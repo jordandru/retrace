@@ -169,7 +169,8 @@
     for (const e of list) {
       const day = fmtDay(e.timestamp);
       if (day !== lastDay) { html += `<div class="day">${esc(day)}</div>`; lastDay = day; }
-      const arts = e.artifacts.map((a) => `<span class="chip" data-art="${esc(a.id)}" title="${esc(a.id)}">${esc(artLabel(a))}</span>`).join("");
+      const MAX = 6; const shown = e.artifacts.slice(0, MAX); const extra = e.artifacts.length - shown.length;
+      const arts = shown.map((a) => `<span class="chip" data-art="${esc(a.id)}" title="${esc(a.id)}">${esc(artLabel(a))}</span>`).join("") + (extra > 0 ? `<span class="chip" title="select the event to see all">+${extra} more</span>` : "");
       const where = e.location?.path || e.location?.url || e.location?.system || "";
       const how = e.method?.tool ? `via ${esc(e.method.tool)}` : "";
       html += `<div class="ev ${e.actor.type} ${state.sel === e.id ? "sel" : ""}" data-id="${esc(e.id)}">
@@ -206,7 +207,7 @@
       <h2>Event #${e.seq}</h2>
       <div class="kv">
         ${kv("Who", `<span style="color:var(--${e.actor.type});font-weight:600">${esc(actorName(e.actor))}</span> <span class="link">${esc(e.actor.type)}${e.actor.model ? " · " + esc(e.actor.model) : ""}${e.actor.version ? " " + esc(e.actor.version) : ""}${e.actor.on_behalf_of ? "<br>on behalf of " + esc(e.actor.on_behalf_of) : ""}</span>`)}
-        ${kv("What", `<b>${esc(verbOf(e))}</b> ${e.artifacts.map((a) => `<span class="chip" data-art="${esc(a.id)}">${esc(artLabel(a))}</span>${a.kind ? `<span class="link">${esc(a.kind)}</span>` : ""}${a.derived_from?.length ? `<div class="link">derived from ${esc(a.derived_from.join(", "))}</div>` : ""}`).join(" ")}${e.change?.summary ? `<div>${esc(e.change.summary)}</div>` : ""}${e.change?.diff ? `<pre>${esc(e.change.diff)}</pre>` : ""}${e.change?.after_hash ? `<div class="hash">after ${esc(e.change.after_hash)}</div>` : ""}`)}
+        ${kv("What", `<b>${esc(verbOf(e))}</b> ${e.artifacts.map((a) => `<span class="chip" data-art="${esc(a.id)}">${esc(artLabel(a))}</span>${a.kind && a.kind !== "file" ? `<span class="link">${esc(a.kind)}</span>` : ""}${a.derived_from?.length ? `<div class="link">derived from ${esc(a.derived_from.join(", "))}</div>` : ""}`).join(" ")}${e.change?.summary ? `<div>${esc(e.change.summary)}</div>` : ""}${e.change?.diff ? `<pre>${esc(e.change.diff)}</pre>` : ""}${e.change?.after_hash ? `<div class="hash">after ${esc(e.change.after_hash)}</div>` : ""}`)}
         ${kv("When", `${esc(new Date(e.timestamp).toLocaleString())}${e.duration_ms != null ? ` <span class="link">· ${e.duration_ms} ms</span>` : ""}<div class="link">received ${esc(new Date(e.received_at).toLocaleString())}</div>`)}
         ${kv("Where", e.location ? esc([e.location.system, e.location.environment, e.location.path || e.location.url, e.location.device].filter(Boolean).join(" · ")) : "")}
         ${kv("Why", `${e.intent ? esc(e.intent) : "<span class='link'>(no intent recorded)</span>"}`)}

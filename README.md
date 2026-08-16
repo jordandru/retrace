@@ -47,6 +47,18 @@ node scripts/seed-demo.mjs   # optional: seed a demo Boxing-RPG session first (R
 
 The UI shows a per-project timeline (humans amber ●, agents blue ■, system grey), the chain-integrity badge, filters by actor type / action / artifact / text, and a detail panel with WHO · WHAT · WHEN · WHERE · WHY · HOW, the causal chain back to the originating instruction, downstream consequences, and hashes. It auto-refreshes every 15 s. Click any artifact chip or actor name to filter. ⚙ lets you point it at a remote Worker (URL + token) or load a JSON export offline. Deep link: `/?project=boxing-rpg&api=https://…&token=…`.
 
+### Git adapter — commits become events automatically
+
+```bash
+cd /path/to/your/repo
+node /ABSOLUTE/PATH/retrace/packages/mcp-server/dist/git-hook.js install --project boxing-rpg
+node /ABSOLUTE/PATH/retrace/packages/mcp-server/dist/git-hook.js backfill      # optional: log existing history (idempotent, safe to re-run)
+```
+
+`install` writes `.git/hooks/post-commit` and a committable `.retrace.json` (`{ "project", "environment", optional "db" | "url" + "token" }`). Every commit is then logged: WHO = the author (human), or an **agent** when the commit carries trailers `Retrace-Actor: claude-code` / `Retrace-Model: …` or a `Co-Authored-By:` naming Claude/Copilot/Codex/etc. (the human author becomes `on_behalf_of`); WHAT = `commit:<repo>@<sha>` plus one `repo:<repo>#<path>` artifact per changed file with `+ins −del`; WHY = the commit message, and `caused_by` from a `Retrace-Caused-By: evt_…` trailer, `RETRACE_CAUSED_BY` env, or `.git/retrace-caused-by`. Merge commits log as `merged`. Idempotency key is the sha, so backfills never duplicate.
+
+Tip for agents (put in `CLAUDE.md`): *when committing, add trailers `Retrace-Actor: claude-code`, `Retrace-Model: <model>`, and `Retrace-Caused-By: <instruction event id>`.*
+
 ### Tools the agent gets
 
 | tool | purpose |
@@ -100,5 +112,5 @@ REST API: `POST /events`, `GET /events/:id`, `GET /events/:id/why`, `GET /projec
 
 ## Status / next
 
-Done: core schema + chain (tested), MCP server (tested via in-memory MCP client), Worker + D1 store (smoke-tested locally with `wrangler dev`, live D1 schema applied), timeline UI (served locally and by the Worker; verified with Playwright incl. tamper detection).
-Next: deploy Worker, Git hook adapter, signed JSON/PDF export + share links, artifact lineage graph.
+Done: core schema + chain (tested), MCP server (tested via in-memory MCP client), Worker + D1 store (smoke-tested locally with `wrangler dev`, live D1 schema applied), timeline UI (served locally and by the Worker; verified with Playwright incl. tamper detection), Git post-commit adapter (tested on a temp repo + dogfooded on this repo).
+Next: deploy Worker, signed JSON/PDF export + share links, artifact lineage graph.
