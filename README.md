@@ -70,6 +70,15 @@ node packages/mcp-server/dist/github-cli.js replay payload.json --event pull_req
 RETRACE_GITHUB_SECRET=hooksecret node scripts/simulate-github.mjs                                                                # fake a whole PR lifecycle against a local server
 ```
 
+### Google Docs / Drive adapter — docs, sheets, slides, comments, sharing
+
+Zero-infra path: paste `adapters/google-apps-script/Code.gs` into a new Apps Script project, enable the Drive Activity + People services, set `RETRACE_URL` / `RETRACE_TOKEN` / `RETRACE_PROJECT` (optional `RETRACE_FOLDER` to scope to one folder), run `setup`. It backfills the last 7 days and then polls every 5 minutes, forwarding Drive Activity to `POST /hooks/gdrive` where Retrace maps it: create → `created`, edit → `edited` (one event per co-editor, with the edit-session duration), comment → `sent`, share → `other:shared` (with who got what role), rename/move/trash/restore. Artifacts are `gdoc:<fileId>` (kind doc/sheet/slides/form/file), `gfolder:<id>`. Google doesn't expose comment text via this API, only that a comment happened. Full instructions in `adapters/google-apps-script/README.md`.
+
+```bash
+node packages/mcp-server/dist/gdrive-cli.js replay packages/core/test-fixtures/drive-activity.json --project boxing-rpg   # try the mapping locally
+node packages/mcp-server/dist/gdrive-cli.js backfill --token "$(gcloud auth print-access-token)" --folder <id> --since 2026-08-01  # direct API backfill
+```
+
 ### Prove — signed exports, printable reports, share links
 
 Every export is a JSON bundle (events in scope + causal ancestors + full-chain verdict at export time) signed with an **Ed25519** key; the issuer's public key is embedded and also published at `/.well-known/retrace-pubkey`. Anyone can verify offline.
@@ -143,5 +152,5 @@ REST API: `POST /events`, `GET /events/:id`, `GET /events/:id/why`, `GET /projec
 
 ## Status / next
 
-Done: core schema + chain (tested), MCP server (tested via in-memory MCP client), Worker + D1 store (smoke-tested locally with `wrangler dev`, live D1 schema applied), timeline UI (served locally and by the Worker; verified with Playwright incl. tamper detection), Git post-commit adapter (tested on a temp repo + dogfooded on this repo), Ed25519-signed exports + offline verify + printable report + read-only share links (tested incl. tamper/wrong-key), artifact lineage graph (core + UI + API + MCP; git commits now carry derived_from → parent commit), GitHub PR adapter (HMAC-verified webhook + backfill/replay CLI; simulated full PR lifecycle end-to-end).
-Next: deploy Worker + dogfood; Google Docs/Drive adapter.
+Done: core schema + chain (tested), MCP server (tested via in-memory MCP client), Worker + D1 store (smoke-tested locally with `wrangler dev`, live D1 schema applied), timeline UI (served locally and by the Worker; verified with Playwright incl. tamper detection), Git post-commit adapter (tested on a temp repo + dogfooded on this repo), Ed25519-signed exports + offline verify + printable report + read-only share links (tested incl. tamper/wrong-key), artifact lineage graph (core + UI + API + MCP; git commits now carry derived_from → parent commit), GitHub PR adapter (HMAC-verified webhook + backfill/replay CLI; simulated full PR lifecycle end-to-end), Google Docs/Drive adapter (Apps Script forwarder + POST /hooks/gdrive mapping + CLI; fixture-tested and simulated end-to-end).
+Next: deploy Worker + dogfood.

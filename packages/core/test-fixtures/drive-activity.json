@@ -1,0 +1,28 @@
+{
+  "project": "boxing-rpg",
+  "source": "apps-script",
+  "actors": { "people/111": { "email": "jordan@slcwitit.com", "name": "Jordan Drumiler" }, "people/222": { "email": "coach.mike@slcwitit.com", "name": "Coach Mike" } },
+  "activities": [
+    { "primaryActionDetail": { "create": { "new": {} } }, "actors": [ { "user": { "knownUser": { "personName": "people/111", "isCurrentUser": true } } } ],
+      "actions": [ { "detail": { "create": { "new": {} } } } ], "targets": [ { "driveItem": { "name": "items/DOC1", "title": "SLC WIT' IT — Gym Business Plan", "mimeType": "application/vnd.google-apps.document", "driveFile": {} } } ],
+      "timestamp": "2026-08-16T15:00:00.000Z" },
+    { "primaryActionDetail": { "edit": {} }, "actors": [ { "user": { "knownUser": { "personName": "people/111" } } }, { "user": { "knownUser": { "personName": "people/222" } } } ],
+      "actions": [ { "detail": { "edit": {} } }, { "detail": { "edit": {} } }, { "detail": { "edit": {} } } ], "targets": [ { "driveItem": { "name": "items/DOC1", "title": "SLC WIT' IT — Gym Business Plan", "mimeType": "application/vnd.google-apps.document" } } ],
+      "timeRange": { "startTime": "2026-08-16T15:05:00.000Z", "endTime": "2026-08-16T15:35:00.000Z" } },
+    { "primaryActionDetail": { "comment": { "post": { "subtype": "ADDED" } } }, "actors": [ { "user": { "knownUser": { "personName": "people/222" } } } ],
+      "actions": [ { "detail": { "comment": { "post": { "subtype": "ADDED" } } } } ], "targets": [ { "fileComment": { "legacyCommentId": "c1", "parent": { "name": "items/DOC1", "title": "SLC WIT' IT — Gym Business Plan", "mimeType": "application/vnd.google-apps.document" } } } ],
+      "timestamp": "2026-08-16T15:40:00.000Z" },
+    { "primaryActionDetail": { "permissionChange": { "addedPermissions": [ { "role": "COMMENTER", "user": { "knownUser": { "personName": "people/222" } } } ] } }, "actors": [ { "user": { "knownUser": { "personName": "people/111" } } } ],
+      "actions": [ { "detail": { "permissionChange": {} } } ], "targets": [ { "driveItem": { "name": "items/DOC1", "title": "SLC WIT' IT — Gym Business Plan", "mimeType": "application/vnd.google-apps.document" } } ],
+      "timestamp": "2026-08-16T15:02:00.000Z" },
+    { "primaryActionDetail": { "create": { "upload": {} } }, "actors": [ { "user": { "knownUser": { "personName": "people/111" } } } ],
+      "actions": [ { "detail": { "create": { "upload": {} } } } ], "targets": [ { "driveItem": { "name": "items/SHEET1", "title": "Membership pricing model", "mimeType": "application/vnd.google-apps.spreadsheet" } } ],
+      "timestamp": "2026-08-16T16:00:00.000Z" },
+    { "primaryActionDetail": { "rename": { "oldTitle": "Untitled", "newTitle": "Membership pricing model" } }, "actors": [ { "user": { "knownUser": { "personName": "people/111" } } } ],
+      "actions": [ { "detail": { "rename": {} } } ], "targets": [ { "driveItem": { "name": "items/SHEET1", "title": "Membership pricing model", "mimeType": "application/vnd.google-apps.spreadsheet" } } ],
+      "timestamp": "2026-08-16T16:01:00.000Z" },
+    { "primaryActionDetail": { "delete": { "type": "TRASH" } }, "actors": [ { "system": { "type": "TRASH_AUTO_PURGE" } } ],
+      "actions": [ { "detail": { "delete": { "type": "TRASH" } } } ], "targets": [ { "driveItem": { "name": "items/OLD1", "title": "old notes.txt", "mimeType": "text/plain" } } ],
+      "timestamp": "2026-08-16T16:30:00.000Z" }
+  ]
+}

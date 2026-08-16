@@ -163,6 +163,7 @@
   const fmtTime = (iso) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
   const fmtDay = (iso) => new Date(iso).toLocaleDateString([], { weekday: "short", year: "numeric", month: "short", day: "numeric" });
   const actorName = (a) => a.display_name || a.id;
+  const fmtDur = (ms) => ms < 1000 ? `${ms} ms` : ms < 60000 ? `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)} s` : ms < 3600000 ? `${Math.round(ms / 60000)} min` : `${(ms / 3600000).toFixed(1)} h`;
   const actorTag = (a) => a.type === "agent" ? (a.model ? ` · ${a.model}` : " · agent") : a.type === "system" ? " · system" : "";
   const verbOf = (e) => e.action === "other" ? (e.action_detail || "acted on") : e.action;
   const artLabel = (a) => a.label || a.id;
@@ -271,7 +272,7 @@
       <div class="kv">
         ${kv("Who", `<span style="color:var(--${e.actor.type});font-weight:600">${esc(actorName(e.actor))}</span> <span class="link">${esc(e.actor.type)}${e.actor.model ? " · " + esc(e.actor.model) : ""}${e.actor.version ? " " + esc(e.actor.version) : ""}${e.actor.on_behalf_of ? "<br>on behalf of " + esc(e.actor.on_behalf_of) : ""}</span>`)}
         ${kv("What", `<b>${esc(verbOf(e))}</b> ${e.artifacts.map((a) => `<span class="chip" data-art="${esc(a.id)}">${esc(artLabel(a))}</span>${a.kind && a.kind !== "file" ? `<span class="link">${esc(a.kind)}</span>` : ""}${a.derived_from?.length ? `<div class="link">derived from ${esc(a.derived_from.join(", "))}</div>` : ""}`).join(" ")}${e.change?.summary ? `<div>${esc(e.change.summary)}</div>` : ""}${e.change?.diff ? `<pre>${esc(e.change.diff)}</pre>` : ""}${e.change?.after_hash ? `<div class="hash">after ${esc(e.change.after_hash)}</div>` : ""}`)}
-        ${kv("When", `${esc(new Date(e.timestamp).toLocaleString())}${e.duration_ms != null ? ` <span class="link">· ${e.duration_ms} ms</span>` : ""}<div class="link">received ${esc(new Date(e.received_at).toLocaleString())}</div>`)}
+        ${kv("When", `${esc(new Date(e.timestamp).toLocaleString())}${e.duration_ms != null ? ` <span class="link">· took ${fmtDur(e.duration_ms)}</span>` : ""}<div class="link">received ${esc(new Date(e.received_at).toLocaleString())}</div>`)}
         ${kv("Where", e.location ? esc([e.location.system, e.location.environment, e.location.path || e.location.url, e.location.device].filter(Boolean).join(" · ")) : "")}
         ${kv("Why", `${e.intent ? esc(e.intent) : "<span class='link'>(no intent recorded)</span>"}`)}
         ${kv("How", e.method ? `${e.method.tool ? `<b>${esc(e.method.tool)}</b> ` : ""}${e.method.automated != null ? `<span class="link">${e.method.automated ? "automated" : "manual"}</span>` : ""}${e.method.instruction ? `<div class="link">instruction: ${esc(e.method.instruction)}</div>` : ""}${e.method.tokens != null ? `<div class="link">${e.method.tokens} tokens${e.method.cost_usd != null ? ` · $${e.method.cost_usd}` : ""}</div>` : ""}${e.method.params ? `<pre>${esc(JSON.stringify(e.method.params, null, 2))}</pre>` : ""}` : "")}

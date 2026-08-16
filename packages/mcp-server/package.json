@@ -7,7 +7,8 @@
     "retrace-serve": "dist/serve.js",
     "retrace-git": "dist/git-hook.js",
     "retrace-export": "dist/export-cli.js",
-    "retrace-github": "dist/github-cli.js"
+    "retrace-github": "dist/github-cli.js",
+    "retrace-gdrive": "dist/gdrive-cli.js"
   },
   "main": "dist/index.js",
   "scripts": {

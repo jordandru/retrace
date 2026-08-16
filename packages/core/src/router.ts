@@ -15,6 +15,7 @@
  *
  * Webhooks (auth: HMAC signature, not the bearer token):
  *   POST /hooks/github?project=<name>     GitHub webhook receiver (pull_request, pull_request_review, issue_comment, workflow_run[, push])
+ *   POST /hooks/gdrive?project=<name>     Google Drive Activity forwarder (Apps Script / retrace-gdrive CLI); bearer-token auth
  *
  * Share routes (no auth; scope locked to the share's project/artifact; read-only):
  *   GET  /s/:id                          UI in shared mode
@@ -26,6 +27,7 @@ import { buildExportBundle, verifyExportBundle } from "./export.js";
 import { renderReportHtml } from "./report.js";
 import { buildLineage, renderLineageDot, renderLineageMermaid } from "./lineage.js";
 import { mapGithubWebhook, verifyGithubSignature } from "./github.js";
+import { mapDriveActivities, DrivePayload } from "./gdrive.js";
 import { publicFromPrivate, keyId } from "./signing.js";
 import { UI_HTML } from "./ui-html.js";
 
@@ -94,6 +96,25 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
           }
         }
         return json({ ok: true, event: ghEvent, logged: results }, 201);
+      }
+      // ---- Google Drive activity forwarder (bearer auth like owner routes) ----
+      if (req.method === "POST" && parts[0] === "hooks" && parts[1] === "gdrive") {
+        if (token) {
+          const auth = req.headers.get("authorization") ?? "";
+          if (auth !== `Bearer ${token}` && url.searchParams.get("token") !== token) return json({ error: "unauthorized" }, 401);
+        }
+        const payload = (await req.json()) as DrivePayload;
+        const inputs = mapDriveActivities({ ...payload, project: url.searchParams.get("project") ?? payload.project }, "google-drive");
+        const results = [];
+        for (const input of inputs) {
+          const parsed = EventInput.safeParse(input);
+          if (!parsed.success) { results.push({ error: parsed.error.issues }); continue; }
+          for (let attempt = 0; ; attempt++) {
+            try { const r = await appendEvent(store, parsed.data); results.push({ id: r.event.id, seq: r.event.seq, deduped: r.deduped }); break; }
+            catch (e: any) { if (!/UNIQUE/i.test(String(e?.message)) || attempt >= 4) throw e; }
+          }
+        }
+        return json({ ok: true, received: (payload.activities ?? []).length, logged: results.filter((r: any) => r.id && !r.deduped).length, deduped: results.filter((r: any) => r.deduped).length, results }, 201);
       }
       // ---- shared, read-only, scope-locked ----
       if (parts[0] === "s" && parts[1]) {
