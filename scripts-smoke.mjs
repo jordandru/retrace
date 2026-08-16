@@ -1,0 +1,12 @@
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+const t = new StdioClientTransport({ command: "node", args: ["packages/mcp-server/dist/index.js"], env: { ...process.env, RETRACE_URL: "http://localhost:8787", RETRACE_PROJECT: "rpg", RETRACE_ACTOR: "claude-code", RETRACE_ACTOR_MODEL: "claude-fable-5", RETRACE_ON_BEHALF_OF: "jordan" } });
+const c = new Client({ name: "t", version: "0" }); await c.connect(t);
+const h = await c.callTool({ name: "retrace_history", arguments: {} });
+const root = h.structuredContent.events[0].id;
+const l = await c.callTool({ name: "retrace_log", arguments: { action: "edited", caused_by: root, artifacts: [{ id: "repo:rpg#src/fight.ts", kind: "file" }], intent: "implement jab counter", method: { tool: "Edit", automated: true } } });
+console.log(l.content[0].text);
+const w = await c.callTool({ name: "retrace_why", arguments: { event_id: l.structuredContent.id } });
+console.log(w.content[0].text);
+console.log((await c.callTool({ name: "retrace_verify", arguments: {} })).content[0].text);
+await c.close(); process.exit(0);

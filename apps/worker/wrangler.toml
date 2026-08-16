@@ -1,0 +1,13 @@
+name = "retrace-api"
+main = "src/index.ts"
+compatibility_date = "2025-06-01"
+compatibility_flags = ["nodejs_compat"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "retrace-db"
+database_id = "ae8ebc52-9784-4109-b421-f63676972dfe"
+
+# Set with: wrangler secret put RETRACE_TOKEN
+# [vars]
+# RETRACE_TOKEN = "dev-only-token"
