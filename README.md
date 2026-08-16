@@ -72,6 +72,10 @@ node packages/mcp-server/dist/export-cli.js share boxing-rpg --label "Jab counte
 
 In the UI: **Report** opens the printable report (Print → Save as PDF), **Export** downloads the signed bundle, **Share** creates a read-only link (`/s/<id>`, optional artifact scope + expiry) that serves the timeline, chain verify, signed export and report **without a token**. Agents get the same via MCP tools `retrace_export` and `retrace_share`. Set `RETRACE_ISSUER="SLC WIT' IT"` to name the issuer; for the Worker put the private JWK in `wrangler secret put RETRACE_SIGNING_KEY` (print it with `keygen --print-private`) and set `RETRACE_PUBLIC_URL` if behind a custom domain.
 
+### Lineage graph — which artifacts came from which
+
+Toggle **Graph** in the UI (or `?view=graph`). Nodes are artifacts, laid out left→right by lineage depth; edges are **derived_from** (purple, explicit — e.g. commit → child commit, or `{derived_from: [...]}` on any artifact), **causal flow** (an event caused by another touched a different artifact: instruction → file → PR), and, with "show people & agents", dashed **touched** edges from actors. Click a node to highlight its neighbourhood and filter the timeline; artifacts with no links yet are packed in a grid below. Buttons export Graphviz DOT or copy Mermaid. API: `GET /projects/:p/lineage?artifact_id=&format=json|dot|mermaid&actors=1` (also `/s/:id/lineage`). MCP: `retrace_lineage`.
+
 ### Tools the agent gets
 
 | tool | purpose |
@@ -83,6 +87,7 @@ In the UI: **Report** opens the printable report (Print → Save as PDF), **Expo
 | `retrace_verify` | recompute the hash chain and report integrity |
 | `retrace_export` | signed JSON bundle (+ optional HTML report file) for a project/artifact |
 | `retrace_share` | create a read-only share link (project or artifact scope, optional expiry) |
+| `retrace_lineage` | artifact lineage (text / DOT / Mermaid / JSON) |
 | `retrace_projects` | list projects |
 
 Suggested instruction to put in your project's `CLAUDE.md` so agents log automatically:
@@ -127,5 +132,5 @@ REST API: `POST /events`, `GET /events/:id`, `GET /events/:id/why`, `GET /projec
 
 ## Status / next
 
-Done: core schema + chain (tested), MCP server (tested via in-memory MCP client), Worker + D1 store (smoke-tested locally with `wrangler dev`, live D1 schema applied), timeline UI (served locally and by the Worker; verified with Playwright incl. tamper detection), Git post-commit adapter (tested on a temp repo + dogfooded on this repo), Ed25519-signed exports + offline verify + printable report + read-only share links (tested incl. tamper/wrong-key).
-Next: deploy Worker, artifact lineage graph, Google Docs/Drive adapter, GitHub PR adapter.
+Done: core schema + chain (tested), MCP server (tested via in-memory MCP client), Worker + D1 store (smoke-tested locally with `wrangler dev`, live D1 schema applied), timeline UI (served locally and by the Worker; verified with Playwright incl. tamper detection), Git post-commit adapter (tested on a temp repo + dogfooded on this repo), Ed25519-signed exports + offline verify + printable report + read-only share links (tested incl. tamper/wrong-key), artifact lineage graph (core + UI + API + MCP; git commits now carry derived_from → parent commit).
+Next: deploy Worker + dogfood, Google Docs/Drive adapter, GitHub PR adapter.

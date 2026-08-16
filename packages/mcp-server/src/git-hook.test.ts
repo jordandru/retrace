@@ -44,6 +44,8 @@ test("git adapter: install hook, human commit, agent commit with trailers, backf
   assert.equal(human.intent, "bump a and add b");
   assert.equal(human.change?.summary, "1 file, +2 −1");
   assert.ok(human.artifacts.some((a) => a.id.endsWith("#a.ts")));
+  assert.equal(human.artifacts[0].kind, "commit");
+  assert.equal(human.artifacts[0].derived_from?.length, 1, "commit derived_from parent commit");
   assert.equal(agent.actor.type, "agent");
   assert.equal(agent.actor.id, "claude-code");
   assert.equal(agent.actor.model, "claude-fable-5");

@@ -116,7 +116,7 @@ export function commitToEvent(repo: string, sha: string, cfg: Cfg): EventInput {
     actor,
     action: isMerge ? "merged" : "committed",
     artifacts: [
-      { id: `commit:${repoName}@${fullSha.slice(0, 12)}`, kind: "commit", label: `${repoName}@${fullSha.slice(0, 7)}` },
+      { id: `commit:${repoName}@${fullSha.slice(0, 12)}`, kind: "commit", label: `${repoName}@${fullSha.slice(0, 7)}`, derived_from: parentList.length ? parentList.map((p) => `commit:${repoName}@${p.slice(0, 12)}`) : undefined },
       ...files.map((f) => ({ id: `repo:${repoName}#${f}`, kind: "file", label: f })),
     ],
     change: { before_hash: parentList[0], after_hash: fullSha, summary: `${files.length} file${files.length === 1 ? "" : "s"}, +${ins} −${del}` },

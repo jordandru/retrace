@@ -10,16 +10,18 @@
  *   GET  /projects · /projects/:p/events?… · /projects/:p/head · /projects/:p/verify
  *   GET  /projects/:p/export?artifact_id=…      signed JSON bundle
  *   GET  /projects/:p/report?artifact_id=…      printable HTML report
+ *   GET  /projects/:p/lineage?artifact_id=&format=json|dot|mermaid&actors=1   artifact lineage graph
  *   POST /projects/:p/share  {artifact_id?, label?, expires_in_days?}   → {share, url}
  *
  * Share routes (no auth; scope locked to the share's project/artifact; read-only):
  *   GET  /s/:id                          UI in shared mode
- *   GET  /s/:id/meta · /s/:id/events · /s/:id/verify · /s/:id/export · /s/:id/report
+ *   GET  /s/:id/meta · /s/:id/events · /s/:id/verify · /s/:id/export · /s/:id/report · /s/:id/lineage
  */
 import { EventInput } from "./schema.js";
 import { EventStore, appendEvent, verifyProject, explainEvent, newShareId, shareIsLive, Share } from "./store.js";
 import { buildExportBundle, verifyExportBundle } from "./export.js";
 import { renderReportHtml } from "./report.js";
+import { buildLineage, renderLineageDot, renderLineageMermaid } from "./lineage.js";
 import { publicFromPrivate, keyId } from "./signing.js";
 import { UI_HTML } from "./ui-html.js";
 
@@ -39,6 +41,12 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
   const opts: RouterOptions = typeof tokenOrOpts === "string" ? { token: tokenOrOpts } : tokenOrOpts ?? {};
   const { token } = opts;
 
+  const lineageResponse = async (events: any[], fmt: string | null, actors: boolean) => {
+    const l = buildLineage(events, { includeActors: actors });
+    if (fmt === "dot") return new Response(renderLineageDot(l), { headers: { "content-type": "text/vnd.graphviz; charset=utf-8", ...CORS } });
+    if (fmt === "mermaid") return new Response(renderLineageMermaid(l), { headers: { "content-type": "text/plain; charset=utf-8", ...CORS } });
+    return json(l);
+  };
   const exportFor = (scope: { project: string; artifact_id?: string }) => buildExportBundle(store, scope, { signingKey: opts.signingKey, issuerName: opts.issuerName });
 
   return async function handle(req: Request): Promise<Response> {
@@ -70,6 +78,10 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
           return json(b.events);
         }
         if (sub === "export") return json(await exportFor({ project: share.project, artifact_id: share.artifact_id }));
+        if (sub === "lineage") {
+          const b = await buildExportBundle(store, { project: share.project, artifact_id: share.artifact_id });
+          return lineageResponse(b.events, url.searchParams.get("format"), url.searchParams.get("actors") === "1");
+        }
         if (sub === "report") {
           const b = await exportFor({ project: share.project, artifact_id: share.artifact_id });
           return html(renderReportHtml(b, await verifyExportBundle(b), { baseUrl: base, title: share.label ? `Provenance report — ${share.label}` : undefined }));
@@ -110,6 +122,10 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
           if (sub === "verify") return json(await verifyProject(store, project));
           if (sub === "events") return json(await store.history({ ...q, project, limit: q.limit ? Number(q.limit) : undefined }));
           if (sub === "export") return json(await exportFor({ project, artifact_id: q.artifact_id }));
+          if (sub === "lineage") {
+            const evs = q.artifact_id ? (await buildExportBundle(store, { project, artifact_id: q.artifact_id })).events : await store.all(project);
+            return lineageResponse(evs, q.format ?? null, q.actors === "1");
+          }
           if (sub === "report") {
             const b = await exportFor({ project, artifact_id: q.artifact_id });
             return html(renderReportHtml(b, await verifyExportBundle(b), { baseUrl: base }));

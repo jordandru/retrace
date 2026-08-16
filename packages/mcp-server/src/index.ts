@@ -22,6 +22,7 @@ import {
   Actor, Action, ArtifactRef, Change, Location, Method, EventInput,
   appendEvent, verifyProject, explainEvent, renderTimeline, renderWhyChain, describeEvent,
   buildExportBundle, verifyExportBundle, renderReportHtml, parseSigningKey, newShareId,
+  buildLineage, renderLineageDot, renderLineageMermaid, renderLineageText,
 } from "@retrace/core";
 import { writeFileSync } from "node:fs";
 import { ensureSigningKey } from "./keys.js";
@@ -222,6 +223,32 @@ export function buildServer(store = makeStore()) {
       const base = env.RETRACE_PUBLIC_URL ?? `http://localhost:${env.RETRACE_PORT ?? 7777}`;
       const url = `${base}/s/${id}`;
       return { content: [{ type: "text", text: `${url}\nreport: ${url}/report\n(local links resolve while \`retrace-serve\` is running)` }], structuredContent: { share, url, report_url: `${url}/report` } };
+    },
+  );
+
+  server.registerTool(
+    "retrace_lineage",
+    {
+      title: "Artifact lineage graph",
+      description:
+        "Which artifacts came from which: explicit derived_from links plus causal flow (instruction → files touched → PR …). " +
+        "Returns text by default; format=dot (Graphviz) or mermaid for diagrams; format=json for nodes/edges.",
+      inputSchema: {
+        project: z.string().optional(),
+        artifact_id: z.string().optional().describe("Focus on one artifact (its events + causal ancestors)"),
+        format: z.enum(["text", "dot", "mermaid", "json"]).optional(),
+        include_actors: z.boolean().optional().describe("Add human/agent nodes with 'touched' edges"),
+      },
+    },
+    async (args) => {
+      const project = args.project ?? DEFAULT_PROJECT;
+      const events = args.artifact_id
+        ? (remote ? await remote.export({ project, artifact_id: args.artifact_id }) : await buildExportBundle(store, { project, artifact_id: args.artifact_id })).events
+        : await store.all(project);
+      const l = buildLineage(events, { includeActors: !!args.include_actors });
+      const fmt = args.format ?? "text";
+      const text = fmt === "dot" ? renderLineageDot(l) : fmt === "mermaid" ? renderLineageMermaid(l) : fmt === "json" ? JSON.stringify(l, null, 2) : renderLineageText(l);
+      return { content: [{ type: "text", text }], structuredContent: { nodes: l.nodes.length, edges: l.edges.length, ...(fmt === "json" ? { lineage: l } : {}) } };
     },
   );
 

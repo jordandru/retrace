@@ -20,7 +20,8 @@
   header h1 { font-size: 16px; margin: 0 8px 0 0; letter-spacing: .04em; }
   header h1 span { color: var(--accent); }
   select, input, button { font: inherit; color: var(--text); background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }
-  input { min-width: 160px; }
+  input { min-width: 140px; }
+  header button { padding: 6px 9px; }
   button { cursor: pointer; }
   button.primary { background: var(--accent); color: #111; border-color: transparent; font-weight: 600; }
   .badge { display: inline-flex; align-items: center; gap: 6px; padding: 3px 8px; border-radius: 999px; font-size: 12px; border: 1px solid var(--line); background: var(--panel-2); }
@@ -68,15 +69,36 @@
   #conn.open { display: flex; }
   .hash { font-family: var(--mono); font-size: 11px; color: var(--muted); }
   a { color: var(--accent); }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+  .seg button { border: 0; border-radius: 0; padding: 6px 10px; background: var(--panel-2); color: var(--muted); }
+  .seg button.on { background: var(--accent); color: #111; font-weight: 600; }
+  #graph { display: none; overflow: auto; position: relative; }
+  #graph.on { display: block; } #timeline.off { display: none; }
+  #graph svg { display: block; min-width: 100%; }
+  .gctl { position: sticky; top: 0; left: 0; z-index: 2; width: 100%; display: flex; gap: 12px; align-items: center; padding: 10px 16px; background: color-mix(in srgb, var(--bg) 85%, transparent); backdrop-filter: blur(4px); font-size: 12px; color: var(--muted); flex-wrap: wrap; }
+  .gctl label { display: inline-flex; gap: 4px; align-items: center; }
+  .gnode { cursor: pointer; }
+  .gnode rect, .gnode ellipse, .gnode polygon { fill: var(--panel-2); stroke: var(--line); stroke-width: 1.2; }
+  .gnode:hover rect, .gnode:hover ellipse, .gnode:hover polygon, .gnode.sel rect, .gnode.sel ellipse, .gnode.sel polygon { stroke: var(--accent); stroke-width: 2; }
+  .gnode.k-task rect { stroke: var(--human); } .gnode.k-commit rect { stroke-dasharray: 3 2; } .gnode.k-pr rect { stroke: var(--ok); } .gnode.k-command rect { stroke: var(--system); }
+  .gnode.actor.human ellipse { stroke: var(--human); } .gnode.actor.agent polygon { stroke: var(--agent); } .gnode.actor.system ellipse { stroke: var(--system); }
+  .gnode text { fill: var(--text); font-size: 11.5px; font-family: var(--mono); pointer-events: none; }
+  .gnode text.sub { fill: var(--muted); font-size: 10px; font-family: system-ui, sans-serif; }
+  .gedge { fill: none; stroke: var(--muted); stroke-width: 1.2; opacity: .75; }
+  .gedge.derived { stroke: var(--accent); stroke-width: 2.2; opacity: 1; }
+  .gedge.touched { stroke-dasharray: 3 3; opacity: .45; }
+  .gedge.dim { opacity: .12; } .gnode.dim { opacity: .25; }
+  .glabel { fill: var(--muted); font-size: 9.5px; }
 </style>
 </head>
 <body>
 <header>
   <h1>RE<span>TRACE</span></h1>
   <select id="project" title="Project"></select>
-  <input id="q" placeholder="search intent, artifact, tool…" />
-  <select id="ftype"><option value="">humans + agents</option><option value="human">humans</option><option value="agent">agents</option><option value="system">system</option></select>
+  <input id="q" placeholder="search…" style="width:150px" />
+  <select id="ftype"><option value="">all actors</option><option value="human">humans</option><option value="agent">agents</option><option value="system">system</option></select>
   <select id="faction"><option value="">any action</option></select>
+  <span class="seg"><button id="vTimeline" class="on">Timeline</button><button id="vGraph">Graph</button></span>
   <span id="verify" class="badge"><span class="dot"></span><span>verifying…</span></span>
   <span id="sharedBadge" class="badge" style="display:none" title="Read-only shared view">🔗 shared view</span>
   <button id="report" title="Printable report (save as PDF)">Report</button>
@@ -101,6 +123,16 @@
 </div>
 <main>
   <section id="timeline"><div class="empty">Loading…</div></section>
+  <section id="graph">
+    <div class="gctl">
+      <span><b id="gStat"></b></span>
+      <label><input type="checkbox" id="gActors"> show people & agents</label>
+      <label><input type="checkbox" id="gFlow" checked> causal flow edges</label>
+      <span style="margin-left:auto">━ derived_from &nbsp; → causal flow &nbsp; ┈ touched &nbsp;·&nbsp; click a node to filter the timeline</span>
+      <button id="gDot" title="Download Graphviz DOT">DOT</button><button id="gMmd" title="Copy Mermaid">Mermaid</button>
+    </div>
+    <div id="gsvg"></div>
+  </section>
   <aside id="detail"><div class="empty">Select an event to see who / what / when / where / why / how.</div></aside>
 </main>
 <script>
@@ -167,13 +199,13 @@
     b.title = v.reason || "";
   }
 
-  function filtered() {
+  function filtered(opts = {}) {
     const q = $("#q").value.trim().toLowerCase();
     const t = $("#ftype").value; const a = $("#faction").value;
     return state.events.filter((e) => {
       if (t && e.actor.type !== t) return false;
       if (a && e.action !== a) return false;
-      if (state.filterArtifact && !e.artifacts.some((x) => x.id === state.filterArtifact)) return false;
+      if (!opts.ignoreArtifact && state.filterArtifact && !e.artifacts.some((x) => x.id === state.filterArtifact)) return false;
       if (state.filterActor && e.actor.id !== state.filterActor) return false;
       if (q && !JSON.stringify(e).toLowerCase().includes(q)) return false;
       return true;
@@ -214,6 +246,7 @@
     $("#timeline").innerHTML = html;
     if (state.sel && !state.events.some((e) => e.id === state.sel)) state.sel = null;
     renderDetail();
+    renderGraph();
   }
 
   function whyChain(id) {
@@ -250,6 +283,98 @@
       <div class="kv"><div class="k">id</div><div class="v mono">${esc(e.id)}</div><div class="k">hash</div><div class="v hash">${esc(e.hash)}</div><div class="k">prev</div><div class="v hash">${esc(e.prev_hash)}</div></div>
       <details><summary class="link">raw JSON</summary><pre>${esc(JSON.stringify(e, null, 2))}</pre></details>`;
   }
+
+  // ---------- lineage graph ----------
+  function buildLineage(events, opts = {}) {
+    const nodes = new Map(), edges = new Map(), byId = new Map(events.map((e) => [e.id, e]));
+    const sorted = [...events].sort((a, b) => a.seq - b.seq);
+    const art = (id, label, kind, seq) => { let n = nodes.get("a:" + id); if (!n) { n = { id, type: "artifact", label: label || id, kind, events: 0, first_seq: seq, last_seq: seq, actors: [], actions: {} }; nodes.set("a:" + id, n); } if (label && n.label === n.id) n.label = label; if (kind && !n.kind) n.kind = kind; return n; };
+    const addEdge = (from, to, type, via) => { if (from === to) return; const k = `${type}|${from}|${to}`; let ed = edges.get(k); if (!ed) { ed = { from, to, type, weight: 0, via: [] }; edges.set(k, ed); } ed.weight++; if (ed.via.length < 5) ed.via.push(via); };
+    for (const e of sorted) {
+      for (const a of e.artifacts) {
+        const n = art(a.id, a.label, a.kind, e.seq); n.events++; n.last_seq = e.seq; if (!n.actors.includes(e.actor.id)) n.actors.push(e.actor.id); n.actions[e.action] = (n.actions[e.action] || 0) + 1;
+        for (const src of a.derived_from || []) { art(src, undefined, undefined, e.seq); addEdge(src, a.id, "derived", e.id); }
+        if (opts.includeActors) { let u = nodes.get("u:" + e.actor.id); if (!u) { u = { id: e.actor.id, type: "actor", label: actorName(e.actor), kind: e.actor.type, events: 0, first_seq: e.seq, last_seq: e.seq }; nodes.set("u:" + e.actor.id, u); } u.events++; addEdge("u:" + e.actor.id, a.id, "touched", e.id); }
+      }
+      if (e.caused_by && opts.flow !== false) { const p = byId.get(e.caused_by); if (p) for (const pa of p.artifacts) for (const ca of e.artifacts) if (pa.id !== ca.id) addEdge(pa.id, ca.id, "flow", e.id); }
+    }
+    return { nodes: [...nodes.values()], edges: [...edges.values()] };
+  }
+  function layerLineage(l) {
+    const ids = l.nodes.filter((n) => n.type === "artifact").map((n) => n.id);
+    const inc = new Map(ids.map((id) => [id, []])); for (const e of l.edges) if (e.type !== "touched" && inc.has(e.to) && inc.has(e.from)) inc.get(e.to).push(e.from);
+    const seq = new Map(l.nodes.map((n) => [n.id, n.first_seq])); const layer = new Map(), visiting = new Set();
+    const depth = (id) => { if (layer.has(id)) return layer.get(id); if (visiting.has(id)) return 0; visiting.add(id); let d = 0; for (const p of inc.get(id) || []) if ((seq.get(p) ?? 0) <= (seq.get(id) ?? 0)) d = Math.max(d, depth(p) + 1); visiting.delete(id); layer.set(id, d); return d; };
+    for (const id of ids) depth(id); return layer;
+  }
+  let lastLineage = null;
+  function renderGraph() {
+    if (!$("#graph").classList.contains("on")) return;
+    const events = filtered({ ignoreArtifact: true }); // artifact filter highlights in the graph instead of hiding
+    const l = buildLineage(events, { includeActors: $("#gActors").checked, flow: $("#gFlow").checked });
+    lastLineage = l;
+    const arts = l.nodes.filter((n) => n.type === "artifact"), actors = l.nodes.filter((n) => n.type === "actor");
+    $("#gStat").textContent = `${arts.length} artifacts · ${l.edges.filter((e) => e.type !== "touched").length} lineage edges${actors.length ? ` · ${actors.length} actors` : ""}`;
+    if (!arts.length) { $("#gsvg").innerHTML = `<div class="empty">No artifacts in view.</div>`; return; }
+    const layer = layerLineage(l);
+    const W = 190, H = 46, GX = 70, GY = 16, PAD = 24, ACT_W = 140;
+    const cw0 = $("#graph").clientWidth || 1000;
+    // connected artifacts: columns = layers, rows by first_seq. Isolated artifacts (no lineage edges): packed grid below.
+    const linked = new Set(); for (const e of l.edges) if (e.type !== "touched") { linked.add(e.from); linked.add(e.to); }
+    const conn = arts.filter((n) => linked.has(n.id)), iso = arts.filter((n) => !linked.has(n.id));
+    const cols = new Map();
+    for (const n of conn) { const c = layer.get(n.id) || 0; if (!cols.has(c)) cols.set(c, []); cols.get(c).push(n); }
+    for (const arr of cols.values()) arr.sort((a, b) => a.first_seq - b.first_seq);
+    const pos = new Map(); let maxRows = 0;
+    const offX = actors.length ? ACT_W + GX : 0;
+    for (const [c, arr] of cols) { maxRows = Math.max(maxRows, arr.length); arr.forEach((n, i) => pos.set(n.id, { x: PAD + offX + c * (W + GX), y: PAD + i * (H + GY), w: W, h: H })); }
+    actors.sort((a, b) => a.first_seq - b.first_seq).forEach((n, i) => pos.set("u:" + n.id, { x: PAD, y: PAD + i * (H + GY), w: ACT_W, h: H }));
+    maxRows = Math.max(maxRows, actors.length);
+    let width = PAD * 2 + offX + Math.max(cols.size, 0) * (W + GX) - (cols.size ? GX : 0);
+    let height = PAD * 2 + maxRows * (H + GY) - GY;
+    let isoLabelY = 0;
+    if (iso.length) {
+      const perRow = Math.max(1, Math.floor((cw0 - PAD * 2 + 30) / (W + 30)));
+      const y0 = (conn.length || actors.length) ? height + 10 : PAD; isoLabelY = y0 + 12;
+      iso.sort((a, b) => b.events - a.events).forEach((n, i) => pos.set(n.id, { x: PAD + (i % perRow) * (W + 30), y: y0 + 24 + Math.floor(i / perRow) * (H + GY), w: W, h: H }));
+      const rows = Math.ceil(iso.length / perRow);
+      height = y0 + 24 + rows * (H + GY) - GY + PAD; width = Math.max(width, PAD * 2 + Math.min(iso.length, perRow) * (W + 30) - 30);
+    }
+    const trunc = (t, n) => (t.length > n ? "…" + t.slice(-(n - 1)) : t);
+    const cw = $("#graph").clientWidth || width; const fit = width > cw && width < cw * 1.5; // gently scale to fit when slightly too wide, otherwise scroll
+    let svg = `<svg xmlns="http://www.w3.org/2000/svg" ${fit ? `width="100%"` : `width="${width}"`} height="${fit ? Math.round(Math.max(height, 120) * cw / width) : Math.max(height, 120)}" viewBox="0 0 ${width} ${Math.max(height, 120)}" preserveAspectRatio="xMinYMin meet"><defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="context-stroke"/></marker></defs>`;
+    const selArt = state.filterArtifact;
+    const connected = new Set(); if (selArt) for (const e of l.edges) { if (e.from === selArt) connected.add(e.to); if (e.to === selArt) connected.add(e.from); }
+    for (const e of l.edges) {
+      const a = pos.get(e.from), b = pos.get(e.to); if (!a || !b) continue;
+      const x1 = a.x + a.w, y1 = a.y + a.h / 2, x2 = b.x, y2 = b.y + b.h / 2; const dx = Math.max(40, (x2 - x1) / 2);
+      const back = x2 <= x1; const d = back ? `M${x1} ${y1} C ${x1 + 60} ${y1}, ${x2 - 60} ${y2}, ${x2} ${y2}` : `M${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
+      const dim = selArt && e.from !== selArt && e.to !== selArt ? " dim" : "";
+      svg += `<path class="gedge ${e.type}${dim}" d="${d}" marker-end="url(#arr)"><title>${esc(e.type)} ×${e.weight}\n${esc(e.from)} → ${esc(e.to)}</title></path>`;
+      if (e.type === "flow" && e.weight > 1) svg += `<text class="glabel" x="${(x1 + x2) / 2}" y="${(y1 + y2) / 2 - 4}" text-anchor="middle">×${e.weight}</text>`;
+    }
+    if (iso.length) svg += `<text class="glabel" x="${PAD}" y="${isoLabelY}" style="font-size:11px">${conn.length ? "no lineage links yet" : "artifacts (no lineage links yet — add derived_from or caused_by to connect them)"} · ${iso.length}</text>`;
+    for (const n of arts) {
+      const p = pos.get(n.id); const dim = selArt && n.id !== selArt && !connected.has(n.id) ? " dim" : ""; const sel = selArt === n.id ? " sel" : "";
+      const sub = `${n.events} ev · ${n.actors.length} actor${n.actors.length === 1 ? "" : "s"}${n.kind ? " · " + n.kind : ""}`;
+      svg += `<g class="gnode k-${esc(n.kind || "x")}${dim}${sel}" data-art="${esc(n.id)}" transform="translate(${p.x},${p.y})"><rect width="${p.w}" height="${p.h}" rx="6"/><text x="10" y="18">${esc(trunc(n.label, 26))}</text><text class="sub" x="10" y="35">${esc(sub)}</text><title>${esc(n.id)}\n${esc(Object.entries(n.actions).map(([k, v]) => k + " ×" + v).join(", "))}\nby ${esc(n.actors.join(", "))}</title></g>`;
+    }
+    for (const n of actors) {
+      const p = pos.get("u:" + n.id); const shape = n.kind === "agent" ? `<polygon points="10,0 ${p.w - 10},0 ${p.w},${p.h / 2} ${p.w - 10},${p.h} 10,${p.h} 0,${p.h / 2}"/>` : `<ellipse cx="${p.w / 2}" cy="${p.h / 2}" rx="${p.w / 2}" ry="${p.h / 2}"/>`;
+      svg += `<g class="gnode actor ${esc(n.kind)}" data-actor="${esc(n.id)}" transform="translate(${p.x},${p.y})">${shape}<text x="${p.w / 2}" y="20" text-anchor="middle">${esc(trunc(n.label, 18))}</text><text class="sub" x="${p.w / 2}" y="35" text-anchor="middle">${esc(n.kind)} · ${n.events} ev</text><title>${esc(n.id)}</title></g>`;
+    }
+    svg += `</svg>`;
+    $("#gsvg").innerHTML = svg;
+  }
+  function setView(v) { const g = v === "graph"; $("#graph").classList.toggle("on", g); $("#timeline").classList.toggle("off", g); $("#vGraph").classList.toggle("on", g); $("#vTimeline").classList.toggle("on", !g); if (g) renderGraph(); }
+  $("#vTimeline").addEventListener("click", () => setView("timeline"));
+  $("#vGraph").addEventListener("click", () => setView("graph"));
+  $("#gActors").addEventListener("change", renderGraph); $("#gFlow").addEventListener("change", renderGraph);
+  function lineageDot(l) { const q = JSON.stringify; const out = ["digraph retrace {", "  rankdir=LR; node [fontname=Helvetica, fontsize=10];"]; for (const n of l.nodes) out.push(`  ${q((n.type === "actor" ? "u:" : "") + n.id)} [label=${q(n.label + (n.type === "artifact" ? "\\n" + n.events + " ev" : ""))}, shape=${n.type === "actor" ? "ellipse" : "box"}${n.type === "actor" ? ", style=dashed" : ""}];`); for (const e of l.edges) out.push(`  ${q(e.from)} -> ${q(e.to)}${e.type === "derived" ? " [penwidth=2]" : e.type === "touched" ? " [style=dashed,color=gray]" : ""};`); out.push("}"); return out.join("\n"); }
+  function lineageMermaid(l) { const ids = new Map(); let i = 0; const nid = (s) => { if (!ids.has(s)) ids.set(s, "n" + i++); return ids.get(s); }; const out = ["graph LR"]; for (const n of l.nodes) { const k = (n.type === "actor" ? "u:" : "") + n.id; const lbl = (n.label + (n.type === "artifact" ? ` (${n.events})` : "")).replace(/"/g, "'"); out.push(n.type === "actor" ? `  ${nid(k)}(["${lbl}"])` : `  ${nid(k)}["${lbl}"]`); } for (const e of l.edges) out.push(`  ${nid(e.from)} ${e.type === "derived" ? "==>" : e.type === "flow" ? "-->" : "-.->"} ${nid(e.to)}`); return out.join("\n"); }
+  $("#gDot").addEventListener("click", () => lastLineage && dl(new Blob([lineageDot(lastLineage)], { type: "text/vnd.graphviz" }), `retrace-${state.project}-lineage.dot`));
+  $("#gMmd").addEventListener("click", () => { if (!lastLineage) return; const t = lineageMermaid(lastLineage); navigator.clipboard?.writeText(t); $("#gMmd").textContent = "copied"; setTimeout(() => ($("#gMmd").textContent = "Mermaid"), 1200); });
+  if (params.get("view") === "graph") setTimeout(() => setView("graph"), 0);
 
   // events
   document.addEventListener("click", (ev) => {

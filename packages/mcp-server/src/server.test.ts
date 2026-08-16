@@ -17,7 +17,7 @@ test("MCP round trip: instruct → log → why → history → verify", async ()
   await client.connect(ct);
 
   const tools = await client.listTools();
-  assert.deepEqual(tools.tools.map((t) => t.name).sort(), ["retrace_export", "retrace_history", "retrace_instruct", "retrace_log", "retrace_projects", "retrace_share", "retrace_verify", "retrace_why"]);
+  assert.deepEqual(tools.tools.map((t) => t.name).sort(), ["retrace_export", "retrace_history", "retrace_instruct", "retrace_lineage", "retrace_log", "retrace_projects", "retrace_share", "retrace_verify", "retrace_why"]);
 
   const ins = (await client.callTool({ name: "retrace_instruct", arguments: { project: "rpg", human_id: "jordan", instruction: "add a jab counter" } })) as any;
   const insId = ins.structuredContent.id;
@@ -59,4 +59,7 @@ test("MCP round trip: instruct → log → why → history → verify", async ()
   assert.match(sh.structuredContent.url, /\/s\/sh_[0-9a-f]{24}$/);
   const got = await store.getShare(sh.structuredContent.share.id);
   assert.equal(got?.label, "test share");
+  const ln = (await client.callTool({ name: "retrace_lineage", arguments: { project: "rpg", format: "mermaid" } })) as any;
+  assert.match(ln.content[0].text, /graph LR/);
+  assert.ok(ln.structuredContent.edges >= 1);
 });
