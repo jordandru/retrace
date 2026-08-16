@@ -3,7 +3,8 @@
  * Local Retrace server: serves the timeline UI + REST API from the same SQLite file the MCP server writes to.
  *   retrace-serve            → http://localhost:7777
  * Env: RETRACE_DB, RETRACE_PORT (7777), RETRACE_TOKEN (optional bearer/query token),
- *      RETRACE_SIGNING_KEY (JWK; else ~/.retrace/signing-key.json, auto-created), RETRACE_ISSUER, RETRACE_PUBLIC_URL
+ *      RETRACE_SIGNING_KEY (JWK; else ~/.retrace/signing-key.json, auto-created), RETRACE_ISSUER, RETRACE_PUBLIC_URL,
+ *      RETRACE_GITHUB_SECRET (enables POST /hooks/github), RETRACE_GITHUB_PUSH=1 (also log push commits)
  */
 import { createServer, IncomingMessage } from "node:http";
 import { Readable } from "node:stream";
@@ -25,6 +26,8 @@ export function startServer(port = Number(process.env.RETRACE_PORT ?? 7777)) {
     signingKey: parseSigningKey(process.env.RETRACE_SIGNING_KEY) ?? loadSigningKey(),
     issuerName: process.env.RETRACE_ISSUER,
     publicUrl: process.env.RETRACE_PUBLIC_URL,
+    githubSecret: process.env.RETRACE_GITHUB_SECRET,
+    githubIncludePush: process.env.RETRACE_GITHUB_PUSH === "1",
   });
   const server = createServer(async (req, res) => {
     try {

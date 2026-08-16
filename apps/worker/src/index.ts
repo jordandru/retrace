@@ -5,7 +5,8 @@
  *   GET  /events/:id · /events/:id/why
  *   GET  /projects · /projects/:p/events?… · /projects/:p/head · /projects/:p/verify
  * Auth: Bearer RETRACE_TOKEN (secret) or ?token= (used by the UI). Share links /s/:id are public + read-only.
- *   GET /projects/:p/export|report · POST /projects/:p/share · GET /.well-known/retrace-pubkey
+ *   GET /projects/:p/export|report|lineage · POST /projects/:p/share · GET /.well-known/retrace-pubkey
+ *   POST /hooks/github?project=…  (GitHub webhook; HMAC-verified with RETRACE_GITHUB_SECRET)
  */
 import { createHandler, parseSigningKey } from "@retrace/core";
 import { D1Store } from "./d1-store.js";
@@ -17,6 +18,9 @@ export interface Env {
   RETRACE_SIGNING_KEY?: string;
   RETRACE_ISSUER?: string;
   RETRACE_PUBLIC_URL?: string;
+  /** `wrangler secret put RETRACE_GITHUB_SECRET` — same value as the webhook secret in GitHub repo settings */
+  RETRACE_GITHUB_SECRET?: string;
+  RETRACE_GITHUB_PUSH?: string;
 }
 
 export default {
@@ -26,6 +30,8 @@ export default {
       signingKey: parseSigningKey(env.RETRACE_SIGNING_KEY),
       issuerName: env.RETRACE_ISSUER,
       publicUrl: env.RETRACE_PUBLIC_URL,
+      githubSecret: env.RETRACE_GITHUB_SECRET,
+      githubIncludePush: env.RETRACE_GITHUB_PUSH === "1",
     })(req);
   },
 };

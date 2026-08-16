@@ -59,6 +59,17 @@ node /ABSOLUTE/PATH/retrace/packages/mcp-server/dist/git-hook.js backfill      #
 
 Tip for agents (put in `CLAUDE.md`): *when committing, add trailers `Retrace-Actor: claude-code`, `Retrace-Model: <model>`, and `Retrace-Caused-By: <instruction event id>`.*
 
+### GitHub PR adapter — PRs, reviews, comments, CI runs become events
+
+Point a GitHub webhook at `POST /hooks/github?project=<name>` (Worker or `retrace-serve`), secret = `RETRACE_GITHUB_SECRET`. Deliveries are HMAC-verified; each becomes an event: PR opened → `created`, new commits → `edited`, review → `approved` / `rejected`, comment → `sent`, merge → `merged` (with the merge commit as an artifact derived from the PR), Actions run → `executed` (system actor). Bots become `system` (Copilot/Claude-style bots become `agent`). Artifact ids line up with the git adapter (`pr:<owner/repo>#n`, `commit:<owner/repo>@<sha>`), and a `Retrace-Caused-By: evt_…` line in the PR body links the PR — and its reviews — back to the originating instruction. Redeliveries dedupe by delivery id.
+
+```bash
+node packages/mcp-server/dist/github-cli.js setup slcwitit/rpg --url https://retrace-api.<you>.workers.dev --project boxing-rpg   # prints webhook settings / gh api one-liner
+node packages/mcp-server/dist/github-cli.js backfill slcwitit/rpg --project boxing-rpg --token $GITHUB_TOKEN                     # import existing PRs + reviews (idempotent)
+node packages/mcp-server/dist/github-cli.js replay payload.json --event pull_request                                             # test with a saved payload
+RETRACE_GITHUB_SECRET=hooksecret node scripts/simulate-github.mjs                                                                # fake a whole PR lifecycle against a local server
+```
+
 ### Prove — signed exports, printable reports, share links
 
 Every export is a JSON bundle (events in scope + causal ancestors + full-chain verdict at export time) signed with an **Ed25519** key; the issuer's public key is embedded and also published at `/.well-known/retrace-pubkey`. Anyone can verify offline.
@@ -132,5 +143,5 @@ REST API: `POST /events`, `GET /events/:id`, `GET /events/:id/why`, `GET /projec
 
 ## Status / next
 
-Done: core schema + chain (tested), MCP server (tested via in-memory MCP client), Worker + D1 store (smoke-tested locally with `wrangler dev`, live D1 schema applied), timeline UI (served locally and by the Worker; verified with Playwright incl. tamper detection), Git post-commit adapter (tested on a temp repo + dogfooded on this repo), Ed25519-signed exports + offline verify + printable report + read-only share links (tested incl. tamper/wrong-key), artifact lineage graph (core + UI + API + MCP; git commits now carry derived_from → parent commit).
-Next: deploy Worker + dogfood, Google Docs/Drive adapter, GitHub PR adapter.
+Done: core schema + chain (tested), MCP server (tested via in-memory MCP client), Worker + D1 store (smoke-tested locally with `wrangler dev`, live D1 schema applied), timeline UI (served locally and by the Worker; verified with Playwright incl. tamper detection), Git post-commit adapter (tested on a temp repo + dogfooded on this repo), Ed25519-signed exports + offline verify + printable report + read-only share links (tested incl. tamper/wrong-key), artifact lineage graph (core + UI + API + MCP; git commits now carry derived_from → parent commit), GitHub PR adapter (HMAC-verified webhook + backfill/replay CLI; simulated full PR lifecycle end-to-end).
+Next: deploy Worker + dogfood; Google Docs/Drive adapter.

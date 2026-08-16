@@ -13,6 +13,9 @@
  *   GET  /projects/:p/lineage?artifact_id=&format=json|dot|mermaid&actors=1   artifact lineage graph
  *   POST /projects/:p/share  {artifact_id?, label?, expires_in_days?}   → {share, url}
  *
+ * Webhooks (auth: HMAC signature, not the bearer token):
+ *   POST /hooks/github?project=<name>     GitHub webhook receiver (pull_request, pull_request_review, issue_comment, workflow_run[, push])
+ *
  * Share routes (no auth; scope locked to the share's project/artifact; read-only):
  *   GET  /s/:id                          UI in shared mode
  *   GET  /s/:id/meta · /s/:id/events · /s/:id/verify · /s/:id/export · /s/:id/report · /s/:id/lineage
@@ -22,6 +25,7 @@ import { EventStore, appendEvent, verifyProject, explainEvent, newShareId, share
 import { buildExportBundle, verifyExportBundle } from "./export.js";
 import { renderReportHtml } from "./report.js";
 import { buildLineage, renderLineageDot, renderLineageMermaid } from "./lineage.js";
+import { mapGithubWebhook, verifyGithubSignature } from "./github.js";
 import { publicFromPrivate, keyId } from "./signing.js";
 import { UI_HTML } from "./ui-html.js";
 
@@ -31,11 +35,18 @@ export interface RouterOptions {
   issuerName?: string;
   /** Public base URL used when building share links (defaults to request origin) */
   publicUrl?: string;
+  /** GitHub webhook secret; POST /hooks/github?project=… is authenticated by X-Hub-Signature-256 instead of the bearer token */
+  githubSecret?: string;
+  /** Also log `push` commits from GitHub (off by default — the git adapter covers commits, and idempotency keys match anyway) */
+  githubIncludePush?: boolean;
 }
 
 const CORS = { "access-control-allow-origin": "*", "access-control-allow-headers": "authorization,content-type", "access-control-allow-methods": "GET,POST,OPTIONS" };
 const json = (data: unknown, status = 200) => new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json", ...CORS } });
 const html = (body: string, status = 200) => new Response(body, { status, headers: { "content-type": "text/html; charset=utf-8" } });
+
+/** deliveries that map to exactly one event can use the delivery id as idempotency key */
+const inputs_needs_unique = (ghEvent: string) => ghEvent !== "push";
 
 export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOptions) {
   const opts: RouterOptions = typeof tokenOrOpts === "string" ? { token: tokenOrOpts } : tokenOrOpts ?? {};
@@ -64,6 +75,26 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
     }
 
     try {
+      // ---- GitHub webhook ----
+      if (req.method === "POST" && parts[0] === "hooks" && parts[1] === "github") {
+        if (!opts.githubSecret) return json({ error: "github webhook not configured (set RETRACE_GITHUB_SECRET)" }, 404);
+        const raw = await req.text();
+        if (!(await verifyGithubSignature(opts.githubSecret, raw, req.headers.get("x-hub-signature-256")))) return json({ error: "bad signature" }, 401);
+        const ghEvent = req.headers.get("x-github-event") ?? "";
+        const delivery = req.headers.get("x-github-delivery") ?? undefined;
+        if (ghEvent === "ping") return json({ ok: true, pong: true });
+        const inputs = mapGithubWebhook(ghEvent, JSON.parse(raw), { project: url.searchParams.get("project") ?? undefined, includePush: opts.githubIncludePush, deliveryId: delivery && inputs_needs_unique(ghEvent) ? delivery : undefined });
+        const results = [];
+        for (const input of inputs) {
+          const parsed = EventInput.safeParse(input);
+          if (!parsed.success) { results.push({ error: parsed.error.issues }); continue; }
+          for (let attempt = 0; ; attempt++) {
+            try { const r = await appendEvent(store, parsed.data); results.push({ id: r.event.id, seq: r.event.seq, deduped: r.deduped }); break; }
+            catch (e: any) { if (!/UNIQUE/i.test(String(e?.message)) || attempt >= 4) throw e; }
+          }
+        }
+        return json({ ok: true, event: ghEvent, logged: results }, 201);
+      }
       // ---- shared, read-only, scope-locked ----
       if (parts[0] === "s" && parts[1]) {
         const share = await store.getShare(parts[1]);

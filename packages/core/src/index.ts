@@ -7,3 +7,4 @@ export * from "./signing.js";
 export * from "./export.js";
 export * from "./report.js";
 export * from "./lineage.js";
+export * from "./github.js";
