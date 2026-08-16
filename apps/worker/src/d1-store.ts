@@ -1,4 +1,4 @@
-import { Event, EventStore, HistoryQuery } from "@retrace/core";
+import { Event, EventStore, HistoryQuery, Share } from "@retrace/core";
 
 export class D1Store implements EventStore {
   constructor(private db: D1Database) {}
@@ -19,6 +19,16 @@ export class D1Store implements EventStore {
       ...e.artifacts.map((a) => this.db.prepare("INSERT OR IGNORE INTO event_artifacts (event_id, project, artifact_id) VALUES (?, ?, ?)").bind(e.id, e.project, a.id)),
     ];
     await this.db.batch(stmts); // batch is atomic in D1
+  }
+
+  async createShare(s: Share) {
+    await this.db.prepare("INSERT INTO shares (id, project, artifact_id, label, created_at, expires_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .bind(s.id, s.project, s.artifact_id ?? null, s.label ?? null, s.created_at, s.expires_at ?? null, s.created_by ?? null).run();
+  }
+  async getShare(id: string) {
+    const r = await this.db.prepare("SELECT * FROM shares WHERE id = ?").bind(id).first<any>();
+    if (!r) return null;
+    return { id: r.id, project: r.project, artifact_id: r.artifact_id ?? undefined, label: r.label ?? undefined, created_at: r.created_at, expires_at: r.expires_at ?? undefined, created_by: r.created_by ?? undefined } as Share;
   }
 
   async byIdempotencyKey(project: string, key: string) {

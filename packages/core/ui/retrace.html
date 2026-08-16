@@ -78,10 +78,27 @@
   <select id="ftype"><option value="">humans + agents</option><option value="human">humans</option><option value="agent">agents</option><option value="system">system</option></select>
   <select id="faction"><option value="">any action</option></select>
   <span id="verify" class="badge"><span class="dot"></span><span>verifying…</span></span>
+  <span id="sharedBadge" class="badge" style="display:none" title="Read-only shared view">🔗 shared view</span>
+  <button id="report" title="Printable report (save as PDF)">Report</button>
+  <button id="export" title="Download signed JSON bundle">Export</button>
+  <button id="share" title="Create a read-only share link">Share</button>
   <button id="refresh" title="Reload">↻</button>
   <button id="toggleConn" title="Connection settings">⚙</button>
   <span id="conn"><input id="apiUrl" placeholder="API URL (blank = same origin)" /><input id="apiTok" placeholder="token" type="password" /><button id="connect" class="primary">Connect</button><button id="loadJson">Load JSON…</button><input type="file" id="file" accept="application/json" style="display:none" /></span>
 </header>
+<div id="shareDlg" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:20;align-items:center;justify-content:center">
+  <div style="background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:18px;width:min(520px,92vw)">
+    <h3 style="margin:0 0 10px;font-size:15px">Create read-only share link</h3>
+    <div class="link" style="margin-bottom:8px">Anyone with the link can view (not edit) the events in scope, verify the chain, and download the signed export / report.</div>
+    <div style="display:grid;gap:8px">
+      <label>Scope <select id="shScope"><option value="project">whole project</option><option value="artifact">current artifact filter</option></select></label>
+      <label>Label <input id="shLabel" placeholder="e.g. Jab counter — client review" style="width:100%"></label>
+      <label>Expires <select id="shExp"><option value="">never</option><option value="7">7 days</option><option value="30">30 days</option><option value="90">90 days</option></select></label>
+      <div id="shResult" class="link" style="word-break:break-all"></div>
+      <div style="display:flex;gap:8px;justify-content:flex-end"><button id="shCancel">Close</button><button id="shCreate" class="primary">Create link</button></div>
+    </div>
+  </div>
+</div>
 <main>
   <section id="timeline"><div class="empty">Loading…</div></section>
   <aside id="detail"><div class="empty">Select an event to see who / what / when / where / why / how.</div></aside>
@@ -94,6 +111,21 @@
   let apiBase = params.get("api") ?? "";
   let token = params.get("token") ?? "";
   $("#apiUrl").value = apiBase; $("#apiTok").value = token;
+  // Shared mode: /s/<id> → all reads go through /s/<id>/*, scope locked server-side
+  const shareMatch = location.pathname.match(/\/s\/([^/]+)/);
+  const shareId = shareMatch ? shareMatch[1] : null;
+  if (shareId) {
+    document.body.classList.add("shared");
+    $("#sharedBadge").style.display = "";
+    ["#share", "#toggleConn", "#project"].forEach((s) => ($(s).style.display = "none"));
+  }
+  const P = {
+    projects: () => shareId ? api(`/s/${shareId}/meta`).then((m) => [m.project]) : api("/projects"),
+    events: (p) => shareId ? api(`/s/${shareId}/events?limit=5000`) : api(`/projects/${encodeURIComponent(p)}/events?limit=5000`),
+    verify: (p) => shareId ? api(`/s/${shareId}/verify`) : api(`/projects/${encodeURIComponent(p)}/verify`),
+    exportUrl: (p, art) => shareId ? `${apiBase}/s/${shareId}/export` : `${apiBase}/projects/${encodeURIComponent(p)}/export?${new URLSearchParams({ ...(art ? { artifact_id: art } : {}), ...(token ? { token } : {}) })}`,
+    reportUrl: (p, art) => shareId ? `${apiBase}/s/${shareId}/report` : `${apiBase}/projects/${encodeURIComponent(p)}/report?${new URLSearchParams({ ...(art ? { artifact_id: art } : {}), ...(token ? { token } : {}) })}`,
+  };
 
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const fmtTime = (iso) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
@@ -111,7 +143,7 @@
   }
 
   async function loadProjects() {
-    state.projects = await api("/projects");
+    state.projects = await P.projects();
     const sel = $("#project");
     sel.innerHTML = state.projects.map((p) => `<option>${esc(p)}</option>`).join("") || "<option value=''>(no projects yet)</option>";
     const want = params.get("project");
@@ -122,10 +154,7 @@
   async function loadEvents() {
     if (state.offline) return render();
     if (!state.project) { state.events = []; return render(); }
-    const [events, verify] = await Promise.all([
-      api(`/projects/${encodeURIComponent(state.project)}/events?limit=5000`),
-      api(`/projects/${encodeURIComponent(state.project)}/verify`).catch(() => null),
-    ]);
+    const [events, verify] = await Promise.all([P.events(state.project), P.verify(state.project).catch(() => null)]);
     state.events = events; state.verify = verify;
     render();
   }
@@ -201,7 +230,8 @@
     if (!e) { d.innerHTML = `<div class="empty">Select an event to see who / what / when / where / why / how.</div>`; return; }
     const kv = (k, v, mono) => v ? `<div class="k">${k}</div><div class="v ${mono ? "mono" : ""}">${v}</div>` : "";
     const chain = whyChain(e.id).slice(1); const kids = effects(e.id);
-    const chainHtml = chain.length ? `<div class="why-chain">` + chain.map((c) => `<div class="step ${c.actor.type}"><span class="arrow">↳ because</span> <span class="who">${esc(actorName(c.actor))}</span> ${esc(verbOf(c))} ${esc(c.artifacts.map(artLabel).join(", "))}${c.intent ? ` — <i>${esc(c.intent)}</i>` : ""} <a href="#" data-goto="${esc(c.id)}" class="link">#${c.seq}</a></div>`).join("") + `</div>` : `<div class="link" style="margin-bottom:12px">no causal parent recorded — this is a root event</div>`;
+    const parentMissing = e.caused_by && !state.events.some((x) => x.id === e.caused_by);
+    const chainHtml = parentMissing ? `<div class="link" style="margin-bottom:12px">caused by <span class="mono">${esc(e.caused_by)}</span> — outside this view's scope</div>` : chain.length ? `<div class="why-chain">` + chain.map((c) => `<div class="step ${c.actor.type}"><span class="arrow">↳ because</span> <span class="who">${esc(actorName(c.actor))}</span> ${esc(verbOf(c))} ${esc(c.artifacts.map(artLabel).join(", "))}${c.intent ? ` — <i>${esc(c.intent)}</i>` : ""} <a href="#" data-goto="${esc(c.id)}" class="link">#${c.seq}</a></div>`).join("") + `</div>` : `<div class="link" style="margin-bottom:12px">no causal parent recorded — this is a root event</div>`;
     const kidsHtml = kids.length ? `<div class="why-chain">` + kids.map((c) => `<div class="step ${c.actor.type}"><span class="arrow">→ led to</span> <span class="who">${esc(actorName(c.actor))}</span> ${esc(verbOf(c))} ${esc(c.artifacts.map(artLabel).join(", "))} <a href="#" data-goto="${esc(c.id)}" class="link">#${c.seq}</a></div>`).join("") + `</div>` : "";
     d.innerHTML = `
       <h2>Event #${e.seq}</h2>
@@ -234,6 +264,25 @@
   $("#project").addEventListener("change", (e) => { state.project = e.target.value; state.sel = null; state.filterArtifact = null; state.filterActor = null; loadEvents().catch(showErr); });
   ["#q", "#ftype", "#faction"].forEach((s) => $(s).addEventListener("input", render));
   $("#refresh").addEventListener("click", () => boot());
+  $("#report").addEventListener("click", () => window.open(P.reportUrl(state.project, state.filterArtifact), "_blank"));
+  $("#export").addEventListener("click", async () => {
+    if (state.offline) { const blob = new Blob([JSON.stringify({ format: "retrace-export/1", scope: { project: state.project }, events: state.events }, null, 2)], { type: "application/json" }); return dl(blob, `${state.project}-events.json`); }
+    const res = await fetch(P.exportUrl(state.project, state.filterArtifact), { headers: token ? { authorization: `Bearer ${token}` } : {} });
+    dl(await res.blob(), `retrace-${state.project}${state.filterArtifact ? "-" + state.filterArtifact.replace(/[^\w.-]+/g, "_") : ""}.json`);
+  });
+  function dl(blob, name) { const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 5000); }
+  $("#share").addEventListener("click", () => { $("#shScope").value = state.filterArtifact ? "artifact" : "project"; $("#shScope").querySelector('[value=artifact]').disabled = !state.filterArtifact; $("#shResult").textContent = ""; $("#shareDlg").style.display = "flex"; });
+  $("#shCancel").addEventListener("click", () => ($("#shareDlg").style.display = "none"));
+  $("#shCreate").addEventListener("click", async () => {
+    const body = { artifact_id: $("#shScope").value === "artifact" ? state.filterArtifact : undefined, label: $("#shLabel").value.trim() || undefined, expires_in_days: Number($("#shExp").value) || undefined };
+    try {
+      const res = await fetch(`${apiBase}/projects/${encodeURIComponent(state.project)}/share`, { method: "POST", headers: { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify(body) });
+      const r = await res.json(); if (!res.ok) throw new Error(r.error || res.status);
+      const u = r.url.startsWith("http") ? r.url : location.origin + r.url;
+      $("#shResult").innerHTML = `Link: <a href="${esc(u)}" target="_blank">${esc(u)}</a> <button id="shCopy">copy</button><br>Report: <a href="${esc(u)}/report" target="_blank">${esc(u)}/report</a>${r.share.expires_at ? `<br>expires ${esc(new Date(r.share.expires_at).toLocaleString())}` : ""}`;
+      $("#shCopy").addEventListener("click", () => navigator.clipboard?.writeText(u));
+    } catch (e) { $("#shResult").textContent = "Failed: " + e.message; }
+  });
   $("#toggleConn").addEventListener("click", () => $("#conn").classList.toggle("open"));
   $("#connect").addEventListener("click", () => { apiBase = $("#apiUrl").value.trim().replace(/\/$/, ""); token = $("#apiTok").value.trim(); state.offline = false; boot(); });
   $("#loadJson").addEventListener("click", () => $("#file").click());

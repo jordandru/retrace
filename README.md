@@ -59,6 +59,19 @@ node /ABSOLUTE/PATH/retrace/packages/mcp-server/dist/git-hook.js backfill      #
 
 Tip for agents (put in `CLAUDE.md`): *when committing, add trailers `Retrace-Actor: claude-code`, `Retrace-Model: <model>`, and `Retrace-Caused-By: <instruction event id>`.*
 
+### Prove — signed exports, printable reports, share links
+
+Every export is a JSON bundle (events in scope + causal ancestors + full-chain verdict at export time) signed with an **Ed25519** key; the issuer's public key is embedded and also published at `/.well-known/retrace-pubkey`. Anyone can verify offline.
+
+```bash
+node packages/mcp-server/dist/export-cli.js keygen                       # ~/.retrace/signing-key.json (auto-created on first export too)
+node packages/mcp-server/dist/export-cli.js export boxing-rpg --artifact "repo:rpg#src/ui/JabCounter.tsx" --out jab.json --report jab.html
+node packages/mcp-server/dist/export-cli.js verify jab.json              # VALID / NOT VALID + reasons; --pubkey <jwk.json|url> to pin a trusted key
+node packages/mcp-server/dist/export-cli.js share boxing-rpg --label "Jab counter — client review" --days 30
+```
+
+In the UI: **Report** opens the printable report (Print → Save as PDF), **Export** downloads the signed bundle, **Share** creates a read-only link (`/s/<id>`, optional artifact scope + expiry) that serves the timeline, chain verify, signed export and report **without a token**. Agents get the same via MCP tools `retrace_export` and `retrace_share`. Set `RETRACE_ISSUER="SLC WIT' IT"` to name the issuer; for the Worker put the private JWK in `wrangler secret put RETRACE_SIGNING_KEY` (print it with `keygen --print-private`) and set `RETRACE_PUBLIC_URL` if behind a custom domain.
+
 ### Tools the agent gets
 
 | tool | purpose |
@@ -68,6 +81,8 @@ Tip for agents (put in `CLAUDE.md`): *when committing, add trailers `Retrace-Act
 | `retrace_history` | timeline, filter by artifact / actor / action / time / text |
 | `retrace_why` | walk `caused_by` links back to the originating human intent |
 | `retrace_verify` | recompute the hash chain and report integrity |
+| `retrace_export` | signed JSON bundle (+ optional HTML report file) for a project/artifact |
+| `retrace_share` | create a read-only share link (project or artifact scope, optional expiry) |
 | `retrace_projects` | list projects |
 
 Suggested instruction to put in your project's `CLAUDE.md` so agents log automatically:
@@ -112,5 +127,5 @@ REST API: `POST /events`, `GET /events/:id`, `GET /events/:id/why`, `GET /projec
 
 ## Status / next
 
-Done: core schema + chain (tested), MCP server (tested via in-memory MCP client), Worker + D1 store (smoke-tested locally with `wrangler dev`, live D1 schema applied), timeline UI (served locally and by the Worker; verified with Playwright incl. tamper detection), Git post-commit adapter (tested on a temp repo + dogfooded on this repo).
-Next: deploy Worker, signed JSON/PDF export + share links, artifact lineage graph.
+Done: core schema + chain (tested), MCP server (tested via in-memory MCP client), Worker + D1 store (smoke-tested locally with `wrangler dev`, live D1 schema applied), timeline UI (served locally and by the Worker; verified with Playwright incl. tamper detection), Git post-commit adapter (tested on a temp repo + dogfooded on this repo), Ed25519-signed exports + offline verify + printable report + read-only share links (tested incl. tamper/wrong-key).
+Next: deploy Worker, artifact lineage graph, Google Docs/Drive adapter, GitHub PR adapter.

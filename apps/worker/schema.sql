@@ -24,3 +24,12 @@ CREATE TABLE IF NOT EXISTS event_artifacts (
   PRIMARY KEY (event_id, artifact_id)
 );
 CREATE INDEX IF NOT EXISTS idx_ea_artifact ON event_artifacts(project, artifact_id);
+CREATE TABLE IF NOT EXISTS shares (
+  id TEXT PRIMARY KEY,
+  project TEXT NOT NULL,
+  artifact_id TEXT,
+  label TEXT,
+  created_at TEXT NOT NULL,
+  expires_at TEXT,
+  created_by TEXT
+);

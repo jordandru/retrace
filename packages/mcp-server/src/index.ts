@@ -21,7 +21,10 @@ import { join } from "node:path";
 import {
   Actor, Action, ArtifactRef, Change, Location, Method, EventInput,
   appendEvent, verifyProject, explainEvent, renderTimeline, renderWhyChain, describeEvent,
+  buildExportBundle, verifyExportBundle, renderReportHtml, parseSigningKey, newShareId,
 } from "@retrace/core";
+import { writeFileSync } from "node:fs";
+import { ensureSigningKey } from "./keys.js";
 import { SqliteStore } from "./sqlite-store.js";
 import { RemoteStore } from "./remote-store.js";
 
@@ -164,6 +167,61 @@ export function buildServer(store = makeStore()) {
         content: [{ type: "text", text: r.ok ? `OK — ${r.checked} events verified for '${p}'` : `BROKEN at seq ${r.first_bad_seq}: ${r.reason}` }],
         structuredContent: { ...r },
       };
+    },
+  );
+
+  server.registerTool(
+    "retrace_export",
+    {
+      title: "Signed provenance export",
+      description:
+        "Build a signed (Ed25519) provenance bundle for a project or one artifact — the 'Prove' step. Optionally writes the JSON " +
+        "and a printable HTML report to disk. Anyone can verify the bundle offline with `retrace-export verify`.",
+      inputSchema: {
+        project: z.string().optional(),
+        artifact_id: z.string().optional().describe("Limit to one artifact (e.g. repo:rpg#src/fight.ts)"),
+        out_json: z.string().optional().describe("Path to write the signed JSON bundle"),
+        out_html: z.string().optional().describe("Path to write the printable HTML report (open → Print → Save as PDF)"),
+      },
+    },
+    async (args) => {
+      const project = args.project ?? DEFAULT_PROJECT;
+      const bundle = remote
+        ? await remote.export({ project, artifact_id: args.artifact_id })
+        : await buildExportBundle(store, { project, artifact_id: args.artifact_id }, { signingKey: parseSigningKey(env.RETRACE_SIGNING_KEY) ?? (await ensureSigningKey()).privateKey, issuerName: env.RETRACE_ISSUER });
+      const verdict = await verifyExportBundle(bundle);
+      if (args.out_json) writeFileSync(args.out_json, JSON.stringify(bundle, null, 2));
+      if (args.out_html) writeFileSync(args.out_html, renderReportHtml(bundle, verdict));
+      const summary = `${bundle.events.length} events · chain ${bundle.chain.ok ? "intact" : "BROKEN"} · signature ${verdict.signature}${bundle.issuer ? " (kid " + bundle.issuer.kid + ")" : ""}` +
+        (args.out_json ? `\njson → ${args.out_json}` : "") + (args.out_html ? `\nreport → ${args.out_html}` : "");
+      return { content: [{ type: "text", text: summary }], structuredContent: { events: bundle.events.length, chain_ok: bundle.chain.ok, signature: verdict.signature, kid: bundle.issuer?.kid, ...(args.out_json || args.out_html ? {} : { bundle }) } };
+    },
+  );
+
+  server.registerTool(
+    "retrace_share",
+    {
+      title: "Create read-only share link",
+      description: "Create a public, read-only share link (timeline + verify + signed export + printable report) scoped to a project or one artifact.",
+      inputSchema: {
+        project: z.string().optional(),
+        artifact_id: z.string().optional(),
+        label: z.string().optional().describe("Shown as the report title, e.g. 'Jab counter — client review'"),
+        expires_in_days: z.number().int().positive().optional(),
+      },
+    },
+    async (args) => {
+      const project = args.project ?? DEFAULT_PROJECT;
+      if (remote) {
+        const r = await remote.share({ project, artifact_id: args.artifact_id, label: args.label, expires_in_days: args.expires_in_days });
+        return { content: [{ type: "text", text: `${r.url}\nreport: ${r.url}/report` }], structuredContent: { ...r } };
+      }
+      const id = newShareId(); const now = new Date();
+      const share = { id, project, artifact_id: args.artifact_id, label: args.label, created_at: now.toISOString(), expires_at: args.expires_in_days ? new Date(now.getTime() + args.expires_in_days * 86400000).toISOString() : undefined };
+      await store.createShare(share);
+      const base = env.RETRACE_PUBLIC_URL ?? `http://localhost:${env.RETRACE_PORT ?? 7777}`;
+      const url = `${base}/s/${id}`;
+      return { content: [{ type: "text", text: `${url}\nreport: ${url}/report\n(local links resolve while \`retrace-serve\` is running)` }], structuredContent: { share, url, report_url: `${url}/report` } };
     },
   );
 

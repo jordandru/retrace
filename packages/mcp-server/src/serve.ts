@@ -2,11 +2,13 @@
 /**
  * Local Retrace server: serves the timeline UI + REST API from the same SQLite file the MCP server writes to.
  *   retrace-serve            → http://localhost:7777
- * Env: RETRACE_DB, RETRACE_PORT (7777), RETRACE_TOKEN (optional bearer/query token)
+ * Env: RETRACE_DB, RETRACE_PORT (7777), RETRACE_TOKEN (optional bearer/query token),
+ *      RETRACE_SIGNING_KEY (JWK; else ~/.retrace/signing-key.json, auto-created), RETRACE_ISSUER, RETRACE_PUBLIC_URL
  */
 import { createServer, IncomingMessage } from "node:http";
 import { Readable } from "node:stream";
-import { createHandler } from "@retrace/core";
+import { createHandler, parseSigningKey } from "@retrace/core";
+import { loadSigningKey } from "./keys.js";
 import { makeStore } from "./index.js";
 
 function toRequest(req: IncomingMessage): Request {
@@ -18,7 +20,12 @@ function toRequest(req: IncomingMessage): Request {
 }
 
 export function startServer(port = Number(process.env.RETRACE_PORT ?? 7777)) {
-  const handle = createHandler(makeStore(), process.env.RETRACE_TOKEN);
+  const handle = createHandler(makeStore(), {
+    token: process.env.RETRACE_TOKEN,
+    signingKey: parseSigningKey(process.env.RETRACE_SIGNING_KEY) ?? loadSigningKey(),
+    issuerName: process.env.RETRACE_ISSUER,
+    publicUrl: process.env.RETRACE_PUBLIC_URL,
+  });
   const server = createServer(async (req, res) => {
     try {
       const out = await handle(toRequest(req));

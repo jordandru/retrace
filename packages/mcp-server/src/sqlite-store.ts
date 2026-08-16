@@ -1,6 +1,6 @@
 /** Local SQLite store using Node's built-in node:sqlite (Node >= 22.13). No native deps. */
 import { DatabaseSync } from "node:sqlite";
-import { Event, EventStore, HistoryQuery, SCHEMA_SQL } from "@retrace/core";
+import { Event, EventStore, HistoryQuery, SCHEMA_SQL, Share } from "@retrace/core";
 
 export class SqliteStore implements EventStore {
   private db: DatabaseSync;
@@ -32,6 +32,16 @@ export class SqliteStore implements EventStore {
       this.db.exec("ROLLBACK");
       throw err;
     }
+  }
+
+  async createShare(s: Share) {
+    this.db.prepare("INSERT INTO shares (id, project, artifact_id, label, created_at, expires_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .run(s.id, s.project, s.artifact_id ?? null, s.label ?? null, s.created_at, s.expires_at ?? null, s.created_by ?? null);
+  }
+  async getShare(id: string) {
+    const r = this.db.prepare("SELECT * FROM shares WHERE id = ?").get(id) as any;
+    if (!r) return null;
+    return { id: r.id, project: r.project, artifact_id: r.artifact_id ?? undefined, label: r.label ?? undefined, created_at: r.created_at, expires_at: r.expires_at ?? undefined, created_by: r.created_by ?? undefined } as Share;
   }
 
   async byIdempotencyKey(project: string, key: string) {

@@ -1,5 +1,5 @@
 /** Remote store: talks to the Retrace Cloudflare Worker over HTTP. Set RETRACE_URL (+ RETRACE_TOKEN). */
-import { Event, EventStore, HistoryQuery, VerifyResult, EventInput } from "@retrace/core";
+import { Event, EventStore, HistoryQuery, VerifyResult, EventInput, Share, ExportBundle } from "@retrace/core";
 
 export class RemoteStore implements EventStore {
   constructor(private baseUrl: string, private token?: string) {
@@ -20,6 +20,16 @@ export class RemoteStore implements EventStore {
   }
   async verify(project: string): Promise<VerifyResult> {
     return this.req("GET", `/projects/${encodeURIComponent(project)}/verify`);
+  }
+  async createShare(): Promise<void> { throw new Error("use share()"); }
+  async getShare(id: string) { return this.req<Share | null>("GET", `/s/${encodeURIComponent(id)}/meta`); }
+  /** Server-side share creation; returns share + url. */
+  async share(body: { project: string; artifact_id?: string; label?: string; expires_in_days?: number }) {
+    return this.req<{ share: Share; url: string }>("POST", `/projects/${encodeURIComponent(body.project)}/share`, body);
+  }
+  async export(scope: { project: string; artifact_id?: string }) {
+    const p = new URLSearchParams(); if (scope.artifact_id) p.set("artifact_id", scope.artifact_id);
+    return this.req<ExportBundle>("GET", `/projects/${encodeURIComponent(scope.project)}/export?${p}`);
   }
   async head(project: string) {
     return this.req<{ seq: number; hash: string } | null>("GET", `/projects/${encodeURIComponent(project)}/head`);

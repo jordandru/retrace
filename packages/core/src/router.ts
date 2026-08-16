@@ -1,37 +1,87 @@
 /**
  * Shared HTTP router (fetch API) — used by the Cloudflare Worker and the local Node server.
- *   GET  /                               UI
- *   GET  /ui                             UI
+ *
+ * Owner routes (auth: Bearer token or ?token= when a token is configured):
+ *   GET  /  | /ui                        UI
  *   GET  /api                            health
+ *   GET  /.well-known/retrace-pubkey     issuer public key (JWK) — public
  *   POST /events                         append (EventInput)
- *   GET  /events/:id                     one event
- *   GET  /events/:id/why                 causal chain
- *   GET  /projects                       list
- *   GET  /projects/:p/events?...         history
- *   GET  /projects/:p/head               chain head
- *   GET  /projects/:p/verify             verify
+ *   GET  /events/:id · /events/:id/why
+ *   GET  /projects · /projects/:p/events?… · /projects/:p/head · /projects/:p/verify
+ *   GET  /projects/:p/export?artifact_id=…      signed JSON bundle
+ *   GET  /projects/:p/report?artifact_id=…      printable HTML report
+ *   POST /projects/:p/share  {artifact_id?, label?, expires_in_days?}   → {share, url}
+ *
+ * Share routes (no auth; scope locked to the share's project/artifact; read-only):
+ *   GET  /s/:id                          UI in shared mode
+ *   GET  /s/:id/meta · /s/:id/events · /s/:id/verify · /s/:id/export · /s/:id/report
  */
 import { EventInput } from "./schema.js";
-import { EventStore, appendEvent, verifyProject, explainEvent } from "./store.js";
+import { EventStore, appendEvent, verifyProject, explainEvent, newShareId, shareIsLive, Share } from "./store.js";
+import { buildExportBundle, verifyExportBundle } from "./export.js";
+import { renderReportHtml } from "./report.js";
+import { publicFromPrivate, keyId } from "./signing.js";
 import { UI_HTML } from "./ui-html.js";
+
+export interface RouterOptions {
+  token?: string;
+  signingKey?: JsonWebKey | null;
+  issuerName?: string;
+  /** Public base URL used when building share links (defaults to request origin) */
+  publicUrl?: string;
+}
 
 const CORS = { "access-control-allow-origin": "*", "access-control-allow-headers": "authorization,content-type", "access-control-allow-methods": "GET,POST,OPTIONS" };
 const json = (data: unknown, status = 200) => new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json", ...CORS } });
+const html = (body: string, status = 200) => new Response(body, { status, headers: { "content-type": "text/html; charset=utf-8" } });
 
-export function createHandler(store: EventStore, token?: string) {
+export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOptions) {
+  const opts: RouterOptions = typeof tokenOrOpts === "string" ? { token: tokenOrOpts } : tokenOrOpts ?? {};
+  const { token } = opts;
+
+  const exportFor = (scope: { project: string; artifact_id?: string }) => buildExportBundle(store, scope, { signingKey: opts.signingKey, issuerName: opts.issuerName });
+
   return async function handle(req: Request): Promise<Response> {
     const url = new URL(req.url);
-    const parts = url.pathname.split("/").filter(Boolean);
+    const parts = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
+    const base = (opts.publicUrl ?? url.origin).replace(/\/$/, "");
     if (req.method === "OPTIONS") return new Response(null, { headers: CORS });
-    if (parts.length === 0 || parts[0] === "ui") return new Response(UI_HTML, { headers: { "content-type": "text/html; charset=utf-8" } });
+    if (parts.length === 0 || parts[0] === "ui") return html(UI_HTML);
     if (parts[0] === "favicon.ico") return new Response(null, { status: 204 });
-    if (parts[0] === "api" && parts.length === 1) return json({ name: "retrace-api", version: "0.1.0", ok: true, auth: !!token });
-    if (token) {
-      const auth = req.headers.get("authorization") ?? "";
-      const qtok = url.searchParams.get("token");
-      if (auth !== `Bearer ${token}` && qtok !== token) return json({ error: "unauthorized" }, 401);
+    if (parts[0] === "api" && parts.length === 1) return json({ name: "retrace-api", version: "0.1.0", ok: true, auth: !!token, signing: !!opts.signingKey });
+    if (parts[0] === ".well-known" && parts[1] === "retrace-pubkey") {
+      if (!opts.signingKey) return json({ error: "no signing key configured" }, 404);
+      const pub = publicFromPrivate(opts.signingKey);
+      return json({ kid: await keyId(pub), alg: "Ed25519", public_key: pub, name: opts.issuerName });
     }
+
     try {
+      // ---- shared, read-only, scope-locked ----
+      if (parts[0] === "s" && parts[1]) {
+        const share = await store.getShare(parts[1]);
+        if (!share || !shareIsLive(share)) return parts.length === 2 ? html("<h1>Share link not found or expired</h1>", 404) : json({ error: "share not found or expired" }, 404);
+        const sub = parts[2];
+        if (!sub) return html(UI_HTML);
+        if (sub === "meta") return json(share);
+        if (sub === "verify") return json(await verifyProject(store, share.project));
+        if (sub === "events") {
+          // same selection as the export (in-scope events + causal ancestors) so the shared UI can answer "why"
+          const b = await buildExportBundle(store, { project: share.project, artifact_id: share.artifact_id });
+          return json(b.events);
+        }
+        if (sub === "export") return json(await exportFor({ project: share.project, artifact_id: share.artifact_id }));
+        if (sub === "report") {
+          const b = await exportFor({ project: share.project, artifact_id: share.artifact_id });
+          return html(renderReportHtml(b, await verifyExportBundle(b), { baseUrl: base, title: share.label ? `Provenance report — ${share.label}` : undefined }));
+        }
+        return json({ error: "not found" }, 404);
+      }
+
+      // ---- owner routes ----
+      if (token) {
+        const auth = req.headers.get("authorization") ?? "";
+        if (auth !== `Bearer ${token}` && url.searchParams.get("token") !== token) return json({ error: "unauthorized" }, 401);
+      }
       if (req.method === "POST" && parts[0] === "events" && parts.length === 1) {
         const parsed = EventInput.safeParse(await req.json());
         if (!parsed.success) return json({ error: "invalid event", issues: parsed.error.issues }, 400);
@@ -45,20 +95,40 @@ export function createHandler(store: EventStore, token?: string) {
         }
       }
       if (req.method === "GET" && parts[0] === "events" && parts[1]) {
-        const id = decodeURIComponent(parts[1]);
-        if (parts[2] === "why") return json(await explainEvent(store, id));
-        const e = await store.get(id);
+        if (parts[2] === "why") return json(await explainEvent(store, parts[1]));
+        const e = await store.get(parts[1]);
         return e ? json(e) : json({ error: "not found" }, 404);
       }
-      if (req.method === "GET" && parts[0] === "projects") {
+      if (parts[0] === "projects") {
         if (parts.length === 1) return json(await store.projects());
-        const project = decodeURIComponent(parts[1]);
-        if (parts[2] === "head") return json(await store.head(project));
-        if (parts[2] === "verify") return json(await verifyProject(store, project));
-        if (parts[2] === "events") {
-          const q = Object.fromEntries(url.searchParams) as Record<string, string>;
-          delete q.token;
-          return json(await store.history({ ...q, project, limit: q.limit ? Number(q.limit) : undefined }));
+        const project = parts[1];
+        const sub = parts[2];
+        const q = Object.fromEntries(url.searchParams) as Record<string, string>;
+        delete q.token;
+        if (req.method === "GET") {
+          if (sub === "head") return json(await store.head(project));
+          if (sub === "verify") return json(await verifyProject(store, project));
+          if (sub === "events") return json(await store.history({ ...q, project, limit: q.limit ? Number(q.limit) : undefined }));
+          if (sub === "export") return json(await exportFor({ project, artifact_id: q.artifact_id }));
+          if (sub === "report") {
+            const b = await exportFor({ project, artifact_id: q.artifact_id });
+            return html(renderReportHtml(b, await verifyExportBundle(b), { baseUrl: base }));
+          }
+        }
+        if (req.method === "POST" && sub === "share") {
+          const body = (await req.json().catch(() => ({}))) as { artifact_id?: string; label?: string; expires_in_days?: number; created_by?: string };
+          const now = new Date();
+          const share: Share = {
+            id: newShareId(),
+            project,
+            artifact_id: body.artifact_id || undefined,
+            label: body.label || undefined,
+            created_at: now.toISOString(),
+            expires_at: body.expires_in_days ? new Date(now.getTime() + body.expires_in_days * 86400000).toISOString() : undefined,
+            created_by: body.created_by,
+          };
+          await store.createShare(share);
+          return json({ share, url: `${base}/s/${share.id}`, report_url: `${base}/s/${share.id}/report`, export_url: `${base}/s/${share.id}/export` }, 201);
         }
       }
       return json({ error: "not found" }, 404);

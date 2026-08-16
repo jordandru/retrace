@@ -5,7 +5,8 @@
   "bin": {
     "retrace-mcp": "dist/index.js",
     "retrace-serve": "dist/serve.js",
-    "retrace-git": "dist/git-hook.js"
+    "retrace-git": "dist/git-hook.js",
+    "retrace-export": "dist/export-cli.js"
   },
   "main": "dist/index.js",
   "scripts": {

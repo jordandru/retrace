@@ -17,8 +17,20 @@ export interface HistoryQuery {
   limit?: number;
 }
 
+export interface Share {
+  id: string;
+  project: string;
+  artifact_id?: string;
+  label?: string;
+  created_at: string;
+  expires_at?: string;
+  created_by?: string;
+}
+
 export interface EventStore {
   head(project: string): Promise<{ seq: number; hash: string } | null>;
+  createShare(share: Share): Promise<void>;
+  getShare(id: string): Promise<Share | null>;
   insert(e: Event): Promise<void>;
   byIdempotencyKey(project: string, key: string): Promise<Event | null>;
   get(id: string): Promise<Event | null>;
@@ -54,7 +66,26 @@ CREATE TABLE IF NOT EXISTS event_artifacts (
   PRIMARY KEY (event_id, artifact_id)
 );
 CREATE INDEX IF NOT EXISTS idx_ea_artifact ON event_artifacts(project, artifact_id);
+CREATE TABLE IF NOT EXISTS shares (
+  id TEXT PRIMARY KEY,
+  project TEXT NOT NULL,
+  artifact_id TEXT,
+  label TEXT,
+  created_at TEXT NOT NULL,
+  expires_at TEXT,
+  created_by TEXT
+);
 `;
+
+export function newShareId(): string {
+  const bytes = new Uint8Array(12);
+  (globalThis as any).crypto.getRandomValues(bytes);
+  return "sh_" + [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+export function shareIsLive(s: Share, now: Date = new Date()): boolean {
+  return !s.expires_at || new Date(s.expires_at) > now;
+}
 
 /** Append an event: idempotent, sealed onto the current chain head. */
 export async function appendEvent(store: EventStore, input: EventInput): Promise<{ event: Event; deduped: boolean }> {
