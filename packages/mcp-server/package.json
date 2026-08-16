@@ -4,7 +4,8 @@
   "type": "module",
   "bin": {
     "retrace-mcp": "dist/index.js",
-    "retrace-serve": "dist/serve.js"
+    "retrace-serve": "dist/serve.js",
+    "retrace-git": "dist/git-hook.js"
   },
   "main": "dist/index.js",
   "scripts": {

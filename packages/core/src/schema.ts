@@ -37,6 +37,8 @@ export const Action = z.enum([
   "received",
   "moved",
   "instructed",
+  "committed",
+  "merged",
   "other",
 ]);
 export type Action = z.infer<typeof Action>;
