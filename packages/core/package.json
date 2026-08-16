@@ -8,10 +8,14 @@
     ".": "./dist/index.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "node scripts/embed-ui.mjs && tsc -p tsconfig.json",
     "test": "node --test dist/*.test.js"
   },
   "dependencies": {
     "zod": "^3.23.8"
-  }
+  },
+  "files": [
+    "dist",
+    "ui"
+  ]
 }

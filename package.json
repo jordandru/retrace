@@ -10,7 +10,8 @@
   "scripts": {
     "build": "npm run build -w @retrace/core && npm run build -w @retrace/mcp-server",
     "test": "npm test -w @retrace/core && npm test -w @retrace/mcp-server",
-    "mcp": "node packages/mcp-server/dist/index.js"
+    "mcp": "node packages/mcp-server/dist/index.js",
+    "serve": "node packages/mcp-server/dist/serve.js"
   },
   "devDependencies": {
     "typescript": "^5.6.0",

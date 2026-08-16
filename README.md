@@ -4,8 +4,9 @@ Provenance ledger for mixed human + AI work. Every event records **who** (person
 
 ```
 packages/core        schema (zod), hash chain, verify, "why" chain, renderers   — runs in Node, Workers, browsers
-packages/mcp-server  MCP server (stdio) so Claude Code / Claude Desktop / Cursor log natively
-apps/worker          Cloudflare Worker + D1 REST API
+packages/mcp-server  MCP server (stdio) + `retrace-serve` local UI/API server
+packages/core/ui     timeline UI (single self-contained HTML, embedded into core at build)
+apps/worker          Cloudflare Worker + D1 — REST API + serves the same UI at /
 ```
 
 ## Quick start (local, no cloud needed)
@@ -36,6 +37,15 @@ Add the MCP server to Claude Code (`~/.claude.json` or project `.mcp.json`):
 ```
 
 Same block works in Claude Desktop's `claude_desktop_config.json`. Events go to `~/.retrace/retrace.db` (override with `RETRACE_DB`).
+
+### See the timeline
+
+```bash
+npm run serve            # → http://localhost:7777  (reads ~/.retrace/retrace.db, or RETRACE_DB)
+node scripts/seed-demo.mjs   # optional: seed a demo Boxing-RPG session first (RETRACE_DB=/tmp/demo.db to keep it separate)
+```
+
+The UI shows a per-project timeline (humans amber ●, agents blue ■, system grey), the chain-integrity badge, filters by actor type / action / artifact / text, and a detail panel with WHO · WHAT · WHEN · WHERE · WHY · HOW, the causal chain back to the originating instruction, downstream consequences, and hashes. It auto-refreshes every 15 s. Click any artifact chip or actor name to filter. ⚙ lets you point it at a remote Worker (URL + token) or load a JSON export offline. Deep link: `/?project=boxing-rpg&api=https://…&token=…`.
 
 ### Tools the agent gets
 
@@ -90,5 +100,5 @@ REST API: `POST /events`, `GET /events/:id`, `GET /events/:id/why`, `GET /projec
 
 ## Status / next
 
-Done: core schema + chain (tested), MCP server (tested via in-memory MCP client), Worker + D1 store (smoke-tested locally with `wrangler dev`, live D1 schema applied).
-Next: deploy Worker, timeline UI (per-artifact scrubber + why panel), Git hook adapter, signed export.
+Done: core schema + chain (tested), MCP server (tested via in-memory MCP client), Worker + D1 store (smoke-tested locally with `wrangler dev`, live D1 schema applied), timeline UI (served locally and by the Worker; verified with Playwright incl. tamper detection).
+Next: deploy Worker, Git hook adapter, signed JSON/PDF export + share links, artifact lineage graph.

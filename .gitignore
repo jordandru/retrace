@@ -2,3 +2,4 @@ node_modules/
 dist/
 .wrangler/
 *.db*
+src/ui-html.ts

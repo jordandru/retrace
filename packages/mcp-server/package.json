@@ -2,12 +2,16 @@
   "name": "@retrace/mcp-server",
   "version": "0.1.0",
   "type": "module",
-  "bin": { "retrace-mcp": "dist/index.js" },
+  "bin": {
+    "retrace-mcp": "dist/index.js",
+    "retrace-serve": "dist/serve.js"
+  },
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "node --test dist/*.test.js",
-    "start": "node dist/index.js"
+    "start": "node dist/index.js",
+    "serve": "node dist/serve.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",

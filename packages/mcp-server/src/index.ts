@@ -73,7 +73,7 @@ export function buildServer(store = makeStore()) {
       const input = EventInput.parse({
         ...args,
         project: args.project ?? DEFAULT_PROJECT,
-        actor: { ...defaultActor, ...(args.actor ?? {}) },
+        actor: args.actor?.type && args.actor.type !== "agent" ? args.actor : { ...defaultActor, ...(args.actor ?? {}) },
       });
       const { event, deduped } = remote ? await remote.append(input) : await appendEvent(store, input);
       return {
@@ -95,6 +95,7 @@ export function buildServer(store = makeStore()) {
         human_id: z.string().describe("Who gave the instruction (email or name)"),
         instruction: z.string().describe("The instruction text (or a faithful summary)"),
         artifacts: z.array(ArtifactRef).optional().describe("What the instruction is about; defaults to a task artifact"),
+        timestamp: z.string().optional().describe("ISO 8601; defaults to now"),
       },
     },
     async (args) => {
@@ -104,6 +105,7 @@ export function buildServer(store = makeStore()) {
         action: "instructed",
         artifacts: args.artifacts ?? [{ id: `task:${args.instruction.slice(0, 60)}`, kind: "task", label: args.instruction.slice(0, 60) }],
         intent: args.instruction,
+        timestamp: args.timestamp,
         method: { tool: "chat", automated: false },
       });
       const { event } = remote ? await remote.append(input) : await appendEvent(store, input);
