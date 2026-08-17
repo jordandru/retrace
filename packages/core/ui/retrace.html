@@ -139,8 +139,9 @@
 <script>
 (() => {
   const $ = (s) => document.querySelector(s);
-  const state = { events: [], project: null, projects: [], sel: null, filterArtifact: null, filterActor: null, verify: null, offline: false, expanded: new Set() };
+  const state = { events: [], project: null, projects: [], sel: null, filterArtifact: null, filterActor: null, verify: null, offline: false, expanded: new Set(), newestFirst: true };
   const params = new URLSearchParams(location.search);
+  if (params.get("order") === "asc") state.newestFirst = false;
   let apiBase = params.get("api") ?? "";
   let token = params.get("token") ?? "";
   $("#apiUrl").value = apiBase; $("#apiTok").value = token;
@@ -219,14 +220,14 @@
     const acts = [...new Set(state.events.map((e) => e.action))].sort();
     const fa = $("#faction"); const cur = fa.value;
     fa.innerHTML = `<option value="">any action</option>` + acts.map((a) => `<option ${a === cur ? "selected" : ""}>${esc(a)}</option>`).join("");
-    const list = filtered();
+    const list = filtered(); if (state.newestFirst) list.reverse();
     const humans = new Set(state.events.filter((e) => e.actor.type === "human").map((e) => e.actor.id)).size;
     const agents = new Set(state.events.filter((e) => e.actor.type === "agent").map((e) => e.actor.id)).size;
     const arts = new Set(state.events.flatMap((e) => e.artifacts.map((a) => a.id))).size;
     let html = `<div class="stat"><span><b>${state.events.length}</b> events</span><span><b>${humans}</b> humans</span><span><b>${agents}</b> agents</span><span><b>${arts}</b> artifacts</span>` +
       (state.filterArtifact ? `<span>artifact: <span class="chip" data-clear="artifact">${esc(state.filterArtifact)} ✕</span></span>` : "") +
       (state.filterActor ? `<span>actor: <span class="chip" data-clear="actor">${esc(state.filterActor)} ✕</span></span>` : "") + `</div>`;
-    html += `<div class="legend"><span><i class="dot human" style="display:inline-block"></i> human</span><span><i class="dot agent" style="display:inline-block;border-radius:2px"></i> agent</span><span><i class="dot system" style="display:inline-block"></i> system</span><span style="margin-left:auto">newest at bottom</span></div>`;
+    html += `<div class="legend"><span><i class="dot human" style="display:inline-block"></i> human</span><span><i class="dot agent" style="display:inline-block;border-radius:2px"></i> agent</span><span><i class="dot system" style="display:inline-block"></i> system</span><span style="margin-left:auto"><span class="chip" data-order="1" title="flip order">${state.newestFirst ? "newest first ▾" : "oldest first ▴"}</span></span></div>`;
     if (!list.length) html += `<div class="empty">No events${state.events.length ? " match these filters" : " yet — log one with the MCP tool <code>retrace_log</code> or POST /events"}.</div>`;
     let lastDay = "";
     for (const e of list) {
@@ -381,8 +382,9 @@
 
   // events
   document.addEventListener("click", (ev) => {
-    const t = ev.target.closest("[data-expand],[data-art],[data-actor],[data-goto],[data-clear],.ev");
+    const t = ev.target.closest("[data-order],[data-expand],[data-art],[data-actor],[data-goto],[data-clear],.ev");
     if (!t) return;
+    if (t.dataset.order) { ev.stopPropagation(); state.newestFirst = !state.newestFirst; return render(); }
     if (t.dataset.expand) { ev.stopPropagation(); const id = t.dataset.expand; state.expanded.has(id) ? state.expanded.delete(id) : state.expanded.add(id); return render(); }
     if (t.dataset.art) { state.filterArtifact = t.dataset.art; ev.stopPropagation(); return render(); }
     if (t.dataset.actor) { state.filterActor = t.dataset.actor; ev.stopPropagation(); return render(); }
