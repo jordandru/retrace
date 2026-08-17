@@ -51,6 +51,7 @@
   .ev .link { color: var(--muted); font-size: 11px; }
   .chip { display: inline-block; font-family: var(--mono); font-size: 11px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 4px; padding: 1px 6px; margin-right: 4px; cursor: pointer; }
   .chip:hover { border-color: var(--accent); }
+  .chip.more { color: var(--accent); border-style: dashed; }
   #detail h2 { font-size: 14px; margin: 0 0 8px; color: var(--muted); font-weight: 500; text-transform: uppercase; letter-spacing: .08em; }
   .kv { display: grid; grid-template-columns: 62px 1fr; gap: 6px 10px; margin-bottom: 14px; }
   .kv .k { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; padding-top: 2px; }
@@ -138,7 +139,7 @@
 <script>
 (() => {
   const $ = (s) => document.querySelector(s);
-  const state = { events: [], project: null, projects: [], sel: null, filterArtifact: null, filterActor: null, verify: null, offline: false };
+  const state = { events: [], project: null, projects: [], sel: null, filterArtifact: null, filterActor: null, verify: null, offline: false, expanded: new Set() };
   const params = new URLSearchParams(location.search);
   let apiBase = params.get("api") ?? "";
   let token = params.get("token") ?? "";
@@ -231,8 +232,9 @@
     for (const e of list) {
       const day = fmtDay(e.timestamp);
       if (day !== lastDay) { html += `<div class="day">${esc(day)}</div>`; lastDay = day; }
-      const MAX = 6; const shown = e.artifacts.slice(0, MAX); const extra = e.artifacts.length - shown.length;
-      const arts = shown.map((a) => `<span class="chip" data-art="${esc(a.id)}" title="${esc(a.id)}">${esc(artLabel(a))}</span>`).join("") + (extra > 0 ? `<span class="chip" title="select the event to see all">+${extra} more</span>` : "");
+      const MAX = 6; const open = state.expanded.has(e.id); const shown = open ? e.artifacts : e.artifacts.slice(0, MAX); const extra = e.artifacts.length - shown.length;
+      const arts = shown.map((a) => `<span class="chip" data-art="${esc(a.id)}" title="${esc(a.id)}">${esc(artLabel(a))}</span>`).join("") +
+        (extra > 0 ? `<span class="chip more" data-expand="${esc(e.id)}" title="show all ${e.artifacts.length} artifacts">+${extra} more</span>` : open && e.artifacts.length > MAX ? `<span class="chip more" data-expand="${esc(e.id)}" title="collapse">show less</span>` : "");
       const where = e.location?.path || e.location?.url || e.location?.system || "";
       const how = e.method?.tool ? `via ${esc(e.method.tool)}` : "";
       html += `<div class="ev ${e.actor.type} ${state.sel === e.id ? "sel" : ""}" data-id="${esc(e.id)}">
@@ -379,8 +381,9 @@
 
   // events
   document.addEventListener("click", (ev) => {
-    const t = ev.target.closest("[data-art],[data-actor],[data-goto],[data-clear],.ev");
+    const t = ev.target.closest("[data-expand],[data-art],[data-actor],[data-goto],[data-clear],.ev");
     if (!t) return;
+    if (t.dataset.expand) { ev.stopPropagation(); const id = t.dataset.expand; state.expanded.has(id) ? state.expanded.delete(id) : state.expanded.add(id); return render(); }
     if (t.dataset.art) { state.filterArtifact = t.dataset.art; ev.stopPropagation(); return render(); }
     if (t.dataset.actor) { state.filterActor = t.dataset.actor; ev.stopPropagation(); return render(); }
     if (t.dataset.goto) { ev.preventDefault(); state.sel = t.dataset.goto; state.filterArtifact = null; state.filterActor = null; render(); document.querySelector(`.ev[data-id="${CSS.escape(state.sel)}"]`)?.scrollIntoView({ block: "center", behavior: "smooth" }); return; }
