@@ -36,6 +36,7 @@ export const Action = z.enum([
   "sent",
   "received",
   "moved",
+  "renamed",
   "instructed",
   "committed",
   "merged",

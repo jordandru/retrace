@@ -8,7 +8,7 @@
  * Mapping
  *   WHO   actor.user.knownUser.personName resolved through `actors` map (email preferred) — humans; anonymous/administrator/system → system;
  *         `impersonation` → the impersonated user; unknown → "google:people/…"
- *   WHAT  primaryActionDetail: create→created, edit→edited, delete→deleted, restore→other:restored, rename/move→moved (rename = other:renamed),
+ *   WHAT  primaryActionDetail: create→created, edit→edited, delete→deleted, restore→other:restored, rename→renamed, move→moved,
  *         permissionChange→other:shared, comment→sent (post/reply/resolve), dlpChange/settingsChange/appliedLabelChange→other
  *         artifacts: gdoc:<fileId> (kind from mimeType) for each target; folders as gfolder:<id>
  *   WHEN  timestamp or timeRange.endTime (edits are aggregated by Google into ranges; duration_ms = range length)
@@ -53,7 +53,7 @@ function detailToAction(d: any, actors: Record<string, DriveActorInfo> = {}): { 
   if (d.edit) return { action: "edited", summary: "edited" };
   if (d.delete) return { action: "deleted", summary: d.delete.type === "PERMANENT_DELETE" ? "permanently deleted" : "moved to trash" };
   if (d.restore) return { action: "other", detail: "restored", summary: "restored from trash" };
-  if (d.rename) return { action: "other", detail: "renamed", summary: `renamed "${d.rename.oldTitle}" → "${d.rename.newTitle}"` };
+  if (d.rename) return { action: "renamed", detail: "renamed", summary: `renamed "${d.rename.oldTitle}" → "${d.rename.newTitle}"` };
   if (d.move) { const from = (d.move.removedParents ?? []).map((p: any) => itemId(p.driveItem?.name)).join(","); const to = (d.move.addedParents ?? []).map((p: any) => itemId(p.driveItem?.name)).join(","); return { action: "moved", summary: `moved${from ? " from " + from : ""}${to ? " to " + to : ""}` }; }
   if (d.permissionChange) { const pc = d.permissionChange; const added = (pc.addedPermissions ?? []).map((x: any) => permDesc(x, actors)), removed = (pc.removedPermissions ?? []).map((x: any) => permDesc(x, actors)); return { action: "other", detail: "shared", summary: [added.length ? "granted " + added.join(", ") : "", removed.length ? "revoked " + removed.join(", ") : ""].filter(Boolean).join("; ") || "permissions changed" }; }
   if (d.comment) { const c = d.comment; const kind = c.post ? `comment ${String(c.post.subtype ?? "added").toLowerCase().replace(/_/g, " ")}` : c.assignment ? `assignment ${String(c.assignment.subtype ?? "").toLowerCase().replace(/_/g, " ")}` : c.suggestion ? `suggestion ${String(c.suggestion.subtype ?? "").toLowerCase().replace(/_/g, " ")}` : "comment"; return { action: "sent", summary: kind }; }
@@ -75,9 +75,11 @@ export function mapDriveActivities(payload: DrivePayload, defaultProject = "goog
   const out: EventInput[] = [];
   for (const act of payload.activities ?? []) {
     const targets = (act.targets ?? []).map((t: any) => t.driveItem ?? t.fileComment?.parent ?? t.drive?.root).filter(Boolean);
+    // For renames the target title reflects query time, not event time — the new title is the as-at label
+    const renamedTo = act.primaryActionDetail?.rename?.newTitle;
     const arts = targets.map((di: any) => {
       const id = itemId(di.name); const meta = fileMeta(di.mimeType);
-      return { id: `${meta.kind === "folder" ? "gfolder" : "gdoc"}:${id}`, kind: meta.kind, label: di.title ?? id };
+      return { id: `${meta.kind === "folder" ? "gfolder" : "gdoc"}:${id}`, kind: meta.kind, label: renamedTo ?? di.title ?? id };
     });
     if (!arts.length) continue;
     const primary = detailToAction(act.primaryActionDetail, actors);
