@@ -64,6 +64,35 @@ test("MCP round trip: instruct → log → why → history → verify", async ()
   assert.ok(ln.structuredContent.edges >= 1);
 });
 
+test("project pin: writes to a non-pinned project are rejected, reads are not", async () => {
+  const store = new SqliteStore(":memory:");
+  const server = buildServer(store, { pinnedProject: "rpg", lock: true });
+  const [ct, st] = InMemoryTransport.createLinkedPair();
+  await server.connect(st);
+  const client = new Client({ name: "t", version: "0" });
+  await client.connect(ct);
+  const bad = (await client.callTool({ name: "retrace_log", arguments: { project: "slc-wit-it", action: "edited", artifacts: [{ id: "repo:rpg#a.ts", kind: "file" }] } })) as any;
+  assert.equal(bad.isError, true);
+  assert.match(bad.content[0].text, /pinned to project "rpg"/);
+  const badIns = (await client.callTool({ name: "retrace_instruct", arguments: { project: "slc-wit-it", human_id: "jordan", instruction: "x" } })) as any;
+  assert.equal(badIns.isError, true);
+  const ok = (await client.callTool({ name: "retrace_log", arguments: { action: "edited", artifacts: [{ id: "repo:rpg#a.ts", kind: "file" }] } })) as any;
+  assert.notEqual(ok.isError, true);
+  const okExplicit = (await client.callTool({ name: "retrace_log", arguments: { project: "rpg", action: "edited", artifacts: [{ id: "repo:rpg#b.ts", kind: "file" }] } })) as any;
+  assert.notEqual(okExplicit.isError, true);
+  const projects = (await client.callTool({ name: "retrace_projects", arguments: {} })) as any;
+  assert.deepEqual(projects.structuredContent.projects, ["rpg"]);
+  const hist = (await client.callTool({ name: "retrace_history", arguments: { project: "some-other-project" } })) as any;
+  assert.notEqual(hist.isError, true);
+  const unlocked = buildServer(new SqliteStore(":memory:"), { pinnedProject: "rpg", lock: false });
+  const [ct2, st2] = InMemoryTransport.createLinkedPair();
+  await unlocked.connect(st2);
+  const c2 = new Client({ name: "t2", version: "0" });
+  await c2.connect(ct2);
+  const free = (await c2.callTool({ name: "retrace_log", arguments: { project: "anything", action: "edited", artifacts: [{ id: "repo:x#a", kind: "file" }] } })) as any;
+  assert.notEqual(free.isError, true);
+});
+
 test('commit guard: retrace_log rejects action "committed" and writes nothing', async () => {
   // Hermetic: injected in-memory store (RETRACE_URL is never consulted — see 3c4b3e5) and no
   // inherited RETRACE_COMMIT_LOCK from the dev shell.
