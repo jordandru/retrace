@@ -1,5 +1,6 @@
 /** Printable provenance report (HTML → "Save as PDF" in any browser). Self-contained, no scripts required. */
 import { ExportBundle, ExportVerdict } from "./export.js";
+import { latestArtifactLabels } from "./lineage.js";
 import { Event } from "./schema.js";
 
 const esc = (s: unknown) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]!));
@@ -10,6 +11,7 @@ export function renderReportHtml(bundle: ExportBundle, verdict?: ExportVerdict, 
   const title = opts.title ?? `Provenance report — ${bundle.scope.project}${bundle.scope.artifact_id ? " · " + bundle.scope.artifact_id : ""}`;
   const events = [...bundle.events].sort((a, b) => a.seq - b.seq);
   const byId = new Map(events.map((e) => [e.id, e]));
+  const labels = latestArtifactLabels(events);
   const humans = new Set(events.filter((e) => e.actor.type === "human").map((e) => e.actor.id));
   const agents = new Set(events.filter((e) => e.actor.type === "agent").map((e) => e.actor.id));
   const arts = new Set(events.flatMap((e) => e.artifacts.map((a) => a.id)));
@@ -25,7 +27,7 @@ export function renderReportHtml(bundle: ExportBundle, verdict?: ExportVerdict, 
     return `<tr class="${e.actor.type}">
       <td class="mono">#${e.seq}<br><small>${esc(new Date(e.timestamp).toISOString().replace("T", " ").slice(0, 19))}Z</small></td>
       <td><b>${esc(actorName(e))}</b><br><small>${esc(e.actor.type)}${e.actor.model ? " · " + esc(e.actor.model) : ""}${e.actor.on_behalf_of ? "<br>for " + esc(e.actor.on_behalf_of) : ""}</small></td>
-      <td><b>${esc(verb(e))}</b> ${e.artifacts.map((a) => `<code>${esc(a.label ?? a.id)}</code>`).join(" ")}${e.change?.summary ? `<br><small>${esc(e.change.summary)}</small>` : ""}</td>
+      <td><b>${esc(verb(e))}</b> ${e.artifacts.map((a) => `<code>${esc(labels.get(a.id) ?? a.label ?? a.id)}</code>`).join(" ")}${e.change?.summary ? `<br><small>${esc(e.change.summary)}</small>` : ""}</td>
       <td><small>${esc(where)}</small></td>
       <td>${why}</td>
       <td><small>${esc(how)}</small></td>

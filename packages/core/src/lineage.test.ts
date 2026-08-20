@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { sealEvent, buildLineage, layerLineage, renderLineageDot, renderLineageMermaid, renderLineageText, EventInput, Event } from "./index.js";
+import { sealEvent, buildLineage, layerLineage, latestArtifactLabels, renderLineageDot, renderLineageMermaid, renderLineageText, renderReportHtml, EventInput, Event } from "./index.js";
 
 async function chain(inputs: EventInput[]): Promise<Event[]> {
   const out: Event[] = []; let prev: { seq: number; hash: string } | null = null;
@@ -48,4 +48,28 @@ test("lineage: derived + causal flow edges, layering, renderers", async () => {
   assert.match(renderLineageDot(l), /digraph retrace/);
   assert.match(renderLineageMermaid(l), /graph LR/);
   assert.match(renderLineageText(l), /4 artifacts/);
+});
+
+test("latest label: created 'Untitled' → renamed; resolver, graph nodes and report use it, events keep as-at labels", async () => {
+  const base = { project: "p", actor: { type: "human", id: "jordan" } } as const;
+  const doc = (label?: string) => [{ id: "gdoc:D1", kind: "doc" as const, ...(label ? { label } : {}) }];
+  const events = await chain([
+    { ...base, action: "created", artifacts: doc("Untitled") },
+    { ...base, action: "renamed", artifacts: doc("Dogfood log") },
+    { ...base, action: "edited", artifacts: doc() }, // no label — must not clear the latest one
+  ]);
+
+  const labels = latestArtifactLabels(events);
+  assert.equal(labels.get("gdoc:D1"), "Dogfood log");
+  // order-independent: resolution sorts by seq itself
+  assert.equal(latestArtifactLabels([...events].reverse()).get("gdoc:D1"), "Dogfood log");
+  // the events themselves keep their as-at labels
+  assert.equal(events[0].artifacts[0].label, "Untitled");
+
+  const node = buildLineage(events).nodes.find((n) => n.id === "gdoc:D1")!;
+  assert.equal(node.label, "Dogfood log");
+
+  const html = renderReportHtml({ format: "retrace-export/1", generated_at: events[0].timestamp, scope: { project: "p" }, chain: { ok: true, checked: events.length, total_events: events.length }, events });
+  assert.equal((html.match(/<code>Dogfood log<\/code>/g) ?? []).length, 3, "every report row names the artifact by its latest label");
+  assert.ok(!html.includes("<code>Untitled</code>"));
 });

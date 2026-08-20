@@ -32,6 +32,19 @@ export interface Lineage { nodes: LineageNode[]; edges: LineageEdge[] }
 
 export interface LineageOptions { includeActors?: boolean; maxVia?: number }
 
+/**
+ * Latest known label per artifact id: the label on the last event (by seq) that carries one.
+ * Drive "created" events arrive titled "Untitled" and later edits/renames carry the real title,
+ * so anywhere the UI names an artifact it should resolve through this. Events stay untouched —
+ * an individual event keeps its own as-at label.
+ */
+export function latestArtifactLabels(events: Pick<Event, "seq" | "artifacts">[]): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const e of [...events].sort((a, b) => a.seq - b.seq))
+    for (const a of e.artifacts) if (a.label) out.set(a.id, a.label);
+  return out;
+}
+
 export function buildLineage(events: Event[], opts: LineageOptions = {}): Lineage {
   const maxVia = opts.maxVia ?? 5;
   const nodes = new Map<string, LineageNode>();
@@ -42,7 +55,7 @@ export function buildLineage(events: Event[], opts: LineageOptions = {}): Lineag
   const artNode = (id: string, label?: string, kind?: string, seq = 0): LineageNode => {
     let n = nodes.get("a:" + id);
     if (!n) { n = { id, type: "artifact", label: label ?? id, kind, events: 0, first_seq: seq, last_seq: seq, actors: [], actions: {} }; nodes.set("a:" + id, n); }
-    if (label && n.label === n.id) n.label = label;
+    if (label) n.label = label; // events arrive in seq order, so the last label seen is the latest
     if (kind && !n.kind) n.kind = kind;
     return n;
   };

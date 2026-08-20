@@ -169,6 +169,9 @@
   const actorTag = (a) => a.type === "agent" ? (a.model ? ` · ${a.model}` : " · agent") : a.type === "system" ? " · system" : "";
   const verbOf = (e) => e.action === "other" ? (e.action_detail || "acted on") : e.action;
   const artLabel = (a) => a.label || a.id;
+  // Latest known label per artifact id: the label on the last event (by seq) that carries one.
+  // Used wherever the UI names an artifact; the event detail pane keeps each event's as-at label.
+  const latestLabels = (events) => { const m = new Map(); for (const e of [...events].sort((a, b) => a.seq - b.seq)) for (const a of e.artifacts) if (a.label) m.set(a.id, a.label); return m; };
 
   async function api(path) {
     const url = (apiBase || "") + path;
@@ -217,6 +220,7 @@
 
   function render() {
     localVerifyBadge();
+    const labels = latestLabels(state.events); const labelOf = (a) => labels.get(a.id) || artLabel(a);
     const acts = [...new Set(state.events.map((e) => e.action))].sort();
     const fa = $("#faction"); const cur = fa.value;
     fa.innerHTML = `<option value="">any action</option>` + acts.map((a) => `<option ${a === cur ? "selected" : ""}>${esc(a)}</option>`).join("");
@@ -225,7 +229,7 @@
     const agents = new Set(state.events.filter((e) => e.actor.type === "agent").map((e) => e.actor.id)).size;
     const arts = new Set(state.events.flatMap((e) => e.artifacts.map((a) => a.id))).size;
     let html = `<div class="stat"><span><b>${state.events.length}</b> events</span><span><b>${humans}</b> humans</span><span><b>${agents}</b> agents</span><span><b>${arts}</b> artifacts</span>` +
-      (state.filterArtifact ? `<span>artifact: <span class="chip" data-clear="artifact">${esc(state.filterArtifact)} ✕</span></span>` : "") +
+      (state.filterArtifact ? `<span>artifact: <span class="chip" data-clear="artifact" title="${esc(state.filterArtifact)}">${esc(labels.get(state.filterArtifact) || state.filterArtifact)} ✕</span></span>` : "") +
       (state.filterActor ? `<span>actor: <span class="chip" data-clear="actor">${esc(state.filterActor)} ✕</span></span>` : "") + `</div>`;
     html += `<div class="legend"><span><i class="dot human" style="display:inline-block"></i> human</span><span><i class="dot agent" style="display:inline-block;border-radius:2px"></i> agent</span><span><i class="dot system" style="display:inline-block"></i> system</span><span style="margin-left:auto"><span class="chip" data-order="1" title="flip order">${state.newestFirst ? "newest first ▾" : "oldest first ▴"}</span></span></div>`;
     if (!list.length) html += `<div class="empty">No events${state.events.length ? " match these filters" : " yet — log one with the MCP tool <code>retrace_log</code> or POST /events"}.</div>`;
@@ -234,7 +238,7 @@
       const day = fmtDay(e.timestamp);
       if (day !== lastDay) { html += `<div class="day">${esc(day)}</div>`; lastDay = day; }
       const MAX = 6; const open = state.expanded.has(e.id); const shown = open ? e.artifacts : e.artifacts.slice(0, MAX); const extra = e.artifacts.length - shown.length;
-      const arts = shown.map((a) => `<span class="chip" data-art="${esc(a.id)}" title="${esc(a.id)}">${esc(artLabel(a))}</span>`).join("") +
+      const arts = shown.map((a) => `<span class="chip" data-art="${esc(a.id)}" title="${esc(a.id)}">${esc(labelOf(a))}</span>`).join("") +
         (extra > 0 ? `<span class="chip more" data-expand="${esc(e.id)}" title="show all ${e.artifacts.length} artifacts">+${extra} more</span>` : open && e.artifacts.length > MAX ? `<span class="chip more" data-expand="${esc(e.id)}" title="collapse">show less</span>` : "");
       const where = e.location?.path || e.location?.url || e.location?.system || "";
       const how = e.method?.tool ? `via ${esc(e.method.tool)}` : "";
@@ -292,7 +296,7 @@
   function buildLineage(events, opts = {}) {
     const nodes = new Map(), edges = new Map(), byId = new Map(events.map((e) => [e.id, e]));
     const sorted = [...events].sort((a, b) => a.seq - b.seq);
-    const art = (id, label, kind, seq) => { let n = nodes.get("a:" + id); if (!n) { n = { id, type: "artifact", label: label || id, kind, events: 0, first_seq: seq, last_seq: seq, actors: [], actions: {} }; nodes.set("a:" + id, n); } if (label && n.label === n.id) n.label = label; if (kind && !n.kind) n.kind = kind; return n; };
+    const art = (id, label, kind, seq) => { let n = nodes.get("a:" + id); if (!n) { n = { id, type: "artifact", label: label || id, kind, events: 0, first_seq: seq, last_seq: seq, actors: [], actions: {} }; nodes.set("a:" + id, n); } if (label) n.label = label; if (kind && !n.kind) n.kind = kind; return n; };
     const addEdge = (from, to, type, via) => { if (from === to) return; const k = `${type}|${from}|${to}`; let ed = edges.get(k); if (!ed) { ed = { from, to, type, weight: 0, via: [] }; edges.set(k, ed); } ed.weight++; if (ed.via.length < 5) ed.via.push(via); };
     for (const e of sorted) {
       for (const a of e.artifacts) {
