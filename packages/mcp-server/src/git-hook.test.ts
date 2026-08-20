@@ -9,8 +9,11 @@ import { SqliteStore } from "./sqlite-store.js";
 import { verifyProject } from "@retrace/core";
 
 const bin = fileURLToPath(new URL("./git-hook.js", import.meta.url));
+// Hermetic: drop inherited RETRACE_* (a dev shell exports RETRACE_URL/TOKEN, which would redirect the
+// spawned hook's writes to the real cloud ledger — this happened; see dogfood log 2026-08-19).
+const baseEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("RETRACE_"))) as Record<string, string>;
 const sh = (cwd: string, cmd: string, args: string[], env: Record<string, string> = {}) =>
-  execFileSync(cmd, args, { cwd, encoding: "utf8", env: { ...process.env, GIT_AUTHOR_NAME: "Jordan", GIT_AUTHOR_EMAIL: "jordan@slcwitit.com", GIT_COMMITTER_NAME: "Jordan", GIT_COMMITTER_EMAIL: "jordan@slcwitit.com", ...env } });
+  execFileSync(cmd, args, { cwd, encoding: "utf8", env: { ...baseEnv, GIT_AUTHOR_NAME: "Jordan", GIT_AUTHOR_EMAIL: "jordan@slcwitit.com", GIT_COMMITTER_NAME: "Jordan", GIT_COMMITTER_EMAIL: "jordan@slcwitit.com", ...env } });
 
 test("git adapter: install hook, human commit, agent commit with trailers, backfill idempotent", async () => {
   const dir = mkdtempSync(join(tmpdir(), "retrace-git-"));
