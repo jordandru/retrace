@@ -21,6 +21,12 @@ export class D1Store implements EventStore {
     await this.db.batch(stmts); // batch is atomic in D1
   }
 
+  async deleteProject(project: string) {
+    const tables = ["events", "event_artifacts", "shares"];
+    const results = await this.db.batch(tables.map((t) => this.db.prepare(`DELETE FROM ${t} WHERE project = ?`).bind(project))); // batch is atomic in D1
+    return Object.fromEntries(tables.map((t, i) => [t, results[i].meta.changes ?? 0]));
+  }
+
   async createShare(s: Share) {
     await this.db.prepare("INSERT INTO shares (id, project, artifact_id, label, created_at, expires_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)")
       .bind(s.id, s.project, s.artifact_id ?? null, s.label ?? null, s.created_at, s.expires_at ?? null, s.created_by ?? null).run();

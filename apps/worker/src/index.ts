@@ -4,6 +4,7 @@
  *   POST /events                         append an event (body = EventInput)
  *   GET  /events/:id · /events/:id/why
  *   GET  /projects · /projects/:p/events?… · /projects/:p/head · /projects/:p/verify
+ *   DELETE /projects/:p?confirm=:p        junk-project cleanup; audit event goes to RETRACE_OPS_PROJECT
  * Auth: Bearer RETRACE_TOKEN (secret) or ?token= (used by the UI). Share links /s/:id are public + read-only.
  *   GET /projects/:p/export|report|lineage · POST /projects/:p/share · GET /.well-known/retrace-pubkey
  *   POST /hooks/github?project=…  (GitHub webhook; HMAC-verified with RETRACE_GITHUB_SECRET)
@@ -21,6 +22,8 @@ export interface Env {
   /** `wrangler secret put RETRACE_GITHUB_SECRET` — same value as the webhook secret in GitHub repo settings */
   RETRACE_GITHUB_SECRET?: string;
   RETRACE_GITHUB_PUSH?: string;
+  /** Project that receives the audit event when DELETE /projects/:p runs (default "retrace") */
+  RETRACE_OPS_PROJECT?: string;
 }
 
 export default {
@@ -32,6 +35,7 @@ export default {
       publicUrl: env.RETRACE_PUBLIC_URL,
       githubSecret: env.RETRACE_GITHUB_SECRET,
       githubIncludePush: env.RETRACE_GITHUB_PUSH === "1",
+      opsProject: env.RETRACE_OPS_PROJECT,
     })(req);
   },
 };

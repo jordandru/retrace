@@ -12,6 +12,7 @@
  *   GET  /projects/:p/report?artifact_id=…      printable HTML report
  *   GET  /projects/:p/lineage?artifact_id=&format=json|dot|mermaid&actors=1   artifact lineage graph
  *   POST /projects/:p/share  {artifact_id?, label?, expires_in_days?}   → {share, url}
+ *   DELETE /projects/:p?confirm=:p       delete a project (junk cleanup; confirm must equal the project name) → per-table counts + an ops-project audit event
  *
  * Webhooks (auth: HMAC signature, not the bearer token):
  *   POST /hooks/github?project=<name>     GitHub webhook receiver (pull_request, pull_request_review, issue_comment, workflow_run[, push])
@@ -41,9 +42,11 @@ export interface RouterOptions {
   githubSecret?: string;
   /** Also log `push` commits from GitHub (off by default — the git adapter covers commits, and idempotency keys match anyway) */
   githubIncludePush?: boolean;
+  /** Project that receives the audit event when a project is deleted (default "retrace") */
+  opsProject?: string;
 }
 
-const CORS = { "access-control-allow-origin": "*", "access-control-allow-headers": "authorization,content-type", "access-control-allow-methods": "GET,POST,OPTIONS" };
+const CORS = { "access-control-allow-origin": "*", "access-control-allow-headers": "authorization,content-type", "access-control-allow-methods": "GET,POST,DELETE,OPTIONS" };
 const json = (data: unknown, status = 200) => new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json", ...CORS } });
 const html = (body: string, status = 200) => new Response(body, { status, headers: { "content-type": "text/html; charset=utf-8" } });
 
@@ -182,6 +185,22 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
             const b = await exportFor({ project, artifact_id: q.artifact_id });
             return html(renderReportHtml(b, await verifyExportBundle(b), { baseUrl: base }));
           }
+        }
+        if (req.method === "DELETE" && parts.length === 2) {
+          if (!store.deleteProject) return json({ error: "project deletion not supported by this store" }, 501);
+          const confirm = url.searchParams.get("confirm");
+          if (confirm !== project) return json({ error: `destructive route: repeat the exact project name as ?confirm=${encodeURIComponent(project)} to delete it` }, 400);
+          if (!(await store.head(project))) return json({ error: "project not found" }, 404);
+          const deleted = await store.deleteProject(project);
+          const ops = await appendEvent(store, {
+            project: opts.opsProject ?? "retrace",
+            actor: { type: "system", id: "worker" },
+            action: "deleted",
+            artifacts: [{ id: `project:${project}`, kind: "project", label: project }],
+            intent: "project deleted via DELETE route",
+            change: { summary: `deleted ${Object.entries(deleted).map(([t, n]) => `${n} ${t}`).join(", ")}` },
+          });
+          return json({ ok: true, project, deleted, ops_event: ops.event.id });
         }
         if (req.method === "POST" && sub === "share") {
           const body = (await req.json().catch(() => ({}))) as { artifact_id?: string; label?: string; expires_in_days?: number; created_by?: string };
