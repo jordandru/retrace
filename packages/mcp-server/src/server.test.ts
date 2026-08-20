@@ -63,3 +63,38 @@ test("MCP round trip: instruct → log → why → history → verify", async ()
   assert.match(ln.content[0].text, /graph LR/);
   assert.ok(ln.structuredContent.edges >= 1);
 });
+
+test('commit guard: retrace_log rejects action "committed" and writes nothing', async () => {
+  // Hermetic: injected in-memory store (RETRACE_URL is never consulted — see 3c4b3e5) and no
+  // inherited RETRACE_COMMIT_LOCK from the dev shell.
+  delete process.env.RETRACE_COMMIT_LOCK;
+  const store = new SqliteStore(":memory:");
+  const server = buildServer(store);
+  const [ct, st] = InMemoryTransport.createLinkedPair();
+  await server.connect(st);
+  const client = new Client({ name: "t", version: "0" });
+  await client.connect(ct);
+  const bad = (await client.callTool({ name: "retrace_log", arguments: { action: "committed", artifacts: [{ id: "commit:rpg@abcdef123456", kind: "commit" }] } })) as any;
+  assert.equal(bad.isError, true);
+  assert.match(bad.content[0].text, /reserved for the git hook/);
+  assert.match(bad.content[0].text, /RETRACE_COMMIT_LOCK=0/);
+  assert.deepEqual(await store.projects(), []);
+});
+
+test("commit guard: RETRACE_COMMIT_LOCK=0 allows a committed event", async () => {
+  process.env.RETRACE_COMMIT_LOCK = "0";
+  try {
+    const store = new SqliteStore(":memory:");
+    const server = buildServer(store);
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    await server.connect(st);
+    const client = new Client({ name: "t", version: "0" });
+    await client.connect(ct);
+    const ok = (await client.callTool({ name: "retrace_log", arguments: { action: "committed", artifacts: [{ id: "commit:rpg@abcdef123456", kind: "commit" }] } })) as any;
+    assert.notEqual(ok.isError, true);
+    assert.match(ok.structuredContent.id, /^evt_/);
+    assert.equal((await store.projects()).length, 1);
+  } finally {
+    delete process.env.RETRACE_COMMIT_LOCK;
+  }
+});

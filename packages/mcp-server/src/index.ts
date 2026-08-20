@@ -9,6 +9,7 @@
  *   RETRACE_TOKEN    bearer token for the remote Worker
  *   RETRACE_PROJECT  default project name; when set, WRITE tools (retrace_log/retrace_instruct) are pinned to it —
  *                    a different explicit project is rejected. Set RETRACE_PROJECT_LOCK=0 to allow any project.
+ *   RETRACE_COMMIT_LOCK  action "committed" is reserved for the git hook; retrace_log rejects it. Set 0 to allow.
  *   RETRACE_ACTOR    default actor id for this agent (e.g. "claude-code")
  *   RETRACE_ACTOR_MODEL default model string
  *   RETRACE_ON_BEHALF_OF the human this agent works for (e.g. jordan@...)
@@ -46,11 +47,12 @@ export function makeStore() {
   return new SqliteStore(path);
 }
 
-export function buildServer(store = makeStore(), opts: { pinnedProject?: string; lock?: boolean } = {}) {
+export function buildServer(store = makeStore(), opts: { pinnedProject?: string; lock?: boolean; commitLock?: boolean } = {}) {
   const server = new McpServer({ name: "retrace", version: "0.1.0" });
   const remote = store instanceof RemoteStore ? store : null;
   const pinned = opts.pinnedProject ?? env.RETRACE_PROJECT;
   const lock = opts.lock ?? env.RETRACE_PROJECT_LOCK !== "0";
+  const commitLock = opts.commitLock ?? env.RETRACE_COMMIT_LOCK !== "0";
   /** Resolve the project for a WRITE. If RETRACE_PROJECT is set (and lock on), any other explicit project is rejected
    *  so agents can't create stray projects by guessing a name. Read tools are not pinned. */
   const writeProject = (requested?: string): string => {
@@ -58,6 +60,12 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
     if (lock && pinned && p !== pinned)
       throw new Error(`project "${p}" is not allowed: this Retrace MCP server is pinned to project "${pinned}" (RETRACE_PROJECT). Omit project or pass "${pinned}". Set RETRACE_PROJECT_LOCK=0 to disable pinning.`);
     return p;
+  };
+  /** "committed" events come only from the git post-commit hook — an agent logging one describes a commit it may not
+   *  have made and misattributes it (this happened 2026-08-19). */
+  const guardAction = (action: string): void => {
+    if (commitLock && action === "committed")
+      throw new Error(`action "committed" is reserved for the git hook, which already records every real commit with the correct actor. Log your work as "edited" or "decided" and reference the commit id in the artifact ids instead. Set RETRACE_COMMIT_LOCK=0 to override.`);
   };
 
   server.registerTool(
@@ -85,6 +93,7 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
       },
     },
     async (args) => {
+      guardAction(args.action);
       const input = EventInput.parse({
         ...args,
         project: writeProject(args.project),
