@@ -7,7 +7,8 @@
  *   RETRACE_DB       path to local SQLite file (default ~/.retrace/retrace.db)
  *   RETRACE_URL      if set, use the remote Worker instead of local SQLite
  *   RETRACE_TOKEN    bearer token for the remote Worker
- *   RETRACE_PROJECT  default project name
+ *   RETRACE_PROJECT  default project name; when set, WRITE tools (retrace_log/retrace_instruct) are pinned to it —
+ *                    a different explicit project is rejected. Set RETRACE_PROJECT_LOCK=0 to allow any project.
  *   RETRACE_ACTOR    default actor id for this agent (e.g. "claude-code")
  *   RETRACE_ACTOR_MODEL default model string
  *   RETRACE_ON_BEHALF_OF the human this agent works for (e.g. jordan@...)
@@ -45,9 +46,19 @@ export function makeStore() {
   return new SqliteStore(path);
 }
 
-export function buildServer(store = makeStore()) {
+export function buildServer(store = makeStore(), opts: { pinnedProject?: string; lock?: boolean } = {}) {
   const server = new McpServer({ name: "retrace", version: "0.1.0" });
   const remote = store instanceof RemoteStore ? store : null;
+  const pinned = opts.pinnedProject ?? env.RETRACE_PROJECT;
+  const lock = opts.lock ?? env.RETRACE_PROJECT_LOCK !== "0";
+  /** Resolve the project for a WRITE. If RETRACE_PROJECT is set (and lock on), any other explicit project is rejected
+   *  so agents can't create stray projects by guessing a name. Read tools are not pinned. */
+  const writeProject = (requested?: string): string => {
+    const p = requested ?? pinned ?? DEFAULT_PROJECT;
+    if (lock && pinned && p !== pinned)
+      throw new Error(`project "${p}" is not allowed: this Retrace MCP server is pinned to project "${pinned}" (RETRACE_PROJECT). Omit project or pass "${pinned}". Set RETRACE_PROJECT_LOCK=0 to disable pinning.`);
+    return p;
+  };
 
   server.registerTool(
     "retrace_log",
@@ -58,7 +69,7 @@ export function buildServer(store = makeStore()) {
         "(create/edit/delete/execute/approve/send). Returns the event id — pass it as caused_by on follow-up actions " +
         "so Retrace can reconstruct the causal chain back to the human instruction.",
       inputSchema: {
-        project: z.string().optional().describe(`Project name (default: ${DEFAULT_PROJECT})`),
+        project: z.string().optional().describe(`Project name (default: ${DEFAULT_PROJECT}). Omit it — the server pins writes to RETRACE_PROJECT and rejects other names.`),
         action: Action.describe("Verb from the controlled vocabulary"),
         action_detail: z.string().optional().describe("Required when action=other; free-text verb"),
         artifacts: z.array(ArtifactRef).min(1).describe("Artifacts touched, e.g. {id:'repo:slcwitit/rpg#src/fight.ts', kind:'file'}"),
@@ -76,7 +87,7 @@ export function buildServer(store = makeStore()) {
     async (args) => {
       const input = EventInput.parse({
         ...args,
-        project: args.project ?? DEFAULT_PROJECT,
+        project: writeProject(args.project),
         actor: args.actor?.type && args.actor.type !== "agent" ? args.actor : { ...defaultActor, ...(args.actor ?? {}) },
       });
       const { event, deduped } = remote ? await remote.append(input) : await appendEvent(store, input);
@@ -104,7 +115,7 @@ export function buildServer(store = makeStore()) {
     },
     async (args) => {
       const input = EventInput.parse({
-        project: args.project ?? DEFAULT_PROJECT,
+        project: writeProject(args.project),
         actor: { type: "human", id: args.human_id },
         action: "instructed",
         artifacts: args.artifacts ?? [{ id: `task:${args.instruction.slice(0, 60)}`, kind: "task", label: args.instruction.slice(0, 60) }],
