@@ -169,6 +169,7 @@
   const actorTag = (a) => a.type === "agent" ? (a.model ? ` · ${a.model}` : " · agent") : a.type === "system" ? " · system" : "";
   const verbOf = (e) => e.action === "other" ? (e.action_detail || "acted on") : e.action;
   const artLabel = (a) => a.label || a.id;
+  const whereText = (loc) => loc ? [loc.system, loc.environment, loc.path || loc.url, loc.device].filter(Boolean).join(" · ") : "";
   // Latest known label per artifact id: the label on the last event (by seq) that carries one.
   // Used wherever the UI names an artifact; the event detail pane keeps each event's as-at label.
   const latestLabels = (events) => { const m = new Map(); for (const e of [...events].sort((a, b) => a.seq - b.seq)) for (const a of e.artifacts) if (a.label) m.set(a.id, a.label); return m; };
@@ -270,26 +271,33 @@
     const d = $("#detail");
     if (!e) { d.innerHTML = `<div class="empty">Select an event to see who / what / when / where / why / how.</div>`; return; }
     const kv = (k, v, mono) => v ? `<div class="k">${k}</div><div class="v ${mono ? "mono" : ""}">${v}</div>` : "";
-    const chain = whyChain(e.id).slice(1); const kids = effects(e.id);
-    const parentMissing = e.caused_by && !state.events.some((x) => x.id === e.caused_by);
-    const chainHtml = parentMissing ? `<div class="link" style="margin-bottom:12px">caused by <span class="mono">${esc(e.caused_by)}</span> — outside this view's scope</div>` : chain.length ? `<div class="why-chain">` + chain.map((c) => `<div class="step ${c.actor.type}"><span class="arrow">↳ because</span> <span class="who">${esc(actorName(c.actor))}</span> ${esc(verbOf(c))} ${esc(c.artifacts.map(artLabel).join(", "))}${c.intent ? ` — <i>${esc(c.intent)}</i>` : ""} <a href="#" data-goto="${esc(c.id)}" class="link">#${c.seq}</a></div>`).join("") + `</div>` : `<div class="link" style="margin-bottom:12px">no causal parent recorded — this is a root event</div>`;
-    const kidsHtml = kids.length ? `<div class="why-chain">` + kids.map((c) => `<div class="step ${c.actor.type}"><span class="arrow">→ led to</span> <span class="who">${esc(actorName(c.actor))}</span> ${esc(verbOf(c))} ${esc(c.artifacts.map(artLabel).join(", "))} <a href="#" data-goto="${esc(c.id)}" class="link">#${c.seq}</a></div>`).join("") + `</div>` : "";
+    // Every section always renders: absent data says "(not recorded)" instead of vanishing,
+    // and a section that fails to render falls back on its own — it never blanks the rest of the pane.
+    const sect = (k, fn, mono) => { let v; try { v = fn(); } catch { v = `<span class="link">(could not render — see raw JSON)</span>`; } return kv(k, v || `<span class="link">(not recorded)</span>`, mono); };
+    let chainHtml, kidsHtml = "", kids = [];
+    try {
+      const chain = whyChain(e.id).slice(1); kids = effects(e.id);
+      const parentMissing = e.caused_by && !state.events.some((x) => x.id === e.caused_by);
+      chainHtml = parentMissing ? `<div class="link" style="margin-bottom:12px">caused by <span class="mono">${esc(e.caused_by)}</span> — outside this view's scope</div>` : chain.length ? `<div class="why-chain">` + chain.map((c) => `<div class="step ${c.actor.type}"><span class="arrow">↳ because</span> <span class="who">${esc(actorName(c.actor))}</span> ${esc(verbOf(c))} ${esc(c.artifacts.map(artLabel).join(", "))}${c.intent ? ` — <i>${esc(c.intent)}</i>` : ""} <a href="#" data-goto="${esc(c.id)}" class="link">#${c.seq}</a></div>`).join("") + `</div>` : `<div class="link" style="margin-bottom:12px">no causal parent recorded — this is a root event</div>`;
+      kidsHtml = kids.length ? `<div class="why-chain">` + kids.map((c) => `<div class="step ${c.actor.type}"><span class="arrow">→ led to</span> <span class="who">${esc(actorName(c.actor))}</span> ${esc(verbOf(c))} ${esc(c.artifacts.map(artLabel).join(", "))} <a href="#" data-goto="${esc(c.id)}" class="link">#${c.seq}</a></div>`).join("") + `</div>` : "";
+    } catch { chainHtml = `<div class="link" style="margin-bottom:12px">(could not render the causal chain — see raw JSON)</div>`; }
+    let raw; try { raw = JSON.stringify(e, null, 2); } catch { raw = "(not serializable)"; }
     d.innerHTML = `
       <h2>Event #${e.seq}</h2>
       <div class="kv">
-        ${kv("Who", `<span style="color:var(--${e.actor.type});font-weight:600">${esc(actorName(e.actor))}</span> <span class="link">${esc(e.actor.type)}${e.actor.model ? " · " + esc(e.actor.model) : ""}${e.actor.version ? " " + esc(e.actor.version) : ""}${e.actor.on_behalf_of ? "<br>on behalf of " + esc(e.actor.on_behalf_of) : ""}</span>`)}
-        ${kv("What", `<b>${esc(verbOf(e))}</b> ${e.artifacts.map((a) => `<span class="chip" data-art="${esc(a.id)}">${esc(artLabel(a))}</span>${a.kind && a.kind !== "file" ? `<span class="link">${esc(a.kind)}</span>` : ""}${a.derived_from?.length ? `<div class="link">derived from ${esc(a.derived_from.join(", "))}</div>` : ""}`).join(" ")}${e.change?.summary ? `<div>${esc(e.change.summary)}</div>` : ""}${e.change?.diff ? `<pre>${esc(e.change.diff)}</pre>` : ""}${e.change?.after_hash ? `<div class="hash">after ${esc(e.change.after_hash)}</div>` : ""}`)}
-        ${kv("When", `${esc(new Date(e.timestamp).toLocaleString())}${e.duration_ms != null ? ` <span class="link">· took ${fmtDur(e.duration_ms)}</span>` : ""}<div class="link">received ${esc(new Date(e.received_at).toLocaleString())}</div>`)}
-        ${kv("Where", e.location ? esc([e.location.system, e.location.environment, e.location.path || e.location.url, e.location.device].filter(Boolean).join(" · ")) : "")}
-        ${kv("Why", `${e.intent ? esc(e.intent) : "<span class='link'>(no intent recorded)</span>"}`)}
-        ${kv("How", e.method ? `${e.method.tool ? `<b>${esc(e.method.tool)}</b> ` : ""}${e.method.automated != null ? `<span class="link">${e.method.automated ? "automated" : "manual"}</span>` : ""}${e.method.instruction ? `<div class="link">instruction: ${esc(e.method.instruction)}</div>` : ""}${e.method.tokens != null ? `<div class="link">${e.method.tokens} tokens${e.method.cost_usd != null ? ` · $${e.method.cost_usd}` : ""}</div>` : ""}${e.method.params ? `<pre>${esc(JSON.stringify(e.method.params, null, 2))}</pre>` : ""}` : "")}
-        ${kv("Tags", e.tags?.length ? e.tags.map((t) => `<span class="chip">${esc(t)}</span>`).join("") : "")}
+        ${sect("Who", () => `<span style="color:var(--${e.actor.type});font-weight:600">${esc(actorName(e.actor))}</span> <span class="link">${esc(e.actor.type)}${e.actor.model ? " · " + esc(e.actor.model) : ""}${e.actor.version ? " " + esc(e.actor.version) : ""}${e.actor.on_behalf_of ? "<br>on behalf of " + esc(e.actor.on_behalf_of) : ""}</span>`)}
+        ${sect("What", () => `<b>${esc(verbOf(e))}</b> ${e.artifacts.map((a) => `<span class="chip" data-art="${esc(a.id)}">${esc(artLabel(a))}</span>${a.kind && a.kind !== "file" ? `<span class="link">${esc(a.kind)}</span>` : ""}${a.derived_from?.length ? `<div class="link">derived from ${esc(a.derived_from.join(", "))}</div>` : ""}`).join(" ")}${e.change?.summary ? `<div>${esc(e.change.summary)}</div>` : ""}${e.change?.diff ? `<pre>${esc(e.change.diff)}</pre>` : ""}${e.change?.after_hash ? `<div class="hash">after ${esc(e.change.after_hash)}</div>` : ""}`)}
+        ${sect("When", () => `${esc(new Date(e.timestamp).toLocaleString())}${e.duration_ms != null ? ` <span class="link">· took ${fmtDur(e.duration_ms)}</span>` : ""}<div class="link">received ${esc(new Date(e.received_at).toLocaleString())}</div>`)}
+        ${sect("Where", () => e.location ? esc(whereText(e.location)) : "")}
+        ${sect("Why", () => e.intent ? esc(e.intent) : "")}
+        ${sect("How", () => e.method ? `${e.method.tool ? `<b>${esc(e.method.tool)}</b> ` : ""}${e.method.automated != null ? `<span class="link">${e.method.automated ? "automated" : "manual"}</span>` : ""}${e.method.instruction ? `<div class="link">instruction: ${esc(e.method.instruction)}</div>` : ""}${e.method.tokens != null ? `<div class="link">${e.method.tokens} tokens${e.method.cost_usd != null ? ` · $${e.method.cost_usd}` : ""}</div>` : ""}${e.method.params ? `<pre>${esc(JSON.stringify(e.method.params, null, 2))}</pre>` : ""}` : "")}
+        ${sect("Tags", () => e.tags?.length ? e.tags.map((t) => `<span class="chip">${esc(t)}</span>`).join("") : "")}
       </div>
       <h2>Causal chain</h2>${chainHtml}
       ${kids.length ? `<h2>Consequences</h2>${kidsHtml}` : ""}
       <h2>Integrity</h2>
       <div class="kv"><div class="k">id</div><div class="v mono">${esc(e.id)}</div><div class="k">hash</div><div class="v hash">${esc(e.hash)}</div><div class="k">prev</div><div class="v hash">${esc(e.prev_hash)}</div></div>
-      <details><summary class="link">raw JSON</summary><pre>${esc(JSON.stringify(e, null, 2))}</pre></details>`;
+      <details><summary class="link">raw JSON</summary><pre>${esc(raw)}</pre></details>`;
   }
 
   // ---------- lineage graph ----------
