@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createHandler, parseCredentials, Credential, EventStore, Event, Share, appendEvent, EventInput } from "./index.js";
+import { createHandler, parseCredentials, Credential, EventStore, Event, Share, appendEvent, EventInput, verifyProject } from "./index.js";
 
 /** minimal in-memory store for tests */
 class MemStore implements EventStore {
@@ -14,15 +14,18 @@ class MemStore implements EventStore {
   async history(q: any) { return this.all(q.project); }
   async createShare(s: Share) { this.shares.set(s.id, s); }
   async getShare(id: string) { return this.shares.get(id) ?? null; }
-  async deleteProject(p: string) {
+  async deleteProject(p: string, audit: Event) {
     const evs = this.events.filter((e) => e.project === p);
     const counts = {
       events: evs.length,
       event_artifacts: evs.reduce((n, e) => n + e.artifacts.length, 0),
       shares: [...this.shares.values()].filter((s) => s.project === p).length,
     };
+    // mimic a UNIQUE(project, seq) constraint so the router's re-seal/retry path is exercised
+    if (this.events.some((e) => e.project === audit.project && e.seq === audit.seq)) throw new Error("UNIQUE constraint failed: events.project, events.seq");
     this.events = this.events.filter((e) => e.project !== p);
     for (const [id, s] of this.shares) if (s.project === p) this.shares.delete(id);
+    this.events.push(audit);
     return counts;
   }
 }
@@ -137,6 +140,51 @@ test("DELETE /projects/:p audit event records the deleted project's final head h
   const [audit] = store.events.filter((e) => e.project === "ops");
   assert.equal(audit.change?.before_hash, head.hash);
   assert.match(audit.change?.summary ?? "", new RegExp(`at head ${head.hash} seq ${head.seq}$`));
+});
+
+// ---- delete atomicity (B3) ----
+test("DELETE /projects/:p: audit event is sealed before deletion and handed to the store in the same call", async () => {
+  const store = await seeded();
+  const calls: string[] = [];
+  const origInsert = store.insert.bind(store);
+  store.insert = async (e) => { calls.push(`insert:${e.project}`); return origInsert(e); };
+  const origDelete = store.deleteProject.bind(store);
+  store.deleteProject = async (p, audit) => { calls.push(`delete:${p}+audit:${audit.project}#${audit.seq}`); return origDelete(p, audit); };
+  const res = await del(createHandler(store, { token: "tok", opsProject: "ops" }), "/projects/junk?confirm=junk", AUTH);
+  assert.equal(res.status, 200);
+  assert.deepEqual(calls, ["delete:junk+audit:ops#0"]); // no separate insert — the store owns the transaction
+  const [audit] = store.events.filter((e) => e.project === "ops");
+  assert.equal(audit.id, (await res.json()).ops_event);
+  assert.match(audit.change?.summary ?? "", /^deleted project "junk" \(2 events\) at head /);
+  assert.equal((await verifyProject(store, "ops")).ok, true);
+});
+
+test("DELETE /projects/:p: if the store's transaction fails, nothing is deleted and no audit event exists", async () => {
+  const store = await seeded();
+  store.deleteProject = async () => { throw new Error("disk on fire"); };
+  const res = await del(createHandler(store, { token: "tok", opsProject: "ops" }), "/projects/junk?confirm=junk", AUTH).catch((e) => e);
+  assert.notEqual(res.status, 200);
+  assert.equal(store.events.filter((e) => e.project === "junk").length, 2);
+  assert.equal(store.events.filter((e) => e.project === "ops").length, 0);
+});
+
+test("DELETE /projects/:p: a concurrent ops write that takes the audit's seq rolls back and is retried onto the new head", async () => {
+  const store = await seeded();
+  await appendEvent(store, ev({ project: "ops", action: "deleted", artifacts: [{ id: "project:old" }] }));
+  let raced = false;
+  const origHead = store.head.bind(store);
+  store.head = async (p) => { // after the router reads the ops head once, sneak in another ops event
+    const h = await origHead(p);
+    if (p === "ops" && !raced) { raced = true; await appendEvent(store, ev({ project: "ops", action: "deleted", artifacts: [{ id: "project:other" }] })); }
+    return h;
+  };
+  const res = await del(createHandler(store, { token: "tok", opsProject: "ops" }), "/projects/junk?confirm=junk", AUTH);
+  assert.equal(res.status, 200);
+  const ops = store.events.filter((e) => e.project === "ops");
+  assert.deepEqual(ops.map((e) => e.seq), [0, 1, 2]);
+  assert.equal(ops[2].id, (await res.json()).ops_event);
+  assert.equal(store.events.filter((e) => e.project === "junk").length, 0);
+  assert.equal((await verifyProject(store, "ops")).ok, true);
 });
 
 // ---- per-actor credentials (backlog #6) ----

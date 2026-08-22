@@ -109,9 +109,34 @@ deleted project elsewhere would have been undetectable.
   `evt_91fbe198b17d401eb5b0f9be5a07d283`.
 - Status: merged to `main`, **not yet deployed** (Jordan deploys after review).
 
-### B3 — delete atomicity (open, separate backlog item)
-`store.deleteProject` and the subsequent ops `appendEvent` are not atomic; a
-failure between them leaves a deletion with no audit record.
+### B3 — delete atomicity — **DONE 2026-08-21** (code; awaiting deploy)
+`store.deleteProject` and the subsequent ops `appendEvent` were two separate
+writes; a failure between them left a deletion with no audit record (and the
+retry/ordering made the reverse — an audit event for a deletion that never
+committed — possible too).
+
+**Fix:** commit `46b9d00`
+- `EventStore.deleteProject(project, audit: Event)` — the store must delete the
+  project's rows AND insert the already-sealed audit event in one transaction.
+- Router (`packages/core/src/router.ts`): seals the audit event against the ops
+  head *before* deleting, hands it to the store, and re-seals/retries (≤5×) if a
+  concurrent ops write takes its seq (the whole transaction rolls back, so
+  nothing is half-applied). Summary is now
+  `deleted project "<p>" (<n> events) at head <hash> seq <n>` — per-table
+  counts stay in the HTTP response (they aren't knowable before the delete and
+  the audit body is hashed at seal time).
+- `D1Store.deleteProject`: deletes + audit insert in one `db.batch` (atomic in
+  D1). `SqliteStore.deleteProject` added (`BEGIN … COMMIT/ROLLBACK`) so the
+  local server serves `DELETE /projects/:p` too and the guarantee is tested on
+  a real SQL engine.
+- Tests: `router.test.ts` — audit sealed before deletion and passed into the
+  store call (no separate insert); store failure → nothing deleted, no audit;
+  concurrent ops write → retried onto the new head, chain verifies.
+  `sqlite-store.test.ts` — happy path; stale audit seq → UNIQUE → deletes and
+  share rolled back. D1 itself is not exercised locally (no wrangler harness) —
+  its batch atomicity is a documented platform guarantee. `npm test`: 30/30
+  core, 12/12 mcp-server.
+- Status: merged to `main`, not yet deployed.
 
 ## Backlog
 
@@ -121,4 +146,4 @@ failure between them leaves a deletion with no audit record.
 | 17 | A2 — ops-project delete guard | **Done** — `cbcf592`, 2026-08-21 (awaiting deploy) |
 | 6 | Worker `POST /events` per-actor credentials | **Done** — 2026-08-21 (awaiting `RETRACE_CREDENTIALS` secret + deploy) |
 | — | Audit-event actor | Open |
-| — | B3 — delete atomicity | Open |
+| — | B3 — delete atomicity | **Done** — `46b9d00`, 2026-08-21 (awaiting deploy) |

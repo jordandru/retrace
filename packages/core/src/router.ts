@@ -27,6 +27,7 @@
 import { z } from "zod";
 import { Actor, EventInput } from "./schema.js";
 import { EventStore, appendEvent, verifyProject, explainEvent, newShareId, shareIsLive, Share } from "./store.js";
+import { sealEvent } from "./chain.js";
 import { buildExportBundle, verifyExportBundle } from "./export.js";
 import { renderReportHtml } from "./report.js";
 import { buildLineage, renderLineageDot, renderLineageMermaid } from "./lineage.js";
@@ -244,20 +245,27 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
           if (!head) return json({ error: "project not found" }, 404);
           const opsProject = opts.opsProject ?? "retrace";
           if (project === opsProject) return json({ error: "refusing to delete the ops/audit project" }, 403);
-          const deleted = await store.deleteProject(project);
-          // Record the final head so a later re-seed of this project from genesis is detectable against the ops chain.
-          const ops = await appendEvent(store, {
+          // Seal the audit event first, then let the store delete + insert it in ONE transaction (B3): a deletion can
+          // never exist without its audit record. The final head is recorded so a later re-seed of this project from
+          // genesis is detectable against the ops chain. Seq is 0-based, so the event count is head.seq + 1.
+          const auditInput: EventInput = {
             project: opsProject,
             actor: { type: "system", id: "worker" },
             action: "deleted",
             artifacts: [{ id: `project:${project}`, kind: "project", label: project }],
             intent: "project deleted via DELETE route",
-            change: {
-              summary: `deleted ${Object.entries(deleted).map(([t, n]) => `${n} ${t}`).join(", ")} at head ${head.hash} seq ${head.seq}`,
-              before_hash: head.hash,
-            },
-          });
-          return json({ ok: true, project, deleted, ops_event: ops.event.id });
+            change: { summary: `deleted project "${project}" (${head.seq + 1} events) at head ${head.hash} seq ${head.seq}`, before_hash: head.hash },
+          };
+          for (let attempt = 0; ; attempt++) {
+            const audit = await sealEvent(auditInput, await store.head(opsProject));
+            try {
+              const deleted = await store.deleteProject(project, audit);
+              return json({ ok: true, project, deleted, ops_event: audit.id });
+            } catch (e: any) {
+              // a concurrent ops-project write took our seq: the whole transaction rolled back, re-seal and retry
+              if (!/UNIQUE/i.test(String(e?.message)) || attempt >= 4) throw e;
+            }
+          }
         }
         if (req.method === "POST" && sub === "share") {
           const body = (await req.json().catch(() => ({}))) as { artifact_id?: string; label?: string; expires_in_days?: number; created_by?: string };

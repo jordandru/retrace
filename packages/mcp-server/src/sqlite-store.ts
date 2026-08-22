@@ -17,17 +17,37 @@ export class SqliteStore implements EventStore {
     return row ?? null;
   }
 
-  async insert(e: Event) {
+  /** Raw row writes for one event — caller owns the transaction. */
+  private insertRows(e: Event) {
     const ins = this.db.prepare(
       `INSERT INTO events (id, project, seq, timestamp, received_at, actor_type, actor_id, action, caused_by, idempotency_key, prev_hash, hash, body)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     const insArt = this.db.prepare("INSERT OR IGNORE INTO event_artifacts (event_id, project, artifact_id) VALUES (?, ?, ?)");
+    ins.run(e.id, e.project, e.seq, e.timestamp, e.received_at, e.actor.type, e.actor.id, e.action, e.caused_by ?? null, e.idempotency_key ?? null, e.prev_hash, e.hash, JSON.stringify(e));
+    for (const a of e.artifacts) insArt.run(e.id, e.project, a.id);
+  }
+
+  async insert(e: Event) {
     this.db.exec("BEGIN");
     try {
-      ins.run(e.id, e.project, e.seq, e.timestamp, e.received_at, e.actor.type, e.actor.id, e.action, e.caused_by ?? null, e.idempotency_key ?? null, e.prev_hash, e.hash, JSON.stringify(e));
-      for (const a of e.artifacts) insArt.run(e.id, e.project, a.id);
+      this.insertRows(e);
       this.db.exec("COMMIT");
+    } catch (err) {
+      this.db.exec("ROLLBACK");
+      throw err;
+    }
+  }
+
+  /** Deletes + audit insert in one transaction (B3); the local server's DELETE /projects/:p needs this. */
+  async deleteProject(project: string, audit: Event) {
+    const tables = ["events", "event_artifacts", "shares"];
+    this.db.exec("BEGIN");
+    try {
+      const counts = Object.fromEntries(tables.map((t) => [t, Number(this.db.prepare(`DELETE FROM ${t} WHERE project = ?`).run(project).changes)]));
+      this.insertRows(audit);
+      this.db.exec("COMMIT");
+      return counts;
     } catch (err) {
       this.db.exec("ROLLBACK");
       throw err;

@@ -37,8 +37,10 @@ export interface EventStore {
   history(q: HistoryQuery): Promise<Event[]>;
   all(project: string): Promise<Event[]>;
   projects(): Promise<string[]>;
-  /** Delete every row belonging to a project, atomically. Returns per-table deleted counts. Optional — stores without it don't serve DELETE /projects/:p. */
-  deleteProject?(project: string): Promise<Record<string, number>>;
+  /** Delete every row belonging to a project AND insert `audit` (already sealed onto its own project's chain) in the
+   *  same transaction, so a deletion can never exist without its audit record and vice versa (security review
+   *  2026-08-21, B3). Returns per-table deleted counts. Optional — stores without it don't serve DELETE /projects/:p. */
+  deleteProject?(project: string, audit: Event): Promise<Record<string, number>>;
 }
 
 export const SCHEMA_SQL = `

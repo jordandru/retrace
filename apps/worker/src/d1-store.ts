@@ -8,8 +8,8 @@ export class D1Store implements EventStore {
     return row ?? null;
   }
 
-  async insert(e: Event) {
-    const stmts = [
+  private insertStatements(e: Event) {
+    return [
       this.db
         .prepare(
           `INSERT INTO events (id, project, seq, timestamp, received_at, actor_type, actor_id, action, caused_by, idempotency_key, prev_hash, hash, body)
@@ -18,12 +18,20 @@ export class D1Store implements EventStore {
         .bind(e.id, e.project, e.seq, e.timestamp, e.received_at, e.actor.type, e.actor.id, e.action, e.caused_by ?? null, e.idempotency_key ?? null, e.prev_hash, e.hash, JSON.stringify(e)),
       ...e.artifacts.map((a) => this.db.prepare("INSERT OR IGNORE INTO event_artifacts (event_id, project, artifact_id) VALUES (?, ?, ?)").bind(e.id, e.project, a.id)),
     ];
-    await this.db.batch(stmts); // batch is atomic in D1
   }
 
-  async deleteProject(project: string) {
+  async insert(e: Event) {
+    await this.db.batch(this.insertStatements(e)); // batch is atomic in D1
+  }
+
+  /** Deletes + the audit insert run in one D1 batch, which is atomic: if the audit's (project, seq) collides the
+   *  deletes roll back too (B3). */
+  async deleteProject(project: string, audit: Event) {
     const tables = ["events", "event_artifacts", "shares"];
-    const results = await this.db.batch(tables.map((t) => this.db.prepare(`DELETE FROM ${t} WHERE project = ?`).bind(project))); // batch is atomic in D1
+    const results = await this.db.batch([
+      ...tables.map((t) => this.db.prepare(`DELETE FROM ${t} WHERE project = ?`).bind(project)),
+      ...this.insertStatements(audit),
+    ]);
     return Object.fromEntries(tables.map((t, i) => [t, results[i].meta.changes ?? 0]));
   }
 
