@@ -99,7 +99,9 @@ When committing, add trailers: Retrace-Actor: claude-code / Retrace-Model: <your
 ```bash
 cd <abs path>/retrace/apps/worker
 npx wrangler login                     # opens browser
-npx wrangler secret put RETRACE_TOKEN          # paste a long random string; SAVE IT — it's your API password
+npx wrangler secret put RETRACE_TOKEN          # paste a long random string; SAVE IT — it's your API password (owner token)
+npx wrangler secret put RETRACE_CREDENTIALS    # optional, JSON array of per-actor tokens: [{"token":"<32+ chars>","actor":{"type":"agent","id":"claude-code","model":"claude-fable-5","on_behalf_of":"<your email>"}}]
+                                               # give each agent its own pinned token as RETRACE_TOKEN in its MCP config — the Worker then stamps WHO, the agent can't; add "trust":"assert" only for the git hook / Drive forwarder
 npx wrangler secret put RETRACE_SIGNING_KEY    # paste output of: node ../../packages/mcp-server/dist/export-cli.js keygen --print-private  (the JSON only)
 npx wrangler secret put RETRACE_GITHUB_SECRET  # another random string; you'll reuse it in GitHub
 npx wrangler deploy

@@ -1,7 +1,9 @@
 /**
  * Shared HTTP router (fetch API) — used by the Cloudflare Worker and the local Node server.
  *
- * Owner routes (auth: Bearer token or ?token= when a token is configured):
+ * Owner routes (auth: Bearer token or ?token= when a token is configured). Per-actor credentials (RETRACE_CREDENTIALS,
+ * Bearer only) may also POST /events and read; "pinned" credentials have their actor stamped by the server, "assert"
+ * credentials (git hook, backfill forwarders) may assert any actor. DELETE/share stay owner-only.
  *   GET  /  | /ui                        UI
  *   GET  /api                            health
  *   GET  /.well-known/retrace-pubkey     issuer public key (JWK) — public
@@ -22,7 +24,8 @@
  *   GET  /s/:id                          UI in shared mode
  *   GET  /s/:id/meta · /s/:id/events · /s/:id/verify · /s/:id/export · /s/:id/report · /s/:id/lineage
  */
-import { EventInput } from "./schema.js";
+import { z } from "zod";
+import { Actor, EventInput } from "./schema.js";
 import { EventStore, appendEvent, verifyProject, explainEvent, newShareId, shareIsLive, Share } from "./store.js";
 import { buildExportBundle, verifyExportBundle } from "./export.js";
 import { renderReportHtml } from "./report.js";
@@ -32,8 +35,29 @@ import { mapDriveActivities, DrivePayload } from "./gdrive.js";
 import { publicFromPrivate, keyId } from "./signing.js";
 import { UI_HTML } from "./ui-html.js";
 
+/** A per-actor credential (security review 2026-08-21, backlog #6). Holders can POST /events and read; they cannot
+ *  DELETE or create shares. trust "pinned" (default): the Worker stamps `actor` from the credential — the body may only
+ *  add display_name/version and may not claim human/system. trust "assert": the body actor is stored verbatim (git
+ *  hook, backfill, Drive forwarder — callers that legitimately relay other people's actions). */
+export const Credential = z.object({
+  token: z.string().min(16),
+  /** Human-readable name, recorded nowhere — for the operator's own bookkeeping */
+  name: z.string().optional(),
+  actor: Actor,
+  trust: z.enum(["pinned", "assert"]).default("pinned"),
+});
+export type Credential = z.infer<typeof Credential>;
+/** Parse the RETRACE_CREDENTIALS secret (JSON array). Throws on malformed config so a bad deploy fails loudly. */
+export function parseCredentials(raw?: string | null): Credential[] {
+  if (!raw) return [];
+  return z.array(Credential).parse(JSON.parse(raw));
+}
+
 export interface RouterOptions {
+  /** Owner token: full access, body actor stored verbatim. Accepted as Bearer or ?token= (the UI uses the latter). */
   token?: string;
+  /** Per-actor credentials; see Credential. Bearer only (never ?token=, which leaks into logs). */
+  credentials?: Credential[];
   signingKey?: JsonWebKey | null;
   issuerName?: string;
   /** Public base URL used when building share links (defaults to request origin) */
@@ -56,6 +80,29 @@ const inputs_needs_unique = (ghEvent: string) => ghEvent !== "push";
 export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOptions) {
   const opts: RouterOptions = typeof tokenOrOpts === "string" ? { token: tokenOrOpts } : tokenOrOpts ?? {};
   const { token } = opts;
+  const credentials = opts.credentials ?? [];
+  type Principal = { kind: "owner" } | { kind: "credential"; credential: Credential } | null;
+  /** Who is calling. `null` = unauthenticated (only valid when no token is configured at all). */
+  const authenticate = (req: Request, url: URL): Principal | "unauthorized" => {
+    const auth = req.headers.get("authorization") ?? "";
+    const bearer = auth.startsWith("Bearer ") ? auth.slice(7) : null;
+    if (token && (bearer === token || url.searchParams.get("token") === token)) return { kind: "owner" };
+    const credential = bearer ? credentials.find((c) => c.token === bearer) : undefined;
+    if (credential) return { kind: "credential", credential };
+    return token || credentials.length ? "unauthorized" : null;
+  };
+  /** Actor to store for POST /events under this principal (mirrors the MCP server's RETRACE_ACTOR_LOCK). */
+  const resolveActor = (principal: Principal, body: Actor): Actor | { error: string } => {
+    if (principal?.kind !== "credential" || principal.credential.trust === "assert") return body;
+    const { actor } = principal.credential;
+    if (body.type !== actor.type)
+      return { error: `actor.type "${body.type}" is not allowed: this credential is pinned to ${actor.type} "${actor.id}". Use an owner or assert-trust credential to record other actors.` };
+    return {
+      ...actor,
+      ...(body.display_name !== undefined ? { display_name: body.display_name } : {}),
+      ...(body.version !== undefined ? { version: body.version } : {}),
+    };
+  };
 
   const lineageResponse = async (events: any[], fmt: string | null, actors: boolean) => {
     const l = buildLineage(events, { includeActors: actors });
@@ -72,7 +119,7 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
     if (req.method === "OPTIONS") return new Response(null, { headers: CORS });
     if (parts.length === 0 || parts[0] === "ui") return html(UI_HTML);
     if (parts[0] === "favicon.ico") return new Response(null, { status: 204 });
-    if (parts[0] === "api" && parts.length === 1) return json({ name: "retrace-api", version: "0.1.0", ok: true, auth: !!token, signing: !!opts.signingKey });
+    if (parts[0] === "api" && parts.length === 1) return json({ name: "retrace-api", version: "0.1.0", ok: true, auth: !!token || credentials.length > 0, credentials: credentials.length, signing: !!opts.signingKey });
     if (parts[0] === ".well-known" && parts[1] === "retrace-pubkey") {
       if (!opts.signingKey) return json({ error: "no signing key configured" }, 404);
       const pub = publicFromPrivate(opts.signingKey);
@@ -100,12 +147,11 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
         }
         return json({ ok: true, event: ghEvent, logged: results }, 201);
       }
-      // ---- Google Drive activity forwarder (bearer auth like owner routes) ----
+      // ---- Google Drive activity forwarder (owner token or an assert-trust credential: it relays other people's edits) ----
       if (req.method === "POST" && parts[0] === "hooks" && parts[1] === "gdrive") {
-        if (token) {
-          const auth = req.headers.get("authorization") ?? "";
-          if (auth !== `Bearer ${token}` && url.searchParams.get("token") !== token) return json({ error: "unauthorized" }, 401);
-        }
+        const principal = authenticate(req, url);
+        if (principal === "unauthorized") return json({ error: "unauthorized" }, 401);
+        if (principal?.kind === "credential" && principal.credential.trust !== "assert") return json({ error: "forbidden: the Drive forwarder needs the owner token or an assert-trust credential" }, 403);
         const payload = (await req.json()) as DrivePayload;
         const inputs = mapDriveActivities({ ...payload, project: url.searchParams.get("project") ?? payload.project }, "google-drive");
         const results = [];
@@ -145,16 +191,20 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
       }
 
       // ---- owner routes ----
-      if (token) {
-        const auth = req.headers.get("authorization") ?? "";
-        if (auth !== `Bearer ${token}` && url.searchParams.get("token") !== token) return json({ error: "unauthorized" }, 401);
-      }
+      const principal = authenticate(req, url);
+      if (principal === "unauthorized") return json({ error: "unauthorized" }, 401);
+      // Per-actor credentials may append and read; anything destructive or outward-facing stays owner-only.
+      if (principal?.kind === "credential" && (req.method === "DELETE" || (req.method === "POST" && parts[0] !== "events")))
+        return json({ error: "forbidden: this route needs the owner token" }, 403);
       if (req.method === "POST" && parts[0] === "events" && parts.length === 1) {
         const parsed = EventInput.safeParse(await req.json());
         if (!parsed.success) return json({ error: "invalid event", issues: parsed.error.issues }, 400);
+        const actor = resolveActor(principal, parsed.data.actor);
+        if ("error" in actor) return json(actor, 403);
+        const input = { ...parsed.data, actor };
         for (let attempt = 0; ; attempt++) {
           try {
-            const r = await appendEvent(store, parsed.data);
+            const r = await appendEvent(store, input);
             return json(r, r.deduped ? 200 : 201);
           } catch (e: any) {
             if (!/UNIQUE/i.test(String(e?.message)) || attempt >= 4) throw e;

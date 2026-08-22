@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createHandler, EventStore, Event, Share, appendEvent, EventInput } from "./index.js";
+import { createHandler, parseCredentials, Credential, EventStore, Event, Share, appendEvent, EventInput } from "./index.js";
 
 /** minimal in-memory store for tests */
 class MemStore implements EventStore {
@@ -137,4 +137,66 @@ test("DELETE /projects/:p audit event records the deleted project's final head h
   const [audit] = store.events.filter((e) => e.project === "ops");
   assert.equal(audit.change?.before_hash, head.hash);
   assert.match(audit.change?.summary ?? "", new RegExp(`at head ${head.hash} seq ${head.seq}$`));
+});
+
+// ---- per-actor credentials (backlog #6) ----
+const CLAUDE = { token: "claude-code-token-0123456789", actor: { type: "agent" as const, id: "claude-code", model: "claude-fable-5", on_behalf_of: "jordan@example.com" } };
+const HOOK = { token: "git-hook-token-0123456789abc", actor: { type: "system" as const, id: "retrace-git" }, trust: "assert" as const };
+const post = (handle: (r: Request) => Promise<Response>, path: string, body: unknown, bearer?: string) =>
+  handle(new Request(`http://test${path}`, { method: "POST", body: JSON.stringify(body), headers: { "content-type": "application/json", ...(bearer ? { authorization: `Bearer ${bearer}` } : {}) } }));
+const get = (handle: (r: Request) => Promise<Response>, path: string, bearer?: string) =>
+  handle(new Request(`http://test${path}`, { headers: bearer ? { authorization: `Bearer ${bearer}` } : {} }));
+
+test("credentials: pinned token cannot claim a human/system actor; nothing written", async () => {
+  const store = new MemStore();
+  const handle = createHandler(store, { token: "tok", credentials: [Credential.parse(CLAUDE)] });
+  for (const type of ["human", "system"] as const) {
+    const res = await post(handle, "/events", ev({ actor: { type, id: "jordan@example.com" }, action: "approved" }), CLAUDE.token);
+    assert.equal(res.status, 403);
+    assert.match((await res.json()).error, new RegExp(`actor.type "${type}" is not allowed.*pinned to agent "claude-code"`));
+  }
+  assert.equal(store.events.length, 0);
+});
+
+test("credentials: pinned token's actor is stamped from the credential, not the body", async () => {
+  const store = new MemStore();
+  const h = createHandler(store, { token: "tok", credentials: parseCredentials(JSON.stringify([CLAUDE, HOOK])) });
+  const res = await post(h, "/events", ev({ actor: { type: "agent", id: "claude-cowork", on_behalf_of: "mallory@example.com", model: "gpt-x", display_name: "Cowork", version: "1.2" } }), CLAUDE.token);
+  assert.equal(res.status, 201);
+  assert.deepEqual(store.events[0].actor, { type: "agent", id: "claude-code", model: "claude-fable-5", on_behalf_of: "jordan@example.com", display_name: "Cowork", version: "1.2" });
+});
+
+test("credentials: assert-trust token and the owner token store the body actor verbatim", async () => {
+  const store = new MemStore();
+  const h = createHandler(store, { token: "tok", credentials: parseCredentials(JSON.stringify([CLAUDE, HOOK])) });
+  const human = { type: "human" as const, id: "jordan@example.com", display_name: "Jordan" };
+  assert.equal((await post(h, "/events", ev({ actor: human, action: "committed" }), HOOK.token)).status, 201);
+  assert.equal((await post(h, "/events", ev({ actor: { type: "agent", id: "claude-cowork" } }), "tok")).status, 201);
+  assert.deepEqual(store.events.map((e) => e.actor), [human, { type: "agent", id: "claude-cowork" }]);
+});
+
+test("credentials: Bearer only, unknown tokens 401, reads allowed, DELETE/share/gdrive forbidden for pinned tokens", async () => {
+  const store = await seeded();
+  const h = createHandler(store, { token: "tok", credentials: parseCredentials(JSON.stringify([CLAUDE, HOOK])), opsProject: "ops" });
+  assert.equal((await get(h, `/projects?token=${CLAUDE.token}`)).status, 401); // credentials never via query string
+  assert.equal((await get(h, "/projects", "nope-nope-nope-nope-nope")).status, 401);
+  assert.equal((await get(h, "/projects", CLAUDE.token)).status, 200);
+  assert.equal((await get(h, "/projects/junk/verify", CLAUDE.token)).status, 200);
+  assert.equal((await del(h, "/projects/junk?confirm=junk", { authorization: `Bearer ${CLAUDE.token}` })).status, 403);
+  assert.equal((await del(h, "/projects/junk?confirm=junk", { authorization: `Bearer ${HOOK.token}` })).status, 403);
+  assert.equal((await post(h, "/projects/junk/share", { label: "x" }, CLAUDE.token)).status, 403);
+  assert.equal((await post(h, "/hooks/gdrive?project=junk", { activities: [] }, CLAUDE.token)).status, 403);
+  assert.equal((await post(h, "/hooks/gdrive?project=junk", { activities: [] }, HOOK.token)).status, 201);
+  assert.equal(store.events.filter((e) => e.project === "junk").length, 2);
+  assert.equal(store.shares.size, 1);
+  const api = await (await get(h, "/api")).json();
+  assert.equal(api.credentials, 2);
+});
+
+test("credentials: parseCredentials validates the secret and defaults trust to pinned", async () => {
+  assert.deepEqual(parseCredentials(undefined), []);
+  assert.equal(parseCredentials(JSON.stringify([CLAUDE]))[0].trust, "pinned");
+  assert.throws(() => parseCredentials(JSON.stringify([{ token: "short", actor: CLAUDE.actor }])), /too_small|at least 16/i);
+  assert.throws(() => parseCredentials(JSON.stringify([{ token: CLAUDE.token }])), /actor/);
+  assert.throws(() => parseCredentials("{not json"));
 });

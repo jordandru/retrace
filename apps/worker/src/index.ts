@@ -6,15 +6,19 @@
  *   GET  /projects · /projects/:p/events?… · /projects/:p/head · /projects/:p/verify
  *   DELETE /projects/:p?confirm=:p        junk-project cleanup; audit event goes to RETRACE_OPS_PROJECT
  * Auth: Bearer RETRACE_TOKEN (secret) or ?token= (used by the UI). Share links /s/:id are public + read-only.
+ *   RETRACE_CREDENTIALS (secret, JSON array of {token, actor, trust?}) — per-actor tokens that may POST /events + read;
+ *   "pinned" (default) stamps the actor server-side, "assert" stores the body actor verbatim. See core Credential.
  *   GET /projects/:p/export|report|lineage · POST /projects/:p/share · GET /.well-known/retrace-pubkey
  *   POST /hooks/github?project=…  (GitHub webhook; HMAC-verified with RETRACE_GITHUB_SECRET)
  */
-import { createHandler, parseSigningKey } from "@retrace/core";
+import { createHandler, parseCredentials, parseSigningKey } from "@retrace/core";
 import { D1Store } from "./d1-store.js";
 
 export interface Env {
   DB: D1Database;
   RETRACE_TOKEN?: string;
+  /** `wrangler secret put RETRACE_CREDENTIALS` — JSON array of per-actor credentials (see @retrace/core Credential) */
+  RETRACE_CREDENTIALS?: string;
   /** Ed25519 private JWK (JSON) — `wrangler secret put RETRACE_SIGNING_KEY` (generate with `retrace-export keygen`) */
   RETRACE_SIGNING_KEY?: string;
   RETRACE_ISSUER?: string;
@@ -30,6 +34,7 @@ export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     return createHandler(new D1Store(env.DB), {
       token: env.RETRACE_TOKEN,
+      credentials: parseCredentials(env.RETRACE_CREDENTIALS),
       signingKey: parseSigningKey(env.RETRACE_SIGNING_KEY),
       issuerName: env.RETRACE_ISSUER,
       publicUrl: env.RETRACE_PUBLIC_URL,

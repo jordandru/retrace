@@ -44,6 +44,39 @@ mirrors the `RETRACE_PROJECT_LOCK` / `RETRACE_COMMIT_LOCK` pattern.
 - Out of scope, still open: the Worker's `POST /events` path (`router.ts`) is a
   separate trust boundary, tracked as #6.
 
+### Worker `POST /events` actor trust (backlog #6) — **DONE 2026-08-21** (code; awaiting secret + deploy)
+One shared `RETRACE_TOKEN` authorised every owner route and `POST /events`
+stored the body's `actor` verbatim (`packages/core/src/router.ts`). Every token
+holder — MCP server, git hook, Apps Script forwarder, the UI's `?token=`, curl —
+could assert any actor, human included; the #16 lock only constrains the MCP
+server's own process, not a caller that hits the Worker directly.
+
+**Fix:** Option A (decided by Jordan 2026-08-21): `RETRACE_CREDENTIALS` secret,
+legacy `RETRACE_TOKEN` kept as the owner token.
+- `Credential` schema + `parseCredentials()` in `router.ts`: JSON array of
+  `{token (≥16 chars), name?, actor, trust: "pinned" | "assert"}`; malformed
+  config throws at parse time.
+- `authenticate()`: owner token via Bearer or `?token=` (UI); credentials Bearer
+  only. Unknown token → 401.
+- `resolveActor()` on `POST /events`: pinned credential → actor stamped from the
+  credential (body may add `display_name`/`version`; a different `actor.type`
+  → 403, nothing written) — mirrors the MCP `RETRACE_ACTOR_LOCK`. Assert
+  credential and owner → body actor verbatim (git hook / forwarders relay other
+  people's actions).
+- Scope: credentials may `POST /events` and read; `DELETE`, `POST …/share` →
+  403. `POST /hooks/gdrive` accepts owner or assert credentials only.
+- Wired in `apps/worker/src/index.ts` (`RETRACE_CREDENTIALS`) and
+  `packages/mcp-server/src/serve.ts`; `/api` reports `credentials: n`.
+- Tests in `packages/core/src/router.test.ts` (MemStore): pinned human/system
+  → 403 nothing written; pinned agent override → stamped; assert/owner
+  verbatim; query-string credential → 401; reads ok; DELETE/share/gdrive → 403
+  for pinned; parse validation. `npm test`: 27/27 core, 10/10 mcp-server.
+- Rollout (Jordan): `wrangler secret put RETRACE_CREDENTIALS`, deploy, then
+  point the MCP server's `RETRACE_TOKEN` at its pinned token. Until then the
+  owner token keeps working unchanged. Not yet deployed.
+- Still open: signed per-actor requests (non-repudiation) were considered
+  (Option C) and deferred.
+
 ### Audit-event actor (open, separate backlog item)
 The DELETE audit event is attributed to `{type:"system", id:"worker"}` rather
 than the caller that authorised the deletion. (The #17 reconstruction labelled
@@ -86,6 +119,6 @@ failure between them leaves a deletion with no audit record.
 |---|---------|--------|
 | 16 | A1 + B4 — MCP-server actor authentication | **Done** — `57e33ea`, 2026-08-21 (local MCP, no deploy) |
 | 17 | A2 — ops-project delete guard | **Done** — `cbcf592`, 2026-08-21 (awaiting deploy) |
-| 6 | Worker `POST /events` actor trust / credentialed per-actor | Open |
+| 6 | Worker `POST /events` per-actor credentials | **Done** — 2026-08-21 (awaiting `RETRACE_CREDENTIALS` secret + deploy) |
 | — | Audit-event actor | Open |
 | — | B3 — delete atomicity | Open |
