@@ -44,7 +44,7 @@ mirrors the `RETRACE_PROJECT_LOCK` / `RETRACE_COMMIT_LOCK` pattern.
 - Out of scope, still open: the Worker's `POST /events` path (`router.ts`) is a
   separate trust boundary, tracked as #6.
 
-### Worker `POST /events` actor trust (backlog #6) — **DONE 2026-08-21** (deployed; `RETRACE_CREDENTIALS` secret not yet set — inert until then)
+### Worker `POST /events` actor trust (backlog #6) — **DONE 2026-08-21** (deployed; `RETRACE_CREDENTIALS` set 2026-08-22)
 One shared `RETRACE_TOKEN` authorised every owner route and `POST /events`
 stored the body's `actor` verbatim (`packages/core/src/router.ts`). Every token
 holder — MCP server, git hook, Apps Script forwarder, the UI's `?token=`, curl —
@@ -71,9 +71,17 @@ legacy `RETRACE_TOKEN` kept as the owner token.
   → 403 nothing written; pinned agent override → stamped; assert/owner
   verbatim; query-string credential → 401; reads ok; DELETE/share/gdrive → 403
   for pinned; parse validation. `npm test`: 27/27 core, 10/10 mcp-server.
-- Rollout (Jordan): `wrangler secret put RETRACE_CREDENTIALS`, deploy, then
-  point the MCP server's `RETRACE_TOKEN` at its pinned token. Until then the
-  owner token keeps working unchanged. Code deployed 2026-08-21 (Worker version 0490ceaa); secret not yet set.
+- Rollout: code deployed 2026-08-21 (Worker version 0490ceaa).
+  `RETRACE_CREDENTIALS` set 2026-08-22 (Worker version 401f6410, secret
+  change) with three credentials — pinned `agent/claude-code`
+  (`on_behalf_of` Jordan), assert `system/retrace-git`, assert
+  `system/gdrive-forwarder`; tokens kept in
+  `~/.retrace/worker-credentials.json` (mode 600, not in the repo).
+  `/api` → `credentials: 3`. Nothing local currently points at the Worker
+  (the MCP server and git hook write to local SQLite — no `RETRACE_URL`), so
+  no client config changed; when a client is pointed at the Worker, give it
+  its credential as `RETRACE_TOKEN` rather than the owner token. The owner
+  token keeps working unchanged.
 - Still open: signed per-actor requests (non-repudiation) were considered
   (Option C) and deferred.
 
@@ -160,6 +168,6 @@ committed — possible too).
 |---|---------|--------|
 | 16 | A1 + B4 — MCP-server actor authentication | **Done** — `57e33ea`, 2026-08-21 (local MCP, no deploy) |
 | 17 | A2 — ops-project delete guard | **Done** — `cbcf592`, 2026-08-21 (deployed 0490ceaa) |
-| 6 | Worker `POST /events` per-actor credentials | **Done** — `6502813`, 2026-08-21 (deployed 0490ceaa; `RETRACE_CREDENTIALS` secret still to set) |
+| 6 | Worker `POST /events` per-actor credentials | **Done** — `6502813`, 2026-08-21 (deployed 0490ceaa; `RETRACE_CREDENTIALS` set 2026-08-22, version 401f6410) |
 | — | Audit-event actor | **Done** — `862335f`, 2026-08-21 (deployed 0490ceaa, `RETRACE_OWNER` set) |
 | — | B3 — delete atomicity | **Done** — `7f481b0`, 2026-08-21 (deployed 0490ceaa) |
