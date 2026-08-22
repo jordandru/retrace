@@ -115,7 +115,7 @@ writes; a failure between them left a deletion with no audit record (and the
 retry/ordering made the reverse — an audit event for a deletion that never
 committed — possible too).
 
-**Fix:** commit `46b9d00`
+**Fix:** commit `7f481b0`
 - `EventStore.deleteProject(project, audit: Event)` — the store must delete the
   project's rows AND insert the already-sealed audit event in one transaction.
 - Router (`packages/core/src/router.ts`): seals the audit event against the ops
@@ -146,4 +146,4 @@ committed — possible too).
 | 17 | A2 — ops-project delete guard | **Done** — `cbcf592`, 2026-08-21 (awaiting deploy) |
 | 6 | Worker `POST /events` per-actor credentials | **Done** — 2026-08-21 (awaiting `RETRACE_CREDENTIALS` secret + deploy) |
 | — | Audit-event actor | Open |
-| — | B3 — delete atomicity | **Done** — `46b9d00`, 2026-08-21 (awaiting deploy) |
+| — | B3 — delete atomicity | **Done** — `7f481b0`, 2026-08-21 (awaiting deploy) |
