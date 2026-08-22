@@ -190,15 +190,22 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
           if (!store.deleteProject) return json({ error: "project deletion not supported by this store" }, 501);
           const confirm = url.searchParams.get("confirm");
           if (confirm !== project) return json({ error: `destructive route: repeat the exact project name as ?confirm=${encodeURIComponent(project)} to delete it` }, 400);
-          if (!(await store.head(project))) return json({ error: "project not found" }, 404);
+          const head = await store.head(project);
+          if (!head) return json({ error: "project not found" }, 404);
+          const opsProject = opts.opsProject ?? "retrace";
+          if (project === opsProject) return json({ error: "refusing to delete the ops/audit project" }, 403);
           const deleted = await store.deleteProject(project);
+          // Record the final head so a later re-seed of this project from genesis is detectable against the ops chain.
           const ops = await appendEvent(store, {
-            project: opts.opsProject ?? "retrace",
+            project: opsProject,
             actor: { type: "system", id: "worker" },
             action: "deleted",
             artifacts: [{ id: `project:${project}`, kind: "project", label: project }],
             intent: "project deleted via DELETE route",
-            change: { summary: `deleted ${Object.entries(deleted).map(([t, n]) => `${n} ${t}`).join(", ")}` },
+            change: {
+              summary: `deleted ${Object.entries(deleted).map(([t, n]) => `${n} ${t}`).join(", ")} at head ${head.hash} seq ${head.seq}`,
+              before_hash: head.hash,
+            },
           });
           return json({ ok: true, project, deleted, ops_event: ops.event.id });
         }

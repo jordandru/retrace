@@ -107,3 +107,34 @@ test("DELETE /projects/:p defaults ops project to 'retrace' and 501s on stores w
   assert.equal(res2.status, 501);
   assert.equal(bare.events.filter((e) => e.project === "junk").length, 2);
 });
+
+test("DELETE /projects/:p refuses the ops/audit project → 403, nothing deleted, ops chain intact", async () => {
+  const store = await seeded();
+  const handle = createHandler(store, { token: "tok", opsProject: "ops" });
+  await appendEvent(store, ev({ project: "ops", action: "deleted", artifacts: [{ id: "project:old" }] }));
+  const before = store.events.filter((e) => e.project === "ops").map((e) => e.hash);
+  const res = await del(handle, "/projects/ops?confirm=ops", AUTH);
+  assert.equal(res.status, 403);
+  assert.deepEqual(await res.json(), { error: "refusing to delete the ops/audit project" });
+  assert.deepEqual(store.events.filter((e) => e.project === "ops").map((e) => e.hash), before); // no wipe, no new audit event
+  assert.equal(store.events.length, 4);
+
+  // default ops project name ("retrace") is guarded too
+  const dflt = await seeded();
+  await appendEvent(dflt, ev({ project: "retrace" }));
+  const res2 = await del(createHandler(dflt, { token: "tok" }), "/projects/retrace?confirm=retrace", AUTH);
+  assert.equal(res2.status, 403);
+  assert.equal(dflt.events.filter((e) => e.project === "retrace").length, 1);
+});
+
+test("DELETE /projects/:p audit event records the deleted project's final head hash and seq", async () => {
+  const store = await seeded();
+  const head = await store.head("junk");
+  assert.ok(head && head.seq === 1);
+  const handle = createHandler(store, { token: "tok", opsProject: "ops" });
+  const res = await del(handle, "/projects/junk?confirm=junk", AUTH);
+  assert.equal(res.status, 200);
+  const [audit] = store.events.filter((e) => e.project === "ops");
+  assert.equal(audit.change?.before_hash, head.hash);
+  assert.match(audit.change?.summary ?? "", new RegExp(`at head ${head.hash} seq ${head.seq}$`));
+});
