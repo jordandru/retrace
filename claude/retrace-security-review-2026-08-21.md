@@ -77,10 +77,26 @@ legacy `RETRACE_TOKEN` kept as the owner token.
 - Still open: signed per-actor requests (non-repudiation) were considered
   (Option C) and deferred.
 
-### Audit-event actor (open, separate backlog item)
-The DELETE audit event is attributed to `{type:"system", id:"worker"}` rather
-than the caller that authorised the deletion. (The #17 reconstruction labelled
-this "A1"; per the #16 brief, A1 is the MCP actor-forging finding above.)
+### Audit-event actor — **DONE 2026-08-21** (code; awaiting `RETRACE_OWNER` var + deploy)
+The DELETE audit event was attributed to `{type:"system", id:"worker"}` rather
+than the caller that authorised the deletion — it said only that *the server*
+did it. (The #17 reconstruction labelled this "A1"; per the #16 brief, A1 is
+the MCP actor-forging finding above.)
+
+**Fix:** commit `862335f`
+- Since #6 the route is owner-token-only, so the owner token is given an
+  identity: `RouterOptions.ownerActor` — `RETRACE_OWNER=<email>` in the Worker
+  (`[vars]`) and local server → `{type:"human", id}`.
+- The audit event is attributed to that actor, carries
+  `method {tool:"http", automated:false, params:{route:"DELETE /projects/:p",
+  principal:"owner"}}`, `location {url, system:"retrace-api"}`, and an optional
+  `?caused_by=evt_…` so `/events/:id/why` walks from the deletion back to the
+  instruction that asked for it.
+- Unset `RETRACE_OWNER` → previous `system/worker` actor, now marked
+  `automated:true`, so the gap is visible rather than silent.
+- Tests in `router.test.ts`: owner attribution + route/location + `why` chain;
+  fallback. `npm test`: 32/32 core, 12/12 mcp-server.
+- Status: merged to `main`, not yet deployed.
 
 ### A2 — ops-project delete guard (backlog #17) — **DONE 2026-08-21**
 `DELETE /projects/:p` had no guard against deleting the ops/audit project.
@@ -145,5 +161,5 @@ committed — possible too).
 | 16 | A1 + B4 — MCP-server actor authentication | **Done** — `57e33ea`, 2026-08-21 (local MCP, no deploy) |
 | 17 | A2 — ops-project delete guard | **Done** — `cbcf592`, 2026-08-21 (awaiting deploy) |
 | 6 | Worker `POST /events` per-actor credentials | **Done** — 2026-08-21 (awaiting `RETRACE_CREDENTIALS` secret + deploy) |
-| — | Audit-event actor | Open |
+| — | Audit-event actor | **Done** — `862335f`, 2026-08-21 (awaiting `RETRACE_OWNER` + deploy) |
 | — | B3 — delete atomicity | **Done** — `7f481b0`, 2026-08-21 (awaiting deploy) |
