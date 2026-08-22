@@ -160,6 +160,6 @@ committed — possible too).
 |---|---------|--------|
 | 16 | A1 + B4 — MCP-server actor authentication | **Done** — `57e33ea`, 2026-08-21 (local MCP, no deploy) |
 | 17 | A2 — ops-project delete guard | **Done** — `cbcf592`, 2026-08-21 (awaiting deploy) |
-| 6 | Worker `POST /events` per-actor credentials | **Done** — 2026-08-21 (awaiting `RETRACE_CREDENTIALS` secret + deploy) |
+| 6 | Worker `POST /events` per-actor credentials | **Done** — `6502813`, 2026-08-21 (awaiting `RETRACE_CREDENTIALS` secret + deploy) |
 | — | Audit-event actor | **Done** — `862335f`, 2026-08-21 (awaiting `RETRACE_OWNER` + deploy) |
 | — | B3 — delete atomicity | **Done** — `7f481b0`, 2026-08-21 (awaiting deploy) |
