@@ -10,6 +10,9 @@
  *   RETRACE_PROJECT  default project name; when set, WRITE tools (retrace_log/retrace_instruct) are pinned to it —
  *                    a different explicit project is rejected. Set RETRACE_PROJECT_LOCK=0 to allow any project.
  *   RETRACE_COMMIT_LOCK  action "committed" is reserved for the git hook; retrace_log rejects it. Set 0 to allow.
+ *   RETRACE_ACTOR_LOCK   actor identity is authoritative from env: retrace_log rejects human/system actors and ignores
+ *                    caller-supplied id/model/on_behalf_of; retrace_instruct only attributes to RETRACE_ON_BEHALF_OF.
+ *                    Set 0 to allow caller overrides (backfill / trusted contexts only).
  *   RETRACE_ACTOR    default actor id for this agent (e.g. "claude-code")
  *   RETRACE_ACTOR_MODEL default model string
  *   RETRACE_ON_BEHALF_OF the human this agent works for (e.g. jordan@...)
@@ -33,12 +36,13 @@ import { RemoteStore } from "./remote-store.js";
 
 const env = process.env;
 const DEFAULT_PROJECT = env.RETRACE_PROJECT ?? "default";
-const defaultActor = {
+/** Read at buildServer() time (not module load) so tests and embedders can configure it via env before building. */
+const readDefaultActor = () => ({
   type: "agent" as const,
   id: env.RETRACE_ACTOR ?? "mcp-agent",
   model: env.RETRACE_ACTOR_MODEL,
   on_behalf_of: env.RETRACE_ON_BEHALF_OF,
-};
+});
 
 export function makeStore() {
   if (env.RETRACE_URL) return new RemoteStore(env.RETRACE_URL, env.RETRACE_TOKEN);
@@ -47,12 +51,14 @@ export function makeStore() {
   return new SqliteStore(path);
 }
 
-export function buildServer(store = makeStore(), opts: { pinnedProject?: string; lock?: boolean; commitLock?: boolean } = {}) {
+export function buildServer(store = makeStore(), opts: { pinnedProject?: string; lock?: boolean; commitLock?: boolean; actorLock?: boolean } = {}) {
   const server = new McpServer({ name: "retrace", version: "0.1.0" });
   const remote = store instanceof RemoteStore ? store : null;
   const pinned = opts.pinnedProject ?? env.RETRACE_PROJECT;
   const lock = opts.lock ?? env.RETRACE_PROJECT_LOCK !== "0";
   const commitLock = opts.commitLock ?? env.RETRACE_COMMIT_LOCK !== "0";
+  const actorLock = opts.actorLock ?? env.RETRACE_ACTOR_LOCK !== "0";
+  const defaultActor = readDefaultActor();
   /** Resolve the project for a WRITE. If RETRACE_PROJECT is set (and lock on), any other explicit project is rejected
    *  so agents can't create stray projects by guessing a name. Read tools are not pinned. */
   const writeProject = (requested?: string): string => {
@@ -66,6 +72,35 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
   const guardAction = (action: string): void => {
     if (commitLock && action === "committed")
       throw new Error(`action "committed" is reserved for the git hook, which already records every real commit with the correct actor. Log your work as "edited" or "decided" and reference the commit id in the artifact ids instead. Set RETRACE_COMMIT_LOCK=0 to override.`);
+  };
+  const ACTOR_LOCK_HINT = "Set RETRACE_ACTOR_LOCK=0 to override.";
+  /** Actor for a retrace_log WRITE (security review 2026-08-21, findings A1 + B4). With the lock on, this server only
+   *  ever logs as its configured agent: human/system actors are refused outright, and id/model/on_behalf_of come from
+   *  env — the caller may only decorate with display_name/version. Known limitation: cross-actor assertion (e.g. a
+   *  "claude-cowork" event from a server configured as "claude-code") now needs the escape hatch; the credentialed
+   *  per-actor version is backlog #6. */
+  const resolveActor = (callerActor?: Partial<Actor>): Actor => {
+    if (!actorLock) {
+      return (callerActor?.type && callerActor.type !== "agent" ? callerActor : { ...defaultActor, ...(callerActor ?? {}) }) as Actor;
+    }
+    if (callerActor?.type === "human" || callerActor?.type === "system")
+      throw new Error(`actor.type "${callerActor.type}" is not allowed: this Retrace MCP server logs as its configured agent ("${defaultActor.id}"). Human instructions go through retrace_instruct; other human/system actors need the git hook or a credentialed context. ${ACTOR_LOCK_HINT}`);
+    return {
+      ...defaultActor,
+      ...(callerActor?.display_name !== undefined ? { display_name: callerActor.display_name } : {}),
+      ...(callerActor?.version !== undefined ? { version: callerActor.version } : {}),
+    };
+  };
+  /** Human actor for retrace_instruct. With the lock on, this server may only speak for its configured human. */
+  const resolveHuman = (humanId: string): Actor => {
+    if (actorLock) {
+      const configured = env.RETRACE_ON_BEHALF_OF;
+      if (!configured)
+        throw new Error(`retrace_instruct cannot attribute an instruction to "${humanId}": RETRACE_ON_BEHALF_OF is not configured for this Retrace MCP server. Set it to the human this agent works for. ${ACTOR_LOCK_HINT}`);
+      if (humanId !== configured)
+        throw new Error(`human_id "${humanId}" is not allowed: this Retrace MCP server can only record instructions from its configured human ("${configured}", RETRACE_ON_BEHALF_OF), not an arbitrary one. ${ACTOR_LOCK_HINT}`);
+    }
+    return { type: "human", id: humanId };
   };
 
   server.registerTool(
@@ -97,7 +132,7 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
       const input = EventInput.parse({
         ...args,
         project: writeProject(args.project),
-        actor: args.actor?.type && args.actor.type !== "agent" ? args.actor : { ...defaultActor, ...(args.actor ?? {}) },
+        actor: resolveActor(args.actor),
       });
       const { event, deduped } = remote ? await remote.append(input) : await appendEvent(store, input);
       return {
@@ -125,7 +160,7 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
     async (args) => {
       const input = EventInput.parse({
         project: writeProject(args.project),
-        actor: { type: "human", id: args.human_id },
+        actor: resolveHuman(args.human_id),
         action: "instructed",
         artifacts: args.artifacts ?? [{ id: `task:${args.instruction.slice(0, 60)}`, kind: "task", label: args.instruction.slice(0, 60) }],
         intent: args.instruction,
