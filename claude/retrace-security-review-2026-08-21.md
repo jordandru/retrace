@@ -44,7 +44,7 @@ mirrors the `RETRACE_PROJECT_LOCK` / `RETRACE_COMMIT_LOCK` pattern.
 - Out of scope, still open: the Worker's `POST /events` path (`router.ts`) is a
   separate trust boundary, tracked as #6.
 
-### Worker `POST /events` actor trust (backlog #6) — **DONE 2026-08-21** (code; awaiting secret + deploy)
+### Worker `POST /events` actor trust (backlog #6) — **DONE 2026-08-21** (deployed; `RETRACE_CREDENTIALS` secret not yet set — inert until then)
 One shared `RETRACE_TOKEN` authorised every owner route and `POST /events`
 stored the body's `actor` verbatim (`packages/core/src/router.ts`). Every token
 holder — MCP server, git hook, Apps Script forwarder, the UI's `?token=`, curl —
@@ -73,11 +73,11 @@ legacy `RETRACE_TOKEN` kept as the owner token.
   for pinned; parse validation. `npm test`: 27/27 core, 10/10 mcp-server.
 - Rollout (Jordan): `wrangler secret put RETRACE_CREDENTIALS`, deploy, then
   point the MCP server's `RETRACE_TOKEN` at its pinned token. Until then the
-  owner token keeps working unchanged. Not yet deployed.
+  owner token keeps working unchanged. Code deployed 2026-08-21 (Worker version 0490ceaa); secret not yet set.
 - Still open: signed per-actor requests (non-repudiation) were considered
   (Option C) and deferred.
 
-### Audit-event actor — **DONE 2026-08-21** (code; awaiting `RETRACE_OWNER` var + deploy)
+### Audit-event actor — **DONE 2026-08-21** (deployed with `RETRACE_OWNER` set)
 The DELETE audit event was attributed to `{type:"system", id:"worker"}` rather
 than the caller that authorised the deletion — it said only that *the server*
 did it. (The #17 reconstruction labelled this "A1"; per the #16 brief, A1 is
@@ -96,7 +96,7 @@ the MCP actor-forging finding above.)
   `automated:true`, so the gap is visible rather than silent.
 - Tests in `router.test.ts`: owner attribution + route/location + `why` chain;
   fallback. `npm test`: 32/32 core, 12/12 mcp-server.
-- Status: merged to `main`, not yet deployed.
+- Status: merged to `main`, **deployed 2026-08-21 (Worker version 0490ceaa)**.
 
 ### A2 — ops-project delete guard (backlog #17) — **DONE 2026-08-21**
 `DELETE /projects/:p` had no guard against deleting the ops/audit project.
@@ -123,9 +123,9 @@ deleted project elsewhere would have been undetectable.
 - Provenance: instruction `evt_2de1eee6cc0241e5bf8ee9e173844b59` → edit
   `evt_373512eacf67417b968605058549fc59` → push
   `evt_91fbe198b17d401eb5b0f9be5a07d283`.
-- Status: merged to `main`, **not yet deployed** (Jordan deploys after review).
+- Status: merged to `main`, **deployed 2026-08-21 (Worker version 0490ceaa)**.
 
-### B3 — delete atomicity — **DONE 2026-08-21** (code; awaiting deploy)
+### B3 — delete atomicity — **DONE 2026-08-21** (deployed)
 `store.deleteProject` and the subsequent ops `appendEvent` were two separate
 writes; a failure between them left a deletion with no audit record (and the
 retry/ordering made the reverse — an audit event for a deletion that never
@@ -152,14 +152,14 @@ committed — possible too).
   share rolled back. D1 itself is not exercised locally (no wrangler harness) —
   its batch atomicity is a documented platform guarantee. `npm test`: 30/30
   core, 12/12 mcp-server.
-- Status: merged to `main`, not yet deployed.
+- Status: merged to `main`, **deployed 2026-08-21 (Worker version 0490ceaa)**.
 
 ## Backlog
 
 | # | Finding | Status |
 |---|---------|--------|
 | 16 | A1 + B4 — MCP-server actor authentication | **Done** — `57e33ea`, 2026-08-21 (local MCP, no deploy) |
-| 17 | A2 — ops-project delete guard | **Done** — `cbcf592`, 2026-08-21 (awaiting deploy) |
-| 6 | Worker `POST /events` per-actor credentials | **Done** — `6502813`, 2026-08-21 (awaiting `RETRACE_CREDENTIALS` secret + deploy) |
-| — | Audit-event actor | **Done** — `862335f`, 2026-08-21 (awaiting `RETRACE_OWNER` + deploy) |
-| — | B3 — delete atomicity | **Done** — `7f481b0`, 2026-08-21 (awaiting deploy) |
+| 17 | A2 — ops-project delete guard | **Done** — `cbcf592`, 2026-08-21 (deployed 0490ceaa) |
+| 6 | Worker `POST /events` per-actor credentials | **Done** — `6502813`, 2026-08-21 (deployed 0490ceaa; `RETRACE_CREDENTIALS` secret still to set) |
+| — | Audit-event actor | **Done** — `862335f`, 2026-08-21 (deployed 0490ceaa, `RETRACE_OWNER` set) |
+| — | B3 — delete atomicity | **Done** — `7f481b0`, 2026-08-21 (deployed 0490ceaa) |
