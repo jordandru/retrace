@@ -77,11 +77,18 @@ legacy `RETRACE_TOKEN` kept as the owner token.
   (`on_behalf_of` Jordan), assert `system/retrace-git`, assert
   `system/gdrive-forwarder`; tokens kept in
   `~/.retrace/worker-credentials.json` (mode 600, not in the repo).
-  `/api` → `credentials: 3`. Nothing local currently points at the Worker
-  (the MCP server and git hook write to local SQLite — no `RETRACE_URL`), so
-  no client config changed; when a client is pointed at the Worker, give it
-  its credential as `RETRACE_TOKEN` rather than the owner token. The owner
-  token keeps working unchanged.
+  `/api` → `credentials: 3`.
+- Clients (2026-08-22): `RETRACE_URL`/`RETRACE_TOKEN` (owner token) are set
+  in Jordan's shell env, so the MCP server and git hook were already writing
+  to the Worker — as owner, actor asserted verbatim. The claude-code MCP entry
+  in `~/.claude.json` now sets `RETRACE_URL` + its **pinned** credential as
+  `RETRACE_TOKEN` (config env overrides the shell's). Verified by spawning the
+  server with a wrong `RETRACE_ACTOR_MODEL`: stored event `seq 78` carries
+  the credential's actor (`claude-fable-5`), not the body's. Still on the
+  owner token: the git hook (shell env; `.retrace.json` is tracked, so its
+  assert token can't go there — use `RETRACE_TOKEN` in the hook's env) and
+  the Drive forwarder (Apps Script property). The owner token keeps working
+  unchanged.
 - Still open: signed per-actor requests (non-repudiation) were considered
   (Option C) and deferred.
 
