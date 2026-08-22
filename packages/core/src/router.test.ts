@@ -142,6 +142,34 @@ test("DELETE /projects/:p audit event records the deleted project's final head h
   assert.match(audit.change?.summary ?? "", new RegExp(`at head ${head.hash} seq ${head.seq}$`));
 });
 
+// ---- audit-event actor ----
+test("DELETE /projects/:p: audit event is attributed to ownerActor, records the route, and links caused_by", async () => {
+  const store = await seeded();
+  const ins = await appendEvent(store, ev({ project: "ops", actor: { type: "human", id: "jordan@example.com" }, action: "instructed", artifacts: [{ id: "task:clean up" }] }));
+  const handle = createHandler(store, { token: "tok", opsProject: "ops", ownerActor: { type: "human", id: "jordan@example.com", display_name: "Jordan" } });
+  const res = await del(handle, `/projects/junk?confirm=junk&caused_by=${ins.event.id}`, AUTH);
+  assert.equal(res.status, 200);
+  const opsEvent = (await res.json()).ops_event;
+  const audit = store.events.find((e) => e.id === opsEvent)!;
+  assert.deepEqual(audit.actor, { type: "human", id: "jordan@example.com", display_name: "Jordan" });
+  assert.equal(audit.caused_by, ins.event.id);
+  assert.deepEqual(audit.method, { tool: "http", automated: false, params: { route: "DELETE /projects/:p", principal: "owner" } });
+  assert.equal(audit.location?.system, "retrace-api");
+  assert.match(audit.location?.url ?? "", /\/projects\/junk$/);
+  const why = await (await handle(new Request(`http://test/events/${audit.id}/why`, { headers: AUTH }))).json();
+  assert.deepEqual(why.map((e: Event) => e.id), [audit.id, ins.event.id]);
+});
+
+test("DELETE /projects/:p: without ownerActor the audit falls back to system/worker and is marked automated", async () => {
+  const store = await seeded();
+  const res = await del(createHandler(store, { token: "tok", opsProject: "ops" }), "/projects/junk?confirm=junk", AUTH);
+  const opsEvent = (await res.json()).ops_event;
+  const audit = store.events.find((e) => e.id === opsEvent)!;
+  assert.deepEqual(audit.actor, { type: "system", id: "worker" });
+  assert.equal(audit.method?.automated, true);
+  assert.equal(audit.caused_by, undefined);
+});
+
 // ---- delete atomicity (B3) ----
 test("DELETE /projects/:p: audit event is sealed before deletion and handed to the store in the same call", async () => {
   const store = await seeded();

@@ -14,7 +14,8 @@
  *   GET  /projects/:p/report?artifact_id=…      printable HTML report
  *   GET  /projects/:p/lineage?artifact_id=&format=json|dot|mermaid&actors=1   artifact lineage graph
  *   POST /projects/:p/share  {artifact_id?, label?, expires_in_days?}   → {share, url}
- *   DELETE /projects/:p?confirm=:p       delete a project (junk cleanup; confirm must equal the project name) → per-table counts + an ops-project audit event
+ *   DELETE /projects/:p?confirm=:p[&caused_by=evt_…]   delete a project (junk cleanup; confirm must equal the project name) → per-table counts +
+ *                                        an ops-project audit event attributed to ownerActor (RETRACE_OWNER) and linked to caused_by
  *
  * Webhooks (auth: HMAC signature, not the bearer token):
  *   POST /hooks/github?project=<name>     GitHub webhook receiver (pull_request, pull_request_review, issue_comment, workflow_run[, push])
@@ -69,6 +70,10 @@ export interface RouterOptions {
   githubIncludePush?: boolean;
   /** Project that receives the audit event when a project is deleted (default "retrace") */
   opsProject?: string;
+  /** Who the owner token is. Owner-only actions (DELETE /projects/:p) are audited as this actor — typically the operator,
+   *  e.g. {type:"human", id:"jordan@example.com"} from RETRACE_OWNER. Unset → {type:"system", id:"worker"}, which says
+   *  only that *the server* did it (security review 2026-08-21, audit-event actor). */
+  ownerActor?: Actor;
 }
 
 const CORS = { "access-control-allow-origin": "*", "access-control-allow-headers": "authorization,content-type", "access-control-allow-methods": "GET,POST,DELETE,OPTIONS" };
@@ -248,12 +253,16 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
           // Seal the audit event first, then let the store delete + insert it in ONE transaction (B3): a deletion can
           // never exist without its audit record. The final head is recorded so a later re-seed of this project from
           // genesis is detectable against the ops chain. Seq is 0-based, so the event count is head.seq + 1.
+          // Attribute the audit to whoever holds the owner token (the only principal allowed here), not to the server.
           const auditInput: EventInput = {
             project: opsProject,
-            actor: { type: "system", id: "worker" },
+            actor: opts.ownerActor ?? { type: "system", id: "worker" },
             action: "deleted",
             artifacts: [{ id: `project:${project}`, kind: "project", label: project }],
             intent: "project deleted via DELETE route",
+            caused_by: url.searchParams.get("caused_by") ?? undefined,
+            method: { tool: "http", automated: !opts.ownerActor, params: { route: "DELETE /projects/:p", principal: "owner" } },
+            location: { url: `${base}/projects/${encodeURIComponent(project)}`, system: "retrace-api" },
             change: { summary: `deleted project "${project}" (${head.seq + 1} events) at head ${head.hash} seq ${head.seq}`, before_hash: head.hash },
           };
           for (let attempt = 0; ; attempt++) {

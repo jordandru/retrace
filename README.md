@@ -122,6 +122,7 @@ D1 database `retrace-db` (`ae8ebc52-9784-4109-b421-f63676972dfe`) already exists
 cd apps/worker
 npx wrangler login
 npx wrangler secret put RETRACE_TOKEN     # pick a long random string (owner token: UI, DELETE, share)
+                                          # set RETRACE_OWNER=<your email> under [vars] so owner-only actions (DELETE) are audited as you, not as "worker"
 npx wrangler secret put RETRACE_CREDENTIALS   # optional: per-actor tokens, e.g. '[{"token":"<32+ chars>","actor":{"type":"agent","id":"claude-code","model":"claude-fable-5","on_behalf_of":"you@example.com"}}]'
                                           # pinned (default) tokens get their actor stamped by the Worker; add "trust":"assert" for the git hook / forwarders
 npx wrangler deploy                        # prints https://retrace-api.<you>.workers.dev

@@ -4,7 +4,8 @@
  *   retrace-serve            → http://localhost:7777
  * Env: RETRACE_DB, RETRACE_PORT (7777), RETRACE_TOKEN (optional bearer/query token), RETRACE_CREDENTIALS (per-actor tokens, JSON),
  *      RETRACE_SIGNING_KEY (JWK; else ~/.retrace/signing-key.json, auto-created), RETRACE_ISSUER, RETRACE_PUBLIC_URL,
- *      RETRACE_GITHUB_SECRET (enables POST /hooks/github), RETRACE_GITHUB_PUSH=1 (also log push commits)
+ *      RETRACE_GITHUB_SECRET (enables POST /hooks/github), RETRACE_GITHUB_PUSH=1 (also log push commits),
+ *      RETRACE_OWNER (who holds RETRACE_TOKEN; DELETE /projects/:p audit events are attributed to this human)
  */
 import { createServer, IncomingMessage } from "node:http";
 import { Readable } from "node:stream";
@@ -29,6 +30,7 @@ export function startServer(port = Number(process.env.RETRACE_PORT ?? 7777)) {
     publicUrl: process.env.RETRACE_PUBLIC_URL,
     githubSecret: process.env.RETRACE_GITHUB_SECRET,
     githubIncludePush: process.env.RETRACE_GITHUB_PUSH === "1",
+    ownerActor: process.env.RETRACE_OWNER ? { type: "human", id: process.env.RETRACE_OWNER } : undefined,
   });
   const server = createServer(async (req, res) => {
     try {

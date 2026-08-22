@@ -110,7 +110,7 @@ The last line prints your URL, like `https://retrace-api.<you>.workers.dev`. The
 
 **Check:** open `<url>/api` → `{"ok":true,"auth":true,"signing":true}`. Open `<url>/?token=<RETRACE_TOKEN>` → the same UI, empty for now. `<url>/.well-known/retrace-pubkey` shows your public key.
 
-Optional: set `RETRACE_ISSUER` (e.g. `SLC WIT' IT`) and `RETRACE_PUBLIC_URL` under `[vars]` in `wrangler.toml` and redeploy, so reports name you as issuer.
+Optional: set `RETRACE_ISSUER` (e.g. `SLC WIT' IT`), `RETRACE_PUBLIC_URL` and `RETRACE_OWNER=<your email>` under `[vars]` in `wrangler.toml` and redeploy, so reports name you as issuer and owner-only actions (`DELETE /projects/:p`) are audited as you rather than as `system/worker`. Pass `&caused_by=evt_…` on a DELETE to link it to the instruction that asked for it.
 
 ### Point local tools at the cloud (optional but recommended)
 Add to the MCP `env` block from 4b and to your shell profile:
