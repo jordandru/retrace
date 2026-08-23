@@ -202,9 +202,11 @@ re-sealed and committed an audit describing rows it never touched. B3's
   succeeds. `npm test`: 34/34 core, 13/13 mcp-server.
 - Status: commit `92a7c6a`, pushed to `main`, **deployed 2026-08-23 (Worker
   version fcad2060)**; ops chain verified live after deploy (88 events, ok).
-  The D1 delete path itself has not been exercised against production — doing
-  so writes a permanent ops audit event, so it is left for a deliberate
-  throwaway-project delete.
+- Production smoke test 2026-08-23: throwaway project `smoke-2026-08-23`
+  (2 events, head `b74d8706…` seq 1) deleted via `DELETE /projects/:p` on the
+  real D1 batch — response `{events:2, event_artifacts:2, shares:0}`, audit
+  `evt_1557ab2b…` at ops seq 90 with `before_hash` equal to the real head,
+  actor = owner, project gone from `/projects`, ops chain verifies (91 events).
 
 ## Backlog
 
