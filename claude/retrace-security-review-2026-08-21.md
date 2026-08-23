@@ -248,7 +248,7 @@ other humans, other actions, or humans on credentials not configured for it.
   `f9bc81d`, **deployed 2026-08-23 (Worker version aad7f223)**; ops chain
   verifies live after deploy.
 
-### Audit 2026-08-22 P1 — assert-credential actor forgery — **DONE 2026-08-23** (not yet deployed)
+### Audit 2026-08-22 P1 — assert-credential actor forgery — **DONE 2026-08-23** (deployed)
 The deployed-Worker audit (bundle of 2026-08-22T03:51:24Z) found that
 `resolveActor` returned the caller-supplied actor unchanged for assert-trust
 credentials, so the `retrace-git` / `gdrive-forwarder` tokens could seal
@@ -265,8 +265,13 @@ emits in this repo today is covered by exact ids (see proposed lists in the
 task report; the hook's co-author/bot fallback paths would need list entries
 if ever used). `~/.retrace/worker-credentials.json` mirrored; the Worker
 secret gets re-set at the next deploy, not in this session.
+- Status: commit `c323b94`; allow-lists approved by Jordan 2026-08-23;
+  `RETRACE_CREDENTIALS` re-set from the mirrored file and **deployed
+  2026-08-23 (Worker version 6f197b64)**. Verified live: forged human via the
+  retrace-git token and forged claude-code agent id via the gdrive token both
+  403 with the allowed_actors error, chain unchanged (108 events, ok).
 
-### Audit 2026-08-22 P1 — pre-auth stored XSS in the share report — **DONE 2026-08-23** (not yet deployed)
+### Audit 2026-08-22 P1 — pre-auth stored XSS in the share report — **DONE 2026-08-23** (deployed)
 The public `/s/:id/report` page built its "why" cell from raw `e.intent`,
 `e.caused_by`, and the causing event's actor name / verb and interpolated the
 result unescaped into `<td>${why}</td>` — the only one of the timeline cells
@@ -284,6 +289,7 @@ now anyway) — was fixed in the same pass. Numeric interpolations
 `report.test.ts` renders a bundle with script-bearing intent, hostile
 caused_by id, actor display_name and action_detail — raw payloads must not
 survive, escaped text must, and the `<br>` join is preserved.
+- Status: commit `7551d1c`, **deployed 2026-08-23 (Worker version 6f197b64)**.
 
 ## Backlog
 
@@ -296,5 +302,5 @@ survive, escaped text must, and the `<br>` join is preserved.
 | — | B3 — delete atomicity | **Done** — `7f481b0`, 2026-08-21 (deployed 0490ceaa) |
 | — | B3 follow-up — stale head in delete audit | **Done** — `92a7c6a`, 2026-08-23 (deployed fcad2060) |
 | — | Instruction roots over pinned credentials | **Done** — `e0b6499`, 2026-08-23 (deployed 5fc34a6f) |
-| — | Audit P1 — assert-credential actor binding | **Done** — 2026-08-23 (not yet deployed) |
-| — | Audit P1 — share-report why-cell XSS | **Done** — 2026-08-23 (not yet deployed) |
+| — | Audit P1 — assert-credential actor binding | **Done** — `c323b94`, 2026-08-23 (deployed 6f197b64, secret re-set) |
+| — | Audit P1 — share-report why-cell XSS | **Done** — `7551d1c`, 2026-08-23 (deployed 6f197b64) |
