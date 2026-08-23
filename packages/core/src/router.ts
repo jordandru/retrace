@@ -2,7 +2,8 @@
  * Shared HTTP router (fetch API) — used by the Cloudflare Worker and the local Node server.
  *
  * Owner routes (auth: Bearer token or ?token= when a token is configured). Per-actor credentials (RETRACE_CREDENTIALS,
- * Bearer only) may also POST /events and read; "pinned" credentials have their actor stamped by the server, "assert"
+ * Bearer only) may also POST /events and read; "pinned" credentials have their actor stamped by the server (with one
+ * carve-out: an agent credential may record "instructed" roots for its configured on_behalf_of human), "assert"
  * credentials (git hook, backfill forwarders) may assert any actor. DELETE/share stay owner-only.
  *   GET  /  | /ui                        UI
  *   GET  /api                            health
@@ -39,8 +40,9 @@ import { UI_HTML } from "./ui-html.js";
 
 /** A per-actor credential (security review 2026-08-21, backlog #6). Holders can POST /events and read; they cannot
  *  DELETE or create shares. trust "pinned" (default): the Worker stamps `actor` from the credential — the body may only
- *  add display_name/version and may not claim human/system. trust "assert": the body actor is stored verbatim (git
- *  hook, backfill, Drive forwarder — callers that legitimately relay other people's actions). */
+ *  add display_name/version and may not claim human/system, except that an agent credential with `actor.on_behalf_of`
+ *  may record "instructed" roots attributed to exactly that human (see resolveActor). trust "assert": the body actor
+ *  is stored verbatim (git hook, backfill, Drive forwarder — callers that legitimately relay other people's actions). */
 export const Credential = z.object({
   token: z.string().min(16),
   /** Human-readable name, recorded nowhere — for the operator's own bookkeeping */
@@ -97,10 +99,28 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
     if (credential) return { kind: "credential", credential };
     return token || credentials.length ? "unauthorized" : null;
   };
-  /** Actor to store for POST /events under this principal (mirrors the MCP server's RETRACE_ACTOR_LOCK). */
-  const resolveActor = (principal: Principal, body: Actor): Actor | { error: string } => {
+  /** Actor to store for POST /events under this principal (mirrors the MCP server's RETRACE_ACTOR_LOCK).
+   *  One narrow carve-out so retrace_instruct works over a pinned credential: a pinned AGENT credential may record a
+   *  HUMAN actor, but only the human it is configured to work for (`actor.on_behalf_of`) and only as an "instructed"
+   *  root — it can relay its operator's instructions (mirroring the MCP server's RETRACE_ON_BEHALF_OF lock) but cannot
+   *  forge arbitrary human actors or attribute other actions to its operator. */
+  const resolveActor = (principal: Principal, body: Actor, action: string): Actor | { error: string } => {
     if (principal?.kind !== "credential" || principal.credential.trust === "assert") return body;
     const { actor } = principal.credential;
+    if (body.type === "human" && actor.type === "agent") {
+      if (!actor.on_behalf_of)
+        return { error: `actor.type "human" is not allowed: this credential is pinned to agent "${actor.id}" and has no on_behalf_of human configured. Add actor.on_behalf_of to this credential in RETRACE_CREDENTIALS to let it relay its operator's instruction roots.` };
+      if (body.id !== actor.on_behalf_of)
+        return { error: `human "${body.id}" is not allowed: this credential is pinned to agent "${actor.id}" and may only relay instructions from its operator "${actor.on_behalf_of}".` };
+      if (action !== "instructed")
+        return { error: `action "${action}" is not allowed for a human actor on this credential: agent "${actor.id}" may only record "instructed" roots for "${actor.on_behalf_of}". Log the agent's own work as the agent.` };
+      return {
+        type: "human",
+        id: actor.on_behalf_of,
+        ...(body.display_name !== undefined ? { display_name: body.display_name } : {}),
+        ...(body.version !== undefined ? { version: body.version } : {}),
+      };
+    }
     if (body.type !== actor.type)
       return { error: `actor.type "${body.type}" is not allowed: this credential is pinned to ${actor.type} "${actor.id}". Use an owner or assert-trust credential to record other actors.` };
     return {
@@ -205,9 +225,13 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
       if (req.method === "POST" && parts[0] === "events" && parts.length === 1) {
         const parsed = EventInput.safeParse(await req.json());
         if (!parsed.success) return json({ error: "invalid event", issues: parsed.error.issues }, 400);
-        const actor = resolveActor(principal, parsed.data.actor);
+        const actor = resolveActor(principal, parsed.data.actor, parsed.data.action);
         if ("error" in actor) return json(actor, 403);
         const input = { ...parsed.data, actor };
+        // A relayed instruction root is stamped with the credential's agent id, so the chain records that the human
+        // did not write this event themselves — their agent did, on their behalf.
+        if (actor.type === "human" && principal?.kind === "credential")
+          input.method = { ...input.method, params: { ...input.method?.params, relayed_by: principal.credential.actor.id } };
         for (let attempt = 0; ; attempt++) {
           try {
             const r = await appendEvent(store, input);

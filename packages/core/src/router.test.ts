@@ -255,14 +255,44 @@ const post = (handle: (r: Request) => Promise<Response>, path: string, body: unk
 const get = (handle: (r: Request) => Promise<Response>, path: string, bearer?: string) =>
   handle(new Request(`http://test${path}`, { headers: bearer ? { authorization: `Bearer ${bearer}` } : {} }));
 
-test("credentials: pinned token cannot claim a human/system actor; nothing written", async () => {
+test("credentials: pinned token cannot claim a system actor or misuse a human one; nothing written", async () => {
   const store = new MemStore();
   const handle = createHandler(store, { token: "tok", credentials: [Credential.parse(CLAUDE)] });
-  for (const type of ["human", "system"] as const) {
-    const res = await post(handle, "/events", ev({ actor: { type, id: "jordan@example.com" }, action: "approved" }), CLAUDE.token);
+  const cases: [any, RegExp][] = [
+    [ev({ actor: { type: "system", id: "worker" }, action: "approved" }), /actor.type "system" is not allowed.*pinned to agent "claude-code"/],
+    [ev({ actor: { type: "human", id: "mallory@example.com" }, action: "instructed" }), /human "mallory@example.com" is not allowed.*only relay instructions from its operator "jordan@example.com"/],
+    [ev({ actor: { type: "human", id: "jordan@example.com" }, action: "approved" }), /action "approved" is not allowed for a human actor.*only record "instructed" roots/],
+  ];
+  for (const [body, re] of cases) {
+    const res = await post(handle, "/events", body, CLAUDE.token);
     assert.equal(res.status, 403);
-    assert.match((await res.json()).error, new RegExp(`actor.type "${type}" is not allowed.*pinned to agent "claude-code"`));
+    assert.match((await res.json()).error, re);
   }
+  assert.equal(store.events.length, 0);
+});
+
+test("credentials: pinned agent token records an instructed root for its on_behalf_of human, stamped with relayed_by", async () => {
+  const store = new MemStore();
+  const handle = createHandler(store, { token: "tok", credentials: [Credential.parse(CLAUDE)] });
+  const body = ev({
+    actor: { type: "human", id: "jordan@example.com", display_name: "Jordan", model: "sneaky-model", on_behalf_of: "mallory@example.com" },
+    action: "instructed",
+    method: { tool: "chat", automated: false },
+  });
+  const res = await post(handle, "/events", body, CLAUDE.token);
+  assert.equal(res.status, 201);
+  const e = store.events[0];
+  assert.deepEqual(e.actor, { type: "human", id: "jordan@example.com", display_name: "Jordan" }); // model/on_behalf_of from the body are dropped
+  assert.equal(e.method?.params?.relayed_by, "claude-code");
+  assert.equal(e.method?.tool, "chat");
+});
+
+test("credentials: a pinned agent credential without on_behalf_of cannot record human instructed roots", async () => {
+  const store = new MemStore();
+  const bare = Credential.parse({ token: "bare-agent-token-0123456789", actor: { type: "agent", id: "claude-code" } });
+  const res = await post(createHandler(store, { token: "tok", credentials: [bare] }), "/events", ev({ actor: { type: "human", id: "jordan@example.com" }, action: "instructed" }), bare.token);
+  assert.equal(res.status, 403);
+  assert.match((await res.json()).error, /no on_behalf_of human configured.*RETRACE_CREDENTIALS/);
   assert.equal(store.events.length, 0);
 });
 

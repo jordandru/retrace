@@ -208,6 +208,30 @@ re-sealed and committed an audit describing rows it never touched. B3's
   `evt_1557ab2b…` at ops seq 90 with `before_hash` equal to the real head,
   actor = owner, project gone from `/projects`, ops chain verifies (91 events).
 
+### Follow-up — instruction roots over pinned credentials — **DONE 2026-08-23**
+`retrace_instruct` broke when the MCP server moved onto its pinned Worker
+credential (#6): the tool records a genuine `{type:"human"}` actor (locked to
+`RETRACE_ON_BEHALF_OF` locally), but the Worker's pinned-credential rule
+rejected every non-agent actor, so agent sessions could no longer record the
+human instruction that roots their causal chains.
+
+**Fix:** a narrow carve-out in the Worker's `resolveActor`
+(`packages/core/src/router.ts`) instead of loosening the trust model: a pinned
+AGENT credential may record a HUMAN actor only when (a) the credential's actor
+has `on_behalf_of` configured, (b) the body's human id equals it exactly, and
+(c) the event action is `"instructed"`. Everything else about the body's actor
+(model, on_behalf_of, arbitrary ids) is dropped or refused as before. The
+Worker also stamps `method.params.relayed_by = <credential agent id>` on such
+events, so the chain records that the operator's agent relayed the instruction
+rather than the human writing it themselves. This mirrors the MCP server's
+`RETRACE_ON_BEHALF_OF` lock: the agent can still fabricate instructions from
+its one configured operator (unavoidable for any relay), but cannot spoof
+other humans, other actions, or humans on credentials not configured for it.
+- Tests: pinned + matching human + `instructed` → 201 with `relayed_by`;
+  mismatched human / wrong action / credential without `on_behalf_of` → 403,
+  nothing written; system actors still refused. `npm test`: 36/36 core,
+  13/13 mcp-server.
+
 ## Backlog
 
 | # | Finding | Status |
@@ -218,3 +242,4 @@ re-sealed and committed an audit describing rows it never touched. B3's
 | — | Audit-event actor | **Done** — `862335f`, 2026-08-21 (deployed 0490ceaa, `RETRACE_OWNER` set) |
 | — | B3 — delete atomicity | **Done** — `7f481b0`, 2026-08-21 (deployed 0490ceaa) |
 | — | B3 follow-up — stale head in delete audit | **Done** — `92a7c6a`, 2026-08-23 (deployed fcad2060) |
+| — | Instruction roots over pinned credentials | **Done** — 2026-08-23 |
