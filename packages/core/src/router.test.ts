@@ -249,7 +249,12 @@ test("DELETE /projects/:p: HeadMovedError on every attempt surfaces after the re
 
 // ---- per-actor credentials (backlog #6) ----
 const CLAUDE = { token: "claude-code-token-0123456789", actor: { type: "agent" as const, id: "claude-code", model: "claude-fable-5", on_behalf_of: "jordan@example.com" } };
-const HOOK = { token: "git-hook-token-0123456789abc", actor: { type: "system" as const, id: "retrace-git" }, trust: "assert" as const };
+const HOOK = {
+  token: "git-hook-token-0123456789abc",
+  actor: { type: "system" as const, id: "retrace-git" },
+  trust: "assert" as const,
+  allowed_actors: [{ type: "human" as const, id: "jordan@example.com" }, { type: "agent" as const, id: "claude-code" }],
+};
 const post = (handle: (r: Request) => Promise<Response>, path: string, body: unknown, bearer?: string) =>
   handle(new Request(`http://test${path}`, { method: "POST", body: JSON.stringify(body), headers: { "content-type": "application/json", ...(bearer ? { authorization: `Bearer ${bearer}` } : {}) } }));
 const get = (handle: (r: Request) => Promise<Response>, path: string, bearer?: string) =>
@@ -331,6 +336,48 @@ test("credentials: Bearer only, unknown tokens 401, reads allowed, DELETE/share/
   assert.equal(store.shares.size, 1);
   const api = await (await get(h, "/api")).json();
   assert.equal(api.credentials, 2);
+});
+
+test("credentials: assert token may only record actors in its allowed_actors list; forgeries write nothing", async () => {
+  const store = new MemStore();
+  const h = createHandler(store, { token: "tok", credentials: parseCredentials(JSON.stringify([CLAUDE, HOOK])) });
+  // in-list actors pass (exact type + id)
+  assert.equal((await post(h, "/events", ev({ actor: { type: "human", id: "jordan@example.com" }, action: "committed" }), HOOK.token)).status, 201);
+  assert.equal((await post(h, "/events", ev({ actor: { type: "agent", id: "claude-code", model: "claude-fable-5" } }), HOOK.token)).status, 201);
+  // forged human not in the list
+  const forgedHuman = await post(h, "/events", ev({ actor: { type: "human", id: "mallory@example.com" }, action: "approved" }), HOOK.token);
+  assert.equal(forgedHuman.status, 403);
+  assert.match((await forgedHuman.json()).error, /actor human "mallory@example.com" is not in this credential's allowed_actors/);
+  // same id, wrong type: listing human jordan does not allow asserting agent jordan
+  assert.equal((await post(h, "/events", ev({ actor: { type: "agent", id: "jordan@example.com" } }), HOOK.token)).status, 403);
+  assert.equal(store.events.length, 2);
+});
+
+test("credentials: assert token without allowed_actors may assert nothing on POST /events", async () => {
+  const store = new MemStore();
+  const bareHook = Credential.parse({ token: "bare-hook-token-0123456789ab", actor: { type: "system", id: "retrace-git" }, trust: "assert" });
+  const h = createHandler(store, { token: "tok", credentials: [bareHook], opsProject: "ops" });
+  for (const actor of [{ type: "human" as const, id: "jordan@example.com" }, { type: "system" as const, id: "retrace-git" }]) {
+    const res = await post(h, "/events", ev({ actor, action: "committed" }), bareHook.token);
+    assert.equal(res.status, 403);
+    assert.match((await res.json()).error, /allowed_actors/);
+  }
+  assert.equal(store.events.length, 0);
+  // routes that map actors server-side are unaffected by the allow-list
+  assert.equal((await post(h, "/hooks/gdrive?project=junk", { activities: [] }, bareHook.token)).status, 201);
+});
+
+test("credentials: pinned path regression — allowed_actors changes nothing for pinned tokens", async () => {
+  const store = new MemStore();
+  const h = createHandler(store, { token: "tok", credentials: parseCredentials(JSON.stringify([CLAUDE, HOOK])) });
+  // pinned agent still stamped from the credential
+  assert.equal((await post(h, "/events", ev({ actor: { type: "agent", id: "whoever" } }), CLAUDE.token)).status, 201);
+  assert.deepEqual(store.events[0].actor, { type: "agent", id: "claude-code", model: "claude-fable-5", on_behalf_of: "jordan@example.com" });
+  // pinned instructed-root carve-out (e0b6499) still works and still stamps relayed_by
+  const res = await post(h, "/events", ev({ actor: { type: "human", id: "jordan@example.com" }, action: "instructed" }), CLAUDE.token);
+  assert.equal(res.status, 201);
+  assert.deepEqual(store.events[1].actor, { type: "human", id: "jordan@example.com" });
+  assert.equal(store.events[1].method?.params?.relayed_by, "claude-code");
 });
 
 test("credentials: parseCredentials validates the secret and defaults trust to pinned", async () => {

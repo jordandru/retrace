@@ -4,7 +4,8 @@
  * Owner routes (auth: Bearer token or ?token= when a token is configured). Per-actor credentials (RETRACE_CREDENTIALS,
  * Bearer only) may also POST /events and read; "pinned" credentials have their actor stamped by the server (with one
  * carve-out: an agent credential may record "instructed" roots for its configured on_behalf_of human), "assert"
- * credentials (git hook, backfill forwarders) may assert any actor. DELETE/share stay owner-only.
+ * credentials (git hook, backfill forwarders) may assert only the actors in their allowed_actors list. DELETE/share
+ * stay owner-only.
  *   GET  /  | /ui                        UI
  *   GET  /api                            health
  *   GET  /.well-known/retrace-pubkey     issuer public key (JWK) — public
@@ -27,7 +28,7 @@
  *   GET  /s/:id/meta · /s/:id/events · /s/:id/verify · /s/:id/export · /s/:id/report · /s/:id/lineage
  */
 import { z } from "zod";
-import { Actor, EventInput } from "./schema.js";
+import { Actor, ActorType, EventInput } from "./schema.js";
 import { EventStore, appendEvent, verifyProject, explainEvent, newShareId, shareIsLive, Share, isHeadMovedError } from "./store.js";
 import { sealEvent } from "./chain.js";
 import { buildExportBundle, verifyExportBundle } from "./export.js";
@@ -42,13 +43,19 @@ import { UI_HTML } from "./ui-html.js";
  *  DELETE or create shares. trust "pinned" (default): the Worker stamps `actor` from the credential — the body may only
  *  add display_name/version and may not claim human/system, except that an agent credential with `actor.on_behalf_of`
  *  may record "instructed" roots attributed to exactly that human (see resolveActor). trust "assert": the body actor
- *  is stored verbatim (git hook, backfill, Drive forwarder — callers that legitimately relay other people's actions). */
+ *  is stored verbatim IF it appears in the credential's allowed_actors list (git hook, backfill, Drive forwarder —
+ *  callers that legitimately relay other people's actions, bounded to the actors they are expected to relay). */
 export const Credential = z.object({
   token: z.string().min(16),
   /** Human-readable name, recorded nowhere — for the operator's own bookkeeping */
   name: z.string().optional(),
   actor: Actor,
   trust: z.enum(["pinned", "assert"]).default("pinned"),
+  /** For assert trust: the ONLY actors this credential may assert on POST /events, matched on exact type + id
+   *  (audit 2026-08-22, P1: an unbounded assert credential could seal events claiming any actor — a human, or the
+   *  pinned agent's id — into any project). Absent or empty = may assert none; routes that map actors server-side
+   *  (/hooks/gdrive) are unaffected. Ignored for pinned trust. */
+  allowed_actors: z.array(z.object({ type: ActorType, id: z.string().min(1) })).optional(),
 });
 export type Credential = z.infer<typeof Credential>;
 /** Parse the RETRACE_CREDENTIALS secret (JSON array). Throws on malformed config so a bad deploy fails loudly. */
@@ -105,7 +112,15 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
    *  root — it can relay its operator's instructions (mirroring the MCP server's RETRACE_ON_BEHALF_OF lock) but cannot
    *  forge arbitrary human actors or attribute other actions to its operator. */
   const resolveActor = (principal: Principal, body: Actor, action: string): { actor: Actor; relayed?: true } | { error: string } => {
-    if (principal?.kind !== "credential" || principal.credential.trust === "assert") return { actor: body };
+    if (principal?.kind !== "credential") return { actor: body };
+    if (principal.credential.trust === "assert") {
+      // Assert trust is now bounded (audit 2026-08-22, P1): the body actor must be in the credential's explicit
+      // allow-list — otherwise the holder of e.g. the git-hook token could forge events from any human or agent.
+      const allowed = principal.credential.allowed_actors ?? [];
+      if (!allowed.some((a) => a.type === body.type && a.id === body.id))
+        return { error: `actor ${body.type} "${body.id}" is not in this credential's allowed_actors: an assert credential may only record the actors explicitly listed for it in RETRACE_CREDENTIALS.` };
+      return { actor: body };
+    }
     const { actor } = principal.credential;
     if (body.type === "human" && actor.type === "agent") {
       if (!actor.on_behalf_of)

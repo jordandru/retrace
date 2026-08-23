@@ -248,6 +248,24 @@ other humans, other actions, or humans on credentials not configured for it.
   `f9bc81d`, **deployed 2026-08-23 (Worker version aad7f223)**; ops chain
   verifies live after deploy.
 
+### Audit 2026-08-22 P1 — assert-credential actor forgery — **DONE 2026-08-23** (not yet deployed)
+The deployed-Worker audit (bundle of 2026-08-22T03:51:24Z) found that
+`resolveActor` returned the caller-supplied actor unchanged for assert-trust
+credentials, so the `retrace-git` / `gdrive-forwarder` tokens could seal
+events claiming ANY actor (a human, or the pinned claude-code agent id).
+
+**Fix:** per-credential actor binding. `Credential` gains
+`allowed_actors?: {type, id}[]` — for assert trust the body actor must match
+an entry on exact type + id or the write is 403'd with a distinct
+`allowed_actors` error and nothing is sealed; absent/empty list = may assert
+none (fail closed). Pinned trust (incl. the `on_behalf_of` instructed-root
+carve-out) is untouched, with a regression test. `/hooks/gdrive` maps actors
+server-side and is unaffected. No prefix patterns: everything the git hook
+emits in this repo today is covered by exact ids (see proposed lists in the
+task report; the hook's co-author/bot fallback paths would need list entries
+if ever used). `~/.retrace/worker-credentials.json` mirrored; the Worker
+secret gets re-set at the next deploy, not in this session.
+
 ## Backlog
 
 | # | Finding | Status |
@@ -259,3 +277,4 @@ other humans, other actions, or humans on credentials not configured for it.
 | — | B3 — delete atomicity | **Done** — `7f481b0`, 2026-08-21 (deployed 0490ceaa) |
 | — | B3 follow-up — stale head in delete audit | **Done** — `92a7c6a`, 2026-08-23 (deployed fcad2060) |
 | — | Instruction roots over pinned credentials | **Done** — `e0b6499`, 2026-08-23 (deployed 5fc34a6f) |
+| — | Audit P1 — assert-credential actor binding | **Done** — 2026-08-23 (not yet deployed) |
