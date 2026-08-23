@@ -244,7 +244,9 @@ other humans, other actions, or humans on credentials not configured for it.
   credential would have been stamped too, permanently, with a non-agent id.
   Fixed by returning `relayed: true` from the carve-out branch itself and
   keying the stamp on that flag, so the two conditions cannot drift; test
-  added that assert-trust human events carry no `relayed_by`.
+  added that assert-trust human events carry no `relayed_by`. Commit
+  `f9bc81d`, **deployed 2026-08-23 (Worker version aad7f223)**; ops chain
+  verifies live after deploy.
 
 ## Backlog
 
