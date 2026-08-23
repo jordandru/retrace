@@ -169,7 +169,7 @@ committed — possible too).
   core, 12/12 mcp-server.
 - Status: merged to `main`, **deployed 2026-08-21 (Worker version 0490ceaa)**.
 
-#### B3 follow-up — stale head in the audit record — **DONE 2026-08-23** (not yet deployed)
+#### B3 follow-up — stale head in the audit record — **DONE 2026-08-23** (deployed)
 Found by ultrareview of `1b26794..f5036b2`. The router read the target
 project's head once, outside the retry loop, and baked it into
 `change.summary` / `change.before_hash`. `DELETE FROM events WHERE project = ?`
@@ -200,6 +200,11 @@ re-sealed and committed an audit describing rows it never touched. B3's
   with nothing deleted. `sqlite-store.test.ts` — moved head ⇒
   `HeadMovedError`, deletes/share/ops untouched, retry with the fresh head
   succeeds. `npm test`: 34/34 core, 13/13 mcp-server.
+- Status: commit `92a7c6a`, pushed to `main`, **deployed 2026-08-23 (Worker
+  version fcad2060)**; ops chain verified live after deploy (88 events, ok).
+  The D1 delete path itself has not been exercised against production — doing
+  so writes a permanent ops audit event, so it is left for a deliberate
+  throwaway-project delete.
 
 ## Backlog
 
@@ -210,4 +215,4 @@ re-sealed and committed an audit describing rows it never touched. B3's
 | 6 | Worker `POST /events` per-actor credentials | **Done** — `6502813`, 2026-08-21 (deployed 0490ceaa; `RETRACE_CREDENTIALS` set 2026-08-22, version 401f6410) |
 | — | Audit-event actor | **Done** — `862335f`, 2026-08-21 (deployed 0490ceaa, `RETRACE_OWNER` set) |
 | — | B3 — delete atomicity | **Done** — `7f481b0`, 2026-08-21 (deployed 0490ceaa) |
-| — | B3 follow-up — stale head in delete audit | **Done** — 2026-08-23 (not yet deployed) |
+| — | B3 follow-up — stale head in delete audit | **Done** — `92a7c6a`, 2026-08-23 (deployed fcad2060) |
