@@ -1,4 +1,5 @@
 {
   "project": "retrace",
-  "environment": "local"
+  "environment": "local",
+  "credential": "retrace-git"
 }
