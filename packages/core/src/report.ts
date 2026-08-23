@@ -21,10 +21,12 @@ export function renderReportHtml(bundle: ExportBundle, verdict?: ExportVerdict, 
 
   const rows = events.map((e) => {
     const cause = e.caused_by ? byId.get(e.caused_by) : undefined;
-    const why = [e.intent, cause ? `↳ because #${cause.seq} (${actorName(cause)} ${verb(cause)})` : e.caused_by ? `↳ caused by ${e.caused_by}` : ""].filter(Boolean).join("<br>");
+    // each part is escaped individually (intent, actor names, verbs and caused_by ids are caller-supplied) and only
+    // then joined with a literal <br> — the one piece of markup this cell is allowed to contain
+    const why = [e.intent, cause ? `↳ because #${cause.seq} (${actorName(cause)} ${verb(cause)})` : e.caused_by ? `↳ caused by ${e.caused_by}` : ""].filter(Boolean).map(esc).join("<br>");
     const where = [e.location?.system, e.location?.environment, e.location?.path ?? e.location?.url].filter(Boolean).join(" · ");
     const how = [e.method?.tool, e.method?.automated == null ? "" : e.method.automated ? "automated" : "manual", e.method?.tokens != null ? `${e.method.tokens} tokens` : ""].filter(Boolean).join(" · ");
-    return `<tr class="${e.actor.type}">
+    return `<tr class="${esc(e.actor.type)}">
       <td class="mono">#${e.seq}<br><small>${esc(new Date(e.timestamp).toISOString().replace("T", " ").slice(0, 19))}Z</small></td>
       <td><b>${esc(actorName(e))}</b><br><small>${esc(e.actor.type)}${e.actor.model ? " · " + esc(e.actor.model) : ""}${e.actor.on_behalf_of ? "<br>for " + esc(e.actor.on_behalf_of) : ""}</small></td>
       <td><b>${esc(verb(e))}</b> ${e.artifacts.map((a) => `<code>${esc(labels.get(a.id) ?? a.label ?? a.id)}</code>`).join(" ")}${e.change?.summary ? `<br><small>${esc(e.change.summary)}</small>` : ""}</td>

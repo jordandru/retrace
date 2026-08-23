@@ -266,6 +266,25 @@ task report; the hook's co-author/bot fallback paths would need list entries
 if ever used). `~/.retrace/worker-credentials.json` mirrored; the Worker
 secret gets re-set at the next deploy, not in this session.
 
+### Audit 2026-08-22 P1 — pre-auth stored XSS in the share report — **DONE 2026-08-23** (not yet deployed)
+The public `/s/:id/report` page built its "why" cell from raw `e.intent`,
+`e.caused_by`, and the causing event's actor name / verb and interpolated the
+result unescaped into `<td>${why}</td>` — the only one of the timeline cells
+without `esc()`. Any event author (incl. a pinned credential) could store a
+script-bearing intent and have it execute in the browser of anyone opening a
+share link — pre-auth, since share routes take no token.
+
+**Fix:** each part of the cell is escaped individually and only then joined
+with the literal `<br>` the cell owns (`packages/core/src/report.ts`). Sweep
+of the file's other interpolations: every other event-field interpolation
+already used `esc()`; the one same-concern stragglers found — the row's
+`class="${e.actor.type}"` attribute (enum-validated at ingest, but escaped
+now anyway) — was fixed in the same pass. Numeric interpolations
+(`seq`, counts) and the intentional `${rows}` are fine. Tests:
+`report.test.ts` renders a bundle with script-bearing intent, hostile
+caused_by id, actor display_name and action_detail — raw payloads must not
+survive, escaped text must, and the `<br>` join is preserved.
+
 ## Backlog
 
 | # | Finding | Status |
@@ -278,3 +297,4 @@ secret gets re-set at the next deploy, not in this session.
 | — | B3 follow-up — stale head in delete audit | **Done** — `92a7c6a`, 2026-08-23 (deployed fcad2060) |
 | — | Instruction roots over pinned credentials | **Done** — `e0b6499`, 2026-08-23 (deployed 5fc34a6f) |
 | — | Audit P1 — assert-credential actor binding | **Done** — 2026-08-23 (not yet deployed) |
+| — | Audit P1 — share-report why-cell XSS | **Done** — 2026-08-23 (not yet deployed) |
