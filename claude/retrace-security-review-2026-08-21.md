@@ -237,6 +237,14 @@ other humans, other actions, or humans on credentials not configured for it.
   needed) stored `evt_1ec756b2…` at ops seq 96 with actor
   human/jordansboxing@gmail.com and `method.params.relayed_by: "claude-code"`;
   ops chain verifies (97 events).
+- Follow-up 2026-08-23 (third ultrareview, nit): the `relayed_by` stamp gated
+  on `actor.type === "human" && credential`, which is broader than the
+  carve-out — an assert-trust credential relaying a human event (e.g. the git
+  hook once it moves onto its `retrace-git` credential) or a pinned human
+  credential would have been stamped too, permanently, with a non-agent id.
+  Fixed by returning `relayed: true` from the carve-out branch itself and
+  keying the stamp on that flag, so the two conditions cannot drift; test
+  added that assert-trust human events carry no `relayed_by`.
 
 ## Backlog
 

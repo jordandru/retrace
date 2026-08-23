@@ -104,8 +104,8 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
    *  HUMAN actor, but only the human it is configured to work for (`actor.on_behalf_of`) and only as an "instructed"
    *  root — it can relay its operator's instructions (mirroring the MCP server's RETRACE_ON_BEHALF_OF lock) but cannot
    *  forge arbitrary human actors or attribute other actions to its operator. */
-  const resolveActor = (principal: Principal, body: Actor, action: string): Actor | { error: string } => {
-    if (principal?.kind !== "credential" || principal.credential.trust === "assert") return body;
+  const resolveActor = (principal: Principal, body: Actor, action: string): { actor: Actor; relayed?: true } | { error: string } => {
+    if (principal?.kind !== "credential" || principal.credential.trust === "assert") return { actor: body };
     const { actor } = principal.credential;
     if (body.type === "human" && actor.type === "agent") {
       if (!actor.on_behalf_of)
@@ -114,19 +114,26 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
         return { error: `human "${body.id}" is not allowed: this credential is pinned to agent "${actor.id}" and may only relay instructions from its operator "${actor.on_behalf_of}".` };
       if (action !== "instructed")
         return { error: `action "${action}" is not allowed for a human actor on this credential: agent "${actor.id}" may only record "instructed" roots for "${actor.on_behalf_of}". Log the agent's own work as the agent.` };
+      // `relayed` marks that THIS branch produced the actor — the stamp at the call site keys off it, so the stamp
+      // can never drift onto other human-actor paths (assert-trust passthrough, pinned human credentials).
       return {
-        type: "human",
-        id: actor.on_behalf_of,
-        ...(body.display_name !== undefined ? { display_name: body.display_name } : {}),
-        ...(body.version !== undefined ? { version: body.version } : {}),
+        relayed: true,
+        actor: {
+          type: "human",
+          id: actor.on_behalf_of,
+          ...(body.display_name !== undefined ? { display_name: body.display_name } : {}),
+          ...(body.version !== undefined ? { version: body.version } : {}),
+        },
       };
     }
     if (body.type !== actor.type)
       return { error: `actor.type "${body.type}" is not allowed: this credential is pinned to ${actor.type} "${actor.id}". Use an owner or assert-trust credential to record other actors.` };
     return {
-      ...actor,
-      ...(body.display_name !== undefined ? { display_name: body.display_name } : {}),
-      ...(body.version !== undefined ? { version: body.version } : {}),
+      actor: {
+        ...actor,
+        ...(body.display_name !== undefined ? { display_name: body.display_name } : {}),
+        ...(body.version !== undefined ? { version: body.version } : {}),
+      },
     };
   };
 
@@ -225,12 +232,13 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
       if (req.method === "POST" && parts[0] === "events" && parts.length === 1) {
         const parsed = EventInput.safeParse(await req.json());
         if (!parsed.success) return json({ error: "invalid event", issues: parsed.error.issues }, 400);
-        const actor = resolveActor(principal, parsed.data.actor, parsed.data.action);
-        if ("error" in actor) return json(actor, 403);
-        const input = { ...parsed.data, actor };
+        const resolved = resolveActor(principal, parsed.data.actor, parsed.data.action);
+        if ("error" in resolved) return json(resolved, 403);
+        const input = { ...parsed.data, actor: resolved.actor };
         // A relayed instruction root is stamped with the credential's agent id, so the chain records that the human
-        // did not write this event themselves — their agent did, on their behalf.
-        if (actor.type === "human" && principal?.kind === "credential")
+        // did not write this event themselves — their agent did, on their behalf. Keyed on the carve-out's own flag:
+        // assert-trust human events (git hook, forwarders) and other human paths must NOT get a relayed_by stamp.
+        if (resolved.relayed && principal?.kind === "credential")
           input.method = { ...input.method, params: { ...input.method?.params, relayed_by: principal.credential.actor.id } };
         for (let attempt = 0; ; attempt++) {
           try {

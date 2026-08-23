@@ -308,9 +308,11 @@ test("credentials: assert-trust token and the owner token store the body actor v
   const store = new MemStore();
   const h = createHandler(store, { token: "tok", credentials: parseCredentials(JSON.stringify([CLAUDE, HOOK])) });
   const human = { type: "human" as const, id: "jordan@example.com", display_name: "Jordan" };
-  assert.equal((await post(h, "/events", ev({ actor: human, action: "committed" }), HOOK.token)).status, 201);
+  assert.equal((await post(h, "/events", ev({ actor: human, action: "committed", method: { tool: "git" } }), HOOK.token)).status, 201);
   assert.equal((await post(h, "/events", ev({ actor: { type: "agent", id: "claude-cowork" } }), "tok")).status, 201);
   assert.deepEqual(store.events.map((e) => e.actor), [human, { type: "agent", id: "claude-cowork" }]);
+  // an assert-trust credential RELAYS the human verbatim — it must not get the carve-out's relayed_by stamp
+  assert.deepEqual(store.events[0].method, { tool: "git" }); // exact match: no params, hence no relayed_by
 });
 
 test("credentials: Bearer only, unknown tokens 401, reads allowed, DELETE/share/gdrive forbidden for pinned tokens", async () => {
