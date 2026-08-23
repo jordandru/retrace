@@ -118,7 +118,7 @@ Add to the MCP `env` block from 4b and to your shell profile:
 RETRACE_URL=https://retrace-api.<you>.workers.dev
 RETRACE_TOKEN=<your token>
 ```
-With those set, the MCP server, git hook, and CLIs write to the cloud ledger instead of `~/.retrace/retrace.db`. (Re-run `git-hook.js backfill` once to copy history up.) You can also put `url`/`token` in the repo's `.retrace.json` — but don't commit the token to a public repo; env is safer.
+With those set, the MCP server, git hook, and CLIs write to the cloud ledger instead of `~/.retrace/retrace.db`. (Re-run `git-hook.js backfill` once to copy history up.) You can also put `url`/`token` in the repo's `.retrace.json` — but don't commit the token to a public repo; env is safer. Better for the git hook: add `"credential": "retrace-git"` to `.retrace.json` (committable — it's a name, not a secret) and keep the assert credential's token in `~/.retrace/worker-credentials.json` (or `RETRACE_CREDENTIALS_FILE`); the hook then never uses the owner token. If a commit doesn't show up, read `.git/retrace-hook.log`.
 
 ---
 

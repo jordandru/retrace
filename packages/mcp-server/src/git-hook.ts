@@ -8,6 +8,13 @@
  *   retrace-git uninstall [--repo <path>]
  *
  * Config precedence: CLI flags > env (RETRACE_PROJECT/RETRACE_DB/RETRACE_URL/RETRACE_TOKEN) > .retrace.json in repo root.
+ * Token precedence (resolveHookToken): env RETRACE_HOOK_TOKEN > the credential named by .retrace.json "credential"
+ *   (looked up by actor.id in RETRACE_CREDENTIALS_FILE, default ~/.retrace/worker-credentials.json — a scoped assert
+ *   credential, so the hook need not carry the owner token) > env RETRACE_TOKEN > .retrace.json "token". No "credential"
+ *   field = the owner-token behaviour, unchanged. A named-but-missing credential is an error, never a silent fallback.
+ * Failures of `commit` (the hook path) are appended to <git-dir>/retrace-hook.log: the post-commit script discards
+ *   stdout/stderr, and with a fail-closed assert credential a 401/403 would otherwise be an invisible drop (owner-token
+ *   migration 2026-08-23). Re-log a dropped commit with `retrace-git commit <sha>` or `backfill`.
  *
  * Mapping a commit → event
  *   WHO    author (human) — or an AGENT if the commit has a trailer `Retrace-Actor: <id>` (optionally
@@ -21,14 +28,47 @@
  *   HOW    tool=git, params { branch, parents, files, insertions, deletions }, automated = agent commit
  */
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync, chmodSync, unlinkSync, mkdirSync } from "node:fs";
-import { hostname } from "node:os";
+import { existsSync, readFileSync, writeFileSync, appendFileSync, chmodSync, unlinkSync, mkdirSync } from "node:fs";
+import { homedir, hostname } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { EventInput, appendEvent, describeEvent, Event } from "@retrace/core";
 import { makeStore } from "./index.js";
 import { RemoteStore } from "./remote-store.js";
 
-type Cfg = { project?: string; db?: string; url?: string; token?: string; environment?: string; repoName?: string };
+type Cfg = { project?: string; db?: string; url?: string; token?: string; credential?: string; environment?: string; repoName?: string };
+
+/** The operator's local mirror of the Worker's RETRACE_CREDENTIALS (JSON array of {token, actor, …}); only token + actor.id are read. */
+const DEFAULT_CREDENTIALS_FILE = join(homedir(), ".retrace", "worker-credentials.json");
+
+/**
+ * Which bearer token the hook sends. `file` is the repo's .retrace.json. Precedence: RETRACE_HOOK_TOKEN (explicit
+ * override) > the credential entry named by `credential` (matched on actor.id in the credentials file) > RETRACE_TOKEN >
+ * .retrace.json `token`. Without a `credential` field this is exactly the old behaviour, so repos that still run on the
+ * owner token (boxing-rpg) are untouched. Naming a credential that cannot be found throws rather than quietly falling
+ * back to the owner token — the point of the field is that the owner token stops being what this repo uses.
+ */
+export function resolveHookToken(
+  file: Pick<Cfg, "token" | "credential">,
+  env: NodeJS.ProcessEnv = process.env,
+  credentialsFile: string = env.RETRACE_CREDENTIALS_FILE ?? DEFAULT_CREDENTIALS_FILE,
+): string | undefined {
+  if (env.RETRACE_HOOK_TOKEN) return env.RETRACE_HOOK_TOKEN;
+  if (file.credential) {
+    if (!existsSync(credentialsFile))
+      throw new Error(`.retrace.json names credential "${file.credential}" but ${credentialsFile} does not exist (set RETRACE_CREDENTIALS_FILE, or remove "credential" to fall back to RETRACE_TOKEN)`);
+    const entries: unknown = JSON.parse(readFileSync(credentialsFile, "utf8"));
+    const hit = Array.isArray(entries) ? entries.find((c) => c?.actor?.id === file.credential) : undefined;
+    if (typeof hit?.token !== "string" || !hit.token) throw new Error(`credential "${file.credential}" not found in ${credentialsFile} (matched on actor.id)`);
+    return hit.token;
+  }
+  return env.RETRACE_TOKEN ?? file.token;
+}
+
+/** One line per failed hook run, appended to <git-dir>/retrace-hook.log. Never throws (the hook is non-fatal by design); the
+ *  messages that reach it (HTTP status + body, config errors) carry no token. */
+export function appendHookLog(gitDir: string, line: string): void {
+  try { appendFileSync(join(gitDir, "retrace-hook.log"), `${new Date().toISOString()} ${line}\n`); } catch {}
+}
 
 function git(repo: string, args: string[]): string {
   return execFileSync("git", ["-C", repo, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
@@ -56,14 +96,14 @@ function loadCfg(repo: string, flags: Record<string, string | boolean>): Cfg {
     project: (flags.project as string) ?? process.env.RETRACE_PROJECT ?? file.project ?? basename(repo),
     db: process.env.RETRACE_DB ?? file.db,
     url: process.env.RETRACE_URL ?? file.url,
-    token: process.env.RETRACE_TOKEN ?? file.token,
+    credential: file.credential,
+    token: resolveHookToken(file),
     environment: process.env.RETRACE_ENV ?? file.environment ?? "local",
     repoName: file.repoName,
   };
-  // makeStore reads env — propagate file config into env when unset
+  // The local store is built by makeStore (reads env) — propagate the file's db path when unset. The remote store is built
+  // from cfg directly (logCommit) so the resolved token, not whatever RETRACE_TOKEN the shell exports, is what is sent.
   if (cfg.db && !process.env.RETRACE_DB) process.env.RETRACE_DB = cfg.db;
-  if (cfg.url && !process.env.RETRACE_URL) process.env.RETRACE_URL = cfg.url;
-  if (cfg.token && !process.env.RETRACE_TOKEN) process.env.RETRACE_TOKEN = cfg.token;
   return cfg;
 }
 
@@ -140,22 +180,38 @@ function remoteName(repo: string): string | undefined {
 
 async function logCommit(repo: string, sha: string, cfg: Cfg): Promise<{ event: Event; deduped: boolean }> {
   const input = commitToEvent(repo, sha, cfg);
-  const store = makeStore();
+  const store = cfg.url ? new RemoteStore(cfg.url, cfg.token) : makeStore();
   return store instanceof RemoteStore ? store.append(input) : appendEvent(store, input);
 }
 
 const HOOK_MARK = "# retrace-git hook";
 function hookScript(): string {
   const self = new URL(import.meta.url).pathname;
-  return `#!/bin/sh\n${HOOK_MARK}\nnode "${self}" commit --repo "$(git rev-parse --show-toplevel)" >/dev/null 2>&1 || echo "retrace: failed to log commit (non-fatal)" >&2\n`;
+  return `#!/bin/sh\n${HOOK_MARK}\nnode "${self}" commit --repo "$(git rev-parse --show-toplevel)" >/dev/null 2>&1 || echo "retrace: failed to log commit (non-fatal; reason appended to $(git rev-parse --git-dir)/retrace-hook.log)" >&2\n`;
 }
 
 async function main() {
   const { flags, pos } = parseArgs(process.argv.slice(2));
   const cmd = pos[0] ?? "help";
   const repo = resolve((flags.repo as string) ?? git(process.cwd(), ["rev-parse", "--show-toplevel"]));
-  const cfg = loadCfg(repo, flags);
   const gitDir = resolve(repo, git(repo, ["rev-parse", "--git-dir"]));
+
+  if (cmd === "commit") {
+    // The hook path. Config errors (a credential that can't be resolved) and server rejections (401/403 from a
+    // fail-closed assert credential, 5xx) both land in retrace-hook.log, because the hook script discards our output.
+    const sha = pos[1] ?? "HEAD";
+    try {
+      const r = await logCommit(repo, sha, loadCfg(repo, flags));
+      console.log(`${r.deduped ? "(already logged) " : "logged "}${r.event.id}\n${describeEvent(r.event)}`);
+    } catch (e: any) {
+      let id = sha;
+      try { id = git(repo, ["rev-parse", "--short=12", sha]); } catch {}
+      appendHookLog(gitDir, `commit ${id} in ${repo} NOT logged: ${e?.message ?? e}`);
+      throw e;
+    }
+    return;
+  }
+  const cfg = loadCfg(repo, flags);
 
   if (cmd === "install") {
     mkdirSync(join(gitDir, "hooks"), { recursive: true });
@@ -174,12 +230,6 @@ async function main() {
   if (cmd === "uninstall") {
     const hookPath = join(gitDir, "hooks", "post-commit");
     if (existsSync(hookPath) && readFileSync(hookPath, "utf8").includes(HOOK_MARK)) { unlinkSync(hookPath); console.log("removed hook"); }
-    return;
-  }
-  if (cmd === "commit") {
-    const sha = pos[1] ?? "HEAD";
-    const r = await logCommit(repo, sha, cfg);
-    console.log(`${r.deduped ? "(already logged) " : "logged "}${r.event.id}\n${describeEvent(r.event)}`);
     return;
   }
   if (cmd === "backfill") {
