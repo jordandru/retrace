@@ -28,7 +28,7 @@ export interface Share {
 }
 
 export interface EventStore {
-  head(project: string): Promise<{ seq: number; hash: string } | null>;
+  head(project: string): Promise<ChainHead | null>;
   createShare(share: Share): Promise<void>;
   getShare(id: string): Promise<Share | null>;
   insert(e: Event): Promise<void>;
@@ -39,8 +39,27 @@ export interface EventStore {
   projects(): Promise<string[]>;
   /** Delete every row belonging to a project AND insert `audit` (already sealed onto its own project's chain) in the
    *  same transaction, so a deletion can never exist without its audit record and vice versa (security review
-   *  2026-08-21, B3). Returns per-table deleted counts. Optional — stores without it don't serve DELETE /projects/:p. */
-  deleteProject?(project: string, audit: Event): Promise<Record<string, number>>;
+   *  2026-08-21, B3). `expectedHead` is the target project's head the caller sealed the audit's `change` fields from:
+   *  the store must check INSIDE the transaction that the head is still exactly that and throw `HeadMovedError`
+   *  (committing nothing) if a write raced the delete, so the immortal audit record can never describe a head or
+   *  event count other than the one actually deleted. Returns per-table deleted counts. Optional — stores without it
+   *  don't serve DELETE /projects/:p. */
+  deleteProject?(project: string, audit: Event, expectedHead: ChainHead): Promise<Record<string, number>>;
+}
+
+export type ChainHead = { seq: number; hash: string };
+
+/** Thrown by `deleteProject` when the target project's head no longer matches `expectedHead`: nothing was committed;
+ *  re-read the head, re-seal the audit and retry. */
+export class HeadMovedError extends Error {
+  constructor(project: string, expected: ChainHead) {
+    super(`project "${project}" was written to while being deleted (expected head ${expected.hash} seq ${expected.seq}); re-read its head and retry`);
+    this.name = "HeadMovedError";
+  }
+}
+
+export function isHeadMovedError(e: unknown): e is HeadMovedError {
+  return e instanceof HeadMovedError || (e as any)?.name === "HeadMovedError";
 }
 
 export const SCHEMA_SQL = `

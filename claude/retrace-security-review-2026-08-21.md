@@ -169,6 +169,38 @@ committed — possible too).
   core, 12/12 mcp-server.
 - Status: merged to `main`, **deployed 2026-08-21 (Worker version 0490ceaa)**.
 
+#### B3 follow-up — stale head in the audit record — **DONE 2026-08-23** (not yet deployed)
+Found by ultrareview of `1b26794..f5036b2`. The router read the target
+project's head once, outside the retry loop, and baked it into
+`change.summary` / `change.before_hash`. `DELETE FROM events WHERE project = ?`
+is unconditional, so a `POST /events` that raced the delete (now an ordinary
+workflow with pinned-credential agents, #6) was wiped with the audit still
+claiming the pre-race count and hash; a losing concurrent DELETE likewise
+re-sealed and committed an audit describing rows it never touched. B3's
+"no deletion without an audit" held — the audit's `change` fields could lie.
+
+**Fix:** compare-and-delete.
+- `EventStore.deleteProject(project, audit, expectedHead)` — the store checks
+  *inside* its transaction that the target head is still exactly
+  `expectedHead` and throws `HeadMovedError` (new, exported from core)
+  committing nothing otherwise. The audit has to be sealed before the
+  transaction (its hash covers `before_hash`), so the store can't compute the
+  head for the router; it verifies the one the router sealed from instead.
+- Router: head read + `change` moved inside the retry loop; `HeadMovedError`
+  is retried exactly like a UNIQUE collision (≤5×), re-reading both heads.
+- `SqliteStore`: synchronous head read between `BEGIN` and the deletes.
+- `D1Store`: a batch has no control flow, so the check is SQL — the audit row
+  is `INSERT … SELECT … WHERE <head == expectedHead>` and every `DELETE` is
+  `… AND EXISTS (SELECT 1 FROM events WHERE id = <audit.id>)`; zero rows from
+  the audit insert after the batch ⇒ `HeadMovedError`. The statement shapes
+  were verified against node:sqlite (same engine as D1).
+- Tests: `router.test.ts` — a write to the target between head read and
+  delete is retried and the audit records the 3-event head and the late
+  event's hash; persistent `HeadMovedError` surfaces after the retry budget
+  with nothing deleted. `sqlite-store.test.ts` — moved head ⇒
+  `HeadMovedError`, deletes/share/ops untouched, retry with the fresh head
+  succeeds. `npm test`: 34/34 core, 13/13 mcp-server.
+
 ## Backlog
 
 | # | Finding | Status |
@@ -178,3 +210,4 @@ committed — possible too).
 | 6 | Worker `POST /events` per-actor credentials | **Done** — `6502813`, 2026-08-21 (deployed 0490ceaa; `RETRACE_CREDENTIALS` set 2026-08-22, version 401f6410) |
 | — | Audit-event actor | **Done** — `862335f`, 2026-08-21 (deployed 0490ceaa, `RETRACE_OWNER` set) |
 | — | B3 — delete atomicity | **Done** — `7f481b0`, 2026-08-21 (deployed 0490ceaa) |
+| — | B3 follow-up — stale head in delete audit | **Done** — 2026-08-23 (not yet deployed) |

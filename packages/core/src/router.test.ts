@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createHandler, parseCredentials, Credential, EventStore, Event, Share, appendEvent, EventInput, verifyProject } from "./index.js";
+import { createHandler, parseCredentials, Credential, EventStore, Event, Share, appendEvent, EventInput, verifyProject, ChainHead, HeadMovedError } from "./index.js";
 
 /** minimal in-memory store for tests */
 class MemStore implements EventStore {
@@ -14,7 +14,9 @@ class MemStore implements EventStore {
   async history(q: any) { return this.all(q.project); }
   async createShare(s: Share) { this.shares.set(s.id, s); }
   async getShare(id: string) { return this.shares.get(id) ?? null; }
-  async deleteProject(p: string, audit: Event) {
+  async deleteProject(p: string, audit: Event, expectedHead: ChainHead) {
+    const head = await this.head(p);
+    if (!head || head.seq !== expectedHead.seq || head.hash !== expectedHead.hash) throw new HeadMovedError(p, expectedHead);
     const evs = this.events.filter((e) => e.project === p);
     const counts = {
       events: evs.length,
@@ -177,7 +179,7 @@ test("DELETE /projects/:p: audit event is sealed before deletion and handed to t
   const origInsert = store.insert.bind(store);
   store.insert = async (e) => { calls.push(`insert:${e.project}`); return origInsert(e); };
   const origDelete = store.deleteProject.bind(store);
-  store.deleteProject = async (p, audit) => { calls.push(`delete:${p}+audit:${audit.project}#${audit.seq}`); return origDelete(p, audit); };
+  store.deleteProject = async (p, audit, head) => { calls.push(`delete:${p}+audit:${audit.project}#${audit.seq}`); return origDelete(p, audit, head); };
   const res = await del(createHandler(store, { token: "tok", opsProject: "ops" }), "/projects/junk?confirm=junk", AUTH);
   assert.equal(res.status, 200);
   assert.deepEqual(calls, ["delete:junk+audit:ops#0"]); // no separate insert — the store owns the transaction
@@ -213,6 +215,36 @@ test("DELETE /projects/:p: a concurrent ops write that takes the audit's seq rol
   assert.equal(ops[2].id, (await res.json()).ops_event);
   assert.equal(store.events.filter((e) => e.project === "junk").length, 0);
   assert.equal((await verifyProject(store, "ops")).ok, true);
+});
+
+test("DELETE /projects/:p: a write to the target project that races the delete is retried, and the audit records the true final head", async () => {
+  const store = await seeded();
+  let raced = false, lateHash: string | undefined;
+  const origHead = store.head.bind(store);
+  store.head = async (p) => { // after the router reads junk's head (2 events) once, a pinned-credential agent appends a 3rd
+    const h = await origHead(p);
+    if (p === "junk" && !raced) { raced = true; lateHash = (await appendEvent(store, ev({ artifacts: [{ id: "late" }] }))).event.hash; }
+    return h;
+  };
+  const res = await del(createHandler(store, { token: "tok", opsProject: "ops" }), "/projects/junk?confirm=junk", AUTH);
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.deleted.events, 3);
+  const [audit] = store.events.filter((e) => e.project === "ops");
+  assert.equal(audit.id, body.ops_event);
+  assert.match(audit.change?.summary ?? "", /^deleted project "junk" \(3 events\) at head .* seq 2$/);
+  assert.equal(audit.change?.before_hash, lateHash); // not the stale 2-event head the first attempt was sealed from
+  assert.equal(store.events.filter((e) => e.project === "junk").length, 0);
+  assert.equal((await verifyProject(store, "ops")).ok, true);
+});
+
+test("DELETE /projects/:p: HeadMovedError on every attempt surfaces after the retry budget, nothing deleted", async () => {
+  const store = await seeded();
+  store.deleteProject = async (p, _audit, head) => { throw new HeadMovedError(p, head); };
+  const res = await del(createHandler(store, { token: "tok", opsProject: "ops" }), "/projects/junk?confirm=junk", AUTH).catch((e) => e);
+  assert.notEqual(res.status, 200);
+  assert.equal(store.events.filter((e) => e.project === "junk").length, 2);
+  assert.equal(store.events.filter((e) => e.project === "ops").length, 0);
 });
 
 // ---- per-actor credentials (backlog #6) ----

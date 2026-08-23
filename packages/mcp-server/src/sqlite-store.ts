@@ -1,6 +1,6 @@
 /** Local SQLite store using Node's built-in node:sqlite (Node >= 22.13). No native deps. */
 import { DatabaseSync } from "node:sqlite";
-import { Event, EventStore, HistoryQuery, SCHEMA_SQL, Share } from "@retrace/core";
+import { ChainHead, Event, EventStore, HeadMovedError, HistoryQuery, SCHEMA_SQL, Share } from "@retrace/core";
 
 export class SqliteStore implements EventStore {
   private db: DatabaseSync;
@@ -10,11 +10,13 @@ export class SqliteStore implements EventStore {
     this.db.exec(SCHEMA_SQL);
   }
 
-  async head(project: string) {
-    const row = this.db
-      .prepare("SELECT seq, hash FROM events WHERE project = ? ORDER BY seq DESC LIMIT 1")
-      .get(project) as { seq: number; hash: string } | undefined;
+  private headSync(project: string): ChainHead | null {
+    const row = this.db.prepare("SELECT seq, hash FROM events WHERE project = ? ORDER BY seq DESC LIMIT 1").get(project) as ChainHead | undefined;
     return row ?? null;
+  }
+
+  async head(project: string) {
+    return this.headSync(project);
   }
 
   /** Raw row writes for one event — caller owns the transaction. */
@@ -39,11 +41,14 @@ export class SqliteStore implements EventStore {
     }
   }
 
-  /** Deletes + audit insert in one transaction (B3); the local server's DELETE /projects/:p needs this. */
-  async deleteProject(project: string, audit: Event) {
+  /** Deletes + audit insert in one transaction (B3); the local server's DELETE /projects/:p needs this. The head
+   *  check runs inside the same transaction, so the audit can only ever commit against the head it describes. */
+  async deleteProject(project: string, audit: Event, expectedHead: ChainHead) {
     const tables = ["events", "event_artifacts", "shares"];
     this.db.exec("BEGIN");
     try {
+      const head = this.headSync(project); // synchronous: the transaction never yields between check and deletes
+      if (!head || head.seq !== expectedHead.seq || head.hash !== expectedHead.hash) throw new HeadMovedError(project, expectedHead);
       const counts = Object.fromEntries(tables.map((t) => [t, Number(this.db.prepare(`DELETE FROM ${t} WHERE project = ?`).run(project).changes)]));
       this.insertRows(audit);
       this.db.exec("COMMIT");

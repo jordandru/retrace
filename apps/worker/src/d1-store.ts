@@ -1,4 +1,4 @@
-import { Event, EventStore, HistoryQuery, Share } from "@retrace/core";
+import { ChainHead, Event, EventStore, HeadMovedError, HistoryQuery, Share } from "@retrace/core";
 
 export class D1Store implements EventStore {
   constructor(private db: D1Database) {}
@@ -8,15 +8,19 @@ export class D1Store implements EventStore {
     return row ?? null;
   }
 
-  private insertStatements(e: Event) {
+  /** Row writes for one event. With `guard`, each INSERT becomes `INSERT … SELECT … WHERE <guard>` so it writes
+   *  nothing unless the guard predicate holds at execution time (used by deleteProject's head check). */
+  private insertStatements(e: Event, guard?: { sql: string; params: unknown[] }) {
+    const where = guard ? ` WHERE ${guard.sql}` : "";
+    const gp = guard?.params ?? [];
     return [
       this.db
         .prepare(
           `INSERT INTO events (id, project, seq, timestamp, received_at, actor_type, actor_id, action, caused_by, idempotency_key, prev_hash, hash, body)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?${where}`,
         )
-        .bind(e.id, e.project, e.seq, e.timestamp, e.received_at, e.actor.type, e.actor.id, e.action, e.caused_by ?? null, e.idempotency_key ?? null, e.prev_hash, e.hash, JSON.stringify(e)),
-      ...e.artifacts.map((a) => this.db.prepare("INSERT OR IGNORE INTO event_artifacts (event_id, project, artifact_id) VALUES (?, ?, ?)").bind(e.id, e.project, a.id)),
+        .bind(e.id, e.project, e.seq, e.timestamp, e.received_at, e.actor.type, e.actor.id, e.action, e.caused_by ?? null, e.idempotency_key ?? null, e.prev_hash, e.hash, JSON.stringify(e), ...gp),
+      ...e.artifacts.map((a) => this.db.prepare(`INSERT OR IGNORE INTO event_artifacts (event_id, project, artifact_id) SELECT ?, ?, ?${where}`).bind(e.id, e.project, a.id, ...gp)),
     ];
   }
 
@@ -25,14 +29,27 @@ export class D1Store implements EventStore {
   }
 
   /** Deletes + the audit insert run in one D1 batch, which is atomic: if the audit's (project, seq) collides the
-   *  deletes roll back too (B3). */
-  async deleteProject(project: string, audit: Event) {
+   *  deletes roll back too (B3). A batch has no control flow, so the head check is expressed in SQL: the audit row
+   *  is only inserted if the target project's head is still exactly `expectedHead`, and every DELETE is conditioned
+   *  on that audit row existing. If a write raced the delete, the batch is a no-op and we throw HeadMovedError. */
+  async deleteProject(project: string, audit: Event, expectedHead: ChainHead) {
+    if (audit.project === project) throw new Error("audit event must not live in the project being deleted");
     const tables = ["events", "event_artifacts", "shares"];
+    const headMatches = {
+      sql: "EXISTS (SELECT 1 FROM events WHERE project = ? AND seq = ? AND hash = ?) AND NOT EXISTS (SELECT 1 FROM events WHERE project = ? AND seq > ?)",
+      params: [project, expectedHead.seq, expectedHead.hash, project, expectedHead.seq],
+    };
+    const auditLanded = "EXISTS (SELECT 1 FROM events WHERE id = ?)";
+    const [auditEvent, ...auditArtifacts] = this.insertStatements(audit, headMatches);
     const results = await this.db.batch([
-      ...tables.map((t) => this.db.prepare(`DELETE FROM ${t} WHERE project = ?`).bind(project)),
-      ...this.insertStatements(audit),
+      auditEvent,
+      ...auditArtifacts, // the guard still holds here: the audit lives in another project, so the target head is unchanged
+      ...tables.map((t) => this.db.prepare(`DELETE FROM ${t} WHERE project = ? AND ${auditLanded}`).bind(project, audit.id)),
     ]);
-    return Object.fromEntries(tables.map((t, i) => [t, results[i].meta.changes ?? 0]));
+    const landed = results[0].meta.changes === 1 || (results[0].meta.changes == null && !!(await this.get(audit.id)));
+    if (!landed) throw new HeadMovedError(project, expectedHead);
+    const offset = 1 + auditArtifacts.length;
+    return Object.fromEntries(tables.map((t, i) => [t, results[offset + i].meta.changes ?? 0]));
   }
 
   async createShare(s: Share) {

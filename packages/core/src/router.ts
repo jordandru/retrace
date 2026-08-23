@@ -27,7 +27,7 @@
  */
 import { z } from "zod";
 import { Actor, EventInput } from "./schema.js";
-import { EventStore, appendEvent, verifyProject, explainEvent, newShareId, shareIsLive, Share } from "./store.js";
+import { EventStore, appendEvent, verifyProject, explainEvent, newShareId, shareIsLive, Share, isHeadMovedError } from "./store.js";
 import { sealEvent } from "./chain.js";
 import { buildExportBundle, verifyExportBundle } from "./export.js";
 import { renderReportHtml } from "./report.js";
@@ -246,33 +246,36 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
           if (!store.deleteProject) return json({ error: "project deletion not supported by this store" }, 501);
           const confirm = url.searchParams.get("confirm");
           if (confirm !== project) return json({ error: `destructive route: repeat the exact project name as ?confirm=${encodeURIComponent(project)} to delete it` }, 400);
-          const head = await store.head(project);
-          if (!head) return json({ error: "project not found" }, 404);
           const opsProject = opts.opsProject ?? "retrace";
           if (project === opsProject) return json({ error: "refusing to delete the ops/audit project" }, 403);
-          // Seal the audit event first, then let the store delete + insert it in ONE transaction (B3): a deletion can
-          // never exist without its audit record. The final head is recorded so a later re-seed of this project from
-          // genesis is detectable against the ops chain. Seq is 0-based, so the event count is head.seq + 1.
-          // Attribute the audit to whoever holds the owner token (the only principal allowed here), not to the server.
-          const auditInput: EventInput = {
-            project: opsProject,
-            actor: opts.ownerActor ?? { type: "system", id: "worker" },
-            action: "deleted",
-            artifacts: [{ id: `project:${project}`, kind: "project", label: project }],
-            intent: "project deleted via DELETE route",
-            caused_by: url.searchParams.get("caused_by") ?? undefined,
-            method: { tool: "http", automated: !opts.ownerActor, params: { route: "DELETE /projects/:p", principal: "owner" } },
-            location: { url: `${base}/projects/${encodeURIComponent(project)}`, system: "retrace-api" },
-            change: { summary: `deleted project "${project}" (${head.seq + 1} events) at head ${head.hash} seq ${head.seq}`, before_hash: head.hash },
-          };
           for (let attempt = 0; ; attempt++) {
+            // Seal the audit event first, then let the store delete + insert it in ONE transaction (B3): a deletion can
+            // never exist without its audit record. The final head is recorded so a later re-seed of this project from
+            // genesis is detectable against the ops chain. Seq is 0-based, so the event count is head.seq + 1. The head
+            // is read inside the loop and handed to the store as the expected head: if a write to the project races the
+            // delete, the store throws HeadMovedError instead of committing an audit that misreports the head/count.
+            // Attribute the audit to whoever holds the owner token (the only principal allowed here), not to the server.
+            const head = await store.head(project);
+            if (!head) return json({ error: "project not found" }, 404);
+            const auditInput: EventInput = {
+              project: opsProject,
+              actor: opts.ownerActor ?? { type: "system", id: "worker" },
+              action: "deleted",
+              artifacts: [{ id: `project:${project}`, kind: "project", label: project }],
+              intent: "project deleted via DELETE route",
+              caused_by: url.searchParams.get("caused_by") ?? undefined,
+              method: { tool: "http", automated: !opts.ownerActor, params: { route: "DELETE /projects/:p", principal: "owner" } },
+              location: { url: `${base}/projects/${encodeURIComponent(project)}`, system: "retrace-api" },
+              change: { summary: `deleted project "${project}" (${head.seq + 1} events) at head ${head.hash} seq ${head.seq}`, before_hash: head.hash },
+            };
             const audit = await sealEvent(auditInput, await store.head(opsProject));
             try {
-              const deleted = await store.deleteProject(project, audit);
+              const deleted = await store.deleteProject(project, audit, head);
               return json({ ok: true, project, deleted, ops_event: audit.id });
             } catch (e: any) {
-              // a concurrent ops-project write took our seq: the whole transaction rolled back, re-seal and retry
-              if (!/UNIQUE/i.test(String(e?.message)) || attempt >= 4) throw e;
+              // Either a concurrent ops-project write took our seq (UNIQUE) or the target project was written to
+              // (HeadMovedError): the whole transaction rolled back, so re-read both heads, re-seal and retry.
+              if (!(isHeadMovedError(e) || /UNIQUE/i.test(String(e?.message))) || attempt >= 4) throw e;
             }
           }
         }
