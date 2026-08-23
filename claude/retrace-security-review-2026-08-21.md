@@ -208,7 +208,7 @@ re-sealed and committed an audit describing rows it never touched. B3's
   `evt_1557ab2b…` at ops seq 90 with `before_hash` equal to the real head,
   actor = owner, project gone from `/projects`, ops chain verifies (91 events).
 
-### Follow-up — instruction roots over pinned credentials — **DONE 2026-08-23**
+### Follow-up — instruction roots over pinned credentials — **DONE 2026-08-23** (deployed)
 `retrace_instruct` broke when the MCP server moved onto its pinned Worker
 credential (#6): the tool records a genuine `{type:"human"}` actor (locked to
 `RETRACE_ON_BEHALF_OF` locally), but the Worker's pinned-credential rule
@@ -231,6 +231,12 @@ other humans, other actions, or humans on credentials not configured for it.
   mismatched human / wrong action / credential without `on_behalf_of` → 403,
   nothing written; system actors still refused. `npm test`: 36/36 core,
   13/13 mcp-server.
+- Status: commit `e0b6499`, **deployed 2026-08-23 (Worker version 5fc34a6f)**.
+  Verified live: `retrace_instruct` over the pinned claude-code credential
+  (whose secret already carried `on_behalf_of`, so no secret change was
+  needed) stored `evt_1ec756b2…` at ops seq 96 with actor
+  human/jordansboxing@gmail.com and `method.params.relayed_by: "claude-code"`;
+  ops chain verifies (97 events).
 
 ## Backlog
 
@@ -242,4 +248,4 @@ other humans, other actions, or humans on credentials not configured for it.
 | — | Audit-event actor | **Done** — `862335f`, 2026-08-21 (deployed 0490ceaa, `RETRACE_OWNER` set) |
 | — | B3 — delete atomicity | **Done** — `7f481b0`, 2026-08-21 (deployed 0490ceaa) |
 | — | B3 follow-up — stale head in delete audit | **Done** — `92a7c6a`, 2026-08-23 (deployed fcad2060) |
-| — | Instruction roots over pinned credentials | **Done** — 2026-08-23 |
+| — | Instruction roots over pinned credentials | **Done** — `e0b6499`, 2026-08-23 (deployed 5fc34a6f) |
