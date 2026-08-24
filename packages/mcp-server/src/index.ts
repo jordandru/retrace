@@ -21,8 +21,9 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { mkdirSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, hostname } from "node:os";
 import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 import {
   Actor, Action, ArtifactRef, Change, Location, Method, EventInput,
   appendEvent, verifyProject, explainEvent, renderTimeline, renderWhyChain, describeEvent,
@@ -44,6 +45,14 @@ const readDefaultActor = () => ({
   on_behalf_of: env.RETRACE_ON_BEHALF_OF,
 });
 
+/** WHERE enrichment for the MCP write path (backlog #15): fill each location field from `defaults` ONLY where the
+ *  caller supplied nothing — a caller value is never overwritten. Exported for unit tests. */
+export function enrichLocation(caller: Location | undefined, defaults: Location): Location {
+  const merged: Location = { ...defaults };
+  for (const [k, v] of Object.entries(caller ?? {})) if (v !== undefined) (merged as any)[k] = v;
+  return merged;
+}
+
 export function makeStore() {
   if (env.RETRACE_URL) return new RemoteStore(env.RETRACE_URL, env.RETRACE_TOKEN);
   const path = env.RETRACE_DB ?? join(homedir(), ".retrace", "retrace.db");
@@ -59,6 +68,18 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
   const commitLock = opts.commitLock ?? env.RETRACE_COMMIT_LOCK !== "0";
   const actorLock = opts.actorLock ?? env.RETRACE_ACTOR_LOCK !== "0";
   const defaultActor = readDefaultActor();
+  /** location.session: a per-process run id (RETRACE_SESSION overrides). TODO(backlog #15): honest proxy — the real
+   *  Claude Code session id is not visible to this MCP subprocess; plumbing it through from the launcher is a separate step. */
+  const sessionId = env.RETRACE_SESSION ?? "run_" + randomUUID().replace(/-/g, "").slice(0, 12);
+  /** WHERE this server authoritatively knows (backlog #15). `url` is never stamped and no prod environment is
+   *  synthesized — commit URLs and deploy environments belong to the git hook / Worker. */
+  const locationDefaults: Location = {
+    system: env.RETRACE_SYSTEM ?? "claude-code",
+    environment: env.RETRACE_ENVIRONMENT ?? env.RETRACE_ENV ?? "local",
+    path: process.cwd(),
+    device: hostname(),
+    session: sessionId,
+  };
   /** Resolve the project for a WRITE. If RETRACE_PROJECT is set (and lock on), any other explicit project is rejected
    *  so agents can't create stray projects by guessing a name. Read tools are not pinned. */
   const writeProject = (requested?: string): string => {
@@ -129,10 +150,13 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
     },
     async (args) => {
       guardAction(args.action);
+      const actor = resolveActor(args.actor); // actor lock first — a rejected write must not get this far
+      // WHERE enrichment (backlog #15): after the actor lock, before sealing (local appendEvent or the Worker's POST /events).
       const input = EventInput.parse({
         ...args,
         project: writeProject(args.project),
-        actor: resolveActor(args.actor),
+        actor,
+        location: enrichLocation(args.location, locationDefaults),
       });
       const { event, deduped } = remote ? await remote.append(input) : await appendEvent(store, input);
       return {
@@ -158,14 +182,17 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
       },
     },
     async (args) => {
+      const actor = resolveHuman(args.human_id); // actor lock first
       const input = EventInput.parse({
         project: writeProject(args.project),
-        actor: resolveHuman(args.human_id),
+        actor,
         action: "instructed",
         artifacts: args.artifacts ?? [{ id: `task:${args.instruction.slice(0, 60)}`, kind: "task", label: args.instruction.slice(0, 60) }],
         intent: args.instruction,
         timestamp: args.timestamp,
         method: { tool: "chat", automated: false },
+        // WHERE enrichment (backlog #15): env-only — retrace_instruct deliberately has no caller-facing location param.
+        location: enrichLocation(undefined, locationDefaults),
       });
       const { event } = remote ? await remote.append(input) : await appendEvent(store, input);
       return { content: [{ type: "text", text: `instruction logged ${event.id}` }], structuredContent: { id: event.id } };

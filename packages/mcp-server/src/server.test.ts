@@ -2,15 +2,15 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { buildServer } from "./index.js";
+import { buildServer, enrichLocation } from "./index.js";
 import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { SqliteStore } from "./sqlite-store.js";
 
 /** Hermetic actor env: the dev shell may export RETRACE_ACTOR/ON_BEHALF_OF/ACTOR_LOCK (see 3c4b3e5). */
 const withActorEnv = async (vars: Record<string, string | undefined>, fn: () => Promise<void>) => {
-  const keys = ["RETRACE_ACTOR", "RETRACE_ACTOR_MODEL", "RETRACE_ON_BEHALF_OF", "RETRACE_ACTOR_LOCK"];
+  const keys = ["RETRACE_ACTOR", "RETRACE_ACTOR_MODEL", "RETRACE_ON_BEHALF_OF", "RETRACE_ACTOR_LOCK", "RETRACE_SYSTEM", "RETRACE_ENVIRONMENT", "RETRACE_ENV", "RETRACE_SESSION"];
   const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
   for (const k of keys) delete process.env[k];
   for (const [k, v] of Object.entries(vars)) if (v !== undefined) process.env[k] = v;
@@ -209,4 +209,75 @@ test("actor lock: RETRACE_ACTOR_LOCK=0 restores caller overrides for both tools"
     { type: "agent", id: "claude-cowork", model: "claude-fable-5", on_behalf_of: "other@example.com" },
     { type: "human", id: "other@example.com" },
   ]);
+}));
+
+// ---- WHERE enrichment (backlog #15) ----
+
+test("enrichLocation: fills absent fields only, never overwrites caller values", () => {
+  const defaults = { system: "claude-code", environment: "local", path: "/srv", device: "box", session: "run_1" };
+  assert.deepEqual(enrichLocation(undefined, defaults), defaults);
+  const caller = { system: "claude-code", environment: "staging", url: "https://example.com/pr/1" };
+  assert.deepEqual(enrichLocation(caller, defaults), {
+    system: "claude-code", environment: "staging", url: "https://example.com/pr/1", path: "/srv", device: "box", session: "run_1",
+  });
+  assert.equal(enrichLocation({ path: undefined }, defaults).path, "/srv"); // explicit undefined = not supplied
+});
+
+test("location enrichment: retrace_log without location gets the server WHERE; session stable per server", async () => withActorEnv(ENV, async () => {
+  const store = new SqliteStore(":memory:");
+  const client = await connect(store);
+  await client.callTool({ name: "retrace_log", arguments: { action: "edited", artifacts: [{ id: "repo:rpg#a.ts", kind: "file" }] } });
+  await client.callTool({ name: "retrace_log", arguments: { action: "executed", artifacts: [{ id: "cmd:test" }] } });
+  const [a, b] = await store.all("default");
+  assert.equal(a.location?.system, "claude-code");
+  assert.equal(a.location?.environment, "local");
+  assert.equal(a.location?.path, process.cwd());
+  assert.equal(a.location?.device, hostname());
+  assert.match(a.location?.session ?? "", /^run_[0-9a-f]{12}$/);
+  assert.ok(!("url" in (a.location ?? {})), "url must never be stamped");
+  assert.equal(a.location?.session, b.location?.session);
+}));
+
+test("location enrichment: caller-supplied fields are preserved verbatim, missing ones filled", async () => withActorEnv(ENV, async () => {
+  const store = new SqliteStore(":memory:");
+  const client = await connect(store);
+  await client.callTool({ name: "retrace_log", arguments: {
+    action: "edited", artifacts: [{ id: "repo:rpg#a.ts", kind: "file" }],
+    location: { system: "claude-code", environment: "staging", path: "src/x.ts" },
+  } });
+  const [evt] = await store.all("default");
+  assert.equal(evt.location?.system, "claude-code");
+  assert.equal(evt.location?.environment, "staging"); // caller wins over default "local"
+  assert.equal(evt.location?.path, "src/x.ts");
+  assert.equal(evt.location?.device, hostname());
+  assert.match(evt.location?.session ?? "", /^run_/);
+}));
+
+test("location enrichment: retrace_instruct events carry a location (env-only)", async () => withActorEnv(ENV, async () => {
+  const store = new SqliteStore(":memory:");
+  const client = await connect(store);
+  await client.callTool({ name: "retrace_instruct", arguments: { human_id: "jordan@example.com", instruction: "x" } });
+  const [evt] = await store.all("default");
+  assert.equal(evt.location?.system, "claude-code");
+  assert.equal(evt.location?.environment, "local");
+  assert.equal(evt.location?.path, process.cwd());
+  assert.equal(evt.location?.device, hostname());
+  assert.match(evt.location?.session ?? "", /^run_/);
+}));
+
+test("location enrichment: RETRACE_SYSTEM/RETRACE_ENVIRONMENT/RETRACE_SESSION override; RETRACE_ENV honored as fallback", async () => withActorEnv({ ...ENV, RETRACE_SYSTEM: "cursor", RETRACE_ENVIRONMENT: "ci", RETRACE_SESSION: "sess-42" }, async () => {
+  const store = new SqliteStore(":memory:");
+  const client = await connect(store);
+  await client.callTool({ name: "retrace_log", arguments: { action: "edited", artifacts: [{ id: "repo:rpg#a.ts" }] } });
+  const [evt] = await store.all("default");
+  assert.equal(evt.location?.system, "cursor");
+  assert.equal(evt.location?.environment, "ci");
+  assert.equal(evt.location?.session, "sess-42");
+  await withActorEnv({ ...ENV, RETRACE_ENV: "staging" }, async () => {
+    const store2 = new SqliteStore(":memory:");
+    const c2 = await connect(store2);
+    await c2.callTool({ name: "retrace_log", arguments: { action: "edited", artifacts: [{ id: "repo:rpg#b.ts" }] } });
+    const [e2] = await store2.all("default");
+    assert.equal(e2.location?.environment, "staging");
+  });
 }));

@@ -68,7 +68,10 @@ export const Location = z.object({
   environment: z.string().optional(), // prod, staging, local, ...
   device: z.string().optional(),
   system: z.string().optional(), // github, gdocs, cursor, claude-code, ...
+  /** Run/session id of the producing process (backlog #15; body-only, like every location field) */
+  session: z.string().optional(),
 });
+export type Location = z.infer<typeof Location>;
 
 export const Method = z.object({
   tool: z.string().optional(), // e.g. "Edit", "git commit", "gdocs-ui"
