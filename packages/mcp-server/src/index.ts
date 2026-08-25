@@ -25,7 +25,7 @@ import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import {
-  Actor, Action, ArtifactRef, Change, Location, Method, EventInput,
+  Actor, Action, ArtifactRef, Change, Location, Method, EventInput, applyDefaultRoles,
   appendEvent, verifyProject, explainEvent, renderTimeline, renderWhyChain, describeEvent,
   buildExportBundle, verifyExportBundle, renderReportHtml, parseSigningKey, newShareId,
   buildLineage, renderLineageDot, renderLineageMermaid, renderLineageText,
@@ -136,7 +136,12 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
         project: z.string().optional().describe(`Project name (default: ${DEFAULT_PROJECT}). Omit it — the server pins writes to RETRACE_PROJECT and rejects other names.`),
         action: Action.describe("Verb from the controlled vocabulary"),
         action_detail: z.string().optional().describe("Required when action=other; free-text verb"),
-        artifacts: z.array(ArtifactRef).min(1).describe("Artifacts touched, e.g. {id:'repo:slcwitit/rpg#src/fight.ts', kind:'file'}"),
+        artifacts: z.array(ArtifactRef).min(1).describe(
+          "Artifacts touched, e.g. {id:'repo:slcwitit/rpg#src/fight.ts', kind:'file', role:'both'}. role (PROV) = 'used' (input), " +
+          "'generated' (output) or 'both'. Omit it and the verb decides: read → used; created → generated; edited/moved/renamed → both; " +
+          "executed/sent/received/approved/rejected → used; deleted/other → unspecified. Always set role explicitly for OUTPUTS of an " +
+          "executed/sent action (a deployment, a report, a message) — the default treats those refs as inputs.",
+        ),
         intent: z.string().optional().describe("WHY: the reason for this action, in one sentence"),
         caused_by: z.string().optional().describe("Event id of the instruction/action that caused this one"),
         actor: Actor.partial().optional().describe("Override the default actor (defaults from env)"),
@@ -151,11 +156,13 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
     async (args) => {
       guardAction(args.action);
       const actor = resolveActor(args.actor); // actor lock first — a rejected write must not get this far
-      // WHERE enrichment (backlog #15): after the actor lock, before sealing (local appendEvent or the Worker's POST /events).
+      // WHERE enrichment (backlog #15) and PROV role fill-absent: after the actor lock, before sealing (local appendEvent
+      // or the Worker's POST /events). A caller-supplied role is never overwritten; refs whose verb has no default stay absent.
       const input = EventInput.parse({
         ...args,
         project: writeProject(args.project),
         actor,
+        artifacts: applyDefaultRoles(args.action, args.artifacts),
         location: enrichLocation(args.location, locationDefaults),
       });
       const { event, deduped } = remote ? await remote.append(input) : await appendEvent(store, input);
@@ -177,7 +184,7 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
         project: z.string().optional(),
         human_id: z.string().describe("Who gave the instruction (email or name)"),
         instruction: z.string().describe("The instruction text (or a faithful summary)"),
-        artifacts: z.array(ArtifactRef).optional().describe("What the instruction is about; defaults to a task artifact"),
+        artifacts: z.array(ArtifactRef).optional().describe("What the instruction is about; defaults to a task artifact (role generated). Supplied refs keep whatever role you give them — an instruction is about a file, it does not generate it."),
         timestamp: z.string().optional().describe("ISO 8601; defaults to now"),
       },
     },
@@ -187,7 +194,9 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
         project: writeProject(args.project),
         actor,
         action: "instructed",
-        artifacts: args.artifacts ?? [{ id: `task:${args.instruction.slice(0, 60)}`, kind: "task", label: args.instruction.slice(0, 60) }],
+        // PROV role: the instruction brings its task into being (generated). Caller-supplied refs are stored as given —
+        // the instruction is ABOUT them, so no default is applied (absent = unspecified).
+        artifacts: args.artifacts ?? [{ id: `task:${args.instruction.slice(0, 60)}`, kind: "task", label: args.instruction.slice(0, 60), role: "generated" as const }],
         intent: args.instruction,
         timestamp: args.timestamp,
         method: { tool: "chat", automated: false },

@@ -211,6 +211,41 @@ test("actor lock: RETRACE_ACTOR_LOCK=0 restores caller overrides for both tools"
   ]);
 }));
 
+// ---- PROV artifact role (used / generated) on the MCP write path ----
+
+test("artifact role: retrace_log fills the verb default only where the caller said nothing", async () => withActorEnv(ENV, async () => {
+  const store = new SqliteStore(":memory:");
+  const client = await connect(store);
+  const log = (action: string, artifacts: any[]) => client.callTool({ name: "retrace_log", arguments: { action, artifacts } });
+  await log("read", [{ id: "repo:rpg#a.ts", kind: "file" }]);
+  await log("edited", [{ id: "repo:rpg#a.ts", kind: "file" }]);
+  await log("created", [{ id: "repo:rpg#b.ts", kind: "file" }]);
+  await log("executed", [{ id: "cmd:npm test" }, { id: "deployment:prod", kind: "deployment", role: "generated" }]);
+  await log("deleted", [{ id: "repo:rpg#old.ts" }]);
+  await log("read", [{ id: "repo:rpg#c.ts", role: "both" }]); // caller override survives even against a verb default
+  const [rd, ed, cr, ex, del, ov] = await store.all("default");
+  assert.equal(rd.artifacts[0].role, "used");
+  assert.equal(ed.artifacts[0].role, "both");
+  assert.equal(cr.artifacts[0].role, "generated");
+  assert.deepEqual(ex.artifacts.map((a) => a.role), ["used", "generated"], "executed: refs default to inputs, the caller-marked output wins");
+  assert.ok(!("role" in del.artifacts[0]), "deleted has no default — invalidation is not a role");
+  assert.equal(ov.artifacts[0].role, "both");
+  // and the roles are inside the sealed content
+  assert.equal((await client.callTool({ name: "retrace_verify", arguments: {} }) as any).structuredContent.ok, true);
+  const hist = (await client.callTool({ name: "retrace_history", arguments: { artifact_id: "repo:rpg#a.ts" } })) as any;
+  assert.deepEqual(hist.structuredContent.events.map((e: any) => e.artifacts[0].role), ["used", "both"]);
+}));
+
+test("artifact role: retrace_instruct's default task is generated; caller-supplied refs are stored as given", async () => withActorEnv(ENV, async () => {
+  const store = new SqliteStore(":memory:");
+  const client = await connect(store);
+  await client.callTool({ name: "retrace_instruct", arguments: { human_id: "jordan@example.com", instruction: "add a jab counter" } });
+  await client.callTool({ name: "retrace_instruct", arguments: { human_id: "jordan@example.com", instruction: "review this", artifacts: [{ id: "repo:rpg#a.ts", kind: "file" }, { id: "task:review", kind: "task", role: "generated" }] } });
+  const [def, given] = await store.all("default");
+  assert.deepEqual(def.artifacts, [{ id: "task:add a jab counter", kind: "task", label: "add a jab counter", role: "generated" }]);
+  assert.deepEqual(given.artifacts, [{ id: "repo:rpg#a.ts", kind: "file" }, { id: "task:review", kind: "task", role: "generated" }]);
+}));
+
 // ---- WHERE enrichment (backlog #15) ----
 
 test("enrichLocation: fills absent fields only, never overwrites caller values", () => {
