@@ -12,8 +12,11 @@
  *
  * Artifact ids line up with the git adapter: `pr:<owner/repo>#<n>`, `commit:<owner/repo>@<sha12>`, `repo:<owner/repo>#<path>`.
  * WHY: PR body / review body; `caused_by` from a `Retrace-Caused-By: evt_…` line in the PR body.
+ * PROV role (what the webhook authoritatively knows): opened → PR generated · synchronize → PR both · review/comment → PR used ·
+ *   merged → PR used + merge commit generated · workflow_run → run generated, PRs/commit used · push → commit + files generated ·
+ *   closed-unmerged / ready_for_review / converted_to_draft / edited → absent (state changes, not content).
  */
-import { EventInput, Actor } from "./schema.js";
+import { EventInput, Actor, ArtifactRole } from "./schema.js";
 
 const enc = new TextEncoder();
 const subtle: SubtleCrypto = (globalThis as any).crypto.subtle;
@@ -54,7 +57,7 @@ export function mapGithubWebhook(event: string, payload: any, opts: GithubMapOpt
   const project = opts.project ?? repoFull;
   const idem = (suffix: string) => (opts.deliveryId ? `gh:${opts.deliveryId}` : `gh:${repoFull}:${suffix}`);
   const where = (url?: string) => ({ system: "github", url });
-  const prArtifact = (pr: any) => ({ id: `pr:${repoFull}#${pr.number}`, kind: "pr", label: `PR #${pr.number} ${pr.title ?? ""}`.trim(), derived_from: pr.head?.sha ? [`commit:${repoFull}@${pr.head.sha.slice(0, 12)}`] : undefined });
+  const prArtifact = (pr: any, role?: ArtifactRole) => ({ id: `pr:${repoFull}#${pr.number}`, kind: "pr", label: `PR #${pr.number} ${pr.title ?? ""}`.trim(), derived_from: pr.head?.sha ? [`commit:${repoFull}@${pr.head.sha.slice(0, 12)}`] : undefined, ...(role ? { role } : {}) });
 
   if (event === "pull_request") {
     const pr = payload.pull_request; const a = payload.action;
@@ -63,10 +66,10 @@ export function mapGithubWebhook(event: string, payload: any, opts: GithubMapOpt
       location: where(pr.html_url), caused_by: causedByFrom(pr.body), method: { tool: "github", automated: false, params: { action: a, head: pr.head?.ref, base: pr.base?.ref, head_sha: pr.head?.sha, additions: pr.additions, deletions: pr.deletions, changed_files: pr.changed_files } },
       idempotency_key: idem(`pr${pr.number}:${a}:${pr.updated_at}`), tags: ["github", "pr"],
     };
-    if (a === "opened" || a === "reopened") return [{ ...base, action: "created", intent: trim(pr.body) ?? `Opened PR: ${pr.title}`, change: { summary: `${pr.title} (${pr.head?.ref} → ${pr.base?.ref})`, after_hash: pr.head?.sha } }];
-    if (a === "synchronize") return [{ ...base, action: "edited", intent: `pushed new commits to PR #${pr.number}`, change: { before_hash: payload.before, after_hash: payload.after, summary: `head ${String(payload.before).slice(0, 7)} → ${String(payload.after).slice(0, 7)}` } }];
+    if (a === "opened" || a === "reopened") return [{ ...base, action: "created", artifacts: [prArtifact(pr, "generated")], intent: trim(pr.body) ?? `Opened PR: ${pr.title}`, change: { summary: `${pr.title} (${pr.head?.ref} → ${pr.base?.ref})`, after_hash: pr.head?.sha } }];
+    if (a === "synchronize") return [{ ...base, action: "edited", artifacts: [prArtifact(pr, "both")], intent: `pushed new commits to PR #${pr.number}`, change: { before_hash: payload.before, after_hash: payload.after, summary: `head ${String(payload.before).slice(0, 7)} → ${String(payload.after).slice(0, 7)}` } }];
     if (a === "closed") {
-      if (pr.merged) return [{ ...base, actor: githubActor(pr.merged_by ?? payload.sender), action: "merged", timestamp: pr.merged_at ?? base.timestamp, intent: trim(pr.body) ?? `Merged PR #${pr.number}`, change: { summary: `${pr.title} — merged ${pr.head?.ref} into ${pr.base?.ref} (+${pr.additions ?? "?"} −${pr.deletions ?? "?"}, ${pr.changed_files ?? "?"} files)`, after_hash: pr.merge_commit_sha }, artifacts: [prArtifact(pr), ...(pr.merge_commit_sha ? [{ id: `commit:${repoFull}@${pr.merge_commit_sha.slice(0, 12)}`, kind: "commit", label: `${repoFull}@${pr.merge_commit_sha.slice(0, 7)}`, derived_from: [`pr:${repoFull}#${pr.number}`] }] : [])] , tags: ["github", "pr", "merge"] }];
+      if (pr.merged) return [{ ...base, actor: githubActor(pr.merged_by ?? payload.sender), action: "merged", timestamp: pr.merged_at ?? base.timestamp, intent: trim(pr.body) ?? `Merged PR #${pr.number}`, change: { summary: `${pr.title} — merged ${pr.head?.ref} into ${pr.base?.ref} (+${pr.additions ?? "?"} −${pr.deletions ?? "?"}, ${pr.changed_files ?? "?"} files)`, after_hash: pr.merge_commit_sha }, artifacts: [prArtifact(pr, "used"), ...(pr.merge_commit_sha ? [{ id: `commit:${repoFull}@${pr.merge_commit_sha.slice(0, 12)}`, kind: "commit", label: `${repoFull}@${pr.merge_commit_sha.slice(0, 7)}`, derived_from: [`pr:${repoFull}#${pr.number}`], role: "generated" as const }] : [])] , tags: ["github", "pr", "merge"] }];
       return [{ ...base, action: "other", action_detail: "closed", intent: `closed PR #${pr.number} without merging` }];
     }
     if (a === "ready_for_review" || a === "converted_to_draft" || a === "edited") return [{ ...base, action: "other", action_detail: a, intent: `${a.replace(/_/g, " ")}: ${pr.title}` }];
@@ -77,7 +80,7 @@ export function mapGithubWebhook(event: string, payload: any, opts: GithubMapOpt
     const action = state === "approved" ? "approved" : state === "changes_requested" ? "rejected" : "other";
     return [{
       project, actor: githubActor(r.user ?? payload.sender), action, action_detail: action === "other" ? "reviewed" : undefined,
-      artifacts: [prArtifact(pr)], timestamp: r.submitted_at ?? new Date().toISOString(), location: where(r.html_url ?? pr.html_url),
+      artifacts: [prArtifact(pr, "used")], timestamp: r.submitted_at ?? new Date().toISOString(), location: where(r.html_url ?? pr.html_url),
       intent: trim(r.body) ?? (state === "approved" ? `approved PR #${pr.number}` : state === "changes_requested" ? `requested changes on PR #${pr.number}` : `reviewed PR #${pr.number}`),
       caused_by: causedByFrom(r.body) ?? causedByFrom(pr.body), method: { tool: "github-review", automated: false, params: { state, commit: r.commit_id } },
       idempotency_key: idem(`review${r.id}`), tags: ["github", "review"],
@@ -86,7 +89,7 @@ export function mapGithubWebhook(event: string, payload: any, opts: GithubMapOpt
   if (event === "issue_comment" && payload.action === "created" && payload.issue?.pull_request) {
     const c = payload.comment, n = payload.issue.number;
     return [{
-      project, actor: githubActor(c.user ?? payload.sender), action: "sent", artifacts: [{ id: `pr:${repoFull}#${n}`, kind: "pr", label: `PR #${n} ${payload.issue.title ?? ""}`.trim() }],
+      project, actor: githubActor(c.user ?? payload.sender), action: "sent", artifacts: [{ id: `pr:${repoFull}#${n}`, kind: "pr", label: `PR #${n} ${payload.issue.title ?? ""}`.trim(), role: "used" as const }],
       timestamp: c.created_at, location: where(c.html_url), intent: trim(c.body), caused_by: causedByFrom(c.body), method: { tool: "github-comment", automated: false },
       idempotency_key: idem(`comment${c.id}`), tags: ["github", "comment"],
     }];
@@ -95,7 +98,7 @@ export function mapGithubWebhook(event: string, payload: any, opts: GithubMapOpt
     const w = payload.workflow_run; const prs: any[] = w.pull_requests ?? [];
     return [{
       project, actor: { type: "system", id: "github-actions", display_name: `GitHub Actions · ${w.name}` }, action: "executed",
-      artifacts: [{ id: `run:${repoFull}#${w.id}`, kind: "workflow_run", label: `${w.name} #${w.run_number}` }, ...prs.map((p) => ({ id: `pr:${repoFull}#${p.number}`, kind: "pr", label: `PR #${p.number}` })), { id: `commit:${repoFull}@${String(w.head_sha).slice(0, 12)}`, kind: "commit", label: `${repoFull}@${String(w.head_sha).slice(0, 7)}` }],
+      artifacts: [{ id: `run:${repoFull}#${w.id}`, kind: "workflow_run", label: `${w.name} #${w.run_number}`, role: "generated" as const }, ...prs.map((p) => ({ id: `pr:${repoFull}#${p.number}`, kind: "pr", label: `PR #${p.number}`, role: "used" as const })), { id: `commit:${repoFull}@${String(w.head_sha).slice(0, 12)}`, kind: "commit", label: `${repoFull}@${String(w.head_sha).slice(0, 7)}`, role: "used" as const }],
       timestamp: w.updated_at, duration_ms: w.run_started_at && w.updated_at ? Date.parse(w.updated_at) - Date.parse(w.run_started_at) : undefined,
       location: where(w.html_url), intent: `${w.name} on ${w.head_branch}: ${w.conclusion}`, change: { summary: `conclusion: ${w.conclusion}`, after_hash: w.head_sha },
       method: { tool: "github-actions", automated: true, params: { event: w.event, conclusion: w.conclusion, attempt: w.run_attempt } },
@@ -105,7 +108,7 @@ export function mapGithubWebhook(event: string, payload: any, opts: GithubMapOpt
   if (event === "push" && opts.includePush) {
     return (payload.commits ?? []).map((c: any) => ({
       project, actor: { type: "human" as const, id: c.author?.email ?? `github:${c.author?.username}`, display_name: c.author?.name }, action: "committed" as const,
-      artifacts: [{ id: `commit:${repoFull}@${String(c.id).slice(0, 12)}`, kind: "commit", label: `${repoFull}@${String(c.id).slice(0, 7)}` }, ...[...(c.added ?? []), ...(c.modified ?? []), ...(c.removed ?? [])].map((f: string) => ({ id: `repo:${repoFull}#${f}`, kind: "file", label: f }))],
+      artifacts: [{ id: `commit:${repoFull}@${String(c.id).slice(0, 12)}`, kind: "commit", label: `${repoFull}@${String(c.id).slice(0, 7)}`, role: "generated" as const }, ...[...(c.added ?? []), ...(c.modified ?? []), ...(c.removed ?? [])].map((f: string) => ({ id: `repo:${repoFull}#${f}`, kind: "file", label: f, role: "generated" as const }))],
       timestamp: c.timestamp, location: where(c.url), intent: c.message, method: { tool: "git", automated: false }, idempotency_key: `git:${c.id}`, tags: ["github", "push"],
     }));
   }

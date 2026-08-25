@@ -26,6 +26,12 @@ test("drive activity → events: actors resolved, co-editors split, kinds/urls, 
   const renamed = evs.find((e) => e.action === "renamed")!;
   assert.equal(renamed.artifacts[0].id, "gdoc:SHEET1"); assert.equal(renamed.artifacts[0].label, "Membership pricing model");
   assert.match(renamed.change!.summary!, /renamed "Untitled" → "Membership pricing model"/);
+  // PROV role from the Drive verb: create → generated, edit/rename → both, comment/share → used, delete → absent
+  assert.equal(created.artifacts[0].role, "generated");
+  assert.ok(edits.every((e) => e.artifacts[0].role === "both"));
+  assert.equal(renamed.artifacts[0].role, "both");
+  assert.equal(comment.artifacts[0].role, "used"); assert.equal(shared.artifacts[0].role, "used");
+  assert.ok(!("role" in del.artifacts[0]));
   // rename label comes from newTitle even when the queried target title is stale
   const rn = mapDriveActivities({ activities: [{ primaryActionDetail: { rename: { oldTitle: "Untitled", newTitle: "Fight plan" } }, actors: [{ user: { knownUser: { personName: "people/999" } } }], targets: [{ driveItem: { name: "items/D", title: "Untitled", mimeType: "application/vnd.google-apps.document" } }], timestamp: "2026-01-01T00:00:00Z" }] }, "p");
   assert.equal(rn[0].action, "renamed"); assert.equal(rn[0].artifacts[0].label, "Fight plan");

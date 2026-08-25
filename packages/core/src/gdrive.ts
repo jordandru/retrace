@@ -11,12 +11,13 @@
  *   WHAT  primaryActionDetail: create→created, edit→edited, delete→deleted, restore→other:restored, rename→renamed, move→moved,
  *         permissionChange→other:shared, comment→sent (post/reply/resolve), dlpChange/settingsChange/appliedLabelChange→other
  *         artifacts: gdoc:<fileId> (kind from mimeType) for each target; folders as gfolder:<id>
+ *         role (PROV): create→generated, edit/rename/move→both, comment/permissionChange→used, everything else absent (driveRole)
  *   WHEN  timestamp or timeRange.endTime (edits are aggregated by Google into ranges; duration_ms = range length)
  *   WHERE system=google-drive, url=docs link
  *   WHY   free text summary (no intent available from Drive) — agents can back-link with retrace_log if needed
  *   HOW   tool=google-docs|sheets|slides|drive, manual
  */
-import { EventInput, Actor, Action } from "./schema.js";
+import { EventInput, Actor, Action, ArtifactRole } from "./schema.js";
 
 export interface DriveActorInfo { email?: string; name?: string }
 export interface DrivePayload { project?: string; activities: any[]; actors?: Record<string, DriveActorInfo>; source?: string }
@@ -63,6 +64,16 @@ function detailToAction(d: any, actors: Record<string, DriveActorInfo> = {}): { 
   if (d.reference) return { action: "other", detail: "referenced", summary: "referenced from another app" };
   return { action: "other", detail: Object.keys(d)[0] ?? "activity", summary: Object.keys(d)[0] ?? "activity" };
 }
+/** PROV role of the targets, from what Drive authoritatively reports: create → generated; edit/rename/move → both (the
+ *  file is read and rewritten); comment/permission change → used (acted on, content unchanged); delete/restore/dlp/
+ *  settings/label/reference → absent (invalidation and administrative changes are not roles). */
+function driveRole(d: any): ArtifactRole | undefined {
+  if (!d) return undefined;
+  if (d.create) return "generated";
+  if (d.edit || d.rename || d.move) return "both";
+  if (d.comment || d.permissionChange) return "used";
+  return undefined;
+}
 function permDesc(p: any, actors: Record<string, DriveActorInfo> = {}): string {
   const pn = p.user?.knownUser?.personName;
   const who = pn ? (actors[pn]?.email ?? actors[pn]?.name ?? pn) : (p.anyone ? "anyone" : p.domain?.name ?? p.group?.email ?? "someone");
@@ -77,9 +88,10 @@ export function mapDriveActivities(payload: DrivePayload, defaultProject = "goog
     const targets = (act.targets ?? []).map((t: any) => t.driveItem ?? t.fileComment?.parent ?? t.drive?.root).filter(Boolean);
     // For renames the target title reflects query time, not event time — the new title is the as-at label
     const renamedTo = act.primaryActionDetail?.rename?.newTitle;
+    const role = driveRole(act.primaryActionDetail);
     const arts = targets.map((di: any) => {
       const id = itemId(di.name); const meta = fileMeta(di.mimeType);
-      return { id: `${meta.kind === "folder" ? "gfolder" : "gdoc"}:${id}`, kind: meta.kind, label: renamedTo ?? di.title ?? id };
+      return { id: `${meta.kind === "folder" ? "gfolder" : "gdoc"}:${id}`, kind: meta.kind, label: renamedTo ?? di.title ?? id, ...(role ? { role } : {}) };
     });
     if (!arts.length) continue;
     const primary = detailToAction(act.primaryActionDetail, actors);
