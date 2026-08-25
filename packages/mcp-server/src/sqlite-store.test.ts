@@ -6,6 +6,19 @@ import { SqliteStore } from "./sqlite-store.js";
 const ev = (over: Partial<EventInput>): EventInput => ({ project: "junk", actor: { type: "agent", id: "claude" }, action: "edited", artifacts: [{ id: "a" }], ...over });
 const audit = (store: SqliteStore) => store.head("ops").then((h) => sealEvent(ev({ project: "ops", action: "deleted", artifacts: [{ id: "project:junk" }] }), h));
 
+test("SqliteStore: artifact role is body-only — survives insert → get/all/history, no index column involved", async () => {
+  const store = new SqliteStore(":memory:");
+  const { event } = await appendEvent(store, ev({ artifacts: [{ id: "in", role: "used" }, { id: "out", role: "generated" }, { id: "legacy" }] }));
+  for (const got of [await store.get(event.id), (await store.all("junk"))[0], (await store.history({ project: "junk", artifact_id: "out" }))[0]]) {
+    assert.deepEqual(got?.artifacts, [{ id: "in", role: "used" }, { id: "out", role: "generated" }, { id: "legacy" }]);
+    assert.equal(got?.hash, event.hash);
+  }
+  assert.equal((await verifyProject(store, "junk")).ok, true);
+  // the lookup index is untouched: one row per (event, artifact), nothing but ids
+  const cols = (store as any).db.prepare("PRAGMA table_info(event_artifacts)").all().map((c: any) => c.name);
+  assert.deepEqual(cols, ["event_id", "project", "artifact_id"]);
+});
+
 test("SqliteStore.deleteProject: deletes + audit insert commit together", async () => {
   const store = new SqliteStore(":memory:");
   await appendEvent(store, ev({ artifacts: [{ id: "a" }, { id: "b" }] }));

@@ -44,6 +44,18 @@ export const Action = z.enum([
 ]);
 export type Action = z.infer<typeof Action>;
 
+/**
+ * PROV role of an artifact within an event: was it an input the activity `used`, an output it `generated`, or `both`
+ * (read then rewritten). Optional — absence means "unspecified" and is a legal, permanent state: events sealed before
+ * this field existed are never backfilled or re-hashed (absence is information).
+ *   Export mapping (for a future prov exporter): used → prov:used (Activity→Entity), generated → prov:wasGeneratedBy
+ *   (Entity→Activity), both → both edges, absent → degrades to prov:wasInfluencedBy.
+ *   Distinct from `derived_from`, which is Entity→Entity (prov:wasDerivedFrom) and unchanged. Invalidation (a deleted
+ *   artifact, prov:wasInvalidatedBy) is deliberately NOT a role — a deleted ref stays absent until that is a first-class edge.
+ */
+export const ArtifactRole = z.enum(["used", "generated", "both"]);
+export type ArtifactRole = z.infer<typeof ArtifactRole>;
+
 export const ArtifactRef = z.object({
   /** Stable id for the thing being worked on, e.g. "repo:slcwitit/rpg#src/fight.ts" or "doc:abc123" */
   id: z.string().min(1),
@@ -51,8 +63,34 @@ export const ArtifactRef = z.object({
   label: z.string().optional(),
   /** Lineage: this artifact was derived from these */
   derived_from: z.array(z.string()).optional(),
+  /** PROV: input (used) / output (generated) / both. Body-only, hash-covered on new events; see ArtifactRole. */
+  role: ArtifactRole.optional(),
 });
 export type ArtifactRef = z.infer<typeof ArtifactRef>;
+
+/**
+ * Default role of an artifact ref for an action verb, for when the caller says nothing. `undefined` = leave absent.
+ *   read → used · created/committed/merged → generated · edited/moved/renamed → both (the prior state is read, the new
+ *   one written) · executed/sent/received/approved/rejected → used (the thing run/sent/reviewed was an input; an OUTPUT
+ *   such as a deployment or report must be said by the caller) · deleted/instructed/other → absent.
+ * Adapters stamp what they authoritatively know and only fall back to this where the verb alone is the truth.
+ */
+export function defaultArtifactRole(action: Action): ArtifactRole | undefined {
+  switch (action) {
+    case "read": return "used";
+    case "created": case "committed": case "merged": return "generated";
+    case "edited": case "moved": case "renamed": return "both";
+    case "executed": case "sent": case "received": case "approved": case "rejected": return "used";
+    default: return undefined; // deleted, instructed, other
+  }
+}
+
+/** Fill `role` from defaultArtifactRole ONLY where a ref has none — a caller-supplied role is never overwritten. Refs
+ *  that get no default come back as they were (no `role` key, so hashes of role-less inputs are unaffected). */
+export function applyDefaultRoles<T extends ArtifactRef>(action: Action, artifacts: T[]): T[] {
+  const def = defaultArtifactRole(action);
+  return artifacts.map((a) => (a.role !== undefined || def === undefined ? a : { ...a, role: def }));
+}
 
 export const Change = z.object({
   before_hash: z.string().optional(),

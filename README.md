@@ -143,7 +143,7 @@ REST API: `POST /events`, `GET /events/:id`, `GET /events/:id/why`, `GET /projec
 {
   "project": "boxing-rpg",
   "actor": { "type": "agent", "id": "claude-code", "model": "claude-fable-5", "on_behalf_of": "jordan" },   // WHO
-  "action": "edited", "artifacts": [{ "id": "repo:rpg#src/fight.ts", "kind": "file" }],                    // WHAT
+  "action": "edited", "artifacts": [{ "id": "repo:rpg#src/fight.ts", "kind": "file", "role": "both" }],     // WHAT · role = PROV used | generated | both (optional; absent = unspecified)
   "change": { "summary": "add jab counter", "after_hash": "…" },
   "timestamp": "2026-08-16T19:21:54Z",                                                                    // WHEN
   "location": { "path": "src/fight.ts", "system": "claude-code", "environment": "local" },                // WHERE

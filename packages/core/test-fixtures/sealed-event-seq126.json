@@ -1,0 +1,62 @@
+{
+  "project": "retrace",
+  "actor": {
+    "type": "agent",
+    "id": "claude-code",
+    "model": "claude-fable-5",
+    "on_behalf_of": "jordansboxing@gmail.com"
+  },
+  "action": "committed",
+  "artifacts": [
+    {
+      "id": "commit:jordandru/retrace@b382cc387910",
+      "kind": "commit",
+      "label": "jordandru/retrace@b382cc3",
+      "derived_from": [
+        "commit:jordandru/retrace@bacabed9e0e3"
+      ]
+    },
+    {
+      "id": "repo:jordandru/retrace#claude/backlog.md",
+      "kind": "file",
+      "label": "claude/backlog.md"
+    }
+  ],
+  "change": {
+    "before_hash": "bacabed9e0e369132745677d17e80c31cf50192b",
+    "after_hash": "b382cc3879106c7a6cba0af6587bfaf2c9e4a57a",
+    "summary": "1 file, +1 −17"
+  },
+  "timestamp": "2026-08-25T03:49:45.000Z",
+  "location": {
+    "path": "/home/jordandrumiler/provenance/retrace",
+    "environment": "local",
+    "device": "JordansLaptop",
+    "system": "git"
+  },
+  "intent": "Reduce claude/backlog.md to a pointer at the canonical Project backlog\n\nBacklog #11 reassessment 2026-08-24: the claude.ai Project\n(retrace-build-status.md → Backlog) is canonical; the repo file now only\npoints there instead of accumulating a parallel backlog.",
+  "caused_by": "evt_fde601e862df48f2ba0a627cbede6ee4",
+  "method": {
+    "tool": "git",
+    "params": {
+      "branch": "main",
+      "parents": [
+        "bacabed9e0e369132745677d17e80c31cf50192b"
+      ],
+      "files": 1,
+      "insertions": 1,
+      "deletions": 17,
+      "sha": "b382cc3879106c7a6cba0af6587bfaf2c9e4a57a"
+    },
+    "automated": true
+  },
+  "idempotency_key": "git:b382cc3879106c7a6cba0af6587bfaf2c9e4a57a",
+  "tags": [
+    "git"
+  ],
+  "id": "evt_30ffc35d5f5d4e50850e9feb80e8f175",
+  "seq": 126,
+  "prev_hash": "92d18a667c0d3bd05a3f735b352ece1d8f2bfe0b06556881a0cde527e8aeec70",
+  "hash": "73793107015d76d66b257fcae57df5faa722bde9f79868bc84b48dff607242c1",
+  "received_at": "2026-08-25T03:49:45.852Z"
+}
