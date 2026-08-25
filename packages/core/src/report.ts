@@ -1,6 +1,7 @@
 /** Printable provenance report (HTML → "Save as PDF" in any browser). Self-contained, no scripts required. */
 import { ExportBundle, ExportVerdict } from "./export.js";
 import { latestArtifactLabels } from "./lineage.js";
+import { roleMark } from "./explain.js";
 import { Event } from "./schema.js";
 
 const esc = (s: unknown) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]!));
@@ -29,7 +30,7 @@ export function renderReportHtml(bundle: ExportBundle, verdict?: ExportVerdict, 
     return `<tr class="${esc(e.actor.type)}">
       <td class="mono">#${e.seq}<br><small>${esc(new Date(e.timestamp).toISOString().replace("T", " ").slice(0, 19))}Z</small></td>
       <td><b>${esc(actorName(e))}</b><br><small>${esc(e.actor.type)}${e.actor.model ? " · " + esc(e.actor.model) : ""}${e.actor.on_behalf_of ? "<br>for " + esc(e.actor.on_behalf_of) : ""}</small></td>
-      <td><b>${esc(verb(e))}</b> ${e.artifacts.map((a) => `<code>${esc(labels.get(a.id) ?? a.label ?? a.id)}</code>`).join(" ")}${e.change?.summary ? `<br><small>${esc(e.change.summary)}</small>` : ""}</td>
+      <td><b>${esc(verb(e))}</b> ${e.artifacts.map((a) => `${roleMark(a.role) ? `<small class="role">${roleMark(a.role)}</small>` : ""}<code>${esc(labels.get(a.id) ?? a.label ?? a.id)}</code>`).join(" ")}${e.change?.summary ? `<br><small>${esc(e.change.summary)}</small>` : ""}</td>
       <td><small>${esc(where)}</small></td>
       <td>${why}</td>
       <td><small>${esc(how)}</small></td>
@@ -47,6 +48,7 @@ export function renderReportHtml(bundle: ExportBundle, verdict?: ExportVerdict, 
  tr.human td:first-child{border-left:3px solid #f2a93b} tr.agent td:first-child{border-left:3px solid #5aa9ff} tr.system td:first-child{border-left:3px solid #9aa3b5}
  code{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:10.5px;background:#f2f3f5;padding:0 3px;border-radius:3px}
  .mono{font-family:ui-monospace,Menlo,Consolas,monospace} small{color:#555}
+ .role{font-size:8.5px;text-transform:uppercase;letter-spacing:.05em;color:#777;margin-right:2px;vertical-align:middle}
  .ok{color:#178f4f;font-weight:600} .bad{color:#d1303f;font-weight:600}
  .box{border:1px solid #ddd;border-radius:6px;padding:10px 12px;background:#fafbfc}
  .print{position:fixed;top:12px;right:12px;padding:8px 12px;border:1px solid #bbb;border-radius:6px;background:#fff;cursor:pointer}

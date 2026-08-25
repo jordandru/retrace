@@ -1,5 +1,10 @@
 /** Human-readable rendering of events — used by the MCP server and CLI. */
-import { Event } from "./schema.js";
+import { ArtifactRole, Event } from "./schema.js";
+
+/** Short PROV role marker for an artifact ref: "in" (used) · "out" (generated) · "in/out" (both) · "" when unspecified. */
+export function roleMark(role?: ArtifactRole): string {
+  return role === "used" ? "in" : role === "generated" ? "out" : role === "both" ? "in/out" : "";
+}
 
 export function describeActor(e: Event): string {
   const a = e.actor;
@@ -10,7 +15,7 @@ export function describeActor(e: Event): string {
 }
 
 export function describeEvent(e: Event): string {
-  const arts = e.artifacts.map((a) => a.label ?? a.id).join(", ");
+  const arts = e.artifacts.map((a) => { const m = roleMark(a.role); return (a.label ?? a.id) + (m ? ` (${m})` : ""); }).join(", ");
   const verb = e.action === "other" ? e.action_detail ?? "did something to" : e.action;
   const where = e.location?.path ?? e.location?.url ?? e.location?.system ?? "";
   const how = e.method?.tool ? ` via ${e.method.tool}` : "";

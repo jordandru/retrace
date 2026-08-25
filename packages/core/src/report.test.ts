@@ -38,6 +38,15 @@ test("report: why cell escapes intent, caused_by, causing actor name and verb (p
   assert.ok(whyCell && whyCell[0].includes("<br>"), "multi-part why keeps its <br> join");
 });
 
+test("report: artifact cells carry an in/out role marker; a role-less ref renders unchanged", () => {
+  const html = renderReportHtml(bundle([evt({ artifacts: [{ id: "a", role: "used" }, { id: "b", role: "generated" }, { id: "c", role: "both" }, { id: "d" }] })]));
+  assert.ok(html.includes('<small class="role">in</small><code>a</code>'));
+  assert.ok(html.includes('<small class="role">out</small><code>b</code>'));
+  assert.ok(html.includes('<small class="role">in/out</small><code>c</code>'));
+  assert.ok(html.includes(" <code>d</code>"), "no marker for an unspecified role");
+  assert.ok(!html.includes('</small><code>d</code>'));
+});
+
 test("report: row class attribute cannot be escaped out of by a hostile actor.type", () => {
   const weird = evt({ actor: { type: '"><script>alert(4)</script>' as any, id: "x" } });
   const html = renderReportHtml(bundle([weird]));

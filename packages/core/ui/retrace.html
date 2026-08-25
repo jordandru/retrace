@@ -52,6 +52,7 @@
   .chip { display: inline-block; font-family: var(--mono); font-size: 11px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 4px; padding: 1px 6px; margin-right: 4px; cursor: pointer; }
   .chip:hover { border-color: var(--accent); }
   .chip.more { color: var(--accent); border-style: dashed; }
+  .chip .role { font-style: normal; font-size: 9px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin-right: 4px; }
   #detail h2 { font-size: 14px; margin: 0 0 8px; color: var(--muted); font-weight: 500; text-transform: uppercase; letter-spacing: .08em; }
   .kv { display: grid; grid-template-columns: 62px 1fr; gap: 6px 10px; margin-bottom: 14px; }
   .kv .k { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; padding-top: 2px; }
@@ -169,6 +170,10 @@
   const actorTag = (a) => a.type === "agent" ? (a.model ? ` · ${a.model}` : " · agent") : a.type === "system" ? " · system" : "";
   const verbOf = (e) => e.action === "other" ? (e.action_detail || "acted on") : e.action;
   const artLabel = (a) => a.label || a.id;
+  // PROV role of a ref within its event: in (used) · out (generated) · in/out (both); no marker when unspecified.
+  const roleMark = (r) => r === "used" ? "in" : r === "generated" ? "out" : r === "both" ? "in/out" : "";
+  const roleTitle = (r) => r === "used" ? " · used (input)" : r === "generated" ? " · generated (output)" : r === "both" ? " · used and generated" : "";
+  const roleTag = (a) => roleMark(a.role) ? `<i class="role">${roleMark(a.role)}</i>` : "";
   const whereText = (loc) => loc ? [loc.system, loc.environment, loc.path || loc.url, loc.device].filter(Boolean).join(" · ") : "";
   // Latest known label per artifact id: the label on the last event (by seq) that carries one.
   // Used wherever the UI names an artifact; the event detail pane keeps each event's as-at label.
@@ -239,7 +244,7 @@
       const day = fmtDay(e.timestamp);
       if (day !== lastDay) { html += `<div class="day">${esc(day)}</div>`; lastDay = day; }
       const MAX = 6; const open = state.expanded.has(e.id); const shown = open ? e.artifacts : e.artifacts.slice(0, MAX); const extra = e.artifacts.length - shown.length;
-      const arts = shown.map((a) => `<span class="chip" data-art="${esc(a.id)}" title="${esc(a.id)}">${esc(labelOf(a))}</span>`).join("") +
+      const arts = shown.map((a) => `<span class="chip" data-art="${esc(a.id)}" title="${esc(a.id + roleTitle(a.role))}">${roleTag(a)}${esc(labelOf(a))}</span>`).join("") +
         (extra > 0 ? `<span class="chip more" data-expand="${esc(e.id)}" title="show all ${e.artifacts.length} artifacts">+${extra} more</span>` : open && e.artifacts.length > MAX ? `<span class="chip more" data-expand="${esc(e.id)}" title="collapse">show less</span>` : "");
       const where = e.location?.path || e.location?.url || e.location?.system || "";
       const how = e.method?.tool ? `via ${esc(e.method.tool)}` : "";
@@ -286,7 +291,7 @@
       <h2>Event #${e.seq}</h2>
       <div class="kv">
         ${sect("Who", () => `<span style="color:var(--${e.actor.type});font-weight:600">${esc(actorName(e.actor))}</span> <span class="link">${esc(e.actor.type)}${e.actor.model ? " · " + esc(e.actor.model) : ""}${e.actor.version ? " " + esc(e.actor.version) : ""}${e.actor.on_behalf_of ? "<br>on behalf of " + esc(e.actor.on_behalf_of) : ""}</span>`)}
-        ${sect("What", () => `<b>${esc(verbOf(e))}</b> ${e.artifacts.map((a) => `<span class="chip" data-art="${esc(a.id)}">${esc(artLabel(a))}</span>${a.kind && a.kind !== "file" ? `<span class="link">${esc(a.kind)}</span>` : ""}${a.derived_from?.length ? `<div class="link">derived from ${esc(a.derived_from.join(", "))}</div>` : ""}`).join(" ")}${e.change?.summary ? `<div>${esc(e.change.summary)}</div>` : ""}${e.change?.diff ? `<pre>${esc(e.change.diff)}</pre>` : ""}${e.change?.after_hash ? `<div class="hash">after ${esc(e.change.after_hash)}</div>` : ""}`)}
+        ${sect("What", () => `<b>${esc(verbOf(e))}</b> ${e.artifacts.map((a) => `<span class="chip" data-art="${esc(a.id)}" title="${esc(a.id + roleTitle(a.role))}">${roleTag(a)}${esc(artLabel(a))}</span>${a.kind && a.kind !== "file" ? `<span class="link">${esc(a.kind)}</span>` : ""}${a.derived_from?.length ? `<div class="link">derived from ${esc(a.derived_from.join(", "))}</div>` : ""}`).join(" ")}${e.change?.summary ? `<div>${esc(e.change.summary)}</div>` : ""}${e.change?.diff ? `<pre>${esc(e.change.diff)}</pre>` : ""}${e.change?.after_hash ? `<div class="hash">after ${esc(e.change.after_hash)}</div>` : ""}`)}
         ${sect("When", () => `${esc(new Date(e.timestamp).toLocaleString())}${e.duration_ms != null ? ` <span class="link">· took ${fmtDur(e.duration_ms)}</span>` : ""}<div class="link">received ${esc(new Date(e.received_at).toLocaleString())}</div>`)}
         ${sect("Where", () => e.location ? esc(whereText(e.location)) : "")}
         ${sect("Why", () => e.intent ? esc(e.intent) : "")}

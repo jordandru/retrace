@@ -102,6 +102,26 @@ test("detail pane: gdrive renamed event renders", async () => {
   assert.match(section(detail, "Where")!, /gdrive · https:\/\/docs.google.com/);
 });
 
+test("artifact chips: timeline and detail carry an in/out role marker; a role-less ref has none", async () => {
+  const events = [ev(0, {
+    artifacts: [
+      { id: "repo:x#a", kind: "file", label: "a", role: "used" },
+      { id: "repo:x#b", kind: "file", label: "b", role: "generated" },
+      { id: "repo:x#c", kind: "file", label: "c", role: "both" },
+      { id: "repo:x#d", kind: "file", label: "d" },
+    ],
+  })];
+  const ui = runUI(events);
+  const detail = await ui.select("evt_0");
+  for (const html of [ui.timeline(), section(detail, "What")!]) {
+    assert.ok(html.includes('<i class="role">in</i>a</span>'), "used → in");
+    assert.ok(html.includes('<i class="role">out</i>b</span>'), "generated → out");
+    assert.ok(html.includes('<i class="role">in/out</i>c</span>'), "both → in/out");
+    assert.ok(html.includes('data-art="repo:x#d" title="repo:x#d">d</span>'), "unspecified → plain chip");
+    assert.ok(html.includes('title="repo:x#a · used (input)"'));
+  }
+});
+
 test("detail pane: one unrenderable section never blanks the rest", async () => {
   const params: any = { branch: "main" }; params.self = params; // JSON.stringify throws
   const events = [ev(0, {
