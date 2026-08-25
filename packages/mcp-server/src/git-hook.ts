@@ -20,7 +20,7 @@
  *   WHO    author (human) — or an AGENT if the commit has a trailer `Retrace-Actor: <id>` (optionally
  *          `Retrace-Model: <model>`), or a `Co-Authored-By:` naming Claude/Copilot/Codex/… or a "[bot]" author;
  *          in that case the human author becomes `on_behalf_of`.
- *   WHAT   action=committed (or merged for merge commits); artifacts = commit:<sha> + repo:<name>#<path> per file
+ *   WHAT   action=committed (or merged for merge commits); artifacts = commit:<sha> + repo:<name>#<path> per file, all role=generated
  *   WHEN   author date
  *   WHERE  system=git, path=repo root, environment=local (override RETRACE_ENV), device=hostname
  *   WHY    intent = commit subject (+ body); caused_by = trailer `Retrace-Caused-By: evt_…`, else env RETRACE_CAUSED_BY,
@@ -155,9 +155,11 @@ export function commitToEvent(repo: string, sha: string, cfg: Cfg): EventInput {
     project: cfg.project ?? basename(repo),
     actor,
     action: isMerge ? "merged" : "committed",
+    // PROV role: a commit generates the commit object and the new state of every changed file (a deletion included —
+    // the commit's diff generates that state; invalidation is not a role). Parents are inputs via derived_from, not refs.
     artifacts: [
-      { id: `commit:${repoName}@${fullSha.slice(0, 12)}`, kind: "commit", label: `${repoName}@${fullSha.slice(0, 7)}`, derived_from: parentList.length ? parentList.map((p) => `commit:${repoName}@${p.slice(0, 12)}`) : undefined },
-      ...files.map((f) => ({ id: `repo:${repoName}#${f}`, kind: "file", label: f })),
+      { id: `commit:${repoName}@${fullSha.slice(0, 12)}`, kind: "commit", label: `${repoName}@${fullSha.slice(0, 7)}`, derived_from: parentList.length ? parentList.map((p) => `commit:${repoName}@${p.slice(0, 12)}`) : undefined, role: "generated" as const },
+      ...files.map((f) => ({ id: `repo:${repoName}#${f}`, kind: "file", label: f, role: "generated" as const })),
     ],
     change: { before_hash: parentList[0], after_hash: fullSha, summary: `${files.length} file${files.length === 1 ? "" : "s"}, +${ins} −${del}` },
     timestamp: new Date(aI).toISOString(),

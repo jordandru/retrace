@@ -57,6 +57,11 @@ test("git adapter: install hook, human commit, agent commit with trailers, backf
   assert.ok(human.artifacts.some((a) => a.id.endsWith("#a.ts")));
   assert.equal(human.artifacts[0].kind, "commit");
   assert.equal(human.artifacts[0].derived_from?.length, 1, "commit derived_from parent commit");
+  // PROV role: the hook is authoritative — commit + every changed file are outputs
+  for (const e of [human, agent]) {
+    assert.ok(e.artifacts.length >= 2);
+    assert.ok(e.artifacts.every((a) => a.role === "generated"), `all refs of #${e.seq} are generated: ${JSON.stringify(e.artifacts)}`);
+  }
   assert.equal(agent.actor.type, "agent");
   assert.equal(agent.actor.id, "claude-code");
   assert.equal(agent.actor.model, "claude-fable-5");
