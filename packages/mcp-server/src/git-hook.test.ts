@@ -10,7 +10,7 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { SqliteStore } from "./sqlite-store.js";
 import { verifyProject } from "@retrace/core";
-import { resolveHookToken } from "./git-hook.js";
+import { parseTrailers, resolveHookToken } from "./git-hook.js";
 
 const bin = fileURLToPath(new URL("./git-hook.js", import.meta.url));
 // Hermetic: drop inherited RETRACE_* (a dev shell exports RETRACE_URL/TOKEN, which would redirect the
@@ -165,4 +165,82 @@ test("hook end to end: the named credential is the bearer the server sees; a rej
   } finally {
     server.close();
   }
+});
+
+// Backlog #12 (dogfood log 2026-08-20): 68c343f carried `Retrace-*` in one paragraph and `Co-Authored-By` in the next;
+// git's %(trailers) only reads the last paragraph, so the hook minted actor "claude-fable-5" from the co-author name.
+test("git adapter: trailers from all trailing paragraphs; consistent Co-Authored-By actor (backlog #12)", async () => {
+  // pure parser: the 68c343f layout → both paragraphs are trailers
+  const t1 = parseTrailers("subject\n\nWhy this change.\n\nRetrace-Actor: claude-code\nRetrace-Model: claude-fable-5\n\nCo-Authored-By: Claude Fable 5 <noreply@anthropic.com>\n");
+  assert.deepEqual(t1.trailers, { "retrace-actor": ["claude-code"], "retrace-model": ["claude-fable-5"], "co-authored-by": ["Claude Fable 5 <noreply@anthropic.com>"] });
+  assert.deepEqual(t1.trailerText, ["Retrace-Actor: claude-code", "Retrace-Model: claude-fable-5", "Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"]);
+  // a "Key: value" line inside prose is not a trailer; the final trailer paragraph still is
+  const t2 = parseTrailers("subject\n\nThe hook should read\nRetrace-Actor: claude-code\nfrom every trailing paragraph.\n\nSigned-off-by: X <x@example.com>");
+  assert.equal(t2.trailers["retrace-actor"], undefined);
+  assert.deepEqual(t2.trailers["signed-off-by"], ["X <x@example.com>"]);
+  assert.deepEqual(t2.trailerText, ["Signed-off-by: X <x@example.com>"]);
+  // no trailers at all; the subject is never a trailer paragraph
+  assert.deepEqual(parseTrailers("just a subject\n\nand some prose"), { trailers: {}, trailerText: [] });
+  assert.deepEqual(parseTrailers("Fix: the subject"), { trailers: {}, trailerText: [] });
+  assert.deepEqual(parseTrailers(""), { trailers: {}, trailerText: [] });
+  // case-insensitive keys, repeated keys keep every value, continuation lines unfold
+  const t4 = parseTrailers("s\n\nCo-Authored-By: A <a@example.com>\nco-authored-by: B <b@example.com>\nSigned-Off-By: C\n  <c@example.com>");
+  assert.deepEqual(t4.trailers["co-authored-by"], ["A <a@example.com>", "B <b@example.com>"]);
+  assert.deepEqual(t4.trailers["signed-off-by"], ["C <c@example.com>"]);
+  // CRLF survives `--cleanup=verbatim`, `git commit-tree` and API-made commits; `.`/`$` stop at \r, so the first #12 fix
+  // classified these lines as trailers yet extracted none — the Retrace-* block vanished (review). U+2028 is the same class.
+  const t5 = parseTrailers("s\r\n\r\nRetrace-Actor: claude-code\r\nRetrace-Model: m\r\n\r\nCo-Authored-By: Claude <n@a>\r\n");
+  assert.deepEqual(t5.trailers, { "retrace-actor": ["claude-code"], "retrace-model": ["m"], "co-authored-by": ["Claude <n@a>"] });
+  assert.deepEqual(t5.trailerText, ["Retrace-Actor: claude-code", "Retrace-Model: m", "Co-Authored-By: Claude <n@a>"]);
+  assert.deepEqual(parseTrailers("s\n\nCo-Authored-By: A\u2028B <a@b>").trailers, { "co-authored-by": ["A\u2028B <a@b>"] });
+
+  // end-to-end through the hook
+  const dir = mkdtempSync(join(tmpdir(), "retrace-git12-"));
+  const db = join(dir, "ledger.db");
+  const env = { RETRACE_DB: db, RETRACE_PROJECT: "rpg" };
+  sh(dir, "git", ["init", "-q", "-b", "main"]);
+  writeFileSync(join(dir, "a.ts"), "export const a = 1;\n");
+  sh(dir, "git", ["add", "."]);
+  sh(dir, "git", ["commit", "-qm", "initial"]);
+  sh(dir, "node", [bin, "install", "--repo", dir], env);
+
+  // (b) the 68c343f layout: Retrace-* paragraph, then a Co-Authored-By paragraph; prose keeps its "Note:" line
+  writeFileSync(join(dir, "hook.ts"), "export const hook = 1;\n");
+  sh(dir, "git", ["add", "."]);
+  sh(dir, "git", ["commit", "-qm", "add hook\n\nLonger text.\nNote: keep me\n\nRetrace-Actor: claude-code\nRetrace-Model: claude-fable-5\nRetrace-Caused-By: evt_root456\n\nCo-Authored-By: Claude Fable 5 <noreply@anthropic.com>"], env);
+  // (c) Co-Authored-By only → family id + model from the full name
+  writeFileSync(join(dir, "hook.ts"), "export const hook = 2;\n");
+  sh(dir, "git", ["commit", "-qam", "bump hook\n\nCo-Authored-By: Claude Fable 5 <noreply@anthropic.com>"], env);
+  // (d) human commit whose prose mentions a trailer-looking line
+  writeFileSync(join(dir, "hook.ts"), "export const hook = 3;\n");
+  sh(dir, "git", ["commit", "-qam", "human note\n\nThis paragraph mentions\nRetrace-Actor: claude-code\nin passing, as prose."], env);
+  // (e) the 68c343f layout with CRLF endings kept verbatim (`-m` cleanup would strip the CRs; verbatim does not)
+  writeFileSync(join(dir, "hook.ts"), "export const hook = 4;\n");
+  sh(dir, "git", ["commit", "-qa", "--cleanup=verbatim", "-m", "crlf hook\r\n\r\nLonger text.\r\nNote: keep me\r\n\r\nRetrace-Actor: claude-code\r\nRetrace-Model: claude-fable-5\r\nRetrace-Caused-By: evt_root789\r\n\r\nCo-Authored-By: Claude Fable 5 <noreply@anthropic.com>\r\n"], env);
+  // (f) `git commit-tree` runs no cleanup and no hook — logged explicitly, as backfill would
+  const ct = sh(dir, "git", ["commit-tree", "HEAD^{tree}", "-p", "HEAD", "-m", "ct\r\n\r\nRetrace-Actor: claude-code\r\nRetrace-Model: m\r\n"]).trim();
+  sh(dir, "node", [bin, "commit", "--repo", dir, ct], env);
+
+  const store = new SqliteStore(db);
+  const events = await store.all("rpg");
+  assert.equal(events.length, 5, "hook logged four commits + one explicit commit-tree");
+  const [layout, coauthored, human, crlf, tree] = events;
+  assert.deepEqual(layout.actor, { type: "agent", id: "claude-code", model: "claude-fable-5", on_behalf_of: "jordan@slcwitit.com" });
+  assert.equal(layout.caused_by, "evt_root456");
+  assert.equal(layout.intent, "add hook\n\nLonger text.\nNote: keep me");
+  assert.equal(layout.method?.automated, true);
+  assert.deepEqual(coauthored.actor, { type: "agent", id: "claude", model: "claude-fable-5", display_name: "Claude Fable 5", on_behalf_of: "jordan@slcwitit.com" });
+  assert.equal(coauthored.intent, "bump hook");
+  assert.equal(coauthored.method?.automated, true);
+  assert.equal(human.actor.type, "human");
+  assert.equal(human.actor.id, "jordan@slcwitit.com");
+  assert.equal(human.intent, "human note\n\nThis paragraph mentions\nRetrace-Actor: claude-code\nin passing, as prose.");
+  assert.equal(human.method?.automated, false);
+  assert.ok(sh(dir, "git", ["log", "-1", "--format=%B"]).includes("\r"), "CRLF commit stored verbatim");
+  assert.deepEqual(crlf.actor, { type: "agent", id: "claude-code", model: "claude-fable-5", on_behalf_of: "jordan@slcwitit.com" });
+  assert.equal(crlf.caused_by, "evt_root789");
+  assert.equal(crlf.intent, "crlf hook\n\nLonger text.\nNote: keep me");
+  assert.deepEqual(tree.actor, { type: "agent", id: "claude-code", model: "m", on_behalf_of: "jordan@slcwitit.com" });
+  assert.equal(tree.intent, "ct");
+  assert.equal((await verifyProject(store, "rpg")).ok, true);
 });

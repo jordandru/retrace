@@ -19,7 +19,10 @@
  * Mapping a commit → event
  *   WHO    author (human) — or an AGENT if the commit has a trailer `Retrace-Actor: <id>` (optionally
  *          `Retrace-Model: <model>`), or a `Co-Authored-By:` naming Claude/Copilot/Codex/… or a "[bot]" author;
- *          in that case the human author becomes `on_behalf_of`.
+ *          in that case the human author becomes `on_behalf_of`. Trailers are read from ALL trailing trailer-only
+ *          paragraphs (not just git's last one — backlog #12, dogfood log 2026-08-20: a `Retrace-*` paragraph
+ *          followed by a separate `Co-Authored-By` paragraph lost the Retrace-* lines); a Co-Authored-By agent gets
+ *          id = family ("claude", "copilot", …) and model = slug of the full name ("Claude Fable 5" → "claude-fable-5").
  *   WHAT   action=committed (or merged for merge commits); artifacts = commit:<sha> + repo:<name>#<path> per file, all role=generated
  *   WHEN   author date
  *   WHERE  system=git, path=repo root, environment=local (override RETRACE_ENV), device=hostname
@@ -108,18 +111,63 @@ function loadCfg(repo: string, flags: Record<string, string | boolean>): Cfg {
 }
 
 const AGENT_COAUTHOR = /claude|copilot|codex|cursor|devin|aider|gpt|gemini|\[bot\]/i;
+/** Agent families a Co-Authored-By name is mapped onto (first match wins) — the actor id (backlog #12). */
+const AGENT_FAMILIES = ["claude", "copilot", "codex", "cursor", "devin", "aider", "gemini", "gpt"];
+const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+/** A trailer line, per git: token, colon, whitespace, non-blank value. */
+const TRAILER_LINE = /^[A-Za-z][\w-]*:\s+\S/;
+
+/**
+ * Trailers from EVERY trailing trailer-only paragraph of a commit message, walking back from the last paragraph
+ * and stopping at the first paragraph with prose (the subject never counts). Git's own `%(trailers)` reads only
+ * the LAST paragraph, so 68c343f's `Retrace-*` block + separate `Co-Authored-By` block lost the Retrace-* lines and
+ * the hook minted actor "claude-fable-5" (backlog #12, dogfood log 2026-08-20). A `Key: value` line inside prose is
+ * NOT a trailer. Keys are lowercased; continuation lines (leading whitespace) are unfolded into the previous value.
+ * `trailerText` = the collected paragraphs' lines (CRLF → LF), so the caller can strip exactly those from the body.
+ * Line endings are normalised first and the value capture avoids `.`/`$` (both stop at \r and U+2028): a CRLF
+ * message (kept verbatim by `--cleanup=verbatim`, `git commit-tree`, API-made commits) otherwise had its lines
+ * classified as trailers yet none extracted — the Retrace-* block vanished from the ledger (review of the #12 fix).
+ */
+export function parseTrailers(message: string): { trailers: Record<string, string[]>; trailerText: string[] } {
+  const paras = message.replace(/\r\n?/g, "\n").trim().split(/\n\s*\n/).map((p) => p.split("\n"));
+  const isTrailerPara = (p: string[]) => TRAILER_LINE.test(p[0]) && p.every((l) => TRAILER_LINE.test(l) || /^\s/.test(l));
+  let k = paras.length;
+  while (k > 1 && isTrailerPara(paras[k - 1])) k--;
+  const trailerText = paras.slice(k).flat();
+  const trailers: Record<string, string[]> = {};
+  let last: string[] | undefined;
+  for (const line of trailerText) {
+    const m = line.match(/^([A-Za-z][\w-]*):\s+([\s\S]*)$/);
+    if (m) (last = trailers[m[1].toLowerCase()] ??= []).push(m[2].trim());
+    else if (last) last[last.length - 1] += " " + line.trim();
+  }
+  return { trailers, trailerText };
+}
+
+/** Body minus its last `n` non-blank lines (the trailer paragraphs, which are always a suffix of the body). CRLF → LF
+ *  as in parseTrailers, so `intent` never carries a stray \r next to git's already CR-free `%s` subject. */
+function stripTrailers(body: string, n: number): string {
+  const lines = body.replace(/\r\n?/g, "\n").split("\n");
+  let i = lines.length;
+  while (n > 0 && i > 0) if (lines[--i].trim()) n--;
+  return lines.slice(0, i).join("\n").trim().replace(/\n{3,}/g, "\n\n");
+}
+
+/** Co-Authored-By agent → { id: family, model: slug of the full name when it says more than the family, display_name:
+ *  name as written }. Keeps "Claude Fable 5" from minting actor id "claude-fable-5" (backlog #12). */
+function coauthorActor(coauthor: string, ae: string): EventInput["actor"] {
+  const name = coauthor.replace(/<.*>/, "").trim();
+  const family = AGENT_FAMILIES.find((f) => name.toLowerCase().includes(f));
+  const full = slug(name);
+  return { type: "agent", id: family ?? full, model: family && full !== family ? full : undefined, on_behalf_of: ae, display_name: name };
+}
 
 export function commitToEvent(repo: string, sha: string, cfg: Cfg): EventInput {
-  const fmt = ["%H", "%P", "%an", "%ae", "%aI", "%s", "%b"].join("%x1f");
+  const fmt = ["%H", "%P", "%an", "%ae", "%aI", "%s", "%b", "%B"].join("%x1f");
   const raw = git(repo, ["show", "-s", `--format=${fmt}`, sha]);
-  const [fullSha, parents, an, ae, aI, subject, body] = raw.split("\x1f");
+  const [fullSha, parents, an, ae, aI, subject, body, message] = raw.split("\x1f");
   const parentList = parents ? parents.split(" ") : [];
-  const trailersRaw = git(repo, ["show", "-s", "--format=%(trailers:only,unfold)", sha]);
-  const trailers: Record<string, string[]> = {};
-  for (const line of trailersRaw.split("\n")) {
-    const m = line.match(/^([\w-]+):\s*(.*)$/);
-    if (m) (trailers[m[1].toLowerCase()] ??= []).push(m[2].trim());
-  }
+  const { trailers, trailerText } = parseTrailers(message);
   const numstat = git(repo, ["show", "--numstat", "--format=", sha]).split("\n").filter(Boolean);
   let ins = 0, del = 0;
   const files = numstat.map((l) => {
@@ -138,7 +186,7 @@ export function commitToEvent(repo: string, sha: string, cfg: Cfg): EventInput {
   const isBot = /\[bot\]/i.test(an);
   let actor: EventInput["actor"];
   if (agentId) actor = { type: "agent", id: agentId, model: trailers["retrace-model"]?.[0], on_behalf_of: ae };
-  else if (agentCo) actor = { type: "agent", id: agentCo.replace(/<.*>/, "").trim().toLowerCase().replace(/\s+/g, "-"), on_behalf_of: ae, display_name: agentCo.replace(/<.*>/, "").trim() };
+  else if (agentCo) actor = coauthorActor(agentCo, ae);
   else if (isBot) actor = { type: "system", id: ae || an, display_name: an };
   else actor = { type: "human", id: ae || an, display_name: an };
 
@@ -149,7 +197,7 @@ export function commitToEvent(repo: string, sha: string, cfg: Cfg): EventInput {
     if (existsSync(fp)) causedBy = readFileSync(fp, "utf8").trim() || undefined;
   }
   const isMerge = parentList.length > 1;
-  const cleanBody = body.replace(/^([\w-]+):\s.*$/gm, "").trim(); // strip trailers from body
+  const cleanBody = stripTrailers(body, trailerText.length); // prose "Key: value" lines survive (backlog #12)
 
   return {
     project: cfg.project ?? basename(repo),
