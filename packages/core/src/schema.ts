@@ -106,8 +106,25 @@ export const Location = z.object({
   environment: z.string().optional(), // prod, staging, local, ...
   device: z.string().optional(),
   system: z.string().optional(), // github, gdocs, cursor, claude-code, ...
-  /** Run/session id of the producing process (backlog #15; body-only, like every location field) */
+  /** Run/session id of the producing process (backlog #15; body-only, like every location field). On the MCP path
+   *  this is the harness's own session id when it exposes one (CLAUDE_CODE_SESSION_ID), so the same string appears on
+   *  events from the agent AND on the commits it drives. It is a *session* key — subagents share it — not a per-run id. */
   session: z.string().optional(),
+  /** The MCP client that drove the write, verbatim from the `initialize` handshake as "<name>@<version>" — e.g.
+   *  "claude-code@2.1.250", "cursor-vscode@1.7.3". Server-stamped only: it is evidence ABOUT the writer, so the
+   *  writer may not assert it (see SERVER_ONLY in the MCP server). */
+  client: z.string().optional(),
+  /** IDE / agent-development environment hosting the actor, e.g. "orca". Deliberately distinct from `system` (the tool
+   *  that produced the event, "claude-code") and from `client` (which build of it): the IDE is the app AROUND both, and
+   *  neither of the other two can express it. Only stamped when the IDE identifies itself in the environment. */
+  ide: z.string().optional(),
+  /** Isolated workspace within `ide` — an Orca worktree id, a codespace or devcontainer name. This is what tells two
+   *  parallel agents apart when they run the same project, on the same host, as the same actor. */
+  workspace: z.string().optional(),
+  /** Whether the producing process had a controlling terminal: "tty" = a human at a keyboard, "agent" = spawned by a
+   *  harness with none. Linux-only today (read from /proc/self/stat); absent everywhere else, and absence is a legal
+   *  permanent state. EVIDENCE, never authority — it must not override the actor determination. */
+  surface: z.enum(["tty", "agent"]).optional(),
 });
 export type Location = z.infer<typeof Location>;
 
