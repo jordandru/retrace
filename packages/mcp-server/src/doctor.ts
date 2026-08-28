@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
-import { Actor, Credential, schemaSurface } from "@retrace/core";
+import { Actor, Credential, ProjectStatus, renderProjectStatus, schemaSurface } from "@retrace/core";
 import { Cfg, commitToEvent, resolveHookToken } from "./git-hook.js";
 
 type Level = "pass" | "warn" | "fail";
@@ -53,10 +53,11 @@ function loadCredential(cfg: RepoConfig, env: NodeJS.ProcessEnv): { credential?:
 
 async function main() {
   const args = process.argv.slice(2);
-  if (args[0] && args[0] !== "doctor" && !args[0].startsWith(".") && !args[0].startsWith("/") && !existsSync(resolve(args[0]))) {
-    console.error("usage: retrace doctor [repo]"); process.exit(2); return;
+  const command = args[0] === "status" ? "status" : "doctor";
+  if (args[0] && args[0] !== "doctor" && args[0] !== "status" && !args[0].startsWith(".") && !args[0].startsWith("/") && !existsSync(resolve(args[0]))) {
+    console.error("usage: retrace <doctor [repo] | status [project] [--json]>"); process.exit(2); return;
   }
-  const arg = args[0] === "doctor" ? args[1] : args[0];
+  const arg = command === "doctor" ? (args[0] === "doctor" ? args[1] : args[0]) : undefined;
   let repo: string;
   try { repo = resolve(git(resolve(arg ?? process.cwd()), ["rev-parse", "--show-toplevel"])); }
   catch { console.error("FAIL  repository — not inside a Git repository (or pass its path)"); process.exit(1); return; }
@@ -75,6 +76,15 @@ async function main() {
   const project = process.env.RETRACE_PROJECT ?? cfg.project ?? basename(repo);
   const url = (process.env.RETRACE_URL ?? cfg.url ?? "").replace(/\/$/, "");
   const auth = loadCredential(cfg, process.env); findings.push(auth.finding);
+  if (command === "status") {
+    const selected = args[1] && !args[1].startsWith("--") ? args[1] : project;
+    if (!url) { console.error("retrace status: RETRACE_URL or .retrace.json url is required"); process.exit(1); return; }
+    const res = await fetch(`${url}/projects/${encodeURIComponent(selected)}/status`, { headers: auth.token ? { authorization: `Bearer ${auth.token}` } : undefined });
+    if (!res.ok) { console.error(`retrace status: HTTP ${res.status}: ${await res.text()}`); process.exit(1); return; }
+    const status = await res.json() as ProjectStatus;
+    console.log(args.includes("--json") ? JSON.stringify(status, null, 2) : renderProjectStatus(status));
+    return;
+  }
   let headEvent: ReturnType<typeof commitToEvent> | undefined;
   try {
     headEvent = commitToEvent(repo, "HEAD", { ...cfg, project, repoName: cfg.repoName });

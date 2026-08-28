@@ -54,6 +54,8 @@ cd /path/to/your/repo
 node /ABSOLUTE/PATH/retrace/packages/mcp-server/dist/git-hook.js install --project boxing-rpg
 node /ABSOLUTE/PATH/retrace/packages/mcp-server/dist/git-hook.js backfill      # optional: log existing history (idempotent, safe to re-run)
 npx retrace doctor                                                            # read-only preflight; exits nonzero when capture is not ready
+npx retrace status                                                            # human-readable integrity + capture + causality status
+npx retrace status retrace --json                                             # the identical canonical model for automation/agents
 ```
 
 `install` writes `.git/hooks/post-commit` and a committable `.retrace.json` (`{ "project", "environment", optional "db" | "url" + "token" | "credential" }`). `"credential": "retrace-git"` makes the hook send that scoped assert credential's token (looked up by `actor.id` in `RETRACE_CREDENTIALS_FILE`, default `~/.retrace/worker-credentials.json`) instead of `RETRACE_TOKEN`, so the repo never carries the owner token; without it the precedence is unchanged (`RETRACE_HOOK_TOKEN` > `RETRACE_TOKEN` > file). Hook failures (a 401/403 from a fail-closed credential, config errors) are appended to `.git/retrace-hook.log` — re-log with `retrace-git commit <sha>`. Every commit is then logged: WHO = the author (human), or an **agent** when the commit carries trailers `Retrace-Actor: claude-code` / `Retrace-Model: …` or a `Co-Authored-By:` naming Claude/Copilot/Codex/etc. (the human author becomes `on_behalf_of`); WHAT = `commit:<repo>@<sha>` plus one `repo:<repo>#<path>` artifact per changed file with `+ins −del`; WHY = the commit message, and `caused_by` from a `Retrace-Caused-By: evt_…` trailer, `RETRACE_CAUSED_BY` env, or `.git/retrace-caused-by`. Merge commits log as `merged`. Idempotency key is the sha, so backfills never duplicate.
@@ -118,6 +120,7 @@ Toggle **Graph** in the UI (or `?view=graph`). Nodes are artifacts, laid out lef
 | `retrace_history` | timeline, filter by artifact / actor / action / time / text |
 | `retrace_why` | walk `caused_by` links back to the originating human intent |
 | `retrace_verify` | recompute the hash chain and report integrity |
+| `retrace_status` | integrity, causal coverage, capture gaps, actors and integration freshness |
 | `retrace_export` | signed JSON bundle (+ optional HTML report file) for a project/artifact |
 | `retrace_share` | create a read-only share link (project or artifact scope, optional expiry) |
 | `retrace_lineage` | artifact lineage (text / DOT / Mermaid / JSON) |
@@ -148,7 +151,7 @@ Then point the MCP server at it by adding to its `env`:
 "RETRACE_TOKEN": "<same token>"
 ```
 
-REST API: `POST /events`, `GET /events/:id`, `GET /events/:id/why`, `GET /projects`, `GET /projects/:p/events?artifact_id=&actor_id=&since=&text=`, `GET /projects/:p/head`, `GET /projects/:p/verify`.
+REST API: `POST /events`, `GET /events/:id`, `GET /events/:id/why`, `GET /projects`, `GET /projects/:p/events?artifact_id=&actor_id=&since=&text=`, `GET /projects/:p/head`, `GET /projects/:p/verify`, `GET /projects/:p/status`.
 
 ### Where an event came from — session, terminal, IDE
 

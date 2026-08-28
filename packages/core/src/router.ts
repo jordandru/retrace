@@ -11,7 +11,7 @@
  *   GET  /.well-known/retrace-pubkey     issuer public key (JWK) — public
  *   POST /events                         append (EventInput)
  *   GET  /events/:id · /events/:id/why
- *   GET  /projects · /projects/:p/events?… · /projects/:p/head · /projects/:p/verify
+ *   GET  /projects · /projects/:p/events?… · /projects/:p/head · /projects/:p/verify · /projects/:p/status
  *   GET  /projects/:p/export?artifact_id=…      signed JSON bundle
  *   GET  /projects/:p/report?artifact_id=…      printable HTML report
  *   GET  /projects/:p/lineage?artifact_id=&format=json|dot|mermaid&actors=1   artifact lineage graph
@@ -36,6 +36,7 @@ import { renderReportHtml } from "./report.js";
 import { buildLineage, renderLineageDot, renderLineageMermaid } from "./lineage.js";
 import { mapGithubWebhook, verifyGithubSignature } from "./github.js";
 import { mapDriveActivities, DrivePayload } from "./gdrive.js";
+import { buildProjectStatus } from "./status.js";
 import { publicFromPrivate, keyId } from "./signing.js";
 import { UI_HTML } from "./ui-html.js";
 
@@ -288,6 +289,7 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
         if (req.method === "GET") {
           if (sub === "head") return json(await store.head(project));
           if (sub === "verify") return json(await verifyProject(store, project));
+          if (sub === "status") return json(await buildProjectStatus(store, project));
           if (sub === "events") return json(await store.history({ ...q, project, limit: q.limit ? Number(q.limit) : undefined }));
           if (sub === "export") return json(await exportFor({ project, artifact_id: q.artifact_id }));
           if (sub === "lineage") {

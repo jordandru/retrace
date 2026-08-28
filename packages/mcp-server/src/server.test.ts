@@ -40,7 +40,7 @@ test("MCP round trip: instruct → log → why → history → verify", async ()
   await client.connect(ct);
 
   const tools = await client.listTools();
-  assert.deepEqual(tools.tools.map((t) => t.name).sort(), ["retrace_export", "retrace_history", "retrace_instruct", "retrace_lineage", "retrace_log", "retrace_projects", "retrace_share", "retrace_verify", "retrace_why"]);
+  assert.deepEqual(tools.tools.map((t) => t.name).sort(), ["retrace_export", "retrace_history", "retrace_instruct", "retrace_lineage", "retrace_log", "retrace_projects", "retrace_share", "retrace_status", "retrace_verify", "retrace_why"]);
 
   const ins = (await client.callTool({ name: "retrace_instruct", arguments: { project: "rpg", human_id: "jordan", instruction: "add a jab counter" } })) as any;
   const insId = ins.structuredContent.id;
@@ -65,6 +65,10 @@ test("MCP round trip: instruct → log → why → history → verify", async ()
   const ver = (await client.callTool({ name: "retrace_verify", arguments: { project: "rpg" } })) as any;
   assert.equal(ver.structuredContent.ok, true);
   assert.equal(ver.structuredContent.checked, 2);
+  const status = (await client.callTool({ name: "retrace_status", arguments: { project: "rpg" } })) as any;
+  assert.equal(status.structuredContent.status.integrity.ok, true);
+  assert.equal(status.structuredContent.status.causality.coverage_pct, 100);
+  assert.match(status.content[0].text, /100% causal coverage/);
 
   // idempotency
   const a = (await client.callTool({ name: "retrace_log", arguments: { project: "rpg", action: "created", artifacts: [{ id: "x" }], idempotency_key: "k1" } })) as any;

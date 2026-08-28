@@ -46,6 +46,18 @@ const del = (handle: (r: Request) => Promise<Response>, path: string, headers?: 
   handle(new Request(`http://test${path}`, { method: "DELETE", headers }));
 const AUTH = { authorization: "Bearer tok" };
 
+test("GET /projects/:p/status exposes the canonical transparency model", async () => {
+  const store = new MemStore();
+  const root = (await appendEvent(store, ev({ project: "p", actor: { type: "human", id: "jordan@example.com" }, action: "instructed", artifacts: [{ id: "task:1", role: "generated" }] }))).event;
+  await appendEvent(store, ev({ project: "p", actor: { type: "agent", id: "gemini", model: "gemini-pro" }, caused_by: root.id, artifacts: [{ id: "repo:p#a.ts", role: "both" }] }));
+  const res = await get(createHandler(store, { token: "tok" }), "/projects/p/status", "tok");
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.integrity.ok, true);
+  assert.equal(body.causality.coverage_pct, 100);
+  assert.deepEqual(body.actors.map((a: any) => a.id), ["gemini", "jordan@example.com"]);
+});
+
 test("DELETE /projects/:p requires auth and deletes nothing without it", async () => {
   const store = await seeded();
   const handle = createHandler(store, { token: "tok", opsProject: "ops" });

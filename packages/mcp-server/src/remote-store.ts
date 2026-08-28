@@ -1,5 +1,5 @@
 /** Remote store: talks to the Retrace Cloudflare Worker over HTTP. Set RETRACE_URL (+ RETRACE_TOKEN). */
-import { Event, EventStore, HistoryQuery, VerifyResult, EventInput, Share, ExportBundle } from "@retrace/core";
+import { Event, EventStore, HistoryQuery, VerifyResult, EventInput, Share, ExportBundle, ProjectStatus } from "@retrace/core";
 
 export class RemoteStore implements EventStore {
   constructor(private baseUrl: string, private token?: string) {
@@ -20,6 +20,9 @@ export class RemoteStore implements EventStore {
   }
   async verify(project: string): Promise<VerifyResult> {
     return this.req("GET", `/projects/${encodeURIComponent(project)}/verify`);
+  }
+  async status(project: string): Promise<ProjectStatus> {
+    return this.req("GET", `/projects/${encodeURIComponent(project)}/status`);
   }
   async createShare(): Promise<void> { throw new Error("use share()"); }
   async getShare(id: string) { return this.req<Share | null>("GET", `/s/${encodeURIComponent(id)}/meta`); }

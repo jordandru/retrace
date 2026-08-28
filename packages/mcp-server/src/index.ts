@@ -34,6 +34,7 @@ import {
   appendEvent, verifyProject, explainEvent, renderTimeline, renderWhyChain, describeEvent,
   buildExportBundle, verifyExportBundle, renderReportHtml, parseSigningKey, newShareId,
   buildLineage, renderLineageDot, renderLineageMermaid, renderLineageText,
+  buildProjectStatus, renderProjectStatus,
 } from "@retrace/core";
 import { writeFileSync } from "node:fs";
 import { ensureSigningKey } from "./keys.js";
@@ -303,6 +304,20 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
       const chain = await explainEvent(store, event_id);
       if (!chain.length) return { content: [{ type: "text", text: `no event ${event_id}` }], isError: true };
       return { content: [{ type: "text", text: renderWhyChain(chain) }], structuredContent: { chain } };
+    },
+  );
+
+  server.registerTool(
+    "retrace_status",
+    {
+      title: "Project transparency status",
+      description: "One canonical view of chain integrity, causal coverage, capture gaps, actors, and integration freshness for humans and agents.",
+      inputSchema: { project: z.string().optional() },
+    },
+    async ({ project }) => {
+      const p = project ?? DEFAULT_PROJECT;
+      const status = remote ? await remote.status(p) : await buildProjectStatus(store, p);
+      return { content: [{ type: "text", text: renderProjectStatus(status) }], structuredContent: { status } };
     },
   );
 

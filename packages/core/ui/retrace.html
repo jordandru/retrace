@@ -102,6 +102,7 @@
   <select id="faction"><option value="">any action</option></select>
   <span class="seg"><button id="vTimeline" class="on">Timeline</button><button id="vGraph">Graph</button></span>
   <span id="verify" class="badge"><span class="dot"></span><span>verifying…</span></span>
+  <span id="status" class="badge" title="Capture completeness and causal coverage">capture…</span>
   <span id="sharedBadge" class="badge" style="display:none" title="Read-only shared view">🔗 shared view</span>
   <button id="report" title="Printable report (save as PDF)">Report</button>
   <button id="export" title="Download signed JSON bundle">Export</button>
@@ -140,7 +141,7 @@
 <script>
 (() => {
   const $ = (s) => document.querySelector(s);
-  const state = { events: [], project: null, projects: [], sel: null, filterArtifact: null, filterActor: null, verify: null, offline: false, expanded: new Set(), newestFirst: true };
+  const state = { events: [], project: null, projects: [], sel: null, filterArtifact: null, filterActor: null, verify: null, status: null, offline: false, expanded: new Set(), newestFirst: true };
   const params = new URLSearchParams(location.search);
   if (params.get("order") === "asc") state.newestFirst = false;
   let apiBase = params.get("api") ?? "";
@@ -158,6 +159,7 @@
     projects: () => shareId ? api(`/s/${shareId}/meta`).then((m) => [m.project]) : api("/projects"),
     events: (p) => shareId ? api(`/s/${shareId}/events?limit=5000`) : api(`/projects/${encodeURIComponent(p)}/events?limit=5000`),
     verify: (p) => shareId ? api(`/s/${shareId}/verify`) : api(`/projects/${encodeURIComponent(p)}/verify`),
+    status: (p) => shareId ? Promise.resolve(null) : api(`/projects/${encodeURIComponent(p)}/status`),
     exportUrl: (p, art) => shareId ? `${apiBase}/s/${shareId}/export` : `${apiBase}/projects/${encodeURIComponent(p)}/export?${new URLSearchParams({ ...(art ? { artifact_id: art } : {}), ...(token ? { token } : {}) })}`,
     reportUrl: (p, art) => shareId ? `${apiBase}/s/${shareId}/report` : `${apiBase}/projects/${encodeURIComponent(p)}/report?${new URLSearchParams({ ...(art ? { artifact_id: art } : {}), ...(token ? { token } : {}) })}`,
   };
@@ -210,8 +212,8 @@
   async function loadEvents() {
     if (state.offline) return render();
     if (!state.project) { state.events = []; return render(); }
-    const [events, verify] = await Promise.all([P.events(state.project), P.verify(state.project).catch(() => null)]);
-    state.events = events; state.verify = verify;
+    const [events, verify, status] = await Promise.all([P.events(state.project), P.verify(state.project).catch(() => null), P.status(state.project).catch(() => null)]);
+    state.events = events; state.verify = verify; state.status = status;
     render();
   }
 
@@ -221,6 +223,16 @@
     b.className = "badge " + (v.ok ? "ok" : "bad");
     b.lastElementChild.textContent = v.ok ? `chain intact · ${v.checked} events` : `chain BROKEN at #${v.first_bad_seq}`;
     b.title = v.reason || "";
+  }
+
+  function statusBadge() {
+    const b = $("#status"), s = state.status;
+    if (!s?.capture || !s?.causality) { b.style.display = state.offline || shareId ? "none" : ""; b.textContent = "capture unknown"; return; }
+    b.style.display = "";
+    const gaps = s.capture.unlinked_commits + s.causality.broken_links + s.capture.agent_events_without_model;
+    b.className = "badge " + (gaps ? "bad" : "ok");
+    b.textContent = `${s.causality.coverage_pct}% causal · ${s.capture.unlinked_commits} unlinked commits`;
+    b.title = `${s.capture.instructions_without_followup} instructions without follow-up · ${s.capture.agent_events_without_model} agent events missing model · ${s.capture.artifact_refs_without_role} artifact refs missing role`;
   }
 
   function filtered(opts = {}) {
@@ -238,6 +250,7 @@
 
   function render() {
     localVerifyBadge();
+    statusBadge();
     const labels = latestLabels(state.events); const labelOf = (a) => labels.get(a.id) || artLabel(a);
     const acts = [...new Set(state.events.map((e) => e.action))].sort();
     const fa = $("#faction"); const cur = fa.value;
@@ -451,7 +464,7 @@
     const f = e.target.files[0]; if (!f) return;
     const data = JSON.parse(await f.text());
     const events = Array.isArray(data) ? data : data.events ?? [];
-    state.offline = true; state.events = events.sort((a, b) => a.seq - b.seq); state.verify = null;
+    state.offline = true; state.events = events.sort((a, b) => a.seq - b.seq); state.verify = null; state.status = null;
     state.projects = [...new Set(events.map((x) => x.project))]; state.project = state.projects[0] ?? null;
     $("#project").innerHTML = state.projects.map((p) => `<option>${esc(p)}</option>`).join("");
     render();
