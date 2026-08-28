@@ -16,6 +16,11 @@
  *   RETRACE_ACTOR    default actor id for this agent (e.g. "claude-code")
  *   RETRACE_ACTOR_MODEL default model string
  *   RETRACE_ON_BEHALF_OF the human this agent works for (e.g. jordan@...)
+ *   RETRACE_SESSION  override location.session (default: the harness's own CLAUDE_CODE_SESSION_ID, else a run id)
+ *   RETRACE_DEVICE   override location.device (default: os.hostname() — an opt-out, since a hostname is sealed into
+ *                    hash-covered bodies that share links serve pre-auth and no later redaction is possible)
+ *   RETRACE_IDE / RETRACE_WORKSPACE  override location.ide / location.workspace (default: detected from the IDE's own
+ *                    environment — Orca's ORCA_PANE_KEY / ORCA_WORKTREE_ID; nothing is guessed)
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -45,12 +50,50 @@ const readDefaultActor = () => ({
   on_behalf_of: env.RETRACE_ON_BEHALF_OF,
 });
 
+/** Location keys only the server may set. These are evidence ABOUT the writer — which session and machine produced
+ *  the event, which client and IDE it came from, whether a human was at a keyboard — so a caller that could assert
+ *  them could forge the very thing they exist to prove. Same reasoning that produced RETRACE_ACTOR_LOCK (security
+ *  review 2026-08-21). The caller keeps `path`/`url`/`environment`, which it genuinely knows better than the server. */
+const SERVER_ONLY: readonly string[] = ["session", "device", "client", "ide", "workspace", "surface"];
+
 /** WHERE enrichment for the MCP write path (backlog #15): fill each location field from `defaults` ONLY where the
- *  caller supplied nothing — a caller value is never overwritten. Exported for unit tests. */
+ *  caller supplied nothing — a caller value is never overwritten, except for SERVER_ONLY keys, which are dropped
+ *  rather than merged. Exported for unit tests. */
 export function enrichLocation(caller: Location | undefined, defaults: Location): Location {
   const merged: Location = { ...defaults };
-  for (const [k, v] of Object.entries(caller ?? {})) if (v !== undefined) (merged as any)[k] = v;
+  for (const [k, v] of Object.entries(caller ?? {}))
+    if (v !== undefined && !SERVER_ONLY.includes(k)) (merged as any)[k] = v;
   return merged;
+}
+
+/** MCP client name (from the `initialize` handshake) → the `system` slug Retrace uses for it. An unmapped name is
+ *  slugged rather than dropped: it is still better evidence than the hardcoded "claude-code" every client used to get. */
+const CLIENT_SYSTEM = new Map<string, string>([
+  ["claude-code", "claude-code"],
+  ["claude-ai", "claude-desktop"],
+  ["cursor-vscode", "cursor"],
+  ["Visual Studio Code", "vscode"],
+]);
+export function clientSystem(name: string): string {
+  // A Map, not an object literal: the client picks this name in the handshake, and an object would resolve
+  // "constructor"/"toString" through Object.prototype and return a function, which then fails Location's zod parse.
+  return CLIENT_SYSTEM.get(name) ?? (name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "unknown");
+}
+
+/** IDE / agent-development environment hosting this agent, read from the environment that IDE injects into the pane it
+ *  launches. Orca (onorca.dev) sets ORCA_PANE_KEY / ORCA_TAB_ID / ORCA_WORKTREE_ID / ORCA_TERMINAL_HANDLE on every
+ *  agent pane; ORCA_WORKTREE_ID is the one that earns its place, because Orca's premise is N agents in N isolated
+ *  worktrees and without it their event streams are indistinguishable. Nothing is guessed — an IDE that does not name
+ *  itself in the environment gets no `ide`, and `location.client` already identifies VS Code / Cursor / Claude Desktop
+ *  from the MCP handshake. Orca's bin directory being on PATH is NOT taken as evidence: that only means it is installed.
+ *  WSL caveat: Orca sets these Windows-side and forwards only HISTFILE and the git-credential vars through WSLENV, so
+ *  they do not reach a WSL pane unless WSLENV names them (see README). */
+export function detectIde(env: NodeJS.ProcessEnv): Pick<Location, "ide" | "workspace"> {
+  const orca = env.ORCA_PANE_KEY || env.ORCA_WORKTREE_ID || env.ORCA_TERMINAL_HANDLE;
+  return {
+    ide: env.RETRACE_IDE ?? (orca ? "orca" : undefined),
+    workspace: env.RETRACE_WORKSPACE ?? env.ORCA_WORKTREE_ID,
+  };
 }
 
 export function makeStore() {
@@ -68,17 +111,31 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
   const commitLock = opts.commitLock ?? env.RETRACE_COMMIT_LOCK !== "0";
   const actorLock = opts.actorLock ?? env.RETRACE_ACTOR_LOCK !== "0";
   const defaultActor = readDefaultActor();
-  /** location.session: a per-process run id (RETRACE_SESSION overrides). TODO(backlog #15): honest proxy — the real
-   *  Claude Code session id is not visible to this MCP subprocess; plumbing it through from the launcher is a separate step. */
-  const sessionId = env.RETRACE_SESSION ?? "run_" + randomUUID().replace(/-/g, "").slice(0, 12);
-  /** WHERE this server authoritatively knows (backlog #15). `url` is never stamped and no prod environment is
-   *  synthesized — commit URLs and deploy environments belong to the git hook / Worker. */
-  const locationDefaults: Location = {
-    system: env.RETRACE_SYSTEM ?? "claude-code",
-    environment: env.RETRACE_ENVIRONMENT ?? env.RETRACE_ENV ?? "local",
-    path: process.cwd(),
-    device: hostname(),
-    session: sessionId,
+  /** location.session: the harness's own session id when it exposes one, else a per-process run id (RETRACE_SESSION
+   *  overrides both). Claude Code passes CLAUDE_CODE_SESSION_ID down to MCP subprocesses — verified 2026-08-27 against
+   *  this server's own /proc/<pid>/environ under 2.1.250 — which is what makes the id SHARED with the git hook: the
+   *  same string lands on the agent's events and on the commits it drives, so `retrace_why` can walk between them.
+   *  Two honest limits, both deliberate: a process environment is frozen at exec, so a session id re-minted mid-process
+   *  is not seen until the server is respawned; and subagents inherit it, so this is a session key, not a per-run key.
+   *  The random fallback stays for MCP clients that expose no session at all. */
+  const sessionId = env.RETRACE_SESSION ?? env.CLAUDE_CODE_SESSION_ID ?? "run_" + randomUUID().replace(/-/g, "").slice(0, 12);
+  /** WHERE this server authoritatively knows (backlog #15). Evaluated per write rather than once, because the MCP
+   *  client's identity only exists after the `initialize` handshake — which happens after buildServer() has returned.
+   *  `url` is never stamped and no prod environment is synthesized — commit URLs and deploy environments belong to the
+   *  git hook / Worker. `surface` is not stamped here either: an MCP subprocess is a harness child by construction, so
+   *  the value would be the constant "agent" — hash bytes carrying no information. `system` follows the real client
+   *  (a Cursor event used to be labelled "claude-code"); RETRACE_SYSTEM still overrides. */
+  const locationDefaults = (): Location => {
+    const ci = server.server.getClientVersion();
+    return {
+      system: env.RETRACE_SYSTEM ?? (ci ? clientSystem(ci.name) : "claude-code"),
+      environment: env.RETRACE_ENVIRONMENT ?? env.RETRACE_ENV ?? "local",
+      path: process.cwd(),
+      device: env.RETRACE_DEVICE ?? hostname(),
+      session: sessionId,
+      client: ci ? `${ci.name}@${ci.version}` : undefined,
+      ...detectIde(env),
+    };
   };
   /** Resolve the project for a WRITE. If RETRACE_PROJECT is set (and lock on), any other explicit project is rejected
    *  so agents can't create stray projects by guessing a name. Read tools are not pinned. */
@@ -146,7 +203,7 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
         caused_by: z.string().optional().describe("Event id of the instruction/action that caused this one"),
         actor: Actor.partial().optional().describe("Override the default actor (defaults from env)"),
         change: Change.optional().describe("WHAT changed: summary, diff, before/after hashes"),
-        location: Location.optional().describe("WHERE: path/url/environment/system"),
+        location: Location.optional().describe("WHERE: path/url/environment/system. session/device/client/ide/workspace/surface are stamped by the server and ignored if you send them."),
         method: Method.optional().describe("HOW: tool, instruction ref, params, tokens/cost"),
         timestamp: z.string().optional().describe("ISO 8601; defaults to now"),
         idempotency_key: z.string().optional(),
@@ -163,7 +220,7 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
         project: writeProject(args.project),
         actor,
         artifacts: applyDefaultRoles(args.action, args.artifacts),
-        location: enrichLocation(args.location, locationDefaults),
+        location: enrichLocation(args.location, locationDefaults()),
       });
       const { event, deduped } = remote ? await remote.append(input) : await appendEvent(store, input);
       return {
@@ -201,7 +258,7 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
         timestamp: args.timestamp,
         method: { tool: "chat", automated: false },
         // WHERE enrichment (backlog #15): env-only — retrace_instruct deliberately has no caller-facing location param.
-        location: enrichLocation(undefined, locationDefaults),
+        location: enrichLocation(undefined, locationDefaults()),
       });
       const { event } = remote ? await remote.append(input) : await appendEvent(store, input);
       return { content: [{ type: "text", text: `instruction logged ${event.id}` }], structuredContent: { id: event.id } };

@@ -25,7 +25,9 @@
  *          id = family ("claude", "copilot", …) and model = slug of the full name ("Claude Fable 5" → "claude-fable-5").
  *   WHAT   action=committed (or merged for merge commits); artifacts = commit:<sha> + repo:<name>#<path> per file, all role=generated
  *   WHEN   author date
- *   WHERE  system=git, path=repo root, environment=local (override RETRACE_ENV), device=hostname
+ *   WHERE  system=git, path=repo root, environment=local (override RETRACE_ENV), device=hostname (override
+ *          RETRACE_DEVICE), session=CLAUDE_CODE_SESSION_ID when an agent's shell drove the commit (absent for a
+ *          human's own `git commit` — see below), ide/workspace when an IDE names itself (Orca), surface=tty|agent
  *   WHY    intent = commit subject (+ body); caused_by = trailer `Retrace-Caused-By: evt_…`, else env RETRACE_CAUSED_BY,
  *          else contents of .git/retrace-caused-by (a scratch file agents/MCP can write)
  *   HOW    tool=git, params { branch, parents, files, insertions, deletions }, automated = agent commit
@@ -35,7 +37,7 @@ import { existsSync, readFileSync, writeFileSync, appendFileSync, chmodSync, unl
 import { homedir, hostname } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { EventInput, appendEvent, describeEvent, Event } from "@retrace/core";
-import { makeStore } from "./index.js";
+import { makeStore, detectIde } from "./index.js";
 import { RemoteStore } from "./remote-store.js";
 
 type Cfg = { project?: string; db?: string; url?: string; token?: string; credential?: string; environment?: string; repoName?: string };
@@ -162,7 +164,7 @@ function coauthorActor(coauthor: string, ae: string): EventInput["actor"] {
   return { type: "agent", id: family ?? full, model: family && full !== family ? full : undefined, on_behalf_of: ae, display_name: name };
 }
 
-export function commitToEvent(repo: string, sha: string, cfg: Cfg): EventInput {
+export function commitToEvent(repo: string, sha: string, cfg: Cfg, live = false): EventInput {
   const fmt = ["%H", "%P", "%an", "%ae", "%aI", "%s", "%b", "%B"].join("%x1f");
   const raw = git(repo, ["show", "-s", `--format=${fmt}`, sha]);
   const [fullSha, parents, an, ae, aI, subject, body, message] = raw.split("\x1f");
@@ -211,13 +213,34 @@ export function commitToEvent(repo: string, sha: string, cfg: Cfg): EventInput {
     ],
     change: { before_hash: parentList[0], after_hash: fullSha, summary: `${files.length} file${files.length === 1 ? "" : "s"}, +${ins} −${del}` },
     timestamp: new Date(aI).toISOString(),
-    location: { system: "git", path: repo, environment: cfg.environment, device: hostname() },
+    location: {
+      system: "git", path: repo, environment: cfg.environment, device: process.env.RETRACE_DEVICE ?? hostname(),
+      // `live` = the post-commit hook, the ONLY caller whose own process context is the commit's context. backfill and
+      // `commit <sha>` replay commits this process did not produce, so stamping them would seal fabricated evidence.
+      ...(live ? { session: process.env.RETRACE_SESSION ?? process.env.CLAUDE_CODE_SESSION_ID, ...detectIde(process.env), surface: ttySurface() } : {}),
+    },
     intent: cleanBody ? `${subject}\n\n${cleanBody}` : subject,
     caused_by: causedBy,
     method: { tool: "git", automated: actor.type !== "human", params: { branch, parents: parentList, files: files.length, insertions: ins, deletions: del, sha: fullSha } },
     idempotency_key: `git:${fullSha}`,
     tags: ["git", ...(isMerge ? ["merge"] : [])],
   };
+}
+
+/** Did this hook run under a controlling terminal? "tty" = a human typed `git commit`; "agent" = a harness ran it.
+ *  Read from /proc/self/stat field 7 (tty_nr), NOT from tty.isatty(): the installed post-commit script redirects its
+ *  own stdout AND stderr to /dev/null (see hookScript), which destroys every file-descriptor signal while leaving the
+ *  controlling terminal itself intact. Measured 2026-08-27: agent-spawned tty_nr=0, real pty tty_nr=34819.
+ *  Linux-only by construction — with no /proc the field is simply absent, which is a legal permanent state
+ *  ("absence is information", schema.ts). It is EVIDENCE only and never decides WHO: authorship does that. */
+export function ttySurface(procStat = "/proc/self/stat"): "tty" | "agent" | undefined {
+  try {
+    const stat = readFileSync(procStat, "utf8");
+    // Parse after the last ")": field 2 (comm) is parenthesised and may itself contain spaces and parens.
+    const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" "); // [state, ppid, pgrp, session, tty_nr, ...]
+    const ttyNr = Number(fields[4]);
+    return Number.isFinite(ttyNr) && fields.length > 4 ? (ttyNr === 0 ? "agent" : "tty") : undefined;
+  } catch { return undefined; }
 }
 
 function remoteName(repo: string): string | undefined {
@@ -228,8 +251,8 @@ function remoteName(repo: string): string | undefined {
   } catch { return undefined; }
 }
 
-async function logCommit(repo: string, sha: string, cfg: Cfg): Promise<{ event: Event; deduped: boolean }> {
-  const input = commitToEvent(repo, sha, cfg);
+async function logCommit(repo: string, sha: string, cfg: Cfg, live = false): Promise<{ event: Event; deduped: boolean }> {
+  const input = commitToEvent(repo, sha, cfg, live);
   const store = cfg.url ? new RemoteStore(cfg.url, cfg.token) : makeStore();
   return store instanceof RemoteStore ? store.append(input) : appendEvent(store, input);
 }
@@ -237,7 +260,7 @@ async function logCommit(repo: string, sha: string, cfg: Cfg): Promise<{ event: 
 const HOOK_MARK = "# retrace-git hook";
 function hookScript(): string {
   const self = new URL(import.meta.url).pathname;
-  return `#!/bin/sh\n${HOOK_MARK}\nnode "${self}" commit --repo "$(git rev-parse --show-toplevel)" >/dev/null 2>&1 || echo "retrace: failed to log commit (non-fatal; reason appended to $(git rev-parse --git-dir)/retrace-hook.log)" >&2\n`;
+  return `#!/bin/sh\n${HOOK_MARK}\nnode "${self}" commit --hook --repo "$(git rev-parse --show-toplevel)" >/dev/null 2>&1 || echo "retrace: failed to log commit (non-fatal; reason appended to $(git rev-parse --git-dir)/retrace-hook.log)" >&2\n`;
 }
 
 async function main() {
@@ -251,7 +274,7 @@ async function main() {
     // fail-closed assert credential, 5xx) both land in retrace-hook.log, because the hook script discards our output.
     const sha = pos[1] ?? "HEAD";
     try {
-      const r = await logCommit(repo, sha, loadCfg(repo, flags));
+      const r = await logCommit(repo, sha, loadCfg(repo, flags), flags.hook === true);
       console.log(`${r.deduped ? "(already logged) " : "logged "}${r.event.id}\n${describeEvent(r.event)}`);
     } catch (e: any) {
       let id = sha;

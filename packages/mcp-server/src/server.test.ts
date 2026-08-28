@@ -2,25 +2,31 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { buildServer, enrichLocation } from "./index.js";
+import { buildServer, enrichLocation, clientSystem, detectIde } from "./index.js";
 import { mkdtempSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { SqliteStore } from "./sqlite-store.js";
 
-/** Hermetic actor env: the dev shell may export RETRACE_ACTOR/ON_BEHALF_OF/ACTOR_LOCK (see 3c4b3e5). */
+/** Hermetic actor env: the dev shell may export RETRACE_ACTOR/ON_BEHALF_OF/ACTOR_LOCK (see 3c4b3e5). The harness and
+ *  IDE vars matter for the same reason: this suite runs INSIDE Claude Code, which exports CLAUDE_CODE_SESSION_ID, and
+ *  may run inside an Orca pane, which exports ORCA_*. Left inherited, the session/ide assertions would pass on this
+ *  machine and fail in CI (or vice versa). */
 const withActorEnv = async (vars: Record<string, string | undefined>, fn: () => Promise<void>) => {
-  const keys = ["RETRACE_ACTOR", "RETRACE_ACTOR_MODEL", "RETRACE_ON_BEHALF_OF", "RETRACE_ACTOR_LOCK", "RETRACE_SYSTEM", "RETRACE_ENVIRONMENT", "RETRACE_ENV", "RETRACE_SESSION"];
+  const keys = ["RETRACE_ACTOR", "RETRACE_ACTOR_MODEL", "RETRACE_ON_BEHALF_OF", "RETRACE_ACTOR_LOCK", "RETRACE_SYSTEM", "RETRACE_ENVIRONMENT", "RETRACE_ENV", "RETRACE_SESSION",
+    "RETRACE_DEVICE", "RETRACE_IDE", "RETRACE_WORKSPACE", "CLAUDE_CODE_SESSION_ID", "ORCA_PANE_KEY", "ORCA_TAB_ID", "ORCA_WORKTREE_ID", "ORCA_TERMINAL_HANDLE"];
   const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
   for (const k of keys) delete process.env[k];
   for (const [k, v] of Object.entries(vars)) if (v !== undefined) process.env[k] = v;
   try { await fn(); } finally { for (const k of keys) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; } }
 };
-const connect = async (store: SqliteStore, opts?: Parameters<typeof buildServer>[1]) => {
+/** The client identity matters now: `location.system`/`location.client` come from the `initialize` handshake, so the
+ *  default here is the client Retrace is actually driven by rather than a placeholder name. */
+const connect = async (store: SqliteStore, opts?: Parameters<typeof buildServer>[1], info = { name: "claude-code", version: "2.1.250" }) => {
   const server = buildServer(store, opts);
   const [ct, st] = InMemoryTransport.createLinkedPair();
   await server.connect(st);
-  const client = new Client({ name: "t", version: "0" });
+  const client = new Client(info);
   await client.connect(ct);
   return client;
 };
@@ -315,4 +321,95 @@ test("location enrichment: RETRACE_SYSTEM/RETRACE_ENVIRONMENT/RETRACE_SESSION ov
     const [e2] = await store2.all("default");
     assert.equal(e2.location?.environment, "staging");
   });
+}));
+
+// ---- WHERE: harness session, MCP client identity, IDE, server-only keys ----
+
+test("clientSystem: known MCP client names map to a Retrace system slug; unknown names are slugged, never dropped", () => {
+  assert.equal(clientSystem("claude-code"), "claude-code");
+  assert.equal(clientSystem("claude-ai"), "claude-desktop");
+  assert.equal(clientSystem("cursor-vscode"), "cursor");
+  assert.equal(clientSystem("Visual Studio Code"), "vscode");
+  assert.equal(clientSystem("Some New Client 2.0"), "some-new-client-2-0");
+  assert.equal(clientSystem("***"), "unknown", "a name with nothing sluggable still yields a value");
+});
+
+test("detectIde: Orca's own pane env identifies the IDE and the isolated worktree; nothing set stamps nothing", () => {
+  assert.deepEqual(detectIde({}), { ide: undefined, workspace: undefined });
+  // Orca's bin dir on PATH means only that it is INSTALLED — never taken as evidence that we are running in it.
+  assert.deepEqual(detectIde({ PATH: "/c/Users/x/AppData/Local/Programs/orca/resources/bin" }), { ide: undefined, workspace: undefined });
+  assert.deepEqual(detectIde({ ORCA_WORKTREE_ID: "wt_7" }), { ide: "orca", workspace: "wt_7" });
+  assert.deepEqual(detectIde({ ORCA_PANE_KEY: "pane:1" }), { ide: "orca", workspace: undefined }, "a pane with no worktree still names the IDE");
+  assert.deepEqual(detectIde({ ORCA_TERMINAL_HANDLE: "h1" }), { ide: "orca", workspace: undefined });
+  assert.deepEqual(detectIde({ RETRACE_IDE: "vscode", RETRACE_WORKSPACE: "ws" }), { ide: "vscode", workspace: "ws" }, "explicit override for an IDE we cannot detect");
+  assert.deepEqual(detectIde({ ORCA_WORKTREE_ID: "wt_7", RETRACE_IDE: "orca-fork" }), { ide: "orca-fork", workspace: "wt_7" }, "override wins over detection");
+});
+
+test("location.session: the harness session id is used when present, so MCP events and git commits share one key", async () => {
+  await withActorEnv({ ...ENV, CLAUDE_CODE_SESSION_ID: "e09a0ccf-5eef-4c17-bc88-284d03d778e2" }, async () => {
+    const store = new SqliteStore(":memory:");
+    const client = await connect(store);
+    await client.callTool({ name: "retrace_log", arguments: { action: "edited", artifacts: [{ id: "repo:rpg#a.ts" }] } });
+    const [evt] = await store.all("default");
+    assert.equal(evt.location?.session, "e09a0ccf-5eef-4c17-bc88-284d03d778e2", "not a run_ proxy any more");
+  });
+  // RETRACE_SESSION stays the explicit override, above the harness id.
+  await withActorEnv({ ...ENV, CLAUDE_CODE_SESSION_ID: "from-harness", RETRACE_SESSION: "pinned" }, async () => {
+    const store = new SqliteStore(":memory:");
+    const client = await connect(store);
+    await client.callTool({ name: "retrace_log", arguments: { action: "edited", artifacts: [{ id: "repo:rpg#a.ts" }] } });
+    assert.equal((await store.all("default"))[0].location?.session, "pinned");
+  });
+});
+
+test("location.client/system: taken from the MCP initialize handshake, not hardcoded", async () => {
+  await withActorEnv(ENV, async () => {
+    const store = new SqliteStore(":memory:");
+    const client = await connect(store);
+    await client.callTool({ name: "retrace_log", arguments: { action: "edited", artifacts: [{ id: "repo:rpg#a.ts" }] } });
+    const [evt] = await store.all("default");
+    assert.equal(evt.location?.client, "claude-code@2.1.250");
+    assert.equal(evt.location?.system, "claude-code");
+  });
+  // The bug this fixes: every client used to be labelled "claude-code" regardless of who was actually connected.
+  await withActorEnv(ENV, async () => {
+    const store = new SqliteStore(":memory:");
+    const client = await connect(store, undefined, { name: "cursor-vscode", version: "1.7.3" });
+    await client.callTool({ name: "retrace_log", arguments: { action: "edited", artifacts: [{ id: "repo:rpg#a.ts" }] } });
+    const [evt] = await store.all("default");
+    assert.equal(evt.location?.client, "cursor-vscode@1.7.3");
+    assert.equal(evt.location?.system, "cursor");
+  });
+});
+
+test("location: an Orca pane stamps ide + workspace on every event", async () => withActorEnv({ ...ENV, ORCA_PANE_KEY: "pane:abc", ORCA_WORKTREE_ID: "wt_feature_x" }, async () => {
+  const store = new SqliteStore(":memory:");
+  const client = await connect(store);
+  await client.callTool({ name: "retrace_log", arguments: { action: "edited", artifacts: [{ id: "repo:rpg#a.ts" }] } });
+  await client.callTool({ name: "retrace_instruct", arguments: { human_id: "jordan@example.com", instruction: "x" } });
+  for (const evt of await store.all("default")) {
+    assert.equal(evt.location?.ide, "orca");
+    assert.equal(evt.location?.workspace, "wt_feature_x");
+  }
+}));
+
+test("location: server-only fields are dropped from caller input — an agent cannot assert where it ran", async () => withActorEnv({ ...ENV, CLAUDE_CODE_SESSION_ID: "real-session", ORCA_WORKTREE_ID: "wt_real" }, async () => {
+  const store = new SqliteStore(":memory:");
+  const client = await connect(store);
+  await client.callTool({ name: "retrace_log", arguments: {
+    action: "edited", artifacts: [{ id: "repo:rpg#a.ts" }],
+    location: { path: "src/x.ts", environment: "staging", session: "forged", device: "someone-elses-box", client: "totally-a-human@1", ide: "emacs", workspace: "wt_fake", surface: "tty" },
+  } });
+  const [evt] = await store.all("default");
+  assert.equal(evt.location?.path, "src/x.ts", "path is still caller-wins — the caller knows the file, the server only knows cwd");
+  assert.equal(evt.location?.environment, "staging");
+  assert.equal(evt.location?.session, "real-session");
+  assert.equal(evt.location?.device, hostname());
+  assert.equal(evt.location?.client, "claude-code@2.1.250");
+  assert.equal(evt.location?.ide, "orca");
+  assert.equal(evt.location?.workspace, "wt_real");
+  assert.ok(!("surface" in (evt.location ?? {})), "the MCP path never stamps surface, and the caller may not either");
+  // enrichLocation is the single choke point, so assert it directly too.
+  assert.deepEqual(enrichLocation({ session: "x", device: "y", client: "z", ide: "i", workspace: "w", surface: "tty", path: "p" }, { session: "s" }),
+    { session: "s", path: "p" });
 }));

@@ -3,19 +3,22 @@ import assert from "node:assert/strict";
 import { execFileSync, execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdtempSync, writeFileSync, readFileSync, existsSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { SqliteStore } from "./sqlite-store.js";
 import { verifyProject } from "@retrace/core";
-import { parseTrailers, resolveHookToken } from "./git-hook.js";
+import { parseTrailers, resolveHookToken, ttySurface } from "./git-hook.js";
 
 const bin = fileURLToPath(new URL("./git-hook.js", import.meta.url));
 // Hermetic: drop inherited RETRACE_* (a dev shell exports RETRACE_URL/TOKEN, which would redirect the
-// spawned hook's writes to the real cloud ledger — this happened; see dogfood log 2026-08-19).
-const baseEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("RETRACE_"))) as Record<string, string>;
+// spawned hook's writes to the real cloud ledger — this happened; see dogfood log 2026-08-19). CLAUDE_CODE_SESSION_ID
+// and ORCA_* go for the same reason: this suite runs inside Claude Code (and may run inside an Orca pane), so leaving
+// them inherited would stamp a session/ide here and none in CI.
+const HOST_VARS = /^(RETRACE_|ORCA_|CLAUDE_CODE_SESSION_ID$)/;
+const baseEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => !HOST_VARS.test(k))) as Record<string, string>;
 const sh = (cwd: string, cmd: string, args: string[], env: Record<string, string> = {}) =>
   execFileSync(cmd, args, { cwd, encoding: "utf8", env: { ...baseEnv, GIT_AUTHOR_NAME: "Jordan", GIT_AUTHOR_EMAIL: "jordan@slcwitit.com", GIT_COMMITTER_NAME: "Jordan", GIT_COMMITTER_EMAIL: "jordan@slcwitit.com", ...env } });
 // Async variant for tests that host an HTTP server in-process: execFileSync blocks the event loop, so that server could
@@ -243,4 +246,109 @@ test("git adapter: trailers from all trailing paragraphs; consistent Co-Authored
   assert.deepEqual(tree.actor, { type: "agent", id: "claude-code", model: "m", on_behalf_of: "jordan@slcwitit.com" });
   assert.equal(tree.intent, "ct");
   assert.equal((await verifyProject(store, "rpg")).ok, true);
+});
+
+// ---- WHERE: the shared session key, and tty vs agent (see ttySurface) ----
+
+test("ttySurface: reads the controlling terminal from /proc/self/stat, surviving the hook's own output redirection", () => {
+  const dir = mkdtempSync(join(tmpdir(), "retrace-tty-"));
+  // Real shapes. Field 2 (comm) is parenthesised and may contain spaces AND parens — parsing must start after the LAST ")".
+  const agent = join(dir, "agent"); writeFileSync(agent, "4242 (node) S 4240 4242 4242 0 -1 4194304 1234 0 0 0 5 1 0 0 20 0 11 0 999\n");
+  const human = join(dir, "human"); writeFileSync(human, "4243 (git) S 4240 4243 4243 34819 4243 4194304 1234 0 0 0 5 1 0 0 20 0 1 0 999\n");
+  const weird = join(dir, "weird"); writeFileSync(weird, "4244 (my (odd) proc) S 4240 4244 4244 34819 4244 4194304 1 0 0 0 1 1 0 0 20 0 1 0 9\n");
+  assert.equal(ttySurface(agent), "agent", "tty_nr 0 = spawned by a harness, no controlling terminal");
+  assert.equal(ttySurface(human), "tty", "tty_nr 34819 = a human typed git commit");
+  assert.equal(ttySurface(weird), "tty", "comm containing spaces and parens still parses");
+  assert.equal(ttySurface(join(dir, "does-not-exist")), undefined, "no /proc (macOS, Windows) → absent, not a guess");
+  writeFileSync(join(dir, "short"), "4245 (node) S\n");
+  assert.equal(ttySurface(join(dir, "short")), undefined, "a truncated stat line is absent, never a false 'tty'");
+});
+
+test("git adapter: a commit driven by an agent shell carries that shell's session; a human's own commit carries none", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "retrace-git-sess-"));
+  const db = join(dir, "ledger.db");
+  const env = { RETRACE_DB: db, RETRACE_PROJECT: "rpg" };
+  sh(dir, "git", ["init", "-q", "-b", "main"]);
+  writeFileSync(join(dir, "a.ts"), "export const a = 1;\n");
+  sh(dir, "git", ["add", "."]);
+  sh(dir, "git", ["commit", "-qm", "initial"]);
+  sh(dir, "node", [bin, "install", "--repo", dir], env);
+
+  // (a) the hook inherits the harness env, exactly as it does when Claude Code runs `git commit` in its Bash tool
+  writeFileSync(join(dir, "a.ts"), "export const a = 2;\n");
+  sh(dir, "git", ["commit", "-qam", "agent-driven"], { ...env, CLAUDE_CODE_SESSION_ID: "sess-abc", ORCA_WORKTREE_ID: "wt_9" });
+  // (b) a human at their own terminal: neither var is set
+  writeFileSync(join(dir, "a.ts"), "export const a = 3;\n");
+  sh(dir, "git", ["commit", "-qam", "human-driven"], env);
+
+  const store = new SqliteStore(db);
+  const [agentCommit, humanCommit] = await store.all("rpg");
+  assert.equal(agentCommit.location?.session, "sess-abc", "joins the MCP events of the same session");
+  assert.equal(agentCommit.location?.ide, "orca");
+  assert.equal(agentCommit.location?.workspace, "wt_9");
+  assert.ok(!("session" in (humanCommit.location ?? {})), "no random fallback — absence is what makes the key discriminating");
+  assert.ok(!("ide" in (humanCommit.location ?? {})));
+  assert.equal(humanCommit.location?.system, "git");
+  assert.equal(humanCommit.location?.device, hostname());
+  // Which value depends on whether this suite was started from a real terminal — that is the point of the field, so
+  // assert it is PRESENT and one of the two legal values rather than pinning the ambient tty (which would fail for a
+  // developer running `npm test` in their own shell, and pass vacuously if the wiring were deleted).
+  for (const e of [agentCommit, humanCommit]) assert.ok(e.location?.surface === "tty" || e.location?.surface === "agent", `hook stamped surface, got ${e.location?.surface}`);
+  assert.equal((await verifyProject(store, "rpg")).ok, true);
+});
+
+test("git adapter: RETRACE_DEVICE overrides the hostname stamped into every commit event", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "retrace-git-dev-"));
+  const db = join(dir, "ledger.db");
+  const env = { RETRACE_DB: db, RETRACE_PROJECT: "rpg" };
+  sh(dir, "git", ["init", "-q", "-b", "main"]);
+  writeFileSync(join(dir, "a.ts"), "1\n");
+  sh(dir, "git", ["add", "."]);
+  sh(dir, "git", ["commit", "-qm", "initial"]);
+  sh(dir, "node", [bin, "install", "--repo", dir], env);
+  writeFileSync(join(dir, "a.ts"), "2\n");
+  sh(dir, "git", ["commit", "-qam", "second"], { ...env, RETRACE_DEVICE: "workstation-7" });
+  const [evt] = await new SqliteStore(db).all("rpg");
+  assert.equal(evt.location?.device, "workstation-7", "a hostname is sealed un-redactably into a shareable body — capture time is the only control point");
+});
+
+test("git adapter: replay paths (backfill, `commit <sha>`) never stamp the replaying process's session/ide/surface", async () => {
+  // These three fields describe the process that PRODUCED the commit, and only the post-commit hook is that process.
+  // Backfilling someone's 2024 commits from an agent shell must not seal "this agent's session, in Orca, at a
+  // terminal" onto them — that is fabricated WHERE evidence in an append-only, hash-covered ledger.
+  const dir = mkdtempSync(join(tmpdir(), "retrace-git-replay-"));
+  const db = join(dir, "ledger.db");
+  const env = { RETRACE_DB: db, RETRACE_PROJECT: "rpg" };
+  const agentEnv = { ...env, CLAUDE_CODE_SESSION_ID: "sess-now", ORCA_WORKTREE_ID: "wt_now" };
+  sh(dir, "git", ["init", "-q", "-b", "main"]);
+  writeFileSync(join(dir, "a.ts"), "1\n");
+  sh(dir, "git", ["add", "."]);
+  sh(dir, "git", ["commit", "-qm", "old work"], { GIT_AUTHOR_DATE: "2024-03-04T10:00:00Z", GIT_COMMITTER_DATE: "2024-03-04T10:00:00Z" });
+
+  // (a) backfill: history this process did not produce
+  sh(dir, "node", [bin, "backfill", "--repo", dir], agentEnv);
+  // (b) `commit <sha>`: the documented recovery when a hook run was dropped — still a replay, not the producing process
+  writeFileSync(join(dir, "a.ts"), "2\n");
+  sh(dir, "git", ["commit", "-qam", "second"]); // no hook installed, so nothing logged yet
+  const sha = sh(dir, "git", ["rev-parse", "HEAD"]).trim();
+  sh(dir, "node", [bin, "commit", "--repo", dir, sha], agentEnv);
+
+  const events = await new SqliteStore(db).all("rpg");
+  assert.equal(events.length, 2);
+  for (const e of events) {
+    assert.equal(e.location?.system, "git", "the fields the replay DOES know are still stamped");
+    assert.equal(e.location?.path, dir);
+    for (const k of ["session", "ide", "workspace", "surface"]) {
+      assert.ok(!(k in (e.location ?? {})), `replay must not stamp location.${k} (got ${JSON.stringify(e.location?.[k as "session"])})`);
+    }
+  }
+
+  // ...and the live hook path, which IS the producing process, does stamp them — the flag the installed hook passes.
+  sh(dir, "node", [bin, "install", "--repo", dir], env);
+  assert.match(readFileSync(join(dir, ".git/hooks/post-commit"), "utf8"), /commit --hook /, "install writes the --hook flag that marks the live path");
+  writeFileSync(join(dir, "a.ts"), "3\n");
+  sh(dir, "git", ["commit", "-qam", "third"], agentEnv);
+  const live = (await new SqliteStore(db).all("rpg"))[2];
+  assert.equal(live.location?.session, "sess-now");
+  assert.equal(live.location?.workspace, "wt_now");
 });
