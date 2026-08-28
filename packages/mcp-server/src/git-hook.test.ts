@@ -10,7 +10,7 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { SqliteStore } from "./sqlite-store.js";
 import { verifyProject } from "@retrace/core";
-import { parseTrailers, resolveHookToken, ttySurface } from "./git-hook.js";
+import { parseTrailers, resolveHookToken, ttySurface, guardRemoteWrite } from "./git-hook.js";
 
 const bin = fileURLToPath(new URL("./git-hook.js", import.meta.url));
 // Hermetic: drop inherited RETRACE_* (a dev shell exports RETRACE_URL/TOKEN, which would redirect the
@@ -351,4 +351,65 @@ test("git adapter: replay paths (backfill, `commit <sha>`) never stamp the repla
   const live = (await new SqliteStore(db).all("rpg"))[2];
   assert.equal(live.location?.session, "sess-now");
   assert.equal(live.location?.workspace, "wt_now");
+});
+
+// ---- Remote-write guard (2026-08-28: six junk events reached the live Worker from /tmp scratch repos) ----
+
+test("guardRemoteWrite: a repo with no .retrace.json may not write to a remote ledger", () => {
+  const wired = mkdtempSync(join(tmpdir(), "retrace-guard-wired-"));
+  const scratch = mkdtempSync(join(tmpdir(), "retrace-guard-scratch-"));
+  writeFileSync(join(wired, ".retrace.json"), JSON.stringify({ project: "rpg" }));
+  const remote = { url: "https://retrace-api.example.workers.dev", project: "scratch" };
+
+  assert.throws(() => guardRemoteWrite(scratch, remote), /refusing to log to the remote ledger/);
+  // The message has to be actionable: it names the ledger, the repo, the project it would have created, and both ways out.
+  assert.throws(() => guardRemoteWrite(scratch, remote), (e: Error) => {
+    assert.match(e.message, /retrace-api\.example\.workers\.dev/);
+    assert.ok(e.message.includes(scratch));
+    assert.match(e.message, /project "scratch" would be created/);
+    assert.match(e.message, /retrace-git install/);
+    assert.match(e.message, /RETRACE_DB=/);
+    assert.match(e.message, /--allow-remote/);
+    return true;
+  });
+
+  guardRemoteWrite(wired, remote);                              // the committed marker permits it
+  guardRemoteWrite(scratch, { ...remote, allowRemote: true });  // explicit one-run override
+  guardRemoteWrite(scratch, { project: "scratch", db: "/tmp/x.db" }); // local writes are not gated — cheap to discard
+  guardRemoteWrite(scratch, {});
+});
+
+test("git adapter: a scratch repo with RETRACE_URL in the env refuses to write, until install or --allow-remote", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "retrace-guard-e2e-"));
+  // Unroutable on purpose: if the guard ever regresses, the write fails loudly here instead of reaching a real ledger.
+  const env = { RETRACE_URL: "http://127.0.0.1:1", RETRACE_TOKEN: "owner-token" };
+  const run = (args: string[], extra: Record<string, string> = {}) => {
+    try { return { ok: true, out: sh(dir, "node", args, { ...env, ...extra }) }; }
+    catch (e: any) { return { ok: false, out: `${e.stdout ?? ""}${e.stderr ?? ""}` }; }
+  };
+  sh(dir, "git", ["init", "-q", "-b", "main"]);
+  writeFileSync(join(dir, "a.ts"), "1\n");
+  sh(dir, "git", ["add", "."]);
+  sh(dir, "git", ["commit", "-qm", "initial"]);
+  assert.ok(!existsSync(join(dir, ".retrace.json")), "the shape of the incident: a repo never wired to Retrace");
+
+  const blocked = run([bin, "commit", "--repo", dir]);
+  assert.equal(blocked.ok, false);
+  assert.match(blocked.out, /refusing to log to the remote ledger http:\/\/127\.0\.0\.1:1/);
+  // The commit path still records why in the hook log, since the real hook discards stdout/stderr.
+  assert.match(readFileSync(join(dir, ".git", "retrace-hook.log"), "utf8"), /NOT logged: refusing to log to the remote ledger/);
+
+  // backfill is guarded too — it was the command that created three of the four junk projects
+  assert.match(run([bin, "backfill", "--repo", dir]).out, /refusing to log to the remote ledger/);
+
+  // Both escape hatches get past the guard: the failure that remains is the connection, not the refusal.
+  for (const attempt of [run([bin, "commit", "--repo", dir, "--allow-remote"]), run([bin, "commit", "--repo", dir], { RETRACE_ALLOW_REMOTE: "1" })]) {
+    assert.equal(attempt.ok, false, "still fails — 127.0.0.1:1 is unroutable");
+    assert.doesNotMatch(attempt.out, /refusing to log/, "but not because of the guard");
+  }
+
+  // ...and so does the documented remedy, which is what makes the error message honest.
+  sh(dir, "node", [bin, "install", "--repo", dir, "--project", "rpg"], env);
+  assert.ok(existsSync(join(dir, ".retrace.json")));
+  assert.doesNotMatch(run([bin, "commit", "--repo", dir]).out, /refusing to log/);
 });

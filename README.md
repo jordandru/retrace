@@ -57,6 +57,14 @@ node /ABSOLUTE/PATH/retrace/packages/mcp-server/dist/git-hook.js backfill      #
 
 `install` writes `.git/hooks/post-commit` and a committable `.retrace.json` (`{ "project", "environment", optional "db" | "url" + "token" | "credential" }`). `"credential": "retrace-git"` makes the hook send that scoped assert credential's token (looked up by `actor.id` in `RETRACE_CREDENTIALS_FILE`, default `~/.retrace/worker-credentials.json`) instead of `RETRACE_TOKEN`, so the repo never carries the owner token; without it the precedence is unchanged (`RETRACE_HOOK_TOKEN` > `RETRACE_TOKEN` > file). Hook failures (a 401/403 from a fail-closed credential, config errors) are appended to `.git/retrace-hook.log` — re-log with `retrace-git commit <sha>`. Every commit is then logged: WHO = the author (human), or an **agent** when the commit carries trailers `Retrace-Actor: claude-code` / `Retrace-Model: …` or a `Co-Authored-By:` naming Claude/Copilot/Codex/etc. (the human author becomes `on_behalf_of`); WHAT = `commit:<repo>@<sha>` plus one `repo:<repo>#<path>` artifact per changed file with `+ins −del`; WHY = the commit message, and `caused_by` from a `Retrace-Caused-By: evt_…` trailer, `RETRACE_CAUSED_BY` env, or `.git/retrace-caused-by`. Merge commits log as `merged`. Idempotency key is the sha, so backfills never duplicate.
 
+**Remote-write guard.** Writing to a *remote* ledger needs a `.retrace.json` in the repo root — the committed marker
+that says this repo logs somewhere. Without it, an ambient `RETRACE_URL` in your shell would silently make any scratch
+repo write to production under a project named after its directory; that is how four junk projects reached the live
+Worker on 2026-08-28. `retrace-git` now refuses, naming the ledger, the repo, the project it would have created, and
+the ways out: `retrace-git install` (writes the file), `RETRACE_DB=<path>` to write locally, or `--allow-remote` /
+`RETRACE_ALLOW_REMOTE=1` for env-only setups such as CI backfill. Local writes are not gated — a stray row in a SQLite
+file is cheap to discard; a sealed event in a shared append-only ledger costs a `DELETE /projects/:p`.
+
 Tip for agents (put in `CLAUDE.md`): *when committing, add trailers `Retrace-Actor: claude-code`, `Retrace-Model: <model>`, and `Retrace-Caused-By: <instruction event id>`.*
 
 ### GitHub PR adapter — PRs, reviews, comments, CI runs become events

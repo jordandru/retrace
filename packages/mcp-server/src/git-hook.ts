@@ -8,6 +8,7 @@
  *   retrace-git uninstall [--repo <path>]
  *
  * Config precedence: CLI flags > env (RETRACE_PROJECT/RETRACE_DB/RETRACE_URL/RETRACE_TOKEN) > .retrace.json in repo root.
+ * Remote-write guard: writing to a REMOTE ledger requires a .retrace.json in the repo root — see guardRemoteWrite.
  * Token precedence (resolveHookToken): env RETRACE_HOOK_TOKEN > the credential named by .retrace.json "credential"
  *   (looked up by actor.id in RETRACE_CREDENTIALS_FILE, default ~/.retrace/worker-credentials.json — a scoped assert
  *   credential, so the hook need not carry the owner token) > env RETRACE_TOKEN > .retrace.json "token". No "credential"
@@ -40,7 +41,10 @@ import { EventInput, appendEvent, describeEvent, Event } from "@retrace/core";
 import { makeStore, detectIde } from "./index.js";
 import { RemoteStore } from "./remote-store.js";
 
-type Cfg = { project?: string; db?: string; url?: string; token?: string; credential?: string; environment?: string; repoName?: string };
+export type Cfg = { project?: string; db?: string; url?: string; token?: string; credential?: string; environment?: string; repoName?: string;
+  /** Resolved from --allow-remote / RETRACE_ALLOW_REMOTE, not from .retrace.json — a repo that HAS the file is already
+   *  permitted, so setting it there would be a no-op. See guardRemoteWrite. */
+  allowRemote?: boolean };
 
 /** The operator's local mirror of the Worker's RETRACE_CREDENTIALS (JSON array of {token, actor, …}); only token + actor.id are read. */
 const DEFAULT_CREDENTIALS_FILE = join(homedir(), ".retrace", "worker-credentials.json");
@@ -105,6 +109,7 @@ function loadCfg(repo: string, flags: Record<string, string | boolean>): Cfg {
     token: resolveHookToken(file),
     environment: process.env.RETRACE_ENV ?? file.environment ?? "local",
     repoName: file.repoName,
+    allowRemote: flags["allow-remote"] !== undefined || process.env.RETRACE_ALLOW_REMOTE === "1",
   };
   // The local store is built by makeStore (reads env) — propagate the file's db path when unset. The remote store is built
   // from cfg directly (logCommit) so the resolved token, not whatever RETRACE_TOKEN the shell exports, is what is sent.
@@ -251,7 +256,32 @@ function remoteName(repo: string): string | undefined {
   } catch { return undefined; }
 }
 
+/** A repo that was never wired to Retrace must not write to a REMOTE ledger just because the shell happens to export
+ *  RETRACE_URL. `.retrace.json` is the committed marker that says "this repo logs to a ledger" — `install` writes it —
+ *  so its absence, combined with an ambient RETRACE_URL, means a scratch repo has picked up someone else's production
+ *  credentials. That is not hypothetical: on 2026-08-28 six events in four junk projects (bf, p, demo, reprotest)
+ *  reached the live Worker exactly this way, from temp repos under /tmp, and had to be deleted project-by-project
+ *  because the ledger is append-only. The repo's own test harness already strips RETRACE_* for this reason
+ *  (git-hook.test.ts baseEnv, after the 2026-08-19 dogfood incident); this is the same defence for anyone driving the
+ *  CLI by hand.
+ *  Local writes are deliberately NOT gated — a stray row in a SQLite file is cheap to discard, a sealed event in a
+ *  shared append-only ledger is not. The real hook never trips this: `install` writes .retrace.json before the hook
+ *  can ever run. Escape hatch for env-only setups (CI backfilling a repo that does not carry the file):
+ *  `--allow-remote`, or RETRACE_ALLOW_REMOTE=1. */
+export function guardRemoteWrite(repo: string, cfg: Cfg): void {
+  if (!cfg.url || cfg.allowRemote || existsSync(join(repo, ".retrace.json"))) return;
+  throw new Error(
+    `refusing to log to the remote ledger ${cfg.url} from ${repo}: this repo has no .retrace.json, so RETRACE_URL came ` +
+    `from the environment rather than from the repo, and project "${cfg.project}" would be created there. ` +
+    `If this repo really should log to that ledger, run \`retrace-git install --project <name>\` (writes .retrace.json). ` +
+    `If it is a scratch or test repo, write locally with RETRACE_DB=<path>, or unset RETRACE_URL. ` +
+    `To override for one run: --allow-remote (or RETRACE_ALLOW_REMOTE=1).`,
+  );
+}
+
 async function logCommit(repo: string, sha: string, cfg: Cfg, live = false): Promise<{ event: Event; deduped: boolean }> {
+  // The single choke point for every write path (hook, `commit <sha>`, backfill) — so a new caller cannot forget it.
+  guardRemoteWrite(repo, cfg);
   const input = commitToEvent(repo, sha, cfg, live);
   const store = cfg.url ? new RemoteStore(cfg.url, cfg.token) : makeStore();
   return store instanceof RemoteStore ? store.append(input) : appendEvent(store, input);
@@ -317,7 +347,7 @@ async function main() {
     console.log(`backfill: ${n} logged, ${d} already present, project '${cfg.project}'`);
     return;
   }
-  console.log(`retrace-git <install|uninstall|commit [sha]|backfill [--since ref] [--max n]> [--repo path] [--project name]`);
+  console.log(`retrace-git <install|uninstall|commit [sha]|backfill [--since ref] [--max n]> [--repo path] [--project name] [--allow-remote]`);
 }
 
 const isMain = process.argv[1] && import.meta.url.endsWith(process.argv[1].split("/").pop()!);
