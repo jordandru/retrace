@@ -7,7 +7,7 @@
  * credentials (git hook, backfill forwarders) may assert only the actors in their allowed_actors list. DELETE/share
  * stay owner-only.
  *   GET  /  | /ui                        UI
- *   GET  /api                            health
+ *   GET  /api                            health + the schema surface this build understands (public; see schemaSurface)
  *   GET  /.well-known/retrace-pubkey     issuer public key (JWK) — public
  *   POST /events                         append (EventInput)
  *   GET  /events/:id · /events/:id/why
@@ -28,7 +28,7 @@
  *   GET  /s/:id/meta · /s/:id/events · /s/:id/verify · /s/:id/export · /s/:id/report · /s/:id/lineage
  */
 import { z } from "zod";
-import { Actor, ActorType, EventInput } from "./schema.js";
+import { Actor, ActorType, EventInput, schemaSurface } from "./schema.js";
 import { EventStore, appendEvent, verifyProject, explainEvent, newShareId, shareIsLive, Share, isHeadMovedError } from "./store.js";
 import { sealEvent } from "./chain.js";
 import { buildExportBundle, verifyExportBundle } from "./export.js";
@@ -167,7 +167,11 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
     if (req.method === "OPTIONS") return new Response(null, { headers: CORS });
     if (parts.length === 0 || parts[0] === "ui") return html(UI_HTML);
     if (parts[0] === "favicon.ico") return new Response(null, { status: 204 });
-    if (parts[0] === "api" && parts.length === 1) return json({ name: "retrace-api", version: "0.1.0", ok: true, auth: !!token || credentials.length > 0, credentials: credentials.length, signing: !!opts.signingKey });
+    // `schema` is what makes version skew detectable: a producer newer than this deployment would have its unknown
+    // fields silently stripped by EventInput.safeParse below. Public, like the rest of this probe — the field NAMES
+    // are already in the README, and being readable without a token is the point (you can check a deployment you
+    // hold no credential for). See schemaSurface() and scripts/check-deploy.mjs.
+    if (parts[0] === "api" && parts.length === 1) return json({ name: "retrace-api", version: "0.1.0", ok: true, auth: !!token || credentials.length > 0, credentials: credentials.length, signing: !!opts.signingKey, schema: schemaSurface() });
     if (parts[0] === ".well-known" && parts[1] === "retrace-pubkey") {
       if (!opts.signingKey) return json({ error: "no signing key configured" }, 404);
       const pub = publicFromPrivate(opts.signingKey);

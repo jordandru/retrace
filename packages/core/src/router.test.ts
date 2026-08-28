@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createHandler, parseCredentials, Credential, EventStore, Event, Share, appendEvent, EventInput, verifyProject, ChainHead, HeadMovedError } from "./index.js";
+import { createHandler, parseCredentials, Credential, EventStore, Event, Share, appendEvent, EventInput, verifyProject, ChainHead, HeadMovedError, schemaSurface, Location, Action } from "./index.js";
 
 /** minimal in-memory store for tests */
 class MemStore implements EventStore {
@@ -386,4 +386,52 @@ test("credentials: parseCredentials validates the secret and defaults trust to p
   assert.throws(() => parseCredentials(JSON.stringify([{ token: "short", actor: CLAUDE.actor }])), /too_small|at least 16/i);
   assert.throws(() => parseCredentials(JSON.stringify([{ token: CLAUDE.token }])), /actor/);
   assert.throws(() => parseCredentials("{not json"));
+});
+
+// ---- schema probe: the only defence against a silently-stale deployment ----
+
+test("schemaSurface is derived from the zod shapes, so it cannot drift from the code", () => {
+  const surface = schemaSurface();
+  // Derived, not hand-listed: adding a field to Location must show up here with no other edit. If someone replaces
+  // this with a literal array, this assertion is what fails.
+  assert.deepEqual(surface.location, Object.keys(Location.shape).sort());
+  assert.deepEqual(surface.actions, [...Action.options].sort());
+  // The fields whose silent loss motivated the probe.
+  for (const f of ["session", "client", "ide", "workspace", "surface", "device", "system"]) assert.ok(surface.location.includes(f), f);
+  for (const f of ["actor", "action", "artifacts", "location", "caused_by", "idempotency_key"]) assert.ok(surface.event.includes(f), f);
+  assert.ok(surface.artifact.includes("role"));
+});
+
+test("GET /api publishes the schema surface, unauthenticated, and it matches this build", async () => {
+  const store = new MemStore();
+  const handle = createHandler(store, { token: "secret" });
+  // No authorization header: a deployment must be checkable by someone holding no credential for it.
+  const res = await handle(new Request("https://x/api"));
+  assert.equal(res.status, 200);
+  const body = await res.json() as any;
+  assert.equal(body.name, "retrace-api");
+  assert.deepEqual(body.schema, schemaSurface(), "what the deployment reports is what the deployment can parse");
+  // The comparison check-deploy performs: every local field present in the probe.
+  const missing = Object.entries(schemaSurface()).flatMap(([g, keys]) =>
+    (keys as string[]).filter((k) => !body.schema[g].includes(k)).map((k) => `${g}.${k}`));
+  assert.deepEqual(missing, []);
+});
+
+test("POST /events silently strips unknown keys — the exact failure the probe exists to surface", async () => {
+  const store = new MemStore();
+  const handle = createHandler(store, { token: "secret" });
+  const res = await handle(new Request("https://x/events", {
+    method: "POST",
+    headers: { authorization: "Bearer secret", "content-type": "application/json" },
+    body: JSON.stringify({
+      project: "p", actor: { type: "human", id: "j" }, action: "edited",
+      artifacts: [{ id: "a" }],
+      location: { path: "/x", a_field_from_a_newer_build: "gone" },
+    }),
+  }));
+  assert.equal(res.status, 201);
+  const stored = store.events[0];
+  assert.equal(stored.location?.path, "/x");
+  assert.ok(!("a_field_from_a_newer_build" in (stored.location ?? {})),
+    "accepted, sealed and hashed WITHOUT the field, and with no error anywhere — hence GET /api");
 });

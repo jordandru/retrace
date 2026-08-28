@@ -170,4 +170,22 @@ export const Event = EventInput.extend({
 });
 export type Event = z.infer<typeof Event>;
 
+/**
+ * The schema surface a build understands, derived from the zod shapes themselves so it can never drift from the code.
+ *
+ * This exists because the failure it detects is SILENT: `POST /events` re-parses with `EventInput.safeParse`, and zod
+ * strips keys it does not know, so a producer running newer code than the deployment loses those fields with no error
+ * anywhere — the event is accepted, sealed and hashed without them. It has happened twice (`location.session`,
+ * `bacabed`; `location.client`/`ide`/`workspace`/`surface`, 2026-08-28), both times found by eye.
+ * `GET /api` publishes this, and `npm run check-deploy` diffs a deployment against the local build.
+ */
+export function schemaSurface(): { event: string[]; location: string[]; artifact: string[]; actions: string[] } {
+  return {
+    event: Object.keys(EventInput.shape).sort(),
+    location: Object.keys(Location.shape).sort(),
+    artifact: Object.keys(ArtifactRef.shape).sort(),
+    actions: [...Action.options].sort(),
+  };
+}
+
 export const GENESIS_HASH = "0".repeat(64);

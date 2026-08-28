@@ -203,5 +203,16 @@ Next: deploy Worker + dogfood.
 
 ⚠ Ship order for any new `location`/event field: **core → `npm run build` at the root → deploy the Worker → producers → UI.**
 `POST /events` re-parses with `EventInput.safeParse` and Zod strips unknown keys, so a field stamped before the Worker is
-deployed is silently dropped from every remote-sealed event (this happened to `location.session`, `bacabed`). Respawn the
-MCP server afterwards — it captures its session id at spawn and keeps its old `dist` until it is restarted.
+deployed is silently dropped from every remote-sealed event — accepted, sealed and hashed without it, with no error
+anywhere. That has happened twice (`location.session`, `bacabed`; the run-context fields, 2026-08-28). Respawn the MCP
+server afterwards — it captures its session id at spawn and keeps its old `dist` until it is restarted.
+
+You no longer have to remember: `GET /api` publishes the schema surface a deployment understands, derived from the zod
+shapes so it cannot drift from the code, and
+
+```bash
+npm run check-deploy                 # or: npm run check-deploy https://retrace-api.<you>.workers.dev
+```
+
+diffs it against the local build — exit 0 if the deployment understands every field you send, exit 1 listing the ones it
+would silently drop. No token, no writes; run it after every deploy, and in CI if you add one.

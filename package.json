@@ -2,7 +2,7 @@
   "name": "retrace",
   "private": true,
   "version": "0.1.0",
-  "description": "Retrace — provenance ledger for mixed human + AI work",
+  "description": "Retrace \u2014 provenance ledger for mixed human + AI work",
   "workspaces": [
     "packages/*",
     "apps/*"
@@ -11,7 +11,8 @@
     "build": "npm run build -w @retrace/core && npm run build -w @retrace/mcp-server",
     "test": "npm test -w @retrace/core && npm test -w @retrace/mcp-server",
     "mcp": "node packages/mcp-server/dist/index.js",
-    "serve": "node packages/mcp-server/dist/serve.js"
+    "serve": "node packages/mcp-server/dist/serve.js",
+    "check-deploy": "node scripts/check-deploy.mjs"
   },
   "devDependencies": {
     "typescript": "^5.6.0",
