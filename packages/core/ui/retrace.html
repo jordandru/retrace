@@ -174,7 +174,19 @@
   const roleMark = (r) => r === "used" ? "in" : r === "generated" ? "out" : r === "both" ? "in/out" : "";
   const roleTitle = (r) => r === "used" ? " · used (input)" : r === "generated" ? " · generated (output)" : r === "both" ? " · used and generated" : "";
   const roleTag = (a) => roleMark(a.role) ? `<i class="role">${roleMark(a.role)}</i>` : "";
-  const whereText = (loc) => loc ? [loc.system, loc.environment, loc.path || loc.url, loc.device].filter(Boolean).join(" · ") : "";
+  const whereText = (loc) => loc ? [loc.system, loc.environment, loc.path || loc.url, loc.device, loc.client].filter(Boolean).join(" · ") : "";
+  // Second WHERE line: the run-identity fields. Deliberately NOT in whereText, which the timeline reuses and which
+  // must stay a readable one-liner. session/workspace are clickable — they drop into the search box, which already
+  // matches the whole event JSON, so one click shows everything from that agent run or that isolated worktree.
+  const findable = (v) => `<span class="chip" data-q="${esc(v)}" title="search for ${esc(v)}">${esc(v)}</span>`;
+  const whereExtra = (loc) => {
+    const bits = [];
+    if (loc.ide) bits.push(`in <b>${esc(loc.ide)}</b>`);
+    if (loc.workspace) bits.push(`workspace ${findable(loc.workspace)}`);
+    if (loc.session) bits.push(`session ${findable(loc.session)}`);
+    if (loc.surface) bits.push(loc.surface === "tty" ? "at a terminal" : "no terminal · agent-driven");
+    return bits.length ? `<div class="link">${bits.join(" · ")}</div>` : "";
+  };
   // Latest known label per artifact id: the label on the last event (by seq) that carries one.
   // Used wherever the UI names an artifact; the event detail pane keeps each event's as-at label.
   const latestLabels = (events) => { const m = new Map(); for (const e of [...events].sort((a, b) => a.seq - b.seq)) for (const a of e.artifacts) if (a.label) m.set(a.id, a.label); return m; };
@@ -293,7 +305,7 @@
         ${sect("Who", () => `<span style="color:var(--${e.actor.type});font-weight:600">${esc(actorName(e.actor))}</span> <span class="link">${esc(e.actor.type)}${e.actor.model ? " · " + esc(e.actor.model) : ""}${e.actor.version ? " " + esc(e.actor.version) : ""}${e.actor.on_behalf_of ? "<br>on behalf of " + esc(e.actor.on_behalf_of) : ""}</span>`)}
         ${sect("What", () => `<b>${esc(verbOf(e))}</b> ${e.artifacts.map((a) => `<span class="chip" data-art="${esc(a.id)}" title="${esc(a.id + roleTitle(a.role))}">${roleTag(a)}${esc(artLabel(a))}</span>${a.kind && a.kind !== "file" ? `<span class="link">${esc(a.kind)}</span>` : ""}${a.derived_from?.length ? `<div class="link">derived from ${esc(a.derived_from.join(", "))}</div>` : ""}`).join(" ")}${e.change?.summary ? `<div>${esc(e.change.summary)}</div>` : ""}${e.change?.diff ? `<pre>${esc(e.change.diff)}</pre>` : ""}${e.change?.after_hash ? `<div class="hash">after ${esc(e.change.after_hash)}</div>` : ""}`)}
         ${sect("When", () => `${esc(new Date(e.timestamp).toLocaleString())}${e.duration_ms != null ? ` <span class="link">· took ${fmtDur(e.duration_ms)}</span>` : ""}<div class="link">received ${esc(new Date(e.received_at).toLocaleString())}</div>`)}
-        ${sect("Where", () => e.location ? esc(whereText(e.location)) : "")}
+        ${sect("Where", () => e.location ? esc(whereText(e.location)) + whereExtra(e.location) : "")}
         ${sect("Why", () => e.intent ? esc(e.intent) : "")}
         ${sect("How", () => e.method ? `${e.method.tool ? `<b>${esc(e.method.tool)}</b> ` : ""}${e.method.automated != null ? `<span class="link">${e.method.automated ? "automated" : "manual"}</span>` : ""}${e.method.instruction ? `<div class="link">instruction: ${esc(e.method.instruction)}</div>` : ""}${e.method.tokens != null ? `<div class="link">${e.method.tokens} tokens${e.method.cost_usd != null ? ` · $${e.method.cost_usd}` : ""}</div>` : ""}${e.method.params ? `<pre>${esc(JSON.stringify(e.method.params, null, 2))}</pre>` : ""}` : "")}
         ${sect("Tags", () => e.tags?.length ? e.tags.map((t) => `<span class="chip">${esc(t)}</span>`).join("") : "")}
@@ -399,12 +411,13 @@
 
   // events
   document.addEventListener("click", (ev) => {
-    const t = ev.target.closest("[data-order],[data-expand],[data-art],[data-actor],[data-goto],[data-clear],.ev");
+    const t = ev.target.closest("[data-order],[data-expand],[data-art],[data-actor],[data-goto],[data-clear],[data-q],.ev");
     if (!t) return;
     if (t.dataset.order) { ev.stopPropagation(); state.newestFirst = !state.newestFirst; return render(); }
     if (t.dataset.expand) { ev.stopPropagation(); const id = t.dataset.expand; state.expanded.has(id) ? state.expanded.delete(id) : state.expanded.add(id); return render(); }
     if (t.dataset.art) { state.filterArtifact = t.dataset.art; ev.stopPropagation(); return render(); }
     if (t.dataset.actor) { state.filterActor = t.dataset.actor; ev.stopPropagation(); return render(); }
+    if (t.dataset.q) { $("#q").value = t.dataset.q; ev.stopPropagation(); return render(); }
     if (t.dataset.goto) { ev.preventDefault(); state.sel = t.dataset.goto; state.filterArtifact = null; state.filterActor = null; render(); document.querySelector(`.ev[data-id="${CSS.escape(state.sel)}"]`)?.scrollIntoView({ block: "center", behavior: "smooth" }); return; }
     if (t.dataset.clear) { if (t.dataset.clear === "artifact") state.filterArtifact = null; else state.filterActor = null; return render(); }
     if (t.classList.contains("ev")) { state.sel = t.dataset.id; render(); }

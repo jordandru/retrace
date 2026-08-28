@@ -137,6 +137,39 @@ Then point the MCP server at it by adding to its `env`:
 
 REST API: `POST /events`, `GET /events/:id`, `GET /events/:id/why`, `GET /projects`, `GET /projects/:p/events?artifact_id=&actor_id=&since=&text=`, `GET /projects/:p/head`, `GET /projects/:p/verify`.
 
+### Where an event came from — session, terminal, IDE
+
+`location` records more than a path. Six fields are **server-stamped**: `retrace_log` silently drops
+`session`, `device`, `client`, `ide`, `workspace` and `surface` if a caller sends them, because they are evidence *about*
+the writer and an agent that could assert them could forge the thing they exist to prove — the same reasoning, and the
+same place of enforcement, as `RETRACE_ACTOR_LOCK` (both live in the MCP server; the Worker's `POST /events` trusts
+whatever a scoped credential sends, as it always has). `path`, `url`, `environment` and `system` stay caller-wins: the
+agent knows the file it edited better than the server, which only knows its own cwd.
+
+| field | what it is | where it comes from |
+|---|---|---|
+| `session` | the harness session, shared across everything one agent run touches | `CLAUDE_CODE_SESSION_ID` (Claude Code passes it to MCP subprocesses and to shells, so the **git hook stamps the same value** and a commit joins that run's events). `RETRACE_SESSION` overrides; an MCP client with no session gets a `run_…` id. A human's own `git commit` gets **none** — no fallback, because an id that is always present cannot discriminate. |
+| `client` | which MCP client wrote it, `name@version` | the MCP `initialize` handshake — e.g. `claude-code@2.1.250`, `cursor-vscode@1.7.3` |
+| `system` | the tool the event came from | the same handshake (`cursor-vscode` → `cursor`). It used to be hardcoded `claude-code` for every client. `RETRACE_SYSTEM` overrides, and unlike the six above a caller may still set it — an adapter legitimately knows its own system. |
+| `ide` / `workspace` | the IDE hosting the agent, and the isolated workspace inside it | the IDE's own environment. [Orca](https://www.onorca.dev/) sets `ORCA_PANE_KEY` / `ORCA_TAB_ID` / `ORCA_WORKTREE_ID` on every agent pane; `ORCA_WORKTREE_ID` is what tells N parallel agents apart. `RETRACE_IDE` / `RETRACE_WORKSPACE` override for an IDE we cannot detect. |
+| `surface` | `tty` (a human typed it) or `agent` (a harness ran it) | git hook only, from `/proc/self/stat` field 7 — not `isatty()`, which the hook's own `>/dev/null 2>&1` destroys. Linux-only; absent elsewhere. |
+| `device` | the machine | `os.hostname()`, or `RETRACE_DEVICE` to override — a hostname is sealed into hash-covered bodies that share links serve pre-auth, and no later redaction is possible, so capture time is the only control point. |
+
+On the git side `session`, `ide`, `workspace` and `surface` describe **the process that produced the commit**, so only the live post-commit hook stamps
+them: `retrace-git backfill` and `retrace-git commit <sha>` replay commits the running process did not make, and
+stamping there would seal today's session, IDE and terminal onto someone else's 2024 commit. The hook marks itself with
+a `--hook` flag, so **re-run `retrace-git install` in repos hooked before this change** — an older hook script keeps
+working and simply records none of the four.
+
+Nothing is guessed: an IDE that does not name itself gets no `ide`, and terminal-emulator identity is deliberately **not**
+recorded — inside WSL there is none to read (`TERM_PROGRAM`, `WT_SESSION`, `ITERM_SESSION_ID` are all absent and `TERM` is
+identical everywhere), and stamping a guess would break the rule that a producer records only what it authoritatively knows.
+
+**Orca + WSL:** Orca sets its vars on the Windows side and forwards only `HISTFILE` and the git-credential vars through
+`WSLENV`, so they do not reach a WSL pane. To capture them there, add a user-level Windows
+`WSLENV=ORCA_PANE_KEY/u:ORCA_TAB_ID/u:ORCA_WORKTREE_ID/u` — Orca appends to whatever `WSLENV` already holds, so yours
+survives. Native macOS/Linux panes need nothing. In the UI, click a session or workspace value to search for it.
+
 ## Event shape (short)
 
 ```jsonc
@@ -146,7 +179,9 @@ REST API: `POST /events`, `GET /events/:id`, `GET /events/:id/why`, `GET /projec
   "action": "edited", "artifacts": [{ "id": "repo:rpg#src/fight.ts", "kind": "file", "role": "both" }],     // WHAT · role = PROV used | generated | both (optional; absent = unspecified)
   "change": { "summary": "add jab counter", "after_hash": "…" },
   "timestamp": "2026-08-16T19:21:54Z",                                                                    // WHEN
-  "location": { "path": "src/fight.ts", "system": "claude-code", "environment": "local" },                // WHERE
+  "location": { "path": "src/fight.ts", "system": "claude-code", "environment": "local",                  // WHERE
+                "session": "e09a0ccf-…", "client": "claude-code@2.1.250",                                 //   who/where it ran (server-stamped)
+                "ide": "orca", "workspace": "wt_feature_x", "surface": "agent" },                         //   IDE pane · isolated worktree · no tty
   "intent": "implement jab counter", "caused_by": "evt_…",                                                // WHY
   "method": { "tool": "Edit", "automated": true, "tokens": 1200 },                                        // HOW
   "seq": 1, "prev_hash": "…", "hash": "…"                                                                 // integrity
@@ -155,5 +190,10 @@ REST API: `POST /events`, `GET /events/:id`, `GET /events/:id/why`, `GET /projec
 
 ## Status / next
 
-Done: core schema + chain (tested), MCP server (tested via in-memory MCP client), Worker + D1 store (smoke-tested locally with `wrangler dev`, live D1 schema applied), timeline UI (served locally and by the Worker; verified with Playwright incl. tamper detection), Git post-commit adapter (tested on a temp repo + dogfooded on this repo), Ed25519-signed exports + offline verify + printable report + read-only share links (tested incl. tamper/wrong-key), artifact lineage graph (core + UI + API + MCP; git commits now carry derived_from → parent commit), GitHub PR adapter (HMAC-verified webhook + backfill/replay CLI; simulated full PR lifecycle end-to-end), Google Docs/Drive adapter (Apps Script forwarder + POST /hooks/gdrive mapping + CLI; fixture-tested and simulated end-to-end), PROV artifact roles (`role: used | generated | both` stamped by every adapter, defaulted by verb on `retrace_log`, shown as in/out markers in the UI, report and event text; deployed 2026-08-25).
+Done: core schema + chain (tested), MCP server (tested via in-memory MCP client), Worker + D1 store (smoke-tested locally with `wrangler dev`, live D1 schema applied), timeline UI (served locally and by the Worker; verified with Playwright incl. tamper detection), Git post-commit adapter (tested on a temp repo + dogfooded on this repo), Ed25519-signed exports + offline verify + printable report + read-only share links (tested incl. tamper/wrong-key), artifact lineage graph (core + UI + API + MCP; git commits now carry derived_from → parent commit), GitHub PR adapter (HMAC-verified webhook + backfill/replay CLI; simulated full PR lifecycle end-to-end), Google Docs/Drive adapter (Apps Script forwarder + POST /hooks/gdrive mapping + CLI; fixture-tested and simulated end-to-end), PROV artifact roles (`role: used | generated | both` stamped by every adapter, defaulted by verb on `retrace_log`, shown as in/out markers in the UI, report and event text; deployed 2026-08-25), run context on WHERE (`location.client` from the MCP handshake, `ide`/`workspace` from the IDE's own env — Orca panes and worktrees — `surface` tty/agent from the git hook, and `session` now the harness's real session id so MCP events and the commits they drive share one key; server-stamped and caller-proof on the MCP path, live-hook-only on the git path).
 Next: deploy Worker + dogfood.
+
+⚠ Ship order for any new `location`/event field: **core → `npm run build` at the root → deploy the Worker → producers → UI.**
+`POST /events` re-parses with `EventInput.safeParse` and Zod strips unknown keys, so a field stamped before the Worker is
+deployed is silently dropped from every remote-sealed event (this happened to `location.session`, `bacabed`). Respawn the
+MCP server afterwards — it captures its session id at spawn and keeps its old `dist` until it is restarted.

@@ -42,7 +42,15 @@ function runUI(events: any[]) {
     clicks[0]({ target: { closest: () => ({ dataset: { id }, classList: { contains: (c: string) => c === "ev" } }) }, stopPropagation() {}, preventDefault() {} });
     return $("#detail").innerHTML;
   };
-  return { select, timeline: () => $("#timeline").innerHTML as string };
+  /** Click a rendered chip. `closest(selector)` is honoured for real: the element matches only if the delegated
+   *  selector actually lists one of its data-attributes — which is exactly how a handler branch whose attribute is
+   *  missing from that selector shows up as dead (it did: [data-q] was absent, so the chips were inert). */
+  const clickChip = async (dataset: Record<string, string>) => {
+    const el = { dataset, classList: { contains: () => false } };
+    const closest = (sel: string) => (Object.keys(dataset).some((k) => sel.includes(`[data-${k}]`)) ? el : null);
+    clicks[0]({ target: { closest }, stopPropagation() {}, preventDefault() {} });
+  };
+  return { select, clickChip, search: () => $("#q").value as string, timeline: () => $("#timeline").innerHTML as string };
 }
 
 const ev = (seq: number, over: any) => ({
@@ -136,4 +144,41 @@ test("detail pane: one unrenderable section never blanks the rest", async () => 
   assert.match(section(detail, "Why")!, /still visible/);
   assert.match(section(detail, "Tags")!, /class="chip">git</);
   assert.ok(detail.includes("raw JSON")); // the guarded raw-JSON block rendered too
+});
+
+test("detail pane: WHERE carries the MCP client, the IDE workspace, the session and the terminal surface", async () => {
+  const events = [ev(0, {
+    action: "committed",
+    location: {
+      path: "/home/j/retrace", environment: "local", device: "JordansLaptop", system: "git",
+      client: "claude-code@2.1.250", ide: "orca", workspace: "wt_feature_x",
+      session: "e09a0ccf-5eef-4c17-bc88-284d03d778e2", surface: "agent",
+    },
+  })];
+  const detail = await runUI(events).select("evt_0");
+  const where = section(detail, "Where")!;
+  // client is APPENDED to the one-line summary: the existing assertions on that line are substring matches.
+  assert.match(where, /git · local · \/home\/j\/retrace · JordansLaptop · claude-code@2\.1\.250/);
+  assert.match(where, /in <b>orca<\/b>/);
+  assert.match(where, /workspace <span class="chip" data-q="wt_feature_x"/);
+  assert.match(where, /session <span class="chip" data-q="e09a0ccf-5eef-4c17-bc88-284d03d778e2"/);
+  assert.match(where, /no terminal · agent-driven/);
+});
+
+test("detail pane: a human's terminal commit says so, and a location without the new fields renders exactly as before", async () => {
+  const tty = await runUI([ev(0, { location: { system: "git", path: "/x", surface: "tty" } })]).select("evt_0");
+  assert.match(section(tty, "Where")!, /at a terminal/);
+  // Absent = says nothing at all; no empty "workspace"/"session" scaffolding, no "(not recorded)" for the section.
+  const bare = await runUI([ev(0, { location: { system: "git", path: "/x" } })]).select("evt_0");
+  assert.equal(section(bare, "Where")!.trim(), "git · /x");
+});
+
+test("detail pane: clicking a session or workspace chip actually searches for it", async () => {
+  const ui = runUI([ev(0, { location: { system: "git", session: "sess-abc", workspace: "wt_feature_x" } })]);
+  const where = section(await ui.select("evt_0"), "Where")!;
+  assert.match(where, /data-q="sess-abc"/);
+  await ui.clickChip({ q: "sess-abc" });
+  assert.equal(ui.search(), "sess-abc", "the chip must reach the search box — asserting the markup alone missed that [data-q] was not in the delegated click selector");
+  await ui.clickChip({ q: "wt_feature_x" });
+  assert.equal(ui.search(), "wt_feature_x");
 });
