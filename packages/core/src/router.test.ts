@@ -309,6 +309,25 @@ test("credentials: pinned token's actor is stamped from the credential, not the 
   assert.deepEqual(store.events[0].actor, { type: "agent", id: "claude-code", model: "claude-fable-5", on_behalf_of: "jordan@example.com", display_name: "Cowork", version: "1.2" });
 });
 
+test("credentials: a pinned credential that omits model lets the producer report the model it actually ran", async () => {
+  const store = new MemStore();
+  const NO_MODEL = { ...CLAUDE, actor: { type: "agent" as const, id: "claude-code", on_behalf_of: "jordan@example.com" } };
+  const h = createHandler(store, { token: "tok", credentials: parseCredentials(JSON.stringify([NO_MODEL, HOOK])) });
+  const res = await post(h, "/events", ev({ actor: { type: "agent", id: "claude-cowork", on_behalf_of: "mallory@example.com", model: "claude-opus-5" } }), NO_MODEL.token);
+  assert.equal(res.status, 201);
+  // identity is still stamped from the credential and stays unforgeable — only the model gets through
+  assert.deepEqual(store.events[0].actor, { type: "agent", id: "claude-code", on_behalf_of: "jordan@example.com", model: "claude-opus-5" });
+});
+
+test("credentials: model passthrough is agent-only", async () => {
+  const store = new MemStore();
+  const HUMAN = { token: "human-token-0123456789abcd", actor: { type: "human" as const, id: "jordan@example.com" } };
+  const h = createHandler(store, { credentials: parseCredentials(JSON.stringify([HUMAN])) });
+  const res = await post(h, "/events", ev({ actor: { type: "human", id: "mallory@example.com", model: "sneaky-model", display_name: "Jordan" } }), HUMAN.token);
+  assert.equal(res.status, 201);
+  assert.deepEqual(store.events[0].actor, { type: "human", id: "jordan@example.com", display_name: "Jordan" });
+});
+
 test("credentials: assert-trust token and the owner token store the body actor verbatim", async () => {
   const store = new MemStore();
   const h = createHandler(store, { token: "tok", credentials: parseCredentials(JSON.stringify([CLAUDE, HOOK])) });

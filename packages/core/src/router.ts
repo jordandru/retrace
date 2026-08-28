@@ -148,6 +148,12 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
         ...actor,
         ...(body.display_name !== undefined ? { display_name: body.display_name } : {}),
         ...(body.version !== undefined ? { version: body.version } : {}),
+        // A pinned credential fixes WHO is acting, not WHICH MODEL ran: it is issued once and outlives every model
+        // swap, so a model pinned here goes stale silently and seals the wrong author into an append-only ledger.
+        // If the credential names a model it stays authoritative; if it omits one, the producer — the only side that
+        // knows what actually ran — reports it. Identity is stamped from the credential either way, so this widens
+        // nothing an operator did not opt into by leaving `model` out.
+        ...(actor.type === "agent" && actor.model === undefined && body.model !== undefined ? { model: body.model } : {}),
       },
     };
   };
