@@ -6,6 +6,7 @@
     "retrace-mcp": "dist/index.js",
     "retrace-serve": "dist/serve.js",
     "retrace-git": "dist/git-hook.js",
+    "retrace": "dist/doctor.js",
     "retrace-export": "dist/export-cli.js",
     "retrace-github": "dist/github-cli.js",
     "retrace-gdrive": "dist/gdrive-cli.js"
