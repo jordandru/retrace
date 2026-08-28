@@ -177,6 +177,18 @@ test("actor lock: agent-branch id/on_behalf_of/model come from env, not the call
   assert.deepEqual(evt.actor, { type: "agent", id: "claude-code", model: "claude-fable-5", on_behalf_of: "jordan@example.com", display_name: "Cowork", version: "1.2" });
 }));
 
+test("actor lock: an unpinned agent may report its runtime model without overriding identity", async () => withActorEnv({ RETRACE_ACTOR: "gemini", RETRACE_ON_BEHALF_OF: "jordan@example.com" }, async () => {
+  const store = new SqliteStore(":memory:");
+  const client = await connect(store);
+  const ok = (await client.callTool({
+    name: "retrace_log",
+    arguments: { action: "edited", actor: { id: "not-gemini", on_behalf_of: "mallory@example.com", model: "gemini-2.5-pro" }, artifacts: [{ id: "repo:rpg#a.ts", kind: "file" }] },
+  })) as any;
+  assert.notEqual(ok.isError, true);
+  const [evt] = await store.all("default");
+  assert.deepEqual(evt.actor, { type: "agent", id: "gemini", model: "gemini-2.5-pro", on_behalf_of: "jordan@example.com" });
+}));
+
 test("actor lock: retrace_instruct only attributes to RETRACE_ON_BEHALF_OF", async () => withActorEnv(ENV, async () => {
   const store = new SqliteStore(":memory:");
   const client = await connect(store);

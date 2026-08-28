@@ -165,6 +165,10 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
       throw new Error(`actor.type "${callerActor.type}" is not allowed: this Retrace MCP server logs as its configured agent ("${defaultActor.id}"). Human instructions go through retrace_instruct; other human/system actors need the git hook or a credentialed context. ${ACTOR_LOCK_HINT}`);
     return {
       ...defaultActor,
+      // A configured model stays authoritative. When it is deliberately unpinned, accept the runtime model reported
+      // by the agent client; the credential and actor lock still control id/type/on_behalf_of. This lets clients such
+      // as Gemini CLI switch models without sealing stale attribution into the ledger.
+      ...(defaultActor.model === undefined && callerActor?.model !== undefined ? { model: callerActor.model } : {}),
       ...(callerActor?.display_name !== undefined ? { display_name: callerActor.display_name } : {}),
       ...(callerActor?.version !== undefined ? { version: callerActor.version } : {}),
     };

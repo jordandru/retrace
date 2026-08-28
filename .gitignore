@@ -4,3 +4,4 @@ dist/
 *.db*
 src/ui-html.ts
 .claude/worktrees/
+.gemini/.env
