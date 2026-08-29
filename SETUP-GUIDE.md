@@ -252,4 +252,4 @@ When the task is done, **clear** `RETRACE_CAUSED_BY` (delete the property or set
 
 Cursor is half-wired in code (`CLIENT_SYSTEM` / git families) and **not** on the git allow-list. Don’t mint a Cursor credential until a Cursor window is actually on this folder. Copilot CLI is pinned; if quota is exhausted, skip that tab until GitHub resets it.
 
-Do not become C2PA, a trace viewer, or an identity provider. Do not add connectors while completeness (omission detection) and attribution (trailer-omit looks human; Drive `RETRACE_CAUSED_BY` is a manual property) are still weak. Do not re-run Apps Script `setup`.
+Do not become C2PA, a trace viewer, or an identity provider. Do not add connectors, a sixth agent, an AI-BOM, or a compliance-deadline pitch while completeness (omission detection) and attribution (trailer-omit looks human; Drive `RETRACE_CAUSED_BY` is a global operator flag, not task evidence) are still weak. Do not re-run Apps Script `setup`.
