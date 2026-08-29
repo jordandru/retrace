@@ -21,7 +21,8 @@
  *
  * Webhooks (auth: HMAC signature, not the bearer token):
  *   POST /hooks/github?project=<name>     GitHub webhook receiver (pull_request, pull_request_review, issue_comment, workflow_run[, push])
- *   POST /hooks/gdrive?project=<name>     Google Drive Activity forwarder (Apps Script / retrace-gdrive CLI); bearer-token auth
+ *   POST /hooks/gdrive?project=<name>     Google Drive Activity forwarder (Apps Script / retrace-gdrive CLI); bearer-token auth.
+ *                                         Optional payload.caused_by is stored on mapped events; empty/absent → root.
  *
  * Share routes (no auth; scope locked to the share's project/artifact; read-only):
  *   GET  /s/:id                          UI in shared mode

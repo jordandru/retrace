@@ -32,10 +32,24 @@ test("drive activity → events: actors resolved, co-editors split, kinds/urls, 
   assert.equal(renamed.artifacts[0].role, "both");
   assert.equal(comment.artifacts[0].role, "used"); assert.equal(shared.artifacts[0].role, "used");
   assert.ok(!("role" in del.artifacts[0]));
+  assert.ok(evs.every((e) => e.caused_by === undefined));
   // rename label comes from newTitle even when the queried target title is stale
   const rn = mapDriveActivities({ activities: [{ primaryActionDetail: { rename: { oldTitle: "Untitled", newTitle: "Fight plan" } }, actors: [{ user: { knownUser: { personName: "people/999" } } }], targets: [{ driveItem: { name: "items/D", title: "Untitled", mimeType: "application/vnd.google-apps.document" } }], timestamp: "2026-01-01T00:00:00Z" }] }, "p");
   assert.equal(rn[0].action, "renamed"); assert.equal(rn[0].artifacts[0].label, "Fight plan");
   // unresolved actor falls back to google:people/… id
   const un = mapDriveActivities({ activities: [{ primaryActionDetail: { edit: {} }, actors: [{ user: { knownUser: { personName: "people/999" } } }], targets: [{ driveItem: { name: "items/X", title: "x", mimeType: "application/vnd.google-apps.document" } }], timestamp: "2026-01-01T00:00:00Z" }] }, "p");
   assert.equal(un[0].actor.id, "google:people/999"); assert.equal(un[0].project, "p");
+});
+
+test("drive activity caused_by is optional: present is copied, empty/absent stays a root", () => {
+  const none = mapDriveActivities(payload);
+  assert.ok(none.every((e) => e.caused_by === undefined));
+  const linked = mapDriveActivities({ ...payload, caused_by: "evt_abc123" });
+  assert.equal(linked.length, none.length);
+  assert.ok(linked.every((e) => e.caused_by === "evt_abc123"));
+  for (const e of linked) EventInput.parse(e);
+  const empty = mapDriveActivities({ ...payload, caused_by: "   " });
+  assert.ok(empty.every((e) => e.caused_by === undefined));
+  const blank = mapDriveActivities({ ...payload, caused_by: "" });
+  assert.ok(blank.every((e) => e.caused_by === undefined));
 });

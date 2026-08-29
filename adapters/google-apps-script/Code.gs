@@ -8,15 +8,19 @@
  *   1. script.google.com → New project → paste this file.
  *   2. Left bar "Services" (+) → add "Drive Activity API" (identifier DriveActivity) and "Peopleapi" (identifier People).
  *   3. Project Settings → Script properties → add:
- *        RETRACE_URL      https://retrace-api.<you>.workers.dev   (or your tunnel to retrace-serve)
- *        RETRACE_TOKEN    <your RETRACE_TOKEN>                     (leave empty if the server has no token)
- *        RETRACE_PROJECT  boxing-rpg                                (project name to log under)
- *        RETRACE_FOLDER   <folder id>                               (optional: only watch this folder tree)
+ *        RETRACE_URL        https://retrace-api.<you>.workers.dev   (or your tunnel to retrace-serve)
+ *        RETRACE_TOKEN      <gdrive-forwarder assert token, not the owner token>
+ *        RETRACE_PROJECT    retrace                                 (project name to log under)
+ *        RETRACE_FOLDER     <folder id>                             (optional: only watch this folder tree)
+ *        RETRACE_CAUSED_BY  evt_…                                   (optional: current instruct id; empty = events are roots)
  *   4. Run `setup` once (authorize when prompted). It backfills the last RETRACE_BACKFILL_DAYS (default 7) and installs
- *      a trigger that runs `poll` every 5 minutes. Run `stop` to remove the trigger.
+ *      a trigger that runs `poll` every 5 minutes. Run `stop` to remove the trigger. Updating Code.gs later does not
+ *      need another `setup`.
  *
  * Notes: Drive Activity is delayed by up to a few minutes and aggregates rapid edits into ranges. Retrace dedupes,
- * so re-running poll/backfill is safe. Comment TEXT is not included by Google's activity API — only that a comment happened.
+ * so re-running poll/backfill is safe. Comment TEXT and Doc bytes are not forwarded — only that an activity happened.
+ * Set RETRACE_CAUSED_BY to the current retrace_instruct id while a task is in progress so new Drive events join that
+ * chain; clear it when the task is done. Already-forwarded activities stay as they were (idempotent).
  */
 
 var PROPS = PropertiesService.getScriptProperties();
@@ -26,6 +30,7 @@ var CFG = {
   project: PROPS.getProperty('RETRACE_PROJECT') || 'google-drive',
   folder: PROPS.getProperty('RETRACE_FOLDER') || '',
   backfillDays: Number(PROPS.getProperty('RETRACE_BACKFILL_DAYS') || 7),
+  causedBy: (PROPS.getProperty('RETRACE_CAUSED_BY') || '').trim(),
 };
 
 function setup() {
@@ -63,7 +68,11 @@ function poll() {
     if (!all.length) return 0;
     var actors = resolveActors_(all);
     // send in chunks of 50
-    for (var i = 0; i < all.length; i += 50) send_({ project: CFG.project, source: 'apps-script', actors: actors, activities: all.slice(i, i + 50) });
+    for (var i = 0; i < all.length; i += 50) {
+      var payload = { project: CFG.project, source: 'apps-script', actors: actors, activities: all.slice(i, i + 50) };
+      if (CFG.causedBy) payload.caused_by = CFG.causedBy;
+      send_(payload);
+    }
     // advance cursor by 1 ms past the newest seen (dedupe on the server tolerates overlap anyway)
     PROPS.setProperty('RETRACE_CURSOR', new Date(Date.parse(newest) + 1).toISOString());
     return all.length;

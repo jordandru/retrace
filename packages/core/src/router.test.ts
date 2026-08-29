@@ -421,6 +421,34 @@ test("credentials: parseCredentials validates the secret and defaults trust to p
 
 // ---- schema probe: the only defence against a silently-stale deployment ----
 
+test("POST /hooks/gdrive: optional caused_by is stored; empty/absent stays a root", async () => {
+  const store = new MemStore();
+  const h = createHandler(store, { token: "tok", credentials: parseCredentials(JSON.stringify([HOOK])) });
+  const activity = (ts: string) => ({
+    primaryActionDetail: { edit: {} },
+    actors: [{ user: { knownUser: { personName: "people/111" } } }],
+    targets: [{ driveItem: { name: "items/DOC1", title: "Untitled document", mimeType: "application/vnd.google-apps.document" } }],
+    timestamp: ts,
+  });
+  const actors = { "people/111": { email: "jordan@example.com", name: "Jordan" } };
+  const body = (over: Record<string, unknown>, ts: string) => ({ source: "apps-script", actors, activities: [activity(ts)], ...over });
+
+  const absent = await post(h, "/hooks/gdrive?project=retrace", body({}, "2026-08-29T12:00:00.000Z"), HOOK.token);
+  assert.equal(absent.status, 201);
+  assert.equal(store.events[0].caused_by, undefined);
+  assert.equal(store.events[0].action, "edited");
+  assert.equal(store.events[0].artifacts[0].id, "gdoc:DOC1");
+  assert.equal(store.events[0].change?.summary, "edited");
+
+  const linked = await post(h, "/hooks/gdrive?project=retrace", body({ caused_by: "evt_abc123" }, "2026-08-29T12:01:00.000Z"), HOOK.token);
+  assert.equal(linked.status, 201);
+  assert.equal(store.events[1].caused_by, "evt_abc123");
+
+  const empty = await post(h, "/hooks/gdrive?project=retrace", body({ caused_by: "   " }, "2026-08-29T12:02:00.000Z"), HOOK.token);
+  assert.equal(empty.status, 201);
+  assert.equal(store.events[2].caused_by, undefined);
+});
+
 test("schemaSurface is derived from the zod shapes, so it cannot drift from the code", () => {
   const surface = schemaSurface();
   // Derived, not hand-listed: adding a field to Location must show up here with no other edit. If someone replaces

@@ -206,9 +206,30 @@ node packages/mcp-server/dist/github-cli.js backfill <owner>/<repo> --project <p
 
 ## Stage 7 — Google Docs / Drive
 
-`adapters/google-apps-script/README.md`: Apps Script + Drive Activity + People, properties `RETRACE_URL` / `RETRACE_TOKEN` / `RETRACE_PROJECT`, optional `RETRACE_FOLDER`. Run `setup`.
+This checkout already has a folder-scoped Apps Script (`retrace-gdrive`) on project **`retrace`**. The script token is the **gdrive-forwarder** assert credential (not the owner token, not `retrace-ci`). Drive Activity does not send document body; Retrace does not store Doc bytes.
+
+Do **not** re-run `setup` here — that would backfill again. Updating `Code.gs` in the live project is enough.
+
+### 7a. First-time (a new account)
+
+`adapters/google-apps-script/README.md`: paste `Code.gs`, enable Drive Activity + People, properties `RETRACE_URL` / `RETRACE_TOKEN` / `RETRACE_PROJECT` (and `RETRACE_FOLDER` to stay folder-scoped). Run `setup`.
 
 **Check:** execution log backfills, then polls ~5 min. An edit shows up in the cloud UI.
+
+### 7b. Join new Drive edits to the current task (`caused_by`)
+
+New forwarded events are roots unless you pass a parent at ingest time. Historical roots stay roots (`retrace_amend` / `attest_causal_root` can qualify one event after the fact — do not batch-amend).
+
+When a task starts:
+
+1. Call `retrace_instruct` and copy the instruction event id (`evt_…`).
+2. Apps Script → **Project Settings → Script properties** → set `RETRACE_CAUSED_BY` to that id.
+3. If the live `Code.gs` is older than this repo, paste `adapters/google-apps-script/Code.gs` over it. Do **not** run `setup` again.
+4. Edit a Doc in the watched folder, wait a minute (Drive Activity lags), run **`testOnce`**. Already-forwarded activities **dedupe** — only a new edit becomes a new event.
+
+When the task is done, **clear** `RETRACE_CAUSED_BY` (delete the property or set it empty) so later edits are not chained to a finished instruct.
+
+**Check:** the new `gdoc:` event in the cloud UI shows `caused_by` → the instruct. Empty `RETRACE_CAUSED_BY` is today's behavior (the edit is a root). The Worker that receives `POST /hooks/gdrive` must be running this mapper; deploy it if the live Worker is older.
 
 ---
 

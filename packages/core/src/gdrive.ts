@@ -3,7 +3,8 @@
  * Fed by the Apps Script forwarder (adapters/google-apps-script) or the retrace-gdrive CLI via POST /hooks/gdrive.
  *
  * Payload shape (what the forwarder sends):
- *   { project?: string, activities: DriveActivity[], actors?: { "people/123": { email?, name? } }, source?: "apps-script" | "cli" }
+ *   { project?: string, activities: DriveActivity[], actors?: { "people/123": { email?, name? } }, source?: "apps-script" | "cli",
+ *     caused_by?: string }
  *
  * Mapping
  *   WHO   actor.user.knownUser.personName resolved through `actors` map (email preferred) — humans; anonymous/administrator/system → system;
@@ -14,13 +15,27 @@
  *         role (PROV): create→generated, edit/rename/move→both, comment/permissionChange→used, everything else absent (driveRole)
  *   WHEN  timestamp or timeRange.endTime (edits are aggregated by Google into ranges; duration_ms = range length)
  *   WHERE system=google-drive, url=docs link
- *   WHY   free text summary (no intent available from Drive) — agents can back-link with retrace_log if needed
+ *   WHY   free text summary (Drive Activity does not send body — Retrace never stores Doc bytes);
+ *         caused_by from the payload when set (Apps Script RETRACE_CAUSED_BY / replay JSON); empty or absent → root
  *   HOW   tool=google-docs|sheets|slides|drive, manual
  */
 import { EventInput, Actor, Action, ArtifactRole } from "./schema.js";
 
 export interface DriveActorInfo { email?: string; name?: string }
-export interface DrivePayload { project?: string; activities: any[]; actors?: Record<string, DriveActorInfo>; source?: string }
+export interface DrivePayload {
+  project?: string;
+  activities: any[];
+  actors?: Record<string, DriveActorInfo>;
+  source?: string;
+  /** Optional causal parent (typically a retrace_instruct id). Empty/whitespace/absent → mapped events are roots. */
+  caused_by?: string;
+}
+
+function causedByOf(payload: DrivePayload): string | undefined {
+  if (typeof payload.caused_by !== "string") return undefined;
+  const t = payload.caused_by.trim();
+  return t || undefined;
+}
 
 const MIME: Record<string, { kind: string; tool: string; url: (id: string) => string }> = {
   "application/vnd.google-apps.document": { kind: "doc", tool: "google-docs", url: (id) => `https://docs.google.com/document/d/${id}/edit` },
@@ -83,6 +98,7 @@ function permDesc(p: any, actors: Record<string, DriveActorInfo> = {}): string {
 export function mapDriveActivities(payload: DrivePayload, defaultProject = "google-drive"): EventInput[] {
   const project = payload.project ?? defaultProject;
   const actors = payload.actors ?? {};
+  const caused_by = causedByOf(payload);
   const out: EventInput[] = [];
   for (const act of payload.activities ?? []) {
     const targets = (act.targets ?? []).map((t: any) => t.driveItem ?? t.fileComment?.parent ?? t.drive?.root).filter(Boolean);
@@ -110,6 +126,7 @@ export function mapDriveActivities(payload: DrivePayload, defaultProject = "goog
         timestamp: ts, duration_ms: dur && dur > 0 ? dur : undefined,
         location: { system: "google-drive", url: meta.url(itemId(targets[0]?.name)) },
         intent: `${primary.summary}${nActions > 1 ? ` (${nActions} actions)` : ""} — ${arts.map((a: any) => a.label).join(", ")}`,
+        caused_by,
         change: { summary: primary.summary },
         method: { tool: meta.tool, automated: actor.type === "system", params: { actions: nActions, source: payload.source ?? "drive-activity" } },
         idempotency_key: `gd:${actor.id}:${arts[0].id}:${primary.action}${primary.detail ? ":" + primary.detail : ""}:${ts}`,
