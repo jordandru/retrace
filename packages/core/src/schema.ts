@@ -107,7 +107,7 @@ export const Location = z.object({
   device: z.string().optional(),
   system: z.string().optional(), // github, gdocs, cursor, claude-code, ...
   /** Run/session id of the producing process (backlog #15; body-only, like every location field). On the MCP path
-   *  this is the harness's own session id when it exposes one (CLAUDE_CODE_SESSION_ID), so the same string appears on
+   *  this is the harness's own session id when it exposes one (CLAUDE_CODE_SESSION_ID or GROK_SESSION_ID), so the same string appears on
    *  events from the agent AND on the commits it drives. It is a *session* key — subagents share it — not a per-run id. */
   session: z.string().optional(),
   /** The MCP client that drove the write, verbatim from the `initialize` handshake as "<name>@<version>" — e.g.

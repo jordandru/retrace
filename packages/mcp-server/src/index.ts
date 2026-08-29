@@ -16,7 +16,7 @@
  *   RETRACE_ACTOR    default actor id for this agent (e.g. "claude-code")
  *   RETRACE_ACTOR_MODEL default model string
  *   RETRACE_ON_BEHALF_OF the human this agent works for (e.g. jordan@...)
- *   RETRACE_SESSION  override location.session (default: the harness's own CLAUDE_CODE_SESSION_ID, else a run id)
+ *   RETRACE_SESSION  override location.session (default: CLAUDE_CODE_SESSION_ID or GROK_SESSION_ID, else a run id)
  *   RETRACE_DEVICE   override location.device (default: os.hostname() — an opt-out, since a hostname is sealed into
  *                    hash-covered bodies that share links serve pre-auth and no later redaction is possible)
  *   RETRACE_IDE / RETRACE_WORKSPACE  override location.ide / location.workspace (default: detected from the IDE's own
@@ -75,6 +75,9 @@ const CLIENT_SYSTEM = new Map<string, string>([
   ["claude-ai", "claude-desktop"],
   ["cursor-vscode", "cursor"],
   ["Visual Studio Code", "vscode"],
+  ["grok-cli", "grok"],
+  ["grok", "grok"],
+  ["gemini-cli", "gemini-cli"],
 ]);
 export function clientSystem(name: string): string {
   // A Map, not an object literal: the client picks this name in the handshake, and an object would resolve
@@ -98,6 +101,12 @@ export function detectIde(env: NodeJS.ProcessEnv): Pick<Location, "ide" | "works
   };
 }
 
+/** Harness session id when one is exposed. MCP and the live git hook must read the same keys so a commit joins the
+ *  events that produced it. No fallback: absence is what makes the key discriminating (a human `git commit` has none). */
+export function harnessSession(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  return env.RETRACE_SESSION ?? env.CLAUDE_CODE_SESSION_ID ?? env.GROK_SESSION_ID;
+}
+
 export function makeStore() {
   if (env.RETRACE_URL) return new RemoteStore(env.RETRACE_URL, env.RETRACE_TOKEN);
   const path = env.RETRACE_DB ?? join(homedir(), ".retrace", "retrace.db");
@@ -115,12 +124,13 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
   const defaultActor = readDefaultActor();
   /** location.session: the harness's own session id when it exposes one, else a per-process run id (RETRACE_SESSION
    *  overrides both). Claude Code passes CLAUDE_CODE_SESSION_ID down to MCP subprocesses — verified 2026-08-27 against
-   *  this server's own /proc/<pid>/environ under 2.1.250 — which is what makes the id SHARED with the git hook: the
-   *  same string lands on the agent's events and on the commits it drives, so `retrace_why` can walk between them.
-   *  Two honest limits, both deliberate: a process environment is frozen at exec, so a session id re-minted mid-process
-   *  is not seen until the server is respawned; and subagents inherit it, so this is a session key, not a per-run key.
-   *  The random fallback stays for MCP clients that expose no session at all. */
-  const sessionId = env.RETRACE_SESSION ?? env.CLAUDE_CODE_SESSION_ID ?? "run_" + randomUUID().replace(/-/g, "").slice(0, 12);
+   *  this server's own /proc/<pid>/environ under 2.1.250 — and Grok Build TUI exports GROK_SESSION_ID the same way.
+   *  That shared env is what makes the id SHARED with the git hook: the same string lands on the agent's events and
+   *  on the commits it drives, so `retrace_why` can walk between them. Two honest limits, both deliberate: a process
+   *  environment is frozen at exec, so a session id re-minted mid-process is not seen until the server is respawned;
+   *  and subagents inherit it, so this is a session key, not a per-run key. The random fallback stays for MCP clients
+   *  that expose no session at all. */
+  const sessionId = harnessSession(env) ?? "run_" + randomUUID().replace(/-/g, "").slice(0, 12);
   /** WHERE this server authoritatively knows (backlog #15). Evaluated per write rather than once, because the MCP
    *  client's identity only exists after the `initialize` handshake — which happens after buildServer() has returned.
    *  `url` is never stamped and no prod environment is synthesized — commit URLs and deploy environments belong to the

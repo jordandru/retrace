@@ -36,7 +36,7 @@ Add the MCP server to Claude Code (`~/.claude.json` or project `.mcp.json`):
 }
 ```
 
-Same block works in Claude Desktop's `claude_desktop_config.json`. Events go to `~/.retrace/retrace.db` (override with `RETRACE_DB`).
+Same block works in Claude Desktop's `claude_desktop_config.json`. Grok Build TUI takes a matching `[mcp_servers.retrace]` in `~/.grok/config.toml` with `RETRACE_ACTOR = "grok"` and Grok's own pinned token — do not reuse the Claude credential, or every Grok event is sealed as `claude-code`. Events go to `~/.retrace/retrace.db` (override with `RETRACE_DB`).
 
 ### See the timeline
 
@@ -58,7 +58,7 @@ npm exec --package=@retrace/cli -- retrace status                             # 
 npm exec --package=@retrace/cli -- retrace status retrace --json              # the identical canonical model for automation/agents
 ```
 
-`install` writes `.git/hooks/post-commit` and a committable `.retrace.json` (`{ "project", "environment", optional "db" | "url" + "token" | "credential" }`). `"credential": "retrace-git"` makes the hook send that scoped assert credential's token (looked up by `actor.id` in `RETRACE_CREDENTIALS_FILE`, default `~/.retrace/worker-credentials.json`) instead of `RETRACE_TOKEN`, so the repo never carries the owner token; without it the precedence is unchanged (`RETRACE_HOOK_TOKEN` > `RETRACE_TOKEN` > file). Hook failures (a 401/403 from a fail-closed credential, config errors) are appended to `.git/retrace-hook.log` — re-log with `retrace-git commit <sha>`. Every commit is then logged: WHO = the author (human), or an **agent** when the commit carries trailers `Retrace-Actor: claude-code` / `Retrace-Model: …` or a `Co-Authored-By:` naming Claude/Copilot/Codex/etc. (the human author becomes `on_behalf_of`); WHAT = `commit:<repo>@<sha>` plus one `repo:<repo>#<path>` artifact per changed file with `+ins −del`; WHY = the commit message, and `caused_by` from a `Retrace-Caused-By: evt_…` trailer, `RETRACE_CAUSED_BY` env, or `.git/retrace-caused-by`. Merge commits log as `merged`. Idempotency key is the sha, so backfills never duplicate.
+`install` writes `.git/hooks/post-commit` and a committable `.retrace.json` (`{ "project", "environment", optional "db" | "url" + "token" | "credential" }`). `"credential": "retrace-git"` makes the hook send that scoped assert credential's token (looked up by `actor.id` in `RETRACE_CREDENTIALS_FILE`, default `~/.retrace/worker-credentials.json`) instead of `RETRACE_TOKEN`, so the repo never carries the owner token; without it the precedence is unchanged (`RETRACE_HOOK_TOKEN` > `RETRACE_TOKEN` > file). Hook failures (a 401/403 from a fail-closed credential, config errors) are appended to `.git/retrace-hook.log` — re-log with `retrace-git commit <sha>`. Every commit is then logged: WHO = the author (human), or an **agent** when the commit carries trailers `Retrace-Actor: claude-code` / `Retrace-Model: …` or a `Co-Authored-By:` naming Claude/Copilot/Codex/Grok/etc. (the human author becomes `on_behalf_of`); WHAT = `commit:<repo>@<sha>` plus one `repo:<repo>#<path>` artifact per changed file with `+ins −del`; WHY = the commit message, and `caused_by` from a `Retrace-Caused-By: evt_…` trailer, `RETRACE_CAUSED_BY` env, or `.git/retrace-caused-by`. Merge commits log as `merged`. Idempotency key is the sha, so backfills never duplicate.
 
 `retrace doctor` checks the repository marker and hook, resolves the scoped credential without printing its token,
 confirms the actor on `HEAD` is authorized, compares the live Worker's schema with this build, verifies the project hash
@@ -72,7 +72,7 @@ the ways out: `retrace-git install` (writes the file), `RETRACE_DB=<path>` to wr
 `RETRACE_ALLOW_REMOTE=1` for env-only setups such as CI backfill. Local writes are not gated — a stray row in a SQLite
 file is cheap to discard; a sealed event in a shared append-only ledger costs a `DELETE /projects/:p`.
 
-Tip for agents (put in `CLAUDE.md`): *when committing, add trailers `Retrace-Actor: claude-code`, `Retrace-Model: <model>`, and `Retrace-Caused-By: <instruction event id>`.*
+Tip for agents (put in `CLAUDE.md` / `GEMINI.md` / `GROK.md`): *when committing, add trailers `Retrace-Actor: <your harness id>`, `Retrace-Model: <model>`, and `Retrace-Caused-By: <instruction event id>`.* Do not copy another harness's actor id.
 
 ### GitHub PR adapter — PRs, reviews, comments, CI runs become events
 
@@ -164,7 +164,7 @@ agent knows the file it edited better than the server, which only knows its own 
 
 | field | what it is | where it comes from |
 |---|---|---|
-| `session` | the harness session, shared across everything one agent run touches | `CLAUDE_CODE_SESSION_ID` (Claude Code passes it to MCP subprocesses and to shells, so the **git hook stamps the same value** and a commit joins that run's events). `RETRACE_SESSION` overrides; an MCP client with no session gets a `run_…` id. A human's own `git commit` gets **none** — no fallback, because an id that is always present cannot discriminate. |
+| `session` | the harness session, shared across everything one agent run touches | `CLAUDE_CODE_SESSION_ID` or `GROK_SESSION_ID` (the harness passes it to MCP subprocesses and to shells, so the **git hook stamps the same value** and a commit joins that run's events). `RETRACE_SESSION` overrides; an MCP client with no session gets a `run_…` id. A human's own `git commit` gets **none** — no fallback, because an id that is always present cannot discriminate. |
 | `client` | which MCP client wrote it, `name@version` | the MCP `initialize` handshake — e.g. `claude-code@2.1.250`, `cursor-vscode@1.7.3` |
 | `system` | the tool the event came from | the same handshake (`cursor-vscode` → `cursor`). It used to be hardcoded `claude-code` for every client. `RETRACE_SYSTEM` overrides, and unlike the six above a caller may still set it — an adapter legitimately knows its own system. |
 | `ide` / `workspace` | the IDE hosting the agent, and the isolated workspace inside it | the IDE's own environment. [Orca](https://www.onorca.dev/) sets `ORCA_PANE_KEY` / `ORCA_TAB_ID` / `ORCA_WORKTREE_ID` on every agent pane; `ORCA_WORKTREE_ID` is what tells N parallel agents apart. `RETRACE_IDE` / `RETRACE_WORKSPACE` override for an IDE we cannot detect. |

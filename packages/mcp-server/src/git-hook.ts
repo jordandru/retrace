@@ -19,7 +19,7 @@
  *
  * Mapping a commit → event
  *   WHO    author (human) — or an AGENT if the commit has a trailer `Retrace-Actor: <id>` (optionally
- *          `Retrace-Model: <model>`), or a `Co-Authored-By:` naming Claude/Copilot/Codex/… or a "[bot]" author;
+ *          `Retrace-Model: <model>`), or a `Co-Authored-By:` naming Claude/Copilot/Codex/Grok/… or a "[bot]" author;
  *          in that case the human author becomes `on_behalf_of`. Trailers are read from ALL trailing trailer-only
  *          paragraphs (not just git's last one — backlog #12, dogfood log 2026-08-20: a `Retrace-*` paragraph
  *          followed by a separate `Co-Authored-By` paragraph lost the Retrace-* lines); a Co-Authored-By agent gets
@@ -27,7 +27,7 @@
  *   WHAT   action=committed (or merged for merge commits); artifacts = commit:<sha> + repo:<name>#<path> per file, all role=generated
  *   WHEN   author date
  *   WHERE  system=git, path=repo root, environment=local (override RETRACE_ENV), device=hostname (override
- *          RETRACE_DEVICE), session=CLAUDE_CODE_SESSION_ID when an agent's shell drove the commit (absent for a
+ *          RETRACE_DEVICE), session=CLAUDE_CODE_SESSION_ID or GROK_SESSION_ID when an agent's shell drove the commit (absent for a
  *          human's own `git commit` — see below), ide/workspace when an IDE names itself (Orca), surface=tty|agent
  *   WHY    intent = commit subject (+ body); caused_by = trailer `Retrace-Caused-By: evt_…`, else env RETRACE_CAUSED_BY,
  *          else contents of .git/retrace-caused-by (a scratch file agents/MCP can write)
@@ -38,7 +38,7 @@ import { existsSync, readFileSync, writeFileSync, appendFileSync, chmodSync, unl
 import { homedir, hostname } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { EventInput, appendEvent, describeEvent, Event } from "@retrace/core";
-import { makeStore, detectIde } from "./index.js";
+import { makeStore, detectIde, harnessSession } from "./index.js";
 import { RemoteStore } from "./remote-store.js";
 import { isMainModule } from "./is-main.js";
 
@@ -118,9 +118,9 @@ function loadCfg(repo: string, flags: Record<string, string | boolean>): Cfg {
   return cfg;
 }
 
-const AGENT_COAUTHOR = /claude|copilot|codex|cursor|devin|aider|gpt|gemini|\[bot\]/i;
+const AGENT_COAUTHOR = /claude|copilot|codex|cursor|devin|aider|gpt|gemini|grok|\[bot\]/i;
 /** Agent families a Co-Authored-By name is mapped onto (first match wins) — the actor id (backlog #12). */
-const AGENT_FAMILIES = ["claude", "copilot", "codex", "cursor", "devin", "aider", "gemini", "gpt"];
+const AGENT_FAMILIES = ["claude", "copilot", "codex", "cursor", "devin", "aider", "gemini", "grok", "gpt"];
 const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
 /** A trailer line, per git: token, colon, whitespace, non-blank value. */
 const TRAILER_LINE = /^[A-Za-z][\w-]*:\s+\S/;
@@ -223,7 +223,7 @@ export function commitToEvent(repo: string, sha: string, cfg: Cfg, live = false)
       system: "git", path: repo, environment: cfg.environment, device: process.env.RETRACE_DEVICE ?? hostname(),
       // `live` = the post-commit hook, the ONLY caller whose own process context is the commit's context. backfill and
       // `commit <sha>` replay commits this process did not produce, so stamping them would seal fabricated evidence.
-      ...(live ? { session: process.env.RETRACE_SESSION ?? process.env.CLAUDE_CODE_SESSION_ID, ...detectIde(process.env), surface: ttySurface() } : {}),
+      ...(live ? { session: harnessSession(process.env), ...detectIde(process.env), surface: ttySurface() } : {}),
     },
     intent: cleanBody ? `${subject}\n\n${cleanBody}` : subject,
     caused_by: causedBy,

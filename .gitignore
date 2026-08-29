@@ -5,3 +5,4 @@ dist/
 src/ui-html.ts
 .claude/worktrees/
 .gemini/.env
+.grok/.env

@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { buildServer, enrichLocation, clientSystem, detectIde } from "./index.js";
+import { buildServer, enrichLocation, clientSystem, detectIde, harnessSession } from "./index.js";
 import { mkdtempSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,7 +14,7 @@ import { SqliteStore } from "./sqlite-store.js";
  *  machine and fail in CI (or vice versa). */
 const withActorEnv = async (vars: Record<string, string | undefined>, fn: () => Promise<void>) => {
   const keys = ["RETRACE_ACTOR", "RETRACE_ACTOR_MODEL", "RETRACE_ON_BEHALF_OF", "RETRACE_ACTOR_LOCK", "RETRACE_SYSTEM", "RETRACE_ENVIRONMENT", "RETRACE_ENV", "RETRACE_SESSION",
-    "RETRACE_DEVICE", "RETRACE_IDE", "RETRACE_WORKSPACE", "CLAUDE_CODE_SESSION_ID", "ORCA_PANE_KEY", "ORCA_TAB_ID", "ORCA_WORKTREE_ID", "ORCA_TERMINAL_HANDLE"];
+    "RETRACE_DEVICE", "RETRACE_IDE", "RETRACE_WORKSPACE", "CLAUDE_CODE_SESSION_ID", "GROK_SESSION_ID", "ORCA_PANE_KEY", "ORCA_TAB_ID", "ORCA_WORKTREE_ID", "ORCA_TERMINAL_HANDLE"];
   const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
   for (const k of keys) delete process.env[k];
   for (const [k, v] of Object.entries(vars)) if (v !== undefined) process.env[k] = v;
@@ -346,8 +346,19 @@ test("clientSystem: known MCP client names map to a Retrace system slug; unknown
   assert.equal(clientSystem("claude-ai"), "claude-desktop");
   assert.equal(clientSystem("cursor-vscode"), "cursor");
   assert.equal(clientSystem("Visual Studio Code"), "vscode");
+  assert.equal(clientSystem("grok-cli"), "grok");
+  assert.equal(clientSystem("grok"), "grok");
+  assert.equal(clientSystem("gemini-cli"), "gemini-cli");
   assert.equal(clientSystem("Some New Client 2.0"), "some-new-client-2-0");
   assert.equal(clientSystem("***"), "unknown", "a name with nothing sluggable still yields a value");
+});
+
+test("harnessSession: Claude and Grok session ids are both first-class; RETRACE_SESSION wins", () => {
+  assert.equal(harnessSession({}), undefined);
+  assert.equal(harnessSession({ CLAUDE_CODE_SESSION_ID: "c" }), "c");
+  assert.equal(harnessSession({ GROK_SESSION_ID: "g" }), "g");
+  assert.equal(harnessSession({ CLAUDE_CODE_SESSION_ID: "c", GROK_SESSION_ID: "g" }), "c", "Claude var is older and stays first when both are set");
+  assert.equal(harnessSession({ RETRACE_SESSION: "pin", CLAUDE_CODE_SESSION_ID: "c", GROK_SESSION_ID: "g" }), "pin");
 });
 
 test("detectIde: Orca's own pane env identifies the IDE and the isolated worktree; nothing set stamps nothing", () => {
@@ -375,6 +386,15 @@ test("location.session: the harness session id is used when present, so MCP even
     const client = await connect(store);
     await client.callTool({ name: "retrace_log", arguments: { action: "edited", artifacts: [{ id: "repo:rpg#a.ts" }] } });
     assert.equal((await store.all("default"))[0].location?.session, "pinned");
+  });
+  await withActorEnv({ ...ENV, GROK_SESSION_ID: "01a04b0f-20cc-7d83-b5fd-68a865a989fe" }, async () => {
+    const store = new SqliteStore(":memory:");
+    const client = await connect(store, undefined, { name: "grok-cli", version: "1.0.13" });
+    await client.callTool({ name: "retrace_log", arguments: { action: "edited", artifacts: [{ id: "repo:rpg#a.ts" }] } });
+    const [evt] = await store.all("default");
+    assert.equal(evt.location?.session, "01a04b0f-20cc-7d83-b5fd-68a865a989fe");
+    assert.equal(evt.location?.client, "grok-cli@1.0.13");
+    assert.equal(evt.location?.system, "grok");
   });
 });
 

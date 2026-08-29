@@ -17,7 +17,7 @@ const bin = fileURLToPath(new URL("./git-hook.js", import.meta.url));
 // spawned hook's writes to the real cloud ledger — this happened; see dogfood log 2026-08-19). CLAUDE_CODE_SESSION_ID
 // and ORCA_* go for the same reason: this suite runs inside Claude Code (and may run inside an Orca pane), so leaving
 // them inherited would stamp a session/ide here and none in CI.
-const HOST_VARS = /^(RETRACE_|ORCA_|CLAUDE_CODE_SESSION_ID$)/;
+const HOST_VARS = /^(RETRACE_|ORCA_|CLAUDE_CODE_SESSION_ID$|GROK_SESSION_ID$)/;
 const baseEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => !HOST_VARS.test(k))) as Record<string, string>;
 const sh = (cwd: string, cmd: string, args: string[], env: Record<string, string> = {}) =>
   execFileSync(cmd, args, { cwd, encoding: "utf8", env: { ...baseEnv, GIT_AUTHOR_NAME: "Jordan", GIT_AUTHOR_EMAIL: "jordan@slcwitit.com", GIT_COMMITTER_NAME: "Jordan", GIT_COMMITTER_EMAIL: "jordan@slcwitit.com", ...env } });
@@ -248,6 +248,27 @@ test("git adapter: trailers from all trailing paragraphs; consistent Co-Authored
   assert.equal((await verifyProject(store, "rpg")).ok, true);
 });
 
+test("git adapter: grok trailers and Co-Authored-By map to actor id grok, not claude-code", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "retrace-git-grok-"));
+  const db = join(dir, "ledger.db");
+  const env = { RETRACE_DB: db, RETRACE_PROJECT: "rpg" };
+  sh(dir, "git", ["init", "-q", "-b", "main"]);
+  writeFileSync(join(dir, "a.ts"), "export const a = 1;\n");
+  sh(dir, "git", ["add", "."]);
+  sh(dir, "git", ["commit", "-qm", "initial"]);
+  sh(dir, "node", [bin, "install", "--repo", dir], env);
+
+  writeFileSync(join(dir, "a.ts"), "export const a = 2;\n");
+  sh(dir, "git", ["commit", "-qam", "grok trailers\n\nRetrace-Actor: grok\nRetrace-Model: grok-4.6\nRetrace-Caused-By: evt_grok1\nCo-Authored-By: Grok <noreply@x.ai>"], env);
+  writeFileSync(join(dir, "a.ts"), "export const a = 3;\n");
+  sh(dir, "git", ["commit", "-qam", "grok coauthor only\n\nCo-Authored-By: Grok 4.6 <noreply@x.ai>"], env);
+
+  const [trailed, coauthored] = await new SqliteStore(db).all("rpg");
+  assert.deepEqual(trailed.actor, { type: "agent", id: "grok", model: "grok-4.6", on_behalf_of: "jordan@slcwitit.com" });
+  assert.equal(trailed.caused_by, "evt_grok1");
+  assert.deepEqual(coauthored.actor, { type: "agent", id: "grok", model: "grok-4-6", display_name: "Grok 4.6", on_behalf_of: "jordan@slcwitit.com" });
+});
+
 // ---- WHERE: the shared session key, and tty vs agent (see ttySurface) ----
 
 test("ttySurface: reads the controlling terminal from /proc/self/stat, surviving the hook's own output redirection", () => {
@@ -280,9 +301,12 @@ test("git adapter: a commit driven by an agent shell carries that shell's sessio
   // (b) a human at their own terminal: neither var is set
   writeFileSync(join(dir, "a.ts"), "export const a = 3;\n");
   sh(dir, "git", ["commit", "-qam", "human-driven"], env);
+  // (c) Grok Build TUI exports GROK_SESSION_ID, not CLAUDE_CODE_SESSION_ID
+  writeFileSync(join(dir, "a.ts"), "export const a = 4;\n");
+  sh(dir, "git", ["commit", "-qam", "grok-driven"], { ...env, GROK_SESSION_ID: "grok-sess-1" });
 
   const store = new SqliteStore(db);
-  const [agentCommit, humanCommit] = await store.all("rpg");
+  const [agentCommit, humanCommit, grokCommit] = await store.all("rpg");
   assert.equal(agentCommit.location?.session, "sess-abc", "joins the MCP events of the same session");
   assert.equal(agentCommit.location?.ide, "orca");
   assert.equal(agentCommit.location?.workspace, "wt_9");
@@ -290,10 +314,11 @@ test("git adapter: a commit driven by an agent shell carries that shell's sessio
   assert.ok(!("ide" in (humanCommit.location ?? {})));
   assert.equal(humanCommit.location?.system, "git");
   assert.equal(humanCommit.location?.device, hostname());
+  assert.equal(grokCommit.location?.session, "grok-sess-1", "Grok commits join Grok MCP events on GROK_SESSION_ID");
   // Which value depends on whether this suite was started from a real terminal — that is the point of the field, so
   // assert it is PRESENT and one of the two legal values rather than pinning the ambient tty (which would fail for a
   // developer running `npm test` in their own shell, and pass vacuously if the wiring were deleted).
-  for (const e of [agentCommit, humanCommit]) assert.ok(e.location?.surface === "tty" || e.location?.surface === "agent", `hook stamped surface, got ${e.location?.surface}`);
+  for (const e of [agentCommit, humanCommit, grokCommit]) assert.ok(e.location?.surface === "tty" || e.location?.surface === "agent", `hook stamped surface, got ${e.location?.surface}`);
   assert.equal((await verifyProject(store, "rpg")).ok, true);
 });
 

@@ -16,9 +16,10 @@ test("doctor: assert credentials authorize the exact actor type/id pair", () => 
     token: "doctor-token-0123456789abcdef",
     actor: { type: "system", id: "retrace-git" },
     trust: "assert",
-    allowed_actors: [{ type: "agent", id: "codex" }],
+    allowed_actors: [{ type: "agent", id: "codex" }, { type: "agent", id: "grok" }],
   });
   assert.equal(credentialAuthorization(credential, { type: "agent", id: "codex" }).level, "pass");
+  assert.equal(credentialAuthorization(credential, { type: "agent", id: "grok" }).level, "pass");
   const denied = credentialAuthorization(credential, { type: "agent", id: "claude-code" });
   assert.equal(denied.level, "fail");
   assert.match(denied.detail, /claude-code.*allowed_actors/);
