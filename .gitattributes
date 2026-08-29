@@ -1,0 +1,17 @@
+# Line-ending policy. The repo is authored on Linux (LF). Without this, Windows
+# and Orca checkouts render every file as modified (CRLF vs LF), which looked
+# like uncommitted work and triggered a whole investigation on 2026-08-29
+# (evt_130f6e9c). Normalize everything to LF in the repo and on checkout.
+* text=auto eol=lf
+
+# Generated/embedded files: still LF, rewritten by `npm run build`.
+packages/core/src/ui-html.ts text eol=lf
+
+# Binaries git must never line-normalize.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.pdf  binary
+*.db   binary
