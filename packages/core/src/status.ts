@@ -1,6 +1,7 @@
 import { Event } from "./schema.js";
 import { VerifyResult } from "./chain.js";
 import { EventStore, verifyProject } from "./store.js";
+import { collectProvenanceAmendments } from "./amendment.js";
 
 export type StatusActor = { type: Event["actor"]["type"]; id: string; events: number; last_seen: string; models: string[] };
 export type StatusIntegration = { system: string; events: number; last_seen: string };
@@ -18,8 +19,10 @@ export type ProjectStatus = {
     instructions_without_followup: number;
     commits: number;
     unlinked_commits: number;
+    amended_unlinked_commits: number;
+    amended_artifact_refs: number;
   };
-  causality: { eligible_events: number; rooted_in_human_instruction: number; broken_links: number; unlinked: number; coverage_pct: number };
+  causality: { eligible_events: number; rooted_in_human_instruction: number; attested_events: number; broken_links: number; unlinked: number; coverage_pct: number };
   actors: StatusActor[];
   integrations: StatusIntegration[];
 };
@@ -65,7 +68,11 @@ export async function buildProjectStatus(store: EventStore, project: string, now
       integrations.set(system, integration);
     }
   }
-  const artifactRefs = events.flatMap((e) => e.artifacts);
+  const amendments = collectProvenanceAmendments(events, (e) => causalRootState(e, byId) === "rooted");
+  const attested = new Set(eligible.filter((e) => causalRootState(e, byId) !== "rooted" && amendments.get(e.id)?.some((a) => a.attest_causal_root)).map((e) => e.id));
+  const amendedRoles = new Set<string>();
+  for (const [targetId, list] of amendments) for (const amendment of list) for (const index of amendment.artifact_roles.keys()) amendedRoles.add(`${targetId}:${index}`);
+  const artifactRefs = events.flatMap((e) => e.artifacts.map((a, index) => ({ event: e, artifact: a, index })));
   const instructions = events.filter((e) => e.actor.type === "human" && e.action === "instructed");
   const commits = events.filter((e) => e.action === "committed" || e.action === "merged");
   const rooted = count("rooted");
@@ -76,20 +83,23 @@ export async function buildProjectStatus(store: EventStore, project: string, now
     events: { total: events.length, last_event_at: events.at(-1)?.timestamp },
     capture: {
       artifact_refs: artifactRefs.length,
-      artifact_refs_without_role: artifactRefs.filter((a) => a.role === undefined).length,
+      artifact_refs_without_role: artifactRefs.filter(({ event, artifact, index }) => artifact.role === undefined && !amendedRoles.has(`${event.id}:${index}`)).length,
+      amended_artifact_refs: amendedRoles.size,
       agent_events: events.filter((e) => e.actor.type === "agent").length,
       agent_events_without_model: events.filter((e) => e.actor.type === "agent" && !e.actor.model).length,
       instructions: instructions.length,
       instructions_without_followup: instructions.filter((e) => !caused.has(e.id)).length,
       commits: commits.length,
-      unlinked_commits: commits.filter((e) => causalRootState(e, byId) !== "rooted").length,
+      unlinked_commits: commits.filter((e) => causalRootState(e, byId) !== "rooted" && !attested.has(e.id)).length,
+      amended_unlinked_commits: commits.filter((e) => attested.has(e.id)).length,
     },
     causality: {
       eligible_events: eligible.length,
       rooted_in_human_instruction: rooted,
-      broken_links: count("broken"),
-      unlinked: count("unlinked"),
-      coverage_pct: eligible.length ? Math.round(rooted * 1000 / eligible.length) / 10 : 100,
+      attested_events: attested.size,
+      broken_links: eligible.filter((e) => causalRootState(e, byId) === "broken" && !attested.has(e.id)).length,
+      unlinked: eligible.filter((e) => causalRootState(e, byId) === "unlinked" && !attested.has(e.id)).length,
+      coverage_pct: eligible.length ? Math.round((rooted + attested.size) * 1000 / eligible.length) / 10 : 100,
     },
     actors: [...actors.values()].map((a) => ({ ...a, models: a.models.sort() })).sort((a, b) => a.type.localeCompare(b.type) || a.id.localeCompare(b.id)),
     integrations: [...integrations.values()].sort((a, b) => a.system.localeCompare(b.system)),
@@ -101,6 +111,7 @@ export function renderProjectStatus(s: ProjectStatus): string {
   return `${s.project} — ${health}\n` +
     `${s.events.total} events · ${s.causality.coverage_pct}% causal coverage · ${s.capture.unlinked_commits}/${s.capture.commits} unlinked commits\n` +
     `${s.capture.agent_events_without_model}/${s.capture.agent_events} agent events missing model · ${s.capture.instructions_without_followup}/${s.capture.instructions} instructions without follow-up · ${s.capture.artifact_refs_without_role}/${s.capture.artifact_refs} artifact refs missing role\n` +
+    `append-only amendments: ${s.capture.amended_unlinked_commits} commits attested · ${s.capture.amended_artifact_refs} artifact roles supplied\n` +
     `actors: ${s.actors.map((a) => `${a.type}/${a.id} (${a.events})`).join(", ") || "none"}\n` +
     `integrations: ${s.integrations.map((i) => `${i.system} (${i.events}, last ${i.last_seen})`).join(", ") || "none"}`;
 }

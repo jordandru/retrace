@@ -119,6 +119,7 @@ Toggle **Graph** in the UI (or `?view=graph`). Nodes are artifacts, laid out lef
 |---|---|
 | `retrace_instruct` | log a human instruction — the root of a causal chain; returns an id |
 | `retrace_log` | log any action (created/edited/deleted/executed/approved/sent/…) with `caused_by` |
+| `retrace_amend` | append a rooted correction for missing artifact roles or a historical causal attestation; sealed events are never rewritten |
 | `retrace_history` | timeline, filter by artifact / actor / action / time / text |
 | `retrace_why` | walk `caused_by` links back to the originating human intent |
 | `retrace_verify` | recompute the hash chain and report integrity |

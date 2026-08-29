@@ -385,7 +385,7 @@
     }
     const c = s.capture, z = s.causality;
     html += `<h2>Causal coverage</h2><div class="kv">
-      <div class="k">Rooted</div><div class="v">${num(z.coverage_pct, (n) => n < 100)}% — ${esc(z.rooted_in_human_instruction)} of ${esc(z.eligible_events)} eligible events trace back, caused_by by caused_by, to a human instruction<div class="link">eligible = every agent event plus every commit and merge</div></div>
+      <div class="k">Covered</div><div class="v">${num(z.coverage_pct, (n) => n < 100)}% — ${esc(z.rooted_in_human_instruction)} rooted${z.attested_events ? ` + ${esc(z.attested_events)} append-only attested` : ""} of ${esc(z.eligible_events)} eligible events<div class="link">rooted events trace back, caused_by by caused_by, to a human instruction; an attestation preserves the sealed original while supplying a later human-accountable correction</div></div>
       <div class="k">Unlinked</div><div class="v">${num(z.unlinked)} <span class="link">chains that stop at an event with no caused_by</span></div>
       <div class="k">Broken</div><div class="v">${num(z.broken_links)} <span class="link">chains whose caused_by names an event that is not in the ledger</span></div>
     </div>`;
@@ -394,6 +394,7 @@
       <tr><td>agent events without a model</td><td>${num(c.agent_events_without_model)} / ${esc(c.agent_events)}</td><td><span class="mono">actor.model</span> on every agent event</td></tr>
       <tr><td>instructions without follow-up</td><td>${num(c.instructions_without_followup)} / ${esc(c.instructions)}</td><td>at least one event whose caused_by is the instruction</td></tr>
       <tr><td>artifact refs without a role</td><td>${num(c.artifact_refs_without_role)} / ${esc(c.artifact_refs)}</td><td><span class="mono">role</span>: used · generated · both on each ref</td></tr>
+      <tr><td>append-only amendments</td><td>${esc(c.amended_unlinked_commits ?? 0)} commits · ${esc(c.amended_artifact_refs ?? 0)} roles</td><td>sealed originals remain unchanged; rooted amendment events supply the correction</td></tr>
     </table>`;
     html += `<h2>Actors</h2><table class="stable"><tr><th>who</th><th>events</th><th>models</th><th>last seen</th></tr>` +
       s.actors.map((a) => `<tr><td><span class="who" data-actor="${esc(a.id)}" style="color:var(--${esc(a.type)})" title="${esc(a.id)} — filter the timeline by this actor">${esc(a.id)}</span> <span class="link">${esc(a.type)}</span></td><td>${esc(a.events)}</td><td class="mono">${a.models?.length ? esc(a.models.join(", ")) : a.type === "agent" ? `<span class="num bad">none recorded</span>` : "—"}</td><td>${when(a.last_seen)}</td></tr>`).join("") + `</table>`;

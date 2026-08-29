@@ -35,6 +35,7 @@ import {
   buildExportBundle, verifyExportBundle, renderReportHtml, parseSigningKey, newShareId,
   buildLineage, renderLineageDot, renderLineageMermaid, renderLineageText,
   buildProjectStatus, renderProjectStatus,
+  AMENDMENT_ACTION_DETAIL, causalRootState, collectProvenanceAmendments,
 } from "@retrace-dev/core";
 import { writeFileSync } from "node:fs";
 import { ensureSigningKey } from "./keys.js";
@@ -245,6 +246,62 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
         content: [{ type: "text", text: `${deduped ? "(deduped) " : ""}logged ${event.id} seq=${event.seq}\n${describeEvent(event)}` }],
         structuredContent: { id: event.id, seq: event.seq, hash: event.hash, deduped },
       };
+    },
+  );
+
+  server.registerTool(
+    "retrace_amend",
+    {
+      title: "Append a provenance amendment",
+      description: "Correct missing metadata without modifying a sealed event. The amendment must be rooted in a human instruction; status then reports the original gap as amended while chain history remains intact.",
+      inputSchema: {
+        project: z.string().optional(),
+        target_event_id: z.string().describe("Existing sealed event being qualified"),
+        artifact_roles: z.array(z.object({ index: z.number().int().nonnegative(), role: z.enum(["used", "generated", "both"]) })).optional().describe("Roles for zero-based artifact indexes whose original role is absent"),
+        attest_causal_root: z.boolean().optional().describe("Attest that an otherwise unlinked historical event was performed under human direction"),
+        reason: z.string().min(1).describe("Evidence-based explanation for the correction"),
+        caused_by: z.string().describe("Human instruction (or rooted follow-up) authorizing this amendment"),
+        actor: Actor.partial().optional().describe("Runtime model may be supplied when the configured actor has no pinned model"),
+      },
+    },
+    async (args) => {
+      const project = writeProject(args.project);
+      const actor = resolveActor(args.actor);
+      const target = await store.get(args.target_event_id);
+      if (!target || target.project !== project) throw new Error(`target event "${args.target_event_id}" does not exist in project "${project}"`);
+      const all = await store.all(project);
+      const byId = new Map(all.map((e) => [e.id, e]));
+      const cause = byId.get(args.caused_by);
+      if (!cause || causalRootState(cause, byId) !== "rooted") throw new Error("caused_by must name an event rooted in a human instruction");
+      const prior = collectProvenanceAmendments(all, (e) => causalRootState(e, byId) === "rooted").get(target.id) ?? [];
+      const alreadyRole = new Set(prior.flatMap((a) => [...a.artifact_roles.keys()]));
+      if (args.attest_causal_root === true && prior.some((a) => a.attest_causal_root)) throw new Error(`target event ${target.id} already has a rooted causal attestation`);
+      const seen = new Set<number>();
+      const roles = (args.artifact_roles ?? []).map(({ index, role }) => {
+        if (seen.has(index)) throw new Error(`artifact index ${index} is repeated`);
+        seen.add(index);
+        const artifact = target.artifacts[index];
+        if (!artifact) throw new Error(`artifact index ${index} is outside target event ${target.id}`);
+        if (artifact.role !== undefined) throw new Error(`artifact index ${index} already has role "${artifact.role}"; amendments only supply absent metadata`);
+        if (alreadyRole.has(index)) throw new Error(`artifact index ${index} already has a rooted role amendment`);
+        return { index, role };
+      });
+      if (!roles.length && args.attest_causal_root !== true) throw new Error("amendment must supply at least one artifact role or attest_causal_root=true");
+      const input = EventInput.parse({
+        project,
+        actor,
+        action: "other",
+        action_detail: AMENDMENT_ACTION_DETAIL,
+        artifacts: [{ id: `event:${target.id}`, kind: "event", label: `amends event #${target.seq}`, role: "used" }],
+        intent: args.reason,
+        caused_by: args.caused_by,
+        method: { tool: "retrace_amend", automated: false, params: { target_event_id: target.id, artifact_roles: roles, attest_causal_root: args.attest_causal_root === true } },
+        location: enrichLocation(undefined, locationDefaults()),
+        idempotency_key: `amend:${target.id}:${JSON.stringify(roles)}:${args.attest_causal_root === true}`,
+        tags: ["amendment"],
+      });
+      const { event, deduped } = remote ? await remote.append(input) : await appendEvent(store, input);
+      return { content: [{ type: "text", text: `${deduped ? "(deduped) " : ""}amended ${target.id} with ${event.id}` }], structuredContent: { id: event.id, target_event_id: target.id, deduped } };
     },
   );
 
