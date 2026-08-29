@@ -10,7 +10,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@retrace/core": "0.1.0"
+    "@retrace-dev/core": "0.1.0"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20250101.0",

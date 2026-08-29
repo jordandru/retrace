@@ -8,7 +8,7 @@
  * Store config: RETRACE_DB (local) or RETRACE_URL(+RETRACE_TOKEN).
  */
 import { readFileSync } from "node:fs";
-import { mapDriveActivities, appendEvent, describeEvent, DrivePayload } from "@retrace/core";
+import { mapDriveActivities, appendEvent, describeEvent, DrivePayload } from "@retrace-dev/core";
 import { makeStore } from "./index.js";
 import { RemoteStore } from "./remote-store.js";
 import { isMainModule } from "./is-main.js";

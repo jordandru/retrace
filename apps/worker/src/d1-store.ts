@@ -1,4 +1,4 @@
-import { ChainHead, Event, EventStore, HeadMovedError, HistoryQuery, Share } from "@retrace/core";
+import { ChainHead, Event, EventStore, HeadMovedError, HistoryQuery, Share } from "@retrace-dev/core";
 
 export class D1Store implements EventStore {
   constructor(private db: D1Database) {}

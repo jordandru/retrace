@@ -37,7 +37,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync, appendFileSync, chmodSync, unlinkSync, mkdirSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { basename, join, resolve } from "node:path";
-import { EventInput, appendEvent, describeEvent, Event } from "@retrace/core";
+import { EventInput, appendEvent, describeEvent, Event } from "@retrace-dev/core";
 import { makeStore, detectIde, harnessSession } from "./index.js";
 import { RemoteStore } from "./remote-store.js";
 import { isMainModule } from "./is-main.js";

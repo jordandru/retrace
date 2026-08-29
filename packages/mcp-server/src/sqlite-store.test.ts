@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { appendEvent, sealEvent, verifyProject, EventInput, HeadMovedError } from "@retrace/core";
+import { appendEvent, sealEvent, verifyProject, EventInput, HeadMovedError } from "@retrace-dev/core";
 import { SqliteStore } from "./sqlite-store.js";
 
 const ev = (over: Partial<EventInput>): EventInput => ({ project: "junk", actor: { type: "agent", id: "claude" }, action: "edited", artifacts: [{ id: "a" }], ...over });

@@ -35,7 +35,7 @@ import {
   buildExportBundle, verifyExportBundle, renderReportHtml, parseSigningKey, newShareId,
   buildLineage, renderLineageDot, renderLineageMermaid, renderLineageText,
   buildProjectStatus, renderProjectStatus,
-} from "@retrace/core";
+} from "@retrace-dev/core";
 import { writeFileSync } from "node:fs";
 import { ensureSigningKey } from "./keys.js";
 import { SqliteStore } from "./sqlite-store.js";
@@ -77,6 +77,8 @@ const CLIENT_SYSTEM = new Map<string, string>([
   ["Visual Studio Code", "vscode"],
   ["grok-cli", "grok"],
   ["grok", "grok"],
+  // Measured 2026-08-29 against Grok Build TUI 1.0.13: initialize.name is "grok-shell-retrace".
+  ["grok-shell-retrace", "grok"],
   ["gemini-cli", "gemini-cli"],
 ]);
 export function clientSystem(name: string): string {

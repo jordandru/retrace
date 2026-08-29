@@ -348,6 +348,7 @@ test("clientSystem: known MCP client names map to a Retrace system slug; unknown
   assert.equal(clientSystem("Visual Studio Code"), "vscode");
   assert.equal(clientSystem("grok-cli"), "grok");
   assert.equal(clientSystem("grok"), "grok");
+  assert.equal(clientSystem("grok-shell-retrace"), "grok");
   assert.equal(clientSystem("gemini-cli"), "gemini-cli");
   assert.equal(clientSystem("Some New Client 2.0"), "some-new-client-2-0");
   assert.equal(clientSystem("***"), "unknown", "a name with nothing sluggable still yields a value");
@@ -415,6 +416,14 @@ test("location.client/system: taken from the MCP initialize handshake, not hardc
     const [evt] = await store.all("default");
     assert.equal(evt.location?.client, "cursor-vscode@1.7.3");
     assert.equal(evt.location?.system, "cursor");
+  });
+  await withActorEnv(ENV, async () => {
+    const store = new SqliteStore(":memory:");
+    const client = await connect(store, undefined, { name: "grok-shell-retrace", version: "1.0.13" });
+    await client.callTool({ name: "retrace_log", arguments: { action: "edited", artifacts: [{ id: "repo:rpg#a.ts" }] } });
+    const [evt] = await store.all("default");
+    assert.equal(evt.location?.client, "grok-shell-retrace@1.0.13", "handshake name stays verbatim");
+    assert.equal(evt.location?.system, "grok");
   });
 });
 

@@ -2,7 +2,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
-import { generateSigningKey, publicFromPrivate, keyId } from "@retrace/core";
+import { generateSigningKey, publicFromPrivate, keyId } from "@retrace-dev/core";
 
 export function keyPath(): string {
   return process.env.RETRACE_SIGNING_KEY_FILE ?? join(homedir(), ".retrace", "signing-key.json");

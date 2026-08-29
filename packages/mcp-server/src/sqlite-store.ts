@@ -1,6 +1,6 @@
 /** Local SQLite store using Node's built-in node:sqlite (Node >= 22.13). No native deps. */
 import { DatabaseSync } from "node:sqlite";
-import { ChainHead, Event, EventStore, HeadMovedError, HistoryQuery, SCHEMA_SQL, Share } from "@retrace/core";
+import { ChainHead, Event, EventStore, HeadMovedError, HistoryQuery, SCHEMA_SQL, Share } from "@retrace-dev/core";
 
 export class SqliteStore implements EventStore {
   private db: DatabaseSync;

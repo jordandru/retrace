@@ -9,7 +9,7 @@
  */
 import { createServer, IncomingMessage } from "node:http";
 import { Readable } from "node:stream";
-import { createHandler, parseCredentials, parseSigningKey } from "@retrace/core";
+import { createHandler, parseCredentials, parseSigningKey } from "@retrace-dev/core";
 import { loadSigningKey } from "./keys.js";
 import { makeStore } from "./index.js";
 import { isMainModule } from "./is-main.js";

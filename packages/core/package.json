@@ -1,5 +1,5 @@
 {
-  "name": "@retrace/core",
+  "name": "@retrace-dev/core",
   "version": "0.1.0",
   "description": "Schemas, hash chains, causal status, exports, and renderers for Retrace provenance",
   "type": "module",

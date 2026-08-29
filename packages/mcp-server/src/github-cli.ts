@@ -10,7 +10,7 @@
  * Store config as everywhere: RETRACE_DB (local) or RETRACE_URL(+RETRACE_TOKEN).
  */
 import { readFileSync } from "node:fs";
-import { mapGithubPullRest, mapGithubWebhook, appendEvent, describeEvent, EventInput } from "@retrace/core";
+import { mapGithubPullRest, mapGithubWebhook, appendEvent, describeEvent, EventInput } from "@retrace-dev/core";
 import { makeStore } from "./index.js";
 import { RemoteStore } from "./remote-store.js";
 import { isMainModule } from "./is-main.js";

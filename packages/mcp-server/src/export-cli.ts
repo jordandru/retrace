@@ -8,7 +8,7 @@
  * Uses the same store config as the MCP server (RETRACE_DB / RETRACE_URL+RETRACE_TOKEN).
  */
 import { readFileSync, writeFileSync } from "node:fs";
-import { buildExportBundle, verifyExportBundle, renderReportHtml, parseSigningKey, ExportBundle, newShareId } from "@retrace/core";
+import { buildExportBundle, verifyExportBundle, renderReportHtml, parseSigningKey, ExportBundle, newShareId } from "@retrace-dev/core";
 import { makeStore } from "./index.js";
 import { RemoteStore } from "./remote-store.js";
 import { ensureSigningKey, loadSigningKey } from "./keys.js";

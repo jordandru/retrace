@@ -4,8 +4,9 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
-import { Actor, Credential, ProjectStatus, renderProjectStatus, schemaSurface } from "@retrace/core";
+import { Actor, Credential, ProjectStatus, renderProjectStatus, schemaSurface } from "@retrace-dev/core";
 import { Cfg, commitToEvent, resolveHookToken } from "./git-hook.js";
+import { retraceHeaders } from "./remote-store.js";
 import { isMainModule } from "./is-main.js";
 
 type Level = "pass" | "warn" | "fail";
@@ -80,7 +81,7 @@ async function main() {
   if (command === "status") {
     const selected = args[1] && !args[1].startsWith("--") ? args[1] : project;
     if (!url) { console.error("retrace status: RETRACE_URL or .retrace.json url is required"); process.exit(1); return; }
-    const res = await fetch(`${url}/projects/${encodeURIComponent(selected)}/status`, { headers: auth.token ? { authorization: `Bearer ${auth.token}` } : undefined });
+    const res = await fetch(`${url}/projects/${encodeURIComponent(selected)}/status`, { headers: retraceHeaders(auth.token) });
     if (!res.ok) { console.error(`retrace status: HTTP ${res.status}: ${await res.text()}`); process.exit(1); return; }
     const status = await res.json() as ProjectStatus;
     console.log(args.includes("--json") ? JSON.stringify(status, null, 2) : renderProjectStatus(status));
@@ -94,9 +95,9 @@ async function main() {
 
   if (!url) findings.push(result("warn", "deployment", "no RETRACE_URL or .retrace.json url; remote checks skipped"));
   else {
-    const headers = auth.token ? { authorization: `Bearer ${auth.token}` } : undefined;
+    const headers = retraceHeaders(auth.token);
     try {
-      const res = await fetch(`${url}/api`); if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const res = await fetch(`${url}/api`, { headers: retraceHeaders() }); if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const api: any = await res.json(); const missing = missingSchema(api.schema ?? {});
       findings.push(missing.length ? result("fail", "deployment schema", `would drop: ${missing.join(", ")}; deploy this build first`) : result("pass", "deployment schema", `${url} understands this build`));
     } catch (e: any) { findings.push(result("fail", "deployment", `${url}/api is unreachable: ${e.message}`)); }

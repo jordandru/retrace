@@ -1,5 +1,5 @@
 /**
- * Retrace API + UI — Cloudflare Worker + D1. Routes live in @retrace/core createHandler:
+ * Retrace API + UI — Cloudflare Worker + D1. Routes live in @retrace-dev/core createHandler:
  *   GET  /  or /ui                       timeline UI
  *   POST /events                         append an event (body = EventInput)
  *   GET  /events/:id · /events/:id/why
@@ -11,13 +11,13 @@
  *   GET /projects/:p/export|report|lineage · POST /projects/:p/share · GET /.well-known/retrace-pubkey
  *   POST /hooks/github?project=…  (GitHub webhook; HMAC-verified with RETRACE_GITHUB_SECRET)
  */
-import { createHandler, parseCredentials, parseSigningKey } from "@retrace/core";
+import { createHandler, parseCredentials, parseSigningKey } from "@retrace-dev/core";
 import { D1Store } from "./d1-store.js";
 
 export interface Env {
   DB: D1Database;
   RETRACE_TOKEN?: string;
-  /** `wrangler secret put RETRACE_CREDENTIALS` — JSON array of per-actor credentials (see @retrace/core Credential) */
+  /** `wrangler secret put RETRACE_CREDENTIALS` — JSON array of per-actor credentials (see @retrace-dev/core Credential) */
   RETRACE_CREDENTIALS?: string;
   /** Ed25519 private JWK (JSON) — `wrangler secret put RETRACE_SIGNING_KEY` (generate with `retrace-export keygen`) */
   RETRACE_SIGNING_KEY?: string;

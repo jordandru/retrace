@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { Credential, schemaSurface } from "@retrace/core";
+import { Credential, schemaSurface } from "@retrace-dev/core";
 import { credentialAuthorization, missingSchema } from "./doctor.js";
 
 test("doctor: schema comparison names only fields the deployment would drop", () => {

@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { SqliteStore } from "./sqlite-store.js";
-import { verifyProject } from "@retrace/core";
+import { verifyProject } from "@retrace-dev/core";
 import { parseTrailers, resolveHookToken, ttySurface, guardRemoteWrite } from "./git-hook.js";
 
 const bin = fileURLToPath(new URL("./git-hook.js", import.meta.url));

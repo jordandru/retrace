@@ -1,5 +1,15 @@
 /** Remote store: talks to the Retrace Cloudflare Worker over HTTP. Set RETRACE_URL (+ RETRACE_TOKEN). */
-import { Event, EventStore, HistoryQuery, VerifyResult, EventInput, Share, ExportBundle, ProjectStatus } from "@retrace/core";
+import { Event, EventStore, HistoryQuery, VerifyResult, EventInput, Share, ExportBundle, ProjectStatus } from "@retrace-dev/core";
+
+/** Consistent headers for CLI-originated requests, including runtimes that require an explicit user agent. */
+export function retraceHeaders(token?: string): Record<string, string> {
+  return {
+    accept: "application/json",
+    "content-type": "application/json",
+    "user-agent": "@retrace-dev/cli/0.1.0",
+    ...(token ? { authorization: `Bearer ${token}` } : {}),
+  };
+}
 
 export class RemoteStore implements EventStore {
   constructor(private baseUrl: string, private token?: string) {
@@ -8,7 +18,7 @@ export class RemoteStore implements EventStore {
   private async req<T>(method: string, path: string, body?: unknown): Promise<T> {
     const res = await fetch(this.baseUrl + path, {
       method,
-      headers: { "content-type": "application/json", ...(this.token ? { authorization: `Bearer ${this.token}` } : {}) },
+      headers: retraceHeaders(this.token),
       body: body ? JSON.stringify(body) : undefined,
     });
     if (!res.ok) throw new Error(`Retrace API ${method} ${path} → ${res.status}: ${await res.text()}`);

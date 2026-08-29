@@ -1,5 +1,5 @@
 {
-  "name": "@retrace/cli",
+  "name": "@retrace-dev/cli",
   "version": "0.1.0",
   "description": "CLI, MCP server, Git adapter, and local UI for verifiable AI-assisted development provenance",
   "type": "module",
@@ -30,7 +30,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",
-    "@retrace/core": "0.1.0",
+    "@retrace-dev/core": "0.1.0",
     "zod": "^3.23.8"
   }
 }
