@@ -2,7 +2,7 @@
 
 Work top to bottom. Each stage ends with a check. Commands assume macOS/Linux or **Ubuntu WSL**. Fill in `<angle brackets>`.
 
-This checkout already has a live Worker (`retrace-api.slcwitit.workers.dev`, D1 `retrace-db`) and pinned credentials for Claude, Codex, Gemini, Grok, and GitHub Copilot. Stages 1–4 still matter on a new machine; 5 is already done here.
+This checkout already has a live Worker (`retrace-api.slcwitit.workers.dev`, D1 `retrace-db`) and pinned credentials for Claude, Codex, Gemini, Grok, and GitHub Copilot. The GitHub repo is **public**. Stages 1–4 still matter on a new machine; 5 is already done here.
 
 Published packages: [`@retrace-dev/core`](https://www.npmjs.com/package/@retrace-dev/core) and [`@retrace-dev/cli`](https://www.npmjs.com/package/@retrace-dev/cli) (Apache-2.0). The CLI lives in `packages/mcp-server` in this repo. The Cloudflare Worker is **not** on npm.
 
@@ -153,7 +153,9 @@ node packages/mcp-server/dist/doctor.js doctor --gate
 
 `--gate` skips the hook and `~/.retrace` file. It **fails** if HEAD is not in the ledger. If HEAD is an **agent** commit (`Retrace-Actor` or agent `Co-Authored-By`), it also fails unless that event walks `caused_by` to a human `instructed` root. Human commits pass without a trailer.
 
-This repo’s workflow is `.github/workflows/retrace-gate.yml`. Set GitHub secret `RETRACE_CI_TOKEN` to a Worker credential that can GET (not the owner token). Mark the `gate` job as a required check in branch protection or it stays advisory. Checkout uses the PR **head** SHA, not GitHub’s merge commit (that SHA is never in the ledger). Fork PRs do not receive the secret.
+This repo’s workflow is `.github/workflows/retrace-gate.yml`. GitHub secret `RETRACE_CI_TOKEN` is a Worker **assert** credential `system/retrace-ci` with empty `allowed_actors` (GET works; POST cannot seal an actor). It is not the owner token and not the git-hook token. Checkout uses the PR **head** SHA, not GitHub’s merge commit (that SHA is never in the ledger). Fork PRs do not receive the secret.
+
+Ruleset **main gate** (active, default branch) requires the Actions check named `gate` and blocks force-pushes. Repository admins are **Exempt**, so `git push origin main` still works for the owner; everyone else needs a green `gate` to update `main`. There is no required-pull-request rule.
 
 Omitting trailers still looks human and bypasses the instruct-root check. Do not skip `Retrace-Actor` / `Retrace-Caused-By` to go green.
 

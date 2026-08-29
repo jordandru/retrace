@@ -69,7 +69,9 @@ confirms the actor on `HEAD` is authorized, compares the live Worker's schema wi
 chain, and confirms that `HEAD` reached the ledger. Every failure includes the command or configuration to repair it.
 `retrace doctor --gate` is the same remote checks without local hook/credential-file wiring: missing HEAD is a failure,
 and an agent-authored HEAD must walk `caused_by` to a human `instructed` event. Human commits are not required to
-carry `Retrace-Caused-By` (omitting trailers still looks human). This repo runs it from `.github/workflows/retrace-gate.yml`.
+carry `Retrace-Caused-By` (omitting trailers still looks human). This repo runs it from `.github/workflows/retrace-gate.yml`
+(`RETRACE_CI_TOKEN`). Ruleset **main gate** requires that check on `main`; repository admins are exempt so owner pushes
+are not blocked.
 
 **Remote-write guard.** Writing to a *remote* ledger needs a `.retrace.json` in the repo root — the committed marker
 that says this repo logs somewhere. Without it, an ambient `RETRACE_URL` in your shell would silently make any scratch
