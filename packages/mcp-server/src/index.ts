@@ -212,7 +212,7 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
         action: Action.describe("Verb from the controlled vocabulary"),
         action_detail: z.string().optional().describe("Required when action=other; free-text verb"),
         artifacts: z.array(ArtifactRef).min(1).describe(
-          "Artifacts touched, e.g. {id:'repo:slcwitit/rpg#src/fight.ts', kind:'file', role:'both'}. role (PROV) = 'used' (input), " +
+          "Artifacts touched, e.g. {id:'repo:my-app#src/main.ts', kind:'file', role:'both'}. role (PROV) = 'used' (input), " +
           "'generated' (output) or 'both'. Omit it and the verb decides: read → used; created → generated; edited/moved/renamed → both; " +
           "executed/sent/received/approved/rejected → used; deleted/other → unspecified. Always set role explicitly for OUTPUTS of an " +
           "executed/sent action (a deployment, a report, a message) — the default treats those refs as inputs.",

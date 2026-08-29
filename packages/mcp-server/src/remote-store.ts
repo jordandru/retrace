@@ -6,7 +6,7 @@ export function retraceHeaders(token?: string): Record<string, string> {
   return {
     accept: "application/json",
     "content-type": "application/json",
-    "user-agent": "@retrace-dev/cli/0.1.0",
+    "user-agent": "@retrace-dev/cli/0.1.1",
     ...(token ? { authorization: `Bearer ${token}` } : {}),
   };
 }

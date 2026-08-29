@@ -57,7 +57,7 @@ export const ArtifactRole = z.enum(["used", "generated", "both"]);
 export type ArtifactRole = z.infer<typeof ArtifactRole>;
 
 export const ArtifactRef = z.object({
-  /** Stable id for the thing being worked on, e.g. "repo:slcwitit/rpg#src/fight.ts" or "doc:abc123" */
+  /** Stable id for the thing being worked on, e.g. "repo:my-app#src/main.ts" or "doc:abc123" */
   id: z.string().min(1),
   kind: z.string().optional(), // file, doc, dataset, pr, message, decision, ...
   label: z.string().optional(),
