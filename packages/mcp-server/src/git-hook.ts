@@ -40,6 +40,7 @@ import { basename, join, resolve } from "node:path";
 import { EventInput, appendEvent, describeEvent, Event } from "@retrace/core";
 import { makeStore, detectIde } from "./index.js";
 import { RemoteStore } from "./remote-store.js";
+import { isMainModule } from "./is-main.js";
 
 export type Cfg = { project?: string; db?: string; url?: string; token?: string; credential?: string; environment?: string; repoName?: string;
   /** Resolved from --allow-remote / RETRACE_ALLOW_REMOTE, not from .retrace.json — a repo that HAS the file is already
@@ -350,5 +351,4 @@ async function main() {
   console.log(`retrace-git <install|uninstall|commit [sha]|backfill [--since ref] [--max n]> [--repo path] [--project name] [--allow-remote]`);
 }
 
-const isMain = process.argv[1] && import.meta.url.endsWith(process.argv[1].split("/").pop()!);
-if (isMain) main().catch((e) => { console.error("retrace-git:", e.message ?? e); process.exit(1); });
+if (isMainModule(import.meta.url)) main().catch((e) => { console.error("retrace-git:", e.message ?? e); process.exit(1); });

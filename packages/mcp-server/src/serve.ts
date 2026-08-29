@@ -12,6 +12,7 @@ import { Readable } from "node:stream";
 import { createHandler, parseCredentials, parseSigningKey } from "@retrace/core";
 import { loadSigningKey } from "./keys.js";
 import { makeStore } from "./index.js";
+import { isMainModule } from "./is-main.js";
 
 function toRequest(req: IncomingMessage): Request {
   const url = `http://${req.headers.host ?? "localhost"}${req.url ?? "/"}`;
@@ -48,5 +49,4 @@ export function startServer(port = Number(process.env.RETRACE_PORT ?? 7777)) {
   return server;
 }
 
-const isMain = process.argv[1] && import.meta.url.endsWith(process.argv[1].split("/").pop()!);
-if (isMain) startServer();
+if (isMainModule(import.meta.url)) startServer();

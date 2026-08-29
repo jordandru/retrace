@@ -11,6 +11,7 @@ import { readFileSync } from "node:fs";
 import { mapDriveActivities, appendEvent, describeEvent, DrivePayload } from "@retrace/core";
 import { makeStore } from "./index.js";
 import { RemoteStore } from "./remote-store.js";
+import { isMainModule } from "./is-main.js";
 
 function parseArgs(argv: string[]) {
   const flags: Record<string, string | boolean> = {}; const pos: string[] = [];
@@ -50,5 +51,4 @@ async function main() {
   }
   console.log("retrace-gdrive <backfill --token T [--folder id] [--since date] | replay <payload.json>> [--project name]");
 }
-const isMain = process.argv[1] && import.meta.url.endsWith(process.argv[1].split("/").pop()!);
-if (isMain) main().catch((e) => { console.error("retrace-gdrive:", e.message ?? e); process.exit(1); });
+if (isMainModule(import.meta.url)) main().catch((e) => { console.error("retrace-gdrive:", e.message ?? e); process.exit(1); });

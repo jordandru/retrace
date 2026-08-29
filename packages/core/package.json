@@ -1,21 +1,26 @@
 {
   "name": "@retrace/core",
   "version": "0.1.0",
+  "description": "Schemas, hash chains, causal status, exports, and renderers for Retrace provenance",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "engines": { "node": ">=20" },
+  "license": "UNLICENSED",
+  "repository": { "type": "git", "url": "git+https://github.com/jordandru/retrace.git", "directory": "packages/core" },
+  "homepage": "https://github.com/jordandru/retrace#readme",
+  "bugs": { "url": "https://github.com/jordandru/retrace/issues" },
+  "publishConfig": { "access": "public" },
   "exports": {
     ".": "./dist/index.js"
   },
   "scripts": {
     "build": "node scripts/embed-ui.mjs && tsc -p tsconfig.json",
+    "prepack": "npm run build",
     "test": "node --test dist/*.test.js"
   },
   "dependencies": {
     "zod": "^3.23.8"
   },
-  "files": [
-    "dist",
-    "ui"
-  ]
+  "files": ["dist", "!dist/*.test.js", "!dist/*.test.d.ts", "ui", "README.md"]
 }

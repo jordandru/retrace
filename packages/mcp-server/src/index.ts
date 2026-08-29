@@ -40,6 +40,7 @@ import { writeFileSync } from "node:fs";
 import { ensureSigningKey } from "./keys.js";
 import { SqliteStore } from "./sqlite-store.js";
 import { RemoteStore } from "./remote-store.js";
+import { isMainModule } from "./is-main.js";
 
 const env = process.env;
 const DEFAULT_PROJECT = env.RETRACE_PROJECT ?? "default";
@@ -431,8 +432,7 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
   return server;
 }
 
-const isMain = process.argv[1] && import.meta.url.endsWith(process.argv[1].split("/").pop()!);
-if (isMain) {
+if (isMainModule(import.meta.url)) {
   const server = buildServer();
   await server.connect(new StdioServerTransport());
 }

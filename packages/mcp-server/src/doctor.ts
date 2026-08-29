@@ -6,6 +6,7 @@ import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { Actor, Credential, ProjectStatus, renderProjectStatus, schemaSurface } from "@retrace/core";
 import { Cfg, commitToEvent, resolveHookToken } from "./git-hook.js";
+import { isMainModule } from "./is-main.js";
 
 type Level = "pass" | "warn" | "fail";
 export type Finding = { level: Level; label: string; detail: string };
@@ -122,5 +123,4 @@ async function main() {
   process.exit(failed ? 1 : 0);
 }
 
-const isMain = process.argv[1] && import.meta.url.endsWith(process.argv[1].split("/").pop()!);
-if (isMain) main().catch((e) => { console.error("retrace doctor:", e.message ?? e); process.exit(1); });
+if (isMainModule(import.meta.url)) main().catch((e) => { console.error("retrace doctor:", e.message ?? e); process.exit(1); });

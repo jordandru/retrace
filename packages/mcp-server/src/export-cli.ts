@@ -12,6 +12,7 @@ import { buildExportBundle, verifyExportBundle, renderReportHtml, parseSigningKe
 import { makeStore } from "./index.js";
 import { RemoteStore } from "./remote-store.js";
 import { ensureSigningKey, loadSigningKey } from "./keys.js";
+import { isMainModule } from "./is-main.js";
 
 function parseArgs(argv: string[]) {
   const flags: Record<string, string | boolean> = {}; const pos: string[] = [];
@@ -72,5 +73,4 @@ async function main() {
   }
   console.log("retrace-export <keygen|export <project>|verify <bundle.json>|share <project>> [--artifact id] [--out f] [--report f.html] [--pubkey jwk|url] [--label s] [--days n]");
 }
-const isMain = process.argv[1] && import.meta.url.endsWith(process.argv[1].split("/").pop()!);
-if (isMain) main().catch((e) => { console.error("retrace-export:", e.message ?? e); process.exit(1); });
+if (isMainModule(import.meta.url)) main().catch((e) => { console.error("retrace-export:", e.message ?? e); process.exit(1); });

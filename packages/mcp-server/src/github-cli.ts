@@ -13,6 +13,7 @@ import { readFileSync } from "node:fs";
 import { mapGithubPullRest, mapGithubWebhook, appendEvent, describeEvent, EventInput } from "@retrace/core";
 import { makeStore } from "./index.js";
 import { RemoteStore } from "./remote-store.js";
+import { isMainModule } from "./is-main.js";
 
 function parseArgs(argv: string[]) {
   const flags: Record<string, string | boolean> = {}; const pos: string[] = [];
@@ -84,5 +85,4 @@ or with the GitHub CLI:
   }
   console.log("retrace-github <setup <owner/repo> --url U | backfill <owner/repo> [--token T] [--state all] [--max n] | replay <payload.json> --event E> [--project name]");
 }
-const isMain = process.argv[1] && import.meta.url.endsWith(process.argv[1].split("/").pop()!);
-if (isMain) main().catch((e) => { console.error("retrace-github:", e.message ?? e); process.exit(1); });
+if (isMainModule(import.meta.url)) main().catch((e) => { console.error("retrace-github:", e.message ?? e); process.exit(1); });
