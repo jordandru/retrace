@@ -28,17 +28,18 @@ Add the MCP server to Claude Code (`~/.claude.json` or project `.mcp.json`):
       "command": "node",
       "args": ["/ABSOLUTE/PATH/retrace/packages/mcp-server/dist/index.js"],
       "env": {
-        "RETRACE_PROJECT": "boxing-rpg",
+        "RETRACE_PROJECT": "retrace",
         "RETRACE_ACTOR": "claude-code",
-        "RETRACE_ACTOR_MODEL": "claude-fable-5",
-        "RETRACE_ON_BEHALF_OF": "jordansboxing@gmail.com"
+        "RETRACE_ON_BEHALF_OF": "<your email>"
       }
     }
   }
 }
 ```
 
-Same block works in Claude Desktop's `claude_desktop_config.json`. Codex takes a matching `[mcp_servers.retrace]` in its `config.toml` with `RETRACE_ACTOR = "codex"`; Grok Build TUI takes the equivalent block in `~/.grok/config.toml` with `RETRACE_ACTOR = "grok"`. Each agent must use its own pinned token—never Claude's—or the Worker will seal events as the wrong actor. Events go to `~/.retrace/retrace.db` (override with `RETRACE_DB`).
+Leave `RETRACE_ACTOR_MODEL` unset so the agent reports the model it actually ran. This repo’s project is `retrace` (see `.retrace.json`); Boxing-RPG is a separate demo project.
+
+Same block works in Claude Desktop's `claude_desktop_config.json`. Other harnesses keep the same `command` / `args` / `env` with their own actor and config file: Gemini CLI (`RETRACE_ACTOR=gemini`, `.gemini/settings.json`), Grok Build TUI (`grok`, `~/.grok/config.toml`), Codex (`codex`, plus `AGENTS.md`), GitHub Copilot CLI (`github-copilot`, `~/.copilot/mcp-config.json`). Each client needs its own pinned `RETRACE_TOKEN` — never Claude’s — or the Worker will seal events as the wrong actor. For the live Worker, add `RETRACE_URL` and that scoped token; locally, events go to `~/.retrace/retrace.db` (override with `RETRACE_DB`).
 
 ### See the timeline
 
