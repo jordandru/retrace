@@ -4,17 +4,51 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
-import { Actor, Credential, ProjectStatus, renderProjectStatus, schemaSurface } from "@retrace-dev/core";
+import { Actor, Credential, Event, ProjectStatus, causalRootState, renderProjectStatus, schemaSurface } from "@retrace-dev/core";
 import { Cfg, commitToEvent, resolveHookToken } from "./git-hook.js";
 import { retraceHeaders } from "./remote-store.js";
 import { isMainModule } from "./is-main.js";
 
 type Level = "pass" | "warn" | "fail";
 export type Finding = { level: Level; label: string; detail: string };
+export type DoctorArgs = { command: "doctor" | "status"; gate: boolean; json: boolean; repo?: string; statusProject?: string };
 type RepoConfig = Cfg & { credential?: string };
 
 const git = (repo: string, args: string[]) => execFileSync("git", ["-C", repo, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 const result = (level: Level, label: string, detail: string): Finding => ({ level, label, detail });
+
+export function parseDoctorArgs(argv: string[]): DoctorArgs {
+  const flags = new Set(argv.filter((a) => a.startsWith("--")));
+  const pos = argv.filter((a) => !a.startsWith("--"));
+  const gate = flags.has("--gate");
+  const json = flags.has("--json");
+  if (pos[0] === "status") return { command: "status", gate: false, json, statusProject: pos[1] };
+  const rest = pos[0] === "doctor" ? pos.slice(1) : pos;
+  return { command: "doctor", gate, json, repo: rest[0] };
+}
+
+/** Missing HEAD is a warning for local preflight and a failure for CI (`--gate`). */
+export function headDelivery(gate: boolean, commitId: string | undefined, found: boolean): Finding {
+  if (!commitId) return result("fail", "HEAD delivery", "HEAD has no commit artifact");
+  if (found) return result("pass", "HEAD delivery", commitId);
+  const hint = `${commitId} is not in the ledger; run retrace-git commit HEAD`;
+  return result(gate ? "fail" : "warn", "HEAD delivery", hint);
+}
+
+/** Agent commits must walk caused_by to a human instructed event. Human commits are not gated. */
+export function instructRootFinding(actorType: string, why: Event[]): Finding {
+  if (actorType !== "agent") return result("pass", "instruct root", "not required for a human commit");
+  if (!why.length) return result("fail", "instruct root", "agent commit has no why-chain");
+  const byId = new Map(why.map((e) => [e.id, e]));
+  const head = why[0];
+  const state = causalRootState(head, byId);
+  if (state === "rooted") {
+    const root = why.find((e) => e.actor.type === "human" && e.action === "instructed");
+    return result("pass", "instruct root", `${head.id} ← ${root?.id ?? "human instruction"}`);
+  }
+  if (state === "broken") return result("fail", "instruct root", `${head.id} has a broken caused_by chain`);
+  return result("fail", "instruct root", `${head.id} is not rooted in a human instruction; add Retrace-Caused-By: evt_…`);
+}
 
 export function missingSchema(remote: Record<string, unknown>, local = schemaSurface()): string[] {
   return Object.entries(local).flatMap(([group, keys]) => {
@@ -35,9 +69,15 @@ export function credentialAuthorization(credential: Credential, actor: Actor): F
     : result("fail", "actor authorization", `HEAD is ${actor.type}/${actor.id}, but credential ${credential.actor.id} is pinned to ${credential.actor.type}/${credential.actor.id}`);
 }
 
-function loadCredential(cfg: RepoConfig, env: NodeJS.ProcessEnv): { credential?: Credential; token?: string; finding: Finding } {
+function loadCredential(cfg: RepoConfig, env: NodeJS.ProcessEnv, gate = false): { credential?: Credential; token?: string; finding: Finding } {
+  const envToken = env.RETRACE_HOOK_TOKEN ?? env.RETRACE_TOKEN;
+  if (gate) {
+    return envToken
+      ? { token: envToken, finding: result("pass", "credential", "RETRACE_TOKEN from environment") }
+      : { finding: result("fail", "credential", "RETRACE_TOKEN is required for --gate") };
+  }
   if (!cfg.credential) {
-    const token = env.RETRACE_HOOK_TOKEN ?? env.RETRACE_TOKEN ?? cfg.token;
+    const token = envToken ?? cfg.token;
     return { token, finding: token ? result("warn", "credential", "using an owner/file token; prefer a named scoped credential") : result("fail", "credential", "no hook token is configured") };
   }
   const file = env.RETRACE_CREDENTIALS_FILE ?? join(homedir(), ".retrace", "worker-credentials.json");
@@ -54,14 +94,15 @@ function loadCredential(cfg: RepoConfig, env: NodeJS.ProcessEnv): { credential?:
 }
 
 async function main() {
-  const args = process.argv.slice(2);
-  const command = args[0] === "status" ? "status" : "doctor";
-  if (args[0] && args[0] !== "doctor" && args[0] !== "status" && !args[0].startsWith(".") && !args[0].startsWith("/") && !existsSync(resolve(args[0]))) {
-    console.error("usage: retrace <doctor [repo] | status [project] [--json]>"); process.exit(2); return;
+  const argv = process.argv.slice(2);
+  const args = parseDoctorArgs(argv);
+  const first = argv.filter((a) => !a.startsWith("--"))[0];
+  if (first && first !== "doctor" && first !== "status" && !first.startsWith(".") && !first.startsWith("/") && !existsSync(resolve(first))) {
+    console.error("usage: retrace <doctor [--gate] [repo] | status [project] [--json]>"); process.exit(2); return;
   }
-  const arg = command === "doctor" ? (args[0] === "doctor" ? args[1] : args[0]) : undefined;
+  const { command, gate } = args;
   let repo: string;
-  try { repo = resolve(git(resolve(arg ?? process.cwd()), ["rev-parse", "--show-toplevel"])); }
+  try { repo = resolve(git(resolve(args.repo ?? process.cwd()), ["rev-parse", "--show-toplevel"])); }
   catch { console.error("FAIL  repository — not inside a Git repository (or pass its path)"); process.exit(1); return; }
   const findings: Finding[] = [];
   const cfgPath = join(repo, ".retrace.json");
@@ -70,30 +111,32 @@ async function main() {
   else try { cfg = JSON.parse(readFileSync(cfgPath, "utf8")); findings.push(result("pass", "repository wiring", cfgPath)); }
   catch (e: any) { findings.push(result("fail", "repository wiring", `${cfgPath} is invalid JSON: ${e.message}`)); }
 
-  const gitDir = resolve(repo, git(repo, ["rev-parse", "--git-dir"]));
-  const hook = join(gitDir, "hooks", "post-commit");
-  const hookOk = existsSync(hook) && readFileSync(hook, "utf8").includes("# retrace-git hook");
-  findings.push(hookOk ? result("pass", "post-commit hook", hook) : result("fail", "post-commit hook", `not installed at ${hook}; run retrace-git install --repo ${repo}`));
+  if (!gate) {
+    const gitDir = resolve(repo, git(repo, ["rev-parse", "--git-dir"]));
+    const hook = join(gitDir, "hooks", "post-commit");
+    const hookOk = existsSync(hook) && readFileSync(hook, "utf8").includes("# retrace-git hook");
+    findings.push(hookOk ? result("pass", "post-commit hook", hook) : result("fail", "post-commit hook", `not installed at ${hook}; run retrace-git install --repo ${repo}`));
+  }
 
   const project = process.env.RETRACE_PROJECT ?? cfg.project ?? basename(repo);
   const url = (process.env.RETRACE_URL ?? cfg.url ?? "").replace(/\/$/, "");
-  const auth = loadCredential(cfg, process.env); findings.push(auth.finding);
+  const auth = loadCredential(cfg, process.env, gate); findings.push(auth.finding);
   if (command === "status") {
-    const selected = args[1] && !args[1].startsWith("--") ? args[1] : project;
+    const selected = args.statusProject ?? project;
     if (!url) { console.error("retrace status: RETRACE_URL or .retrace.json url is required"); process.exit(1); return; }
     const res = await fetch(`${url}/projects/${encodeURIComponent(selected)}/status`, { headers: retraceHeaders(auth.token) });
     if (!res.ok) { console.error(`retrace status: HTTP ${res.status}: ${await res.text()}`); process.exit(1); return; }
     const status = await res.json() as ProjectStatus;
-    console.log(args.includes("--json") ? JSON.stringify(status, null, 2) : renderProjectStatus(status));
+    console.log(args.json ? JSON.stringify(status, null, 2) : renderProjectStatus(status));
     return;
   }
   let headEvent: ReturnType<typeof commitToEvent> | undefined;
   try {
     headEvent = commitToEvent(repo, "HEAD", { ...cfg, project, repoName: cfg.repoName });
-    if (auth.credential) findings.push(credentialAuthorization(auth.credential, headEvent.actor));
+    if (!gate && auth.credential) findings.push(credentialAuthorization(auth.credential, headEvent.actor));
   } catch (e: any) { findings.push(result("fail", "HEAD", `could not inspect the current commit: ${e.message}`)); }
 
-  if (!url) findings.push(result("warn", "deployment", "no RETRACE_URL or .retrace.json url; remote checks skipped"));
+  if (!url) findings.push(result(gate ? "fail" : "warn", "deployment", gate ? "RETRACE_URL is required for --gate" : "no RETRACE_URL or .retrace.json url; remote checks skipped"));
   else {
     const headers = retraceHeaders(auth.token);
     try {
@@ -112,8 +155,19 @@ async function main() {
       try {
         const res = await fetch(`${url}/projects/${encodeURIComponent(project)}/events?artifact_id=${encodeURIComponent(commit ?? "")}`, { headers });
         if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
-        const events: any[] = await res.json();
-        findings.push(events.length ? result("pass", "HEAD delivery", `${commit} is event #${events.at(-1)?.seq}`) : result("warn", "HEAD delivery", `${commit} is not in the ledger; run retrace-git commit --repo ${repo} HEAD`));
+        const events: Event[] = await res.json();
+        const delivery = headDelivery(gate, commit, events.length > 0);
+        findings.push(events.length ? result("pass", "HEAD delivery", `${commit} is event #${events.at(-1)?.seq}`) : delivery);
+        if (gate && events.length && headEvent.actor.type !== "agent") {
+          findings.push(instructRootFinding(headEvent.actor.type, []));
+        } else if (gate && events.length) {
+          const eventId = events.at(-1)?.id;
+          try {
+            const whyRes = await fetch(`${url}/events/${encodeURIComponent(eventId ?? "")}/why`, { headers });
+            if (!whyRes.ok) throw new Error(`HTTP ${whyRes.status}: ${await whyRes.text()}`);
+            findings.push(instructRootFinding(headEvent.actor.type, await whyRes.json() as Event[]));
+          } catch (e: any) { findings.push(result("fail", "instruct root", e.message)); }
+        }
       } catch (e: any) { findings.push(result("fail", "HEAD delivery", e.message)); }
     }
   }

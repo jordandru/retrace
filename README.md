@@ -57,6 +57,7 @@ cd /path/to/your/repo
 node /ABSOLUTE/PATH/retrace/packages/mcp-server/dist/git-hook.js install --project boxing-rpg
 node /ABSOLUTE/PATH/retrace/packages/mcp-server/dist/git-hook.js backfill      # optional: log existing history (idempotent, safe to re-run)
 npm exec --package=@retrace-dev/cli -- retrace doctor                         # read-only preflight; exits nonzero when capture is not ready
+npm exec --package=@retrace-dev/cli -- retrace doctor --gate                  # CI: fail if HEAD is missing or an agent commit is not rooted in an instruction
 npm exec --package=@retrace-dev/cli -- retrace status                         # human-readable integrity + capture + causality status
 npm exec --package=@retrace-dev/cli -- retrace status retrace --json          # the identical canonical model for automation/agents
 ```
@@ -66,6 +67,9 @@ npm exec --package=@retrace-dev/cli -- retrace status retrace --json          # 
 `retrace doctor` checks the repository marker and hook, resolves the scoped credential without printing its token,
 confirms the actor on `HEAD` is authorized, compares the live Worker's schema with this build, verifies the project hash
 chain, and confirms that `HEAD` reached the ledger. Every failure includes the command or configuration to repair it.
+`retrace doctor --gate` is the same remote checks without local hook/credential-file wiring: missing HEAD is a failure,
+and an agent-authored HEAD must walk `caused_by` to a human `instructed` event. Human commits are not required to
+carry `Retrace-Caused-By` (omitting trailers still looks human). This repo runs it from `.github/workflows/retrace-gate.yml`.
 
 **Remote-write guard.** Writing to a *remote* ledger needs a `.retrace.json` in the repo root — the committed marker
 that says this repo logs somewhere. Without it, an ambient `RETRACE_URL` in your shell would silently make any scratch

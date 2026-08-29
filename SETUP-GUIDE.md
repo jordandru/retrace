@@ -142,6 +142,21 @@ Per-harness notes: `CLAUDE.md`, `GEMINI.md`, `GROK.md`, `AGENTS.md` (Codex), `.g
 
 This repo’s project name is `retrace` (see `.retrace.json`). Boxing-RPG is a separate project.
 
+### 4c. CI gate
+
+`retrace doctor` is a local preflight (hook installed, credential file). CI has neither. Use:
+
+```bash
+node packages/mcp-server/dist/doctor.js doctor --gate
+# env: RETRACE_URL, RETRACE_TOKEN
+```
+
+`--gate` skips the hook and `~/.retrace` file. It **fails** if HEAD is not in the ledger. If HEAD is an **agent** commit (`Retrace-Actor` or agent `Co-Authored-By`), it also fails unless that event walks `caused_by` to a human `instructed` root. Human commits pass without a trailer.
+
+This repo’s workflow is `.github/workflows/retrace-gate.yml`. Set GitHub secret `RETRACE_CI_TOKEN` to a Worker credential that can GET (not the owner token). Mark the `gate` job as a required check in branch protection or it stays advisory. Checkout uses the PR **head** SHA, not GitHub’s merge commit (that SHA is never in the ledger). Fork PRs do not receive the secret.
+
+Omitting trailers still looks human and bypasses the instruct-root check. Do not skip `Retrace-Actor` / `Retrace-Caused-By` to go green.
+
 ---
 
 ## Stage 5 — Cloudflare Worker + D1

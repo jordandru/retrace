@@ -1,0 +1,26 @@
+# Source-stage provenance gate. Fails when an agent-authored HEAD is missing
+# from the ledger or is not rooted in a human instruction. Human commits pass.
+# Requires repo secret RETRACE_CI_TOKEN (a Worker credential that can GET).
+name: retrace-gate
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # pull_request default is a merge commit that is not in the ledger.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: node packages/mcp-server/dist/doctor.js doctor --gate
+        env:
+          RETRACE_URL: https://retrace-api.slcwitit.workers.dev
+          RETRACE_TOKEN: ${{ secrets.RETRACE_CI_TOKEN }}
