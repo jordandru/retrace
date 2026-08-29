@@ -10,3 +10,9 @@ This repository records verifiable provenance through the `retrace` MCP server.
 - Add commit trailers `Retrace-Actor: claude-code`, `Retrace-Model: <actual model>`, and `Retrace-Caused-By: <instruction event id>`.
 - These instructions are authoritative for Claude Code. Do not copy another agent's `Retrace-Actor` from `GEMINI.md`, `GROK.md`, or `.github/copilot-instructions.md`.
 - Packages are `@retrace-dev/core` and `@retrace-dev/cli` (the workspace folder is still `packages/mcp-server`).
+
+## Operational notes (multi-agent, multi-clone)
+
+- **If the `retrace` MCP tools vanish mid-session, restart Claude Code** (`claude --continue`). A running session does not respawn a project-scoped MCP server that has died, and the `/mcp` dialog's reconnect does not either. The `~/.claude.json` entry is fine — it is the server *process* that dropped (consistent with WSL2 fetch/stdio flakiness). Confirmed by investigation 2026-08-29 (evt_130f6e9c): the config was present in every snapshot; only a restart brought the tools back.
+- **Two separate clones of this repo exist and drift apart:** `/home/jordandrumiler/provenance/retrace` (Linux) and `/mnt/c/Users/drumi/orca/retrace` (Windows/Orca). They are different checkouts at different commits, not one filesystem. Run `git rev-parse --short HEAD` to confirm which clone you are in before working, and never `pull`/`reset`/`checkout` a clone that carries another agent's uncommitted changes.
+- **This checkout is shared by five agents.** Uncommitted work in the tree gets swept into whichever agent commits next (this happened — bfe87c3, corrected by c375ed4). Finish a task by committing only your own paths (`git commit --only <paths>`); never `git commit -a`/`git add -A` when another agent's changes are staged or unstaged in the tree.
