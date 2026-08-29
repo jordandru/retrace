@@ -36,7 +36,7 @@ Add the MCP server to Claude Code (`~/.claude.json` or project `.mcp.json`):
 }
 ```
 
-Same block works in Claude Desktop's `claude_desktop_config.json`. Grok Build TUI takes a matching `[mcp_servers.retrace]` in `~/.grok/config.toml` with `RETRACE_ACTOR = "grok"` and Grok's own pinned token — do not reuse the Claude credential, or every Grok event is sealed as `claude-code`. Events go to `~/.retrace/retrace.db` (override with `RETRACE_DB`).
+Same block works in Claude Desktop's `claude_desktop_config.json`. Codex takes a matching `[mcp_servers.retrace]` in its `config.toml` with `RETRACE_ACTOR = "codex"`; Grok Build TUI takes the equivalent block in `~/.grok/config.toml` with `RETRACE_ACTOR = "grok"`. Each agent must use its own pinned token—never Claude's—or the Worker will seal events as the wrong actor. Events go to `~/.retrace/retrace.db` (override with `RETRACE_DB`).
 
 ### See the timeline
 
@@ -72,7 +72,7 @@ the ways out: `retrace-git install` (writes the file), `RETRACE_DB=<path>` to wr
 `RETRACE_ALLOW_REMOTE=1` for env-only setups such as CI backfill. Local writes are not gated — a stray row in a SQLite
 file is cheap to discard; a sealed event in a shared append-only ledger costs a `DELETE /projects/:p`.
 
-Tip for agents (put in `CLAUDE.md` / `GEMINI.md` / `GROK.md`): *when committing, add trailers `Retrace-Actor: <your harness id>`, `Retrace-Model: <model>`, and `Retrace-Caused-By: <instruction event id>`.* Do not copy another harness's actor id.
+Tip for agents (put in `AGENTS.md` / `CLAUDE.md` / `GEMINI.md` / `GROK.md`): *when committing, add trailers `Retrace-Actor: <your harness id>`, `Retrace-Model: <model>`, and `Retrace-Caused-By: <instruction event id>`.* Do not copy another harness's actor id.
 
 ### GitHub PR adapter — PRs, reviews, comments, CI runs become events
 
