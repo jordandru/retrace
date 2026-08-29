@@ -224,3 +224,4 @@ npm run check-deploy                 # or: npm run check-deploy https://retrace-
 
 diffs it against the local build — exit 0 if the deployment understands every field you send, exit 1 listing the ones it
 would silently drop. No token, no writes; run it after every deploy, and in CI if you add one.
+Licensed under the [Apache License 2.0](LICENSE).
