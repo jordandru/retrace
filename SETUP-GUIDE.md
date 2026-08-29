@@ -1,167 +1,215 @@
-# Retrace — Laptop Setup Walkthrough (v0.7)
+# Retrace — setup walkthrough (v0.1.1)
 
-Work top to bottom. Each stage ends with a check so you know it worked before moving on. Commands assume macOS/Linux terminal; on Windows use WSL or Git Bash. Anything in `<angle brackets>` is yours to fill in.
+Work top to bottom. Each stage ends with a check. Commands assume macOS/Linux or **Ubuntu WSL**. Fill in `<angle brackets>`.
 
----
+This checkout already has a live Worker (`retrace-api.slcwitit.workers.dev`, D1 `retrace-db`) and pinned credentials for Claude, Codex, Gemini, Grok, and GitHub Copilot. Stages 1–4 still matter on a new machine; 5 is already done here.
 
-## Stage 0 — Prerequisites (10 min)
+Published packages: [`@retrace-dev/core`](https://www.npmjs.com/package/@retrace-dev/core) and [`@retrace-dev/cli`](https://www.npmjs.com/package/@retrace-dev/cli) (Apache-2.0). The CLI lives in `packages/mcp-server` in this repo. The Cloudflare Worker is **not** on npm.
 
-You need: **Node.js 22.13 or newer** (`node -v`), **git**, and a **Cloudflare account** (free tier is fine — you already have one, since `retrace-db` lives in it). Optional but useful: the **GitHub CLI** (`gh`) and **Claude Code** or **Claude Desktop** for the MCP part.
+The `retrace` binary name collides with Android’s R8 `retrace`. Prefer:
 
-If Node is older than 22.13, install the current LTS from nodejs.org (the local ledger uses Node's built-in SQLite, which needs ≥ 22.13).
+```bash
+npm exec --package=@retrace-dev/cli -- retrace doctor
+```
 
----
-
-## Stage 1 — Unzip, build, test (5 min)
-
-1. Download `retrace-v0.7.zip` from our chat and unzip it somewhere permanent, e.g. `~/code/retrace`.
-2. In a terminal:
-   ```bash
-   cd ~/code/retrace
-   npm install
-   npm run build
-   npm test
-   ```
-   **Check:** you should see `# pass 10` (core) and `# pass 2` (mcp-server), `# fail 0` for both. Warnings about "SQLite is an experimental feature" are normal.
-
-3. Note the absolute path — you'll paste it into configs:
-   ```bash
-   pwd        # e.g. /Users/jordan/code/retrace
-   ```
+or a global `@retrace-dev/cli` install, not whatever `retrace` happens to be first on `PATH`.
 
 ---
 
-## Stage 2 — See it working locally with demo data (5 min)
+## Stage 0 — Prerequisites
 
-1. Seed a demo Boxing-RPG session into a scratch database and start the local server:
-   ```bash
-   RETRACE_DB=/tmp/demo.db node scripts/seed-demo.mjs
-   RETRACE_DB=/tmp/demo.db npm run serve
-   ```
-2. Open http://localhost:7777 in your browser.
-   **Check:** badge says "chain intact · 9 events". Click an event → detail panel shows WHO/WHAT/WHEN/WHERE/WHY/HOW and the causal chain. Toggle **Graph**. Try **Report** (opens printable page), **Export** (downloads signed JSON), **Share** (creates a `/s/…` link — open it in a private window to see the client view).
-3. Optional extra demos while the server runs (new terminal, same `RETRACE_DB`):
-   ```bash
-   RETRACE_DB=/tmp/demo.db RETRACE_GITHUB_SECRET=hooksecret node scripts/simulate-github.mjs   # needs server started with RETRACE_GITHUB_SECRET=hooksecret too
-   RETRACE_DB=/tmp/demo.db node packages/mcp-server/dist/gdrive-cli.js replay packages/core/test-fixtures/drive-activity.json --project boxing-rpg
-   ```
-4. Stop the server (Ctrl-C). Your real ledger will live at `~/.retrace/retrace.db` (the default when `RETRACE_DB` is unset) — the demo db is throwaway.
-
-**Tell me:** anything that looked wrong or confusing here. This is the cheapest moment to change UI.
+- **Node.js 22.13+** (`node -v`) — local SQLite needs ≥ 22.13
+- **git**
+- **Cloudflare account** (free tier is enough) for cloud mode
+- Optional: `gh`, and at least one MCP client (Claude Code, Gemini CLI, Grok Build TUI, Codex, GitHub Copilot CLI)
 
 ---
 
-## Stage 3 — Signing key (1 min)
+## Stage 1 — Clone, build, test
+
+```bash
+git clone https://github.com/jordandru/retrace.git
+cd retrace
+npm install
+npm run build
+npm test
+```
+
+**Check:** both workspaces exit 0 (`@retrace-dev/core` and `@retrace-dev/cli`). SQLite “experimental feature” warnings are normal.
+
+Note the absolute path for MCP configs:
+
+```bash
+pwd
+```
+
+Consumers who only need the CLI can skip the clone and use `npx @retrace-dev/cli` / `npm i -g @retrace-dev/cli@0.1.1`.
+
+---
+
+## Stage 2 — Local timeline (no cloud)
+
+```bash
+RETRACE_DB=/tmp/demo.db node scripts/seed-demo.mjs
+RETRACE_DB=/tmp/demo.db npm run serve
+```
+
+Open http://localhost:7777.
+
+**Check:** chain-intact badge, a short Boxing-RPG demo timeline. Click an event → WHO · WHAT · WHEN · WHERE · WHY · HOW. Toggle **Graph**. **Report** / **Export** / **Share** (`/s/…`, open in a private window).
+
+Optional, same `RETRACE_DB`, while the server runs:
+
+```bash
+RETRACE_DB=/tmp/demo.db RETRACE_GITHUB_SECRET=hooksecret node scripts/simulate-github.mjs
+# start serve with RETRACE_GITHUB_SECRET=hooksecret too
+RETRACE_DB=/tmp/demo.db node packages/mcp-server/dist/gdrive-cli.js replay \
+  packages/core/test-fixtures/drive-activity.json --project boxing-rpg
+```
+
+Stop the server (Ctrl-C). Throw away `/tmp/demo.db`. The real local ledger is `~/.retrace/retrace.db` when `RETRACE_DB` is unset.
+
+---
+
+## Stage 3 — Signing key
 
 ```bash
 node packages/mcp-server/dist/export-cli.js keygen
+# or: npx retrace-export keygen   (from @retrace-dev/cli)
 ```
-Creates `~/.retrace/signing-key.json` (keep it private) and prints the `kid`. Every export you or the local server produce is now signed. Run it again with `--print-private` later when you deploy the Worker (Stage 5) — you'll paste that value as a secret.
+
+Writes `~/.retrace/signing-key.json` (private). Prints `kid`. `--print-private` later for the Worker secret (Stage 5).
 
 ---
 
-## Stage 4 — Hook up your Boxing RPG repo (10 min)
+## Stage 4 — Wire a git repo
 
-### 4a. Git commits → Retrace
+### 4a. Commits → ledger
+
 ```bash
-cd <path to your boxing rpg repo>
-node <abs path>/retrace/packages/mcp-server/dist/git-hook.js install --project boxing-rpg
-node <abs path>/retrace/packages/mcp-server/dist/git-hook.js backfill      # imports existing history; safe to re-run
-git add .retrace.json && git commit -m "Add Retrace config"
+cd <your-repo>
+node <abs path>/retrace/packages/mcp-server/dist/git-hook.js install --project <project>
+node <abs path>/retrace/packages/mcp-server/dist/git-hook.js backfill   # optional, idempotent
 ```
-**Check:** `npm run serve` (in the retrace folder, no `RETRACE_DB`) → http://localhost:7777 → project `boxing-rpg` shows your commits, and the commit you just made appears automatically (the hook logged it).
 
-### 4b. Claude Code / Claude Desktop → Retrace (the MCP server)
-Add to `~/.claude.json` (Claude Code) or `claude_desktop_config.json` (Desktop) under `mcpServers`:
+Commit `.retrace.json` (name only — no owner token). For a remote ledger, set `"credential": "retrace-git"` and keep the hook token in `~/.retrace/worker-credentials.json`.
+
+**Check:**
+
+```bash
+npm exec --package=@retrace-dev/cli -- retrace doctor
+```
+
+READY. Failures name the repair. Hook misses go in `.git/retrace-hook.log`; re-log with `retrace-git commit <sha>`.
+
+Without `.retrace.json`, `retrace-git` **refuses** a remote write so a stray `RETRACE_URL` cannot create junk projects on the live Worker.
+
+Agent commits need trailers `Retrace-Actor: <id>`, `Retrace-Model: <model>`, `Retrace-Caused-By: evt_…`. Do not log `committed` through MCP.
+
+### 4b. MCP — one pinned identity per harness
+
+Each client gets its **own** `RETRACE_TOKEN` (pinned credential). Reusing Claude’s token seals Grok/Copilot/… as `claude-code`.
+
+| Harness | `RETRACE_ACTOR` | Config |
+|---|---|---|
+| Claude Code / Desktop | `claude-code` | `~/.claude.json` / `claude_desktop_config.json` |
+| Gemini CLI | `gemini` | `.gemini/settings.json` |
+| Grok Build TUI | `grok` | `~/.grok/config.toml` |
+| Codex | `codex` | Codex MCP + `AGENTS.md` |
+| GitHub Copilot CLI | `github-copilot` | `~/.copilot/mcp-config.json` |
+
+Claude example (`args` = absolute `packages/mcp-server/dist/index.js`):
+
 ```json
 "retrace": {
   "command": "node",
   "args": ["<abs path>/retrace/packages/mcp-server/dist/index.js"],
   "env": {
-    "RETRACE_PROJECT": "boxing-rpg",
+    "RETRACE_PROJECT": "<project>",
     "RETRACE_ACTOR": "claude-code",
-    "RETRACE_ACTOR_MODEL": "claude-fable-5",
-    "RETRACE_ON_BEHALF_OF": "jordansboxing@gmail.com"
+    "RETRACE_ON_BEHALF_OF": "<your email>",
+    "RETRACE_URL": "https://retrace-api.<you>.workers.dev",
+    "RETRACE_TOKEN": "<pinned claude-code token, not the owner token>"
   }
 }
 ```
-Restart Claude Code. Then add these two lines to the RPG repo's `CLAUDE.md` so the agent logs without being asked:
-```
-Provenance: at the start of each task call retrace_instruct with my request; after each edit/command/decision call retrace_log with caused_by (the instruction id), a one-sentence intent, and the artifact ids touched.
-When committing, add trailers: Retrace-Actor: claude-code / Retrace-Model: <your model> / Retrace-Caused-By: <instruction event id>.
-```
-**Check:** in Claude Code type `/mcp` — `retrace` should be connected with 9 tools. Do one small real task; then refresh http://localhost:7777 → you should see the instruction (amber) followed by agent edits (blue) linked by "caused by".
+
+Leave `RETRACE_ACTOR_MODEL` unset so the agent reports the model it actually ran. After `dist/` changes, **respawn** the MCP server (it keeps old `dist` and session id until restart).
+
+Per-harness notes: `CLAUDE.md`, `GEMINI.md`, `GROK.md`, `AGENTS.md` (Codex), `.github/copilot-instructions.md`. Grok also loads `.grok/rules/retrace.md` (it still auto-loads `CLAUDE.md` via compatibility).
+
+**Check:** client shows Retrace tools (10). One real `retrace_instruct` → timeline shows an amber instruction, then blue agent events with `caused_by`.
+
+This repo’s project name is `retrace` (see `.retrace.json`). Boxing-RPG is a separate project.
 
 ---
 
-## Stage 5 — Deploy the Cloudflare Worker (15 min) — unlocks GitHub, Google Drive, and remote mode
+## Stage 5 — Cloudflare Worker + D1
+
+Already applied in this checkout (`apps/worker/wrangler.toml` → `retrace-db`). On a new account:
 
 ```bash
-cd <abs path>/retrace/apps/worker
-npx wrangler login                     # opens browser
-npx wrangler secret put RETRACE_TOKEN          # paste a long random string; SAVE IT — it's your API password (owner token)
-npx wrangler secret put RETRACE_CREDENTIALS    # optional, JSON array of per-actor tokens: [{"token":"<32+ chars>","actor":{"type":"agent","id":"claude-code","model":"claude-fable-5","on_behalf_of":"<your email>"}}]
-                                               # give each agent its own pinned token as RETRACE_TOKEN in its MCP config — the Worker then stamps WHO, the agent can't; add "trust":"assert" only for the git hook / Drive forwarder
-npx wrangler secret put RETRACE_SIGNING_KEY    # paste output of: node ../../packages/mcp-server/dist/export-cli.js keygen --print-private  (the JSON only)
-npx wrangler secret put RETRACE_GITHUB_SECRET  # another random string; you'll reuse it in GitHub
+cd apps/worker
+npx wrangler login
+npx wrangler secret put RETRACE_TOKEN          # owner token: UI, DELETE, share
+npx wrangler secret put RETRACE_CREDENTIALS    # JSON array of per-actor credentials
+npx wrangler secret put RETRACE_SIGNING_KEY    # private JWK from keygen --print-private
+npx wrangler secret put RETRACE_GITHUB_SECRET
 npx wrangler deploy
+npm run check-deploy                           # from repo root; no token, no writes
 ```
-The last line prints your URL, like `https://retrace-api.<you>.workers.dev`. The D1 database (`retrace-db`) is already created and migrated; `wrangler.toml` already points at it.
 
-**Check:** open `<url>/api` → `{"ok":true,"auth":true,"signing":true}`. Open `<url>/?token=<RETRACE_TOKEN>` → the same UI, empty for now. `<url>/.well-known/retrace-pubkey` shows your public key.
+`RETRACE_CREDENTIALS`: pinned agents (Worker stamps WHO) plus `trust: "assert"` for `retrace-git` / Drive, with `allowed_actors`. After changing credentials, `wrangler secret put RETRACE_CREDENTIALS` again from `~/.retrace/worker-credentials.json`.
 
-Optional: set `RETRACE_ISSUER` (e.g. `SLC WIT' IT`), `RETRACE_PUBLIC_URL` and `RETRACE_OWNER=<your email>` under `[vars]` in `wrangler.toml` and redeploy, so reports name you as issuer and owner-only actions (`DELETE /projects/:p`) are audited as you rather than as `system/worker`. Pass `&caused_by=evt_…` on a DELETE to link it to the instruction that asked for it.
+**Check:** `https://<url>/api` → `ok`, `auth`, `signing`. UI at `/?token=<owner>`. `/.well-known/retrace-pubkey` for exports.
 
-### Point local tools at the cloud (optional but recommended)
-Add to the MCP `env` block from 4b and to your shell profile:
-```
-RETRACE_URL=https://retrace-api.<you>.workers.dev
-RETRACE_TOKEN=<your token>
-```
-With those set, the MCP server, git hook, and CLIs write to the cloud ledger instead of `~/.retrace/retrace.db`. (Re-run `git-hook.js backfill` once to copy history up.) You can also put `url`/`token` in the repo's `.retrace.json` — but don't commit the token to a public repo; env is safer. Better for the git hook: add `"credential": "retrace-git"` to `.retrace.json` (committable — it's a name, not a secret) and keep the assert credential's token in `~/.retrace/worker-credentials.json` (or `RETRACE_CREDENTIALS_FILE`); the hook then never uses the owner token. If a commit doesn't show up, read `.git/retrace-hook.log`.
+Set `RETRACE_OWNER` under `[vars]` so DELETE is audited as you, not `system/worker`.
+
+MCP / hook / CLI: `RETRACE_URL` + the **scoped** token, not the owner token on the git hook. npm publish to the public registry uses npm 2FA (passkey/web), not `RETRACE_TOKEN`.
 
 ---
 
-## Stage 6 — GitHub PRs (5 min)
+## Stage 6 — GitHub PRs
 
 ```bash
-node <abs path>/retrace/packages/mcp-server/dist/github-cli.js setup <owner>/<repo> --url https://retrace-api.<you>.workers.dev --project boxing-rpg
+node packages/mcp-server/dist/github-cli.js setup <owner>/<repo> \
+  --url https://retrace-api.<you>.workers.dev --project <project>
 ```
-It prints the exact webhook settings — either paste them into GitHub → repo → Settings → Webhooks (Payload URL, content type `application/json`, secret = the `RETRACE_GITHUB_SECRET` value, events: Pull requests, Pull request reviews, Issue comments, Workflow runs) or run the printed `gh api` one-liner with `RETRACE_GITHUB_SECRET` exported.
 
-Import existing PRs:
+Webhook: `POST /hooks/github?project=<name>`, secret = `RETRACE_GITHUB_SECRET`, events: PRs, reviews, issue comments, workflow runs.
+
 ```bash
-GITHUB_TOKEN=<a personal access token with repo read> RETRACE_URL=... RETRACE_TOKEN=... \
-node <abs path>/retrace/packages/mcp-server/dist/github-cli.js backfill <owner>/<repo> --project boxing-rpg
+GITHUB_TOKEN=<repo-read> RETRACE_URL=... RETRACE_TOKEN=... \
+node packages/mcp-server/dist/github-cli.js backfill <owner>/<repo> --project <project>
 ```
-**Check:** GitHub → Webhooks → Recent Deliveries shows a green ping. Open a test PR → it appears in the cloud UI within seconds. Put `Retrace-Caused-By: evt_…` (an instruction id from `retrace_instruct`) in a PR body and watch it link.
+
+**Check:** GitHub → Recent Deliveries green. A test PR appears in the UI. `Retrace-Caused-By: evt_…` in the PR body links reviews to the instruction.
 
 ---
 
-## Stage 7 — Google Docs / Drive (5 min)
+## Stage 7 — Google Docs / Drive
 
-Follow `adapters/google-apps-script/README.md`: new project at script.google.com → paste `Code.gs` → add services **Drive Activity API** and **Peopleapi** → Script properties `RETRACE_URL`, `RETRACE_TOKEN`, `RETRACE_PROJECT` (e.g. `slc-witit-gym` for business docs, or `boxing-rpg`), optionally `RETRACE_FOLDER` → run `setup` and authorize.
+`adapters/google-apps-script/README.md`: Apps Script + Drive Activity + People, properties `RETRACE_URL` / `RETRACE_TOKEN` / `RETRACE_PROJECT`, optional `RETRACE_FOLDER`. Run `setup`.
 
-**Check:** the execution log says "backfilled N activities … polling every 5 min". Edit a doc, wait ~5–10 min, refresh the cloud UI.
-
----
-
-## Stage 8 — Domain check (2 min)
-
-At your registrar (Cloudflare Registrar is convenient since you're already there): check `retrace.app`, `retrace.dev`, `getretrace.com`, `retrace.io`. If the good ones are taken, tell me and we'll brainstorm — no code depends on the name.
-
----
-
-## Stage 9 — Dogfood for a week
-
-Just work on the RPG normally. Once a day glance at the timeline and the graph. Keep a note of: events that are missing, events that are noise, "why" chains that broke, anything a client couldn't understand in the report. Send me that list — that's the next build.
+**Check:** execution log backfills, then polls ~5 min. An edit shows up in the cloud UI.
 
 ---
 
 ## If something goes wrong
 
-- `npm test` fails → send me the output.
-- Hook didn't log → run `node .../git-hook.js commit` in the repo and read the error; usually a path or Node version issue.
-- Cloud UI shows nothing → check `<url>/api`; confirm you're using `?token=` or the header; check `wrangler tail` for live logs.
-- Chain badge says BROKEN → don't panic; export first, then send me the export. That's the feature working.
-- Anything else: paste the command and the error to me.
+| Symptom | What to do |
+|---|---|
+| `npm test` fails | Full TAP output |
+| Hook didn’t log | `.git/retrace-hook.log`; `retrace-git commit <sha>` |
+| `retrace doctor` NOT READY | Follow the named repair (schema deploy, allow-list, missing `.retrace.json`) |
+| `retrace` = Android R8 | Use `npm exec --package=@retrace-dev/cli -- retrace` |
+| Cloud UI empty | `/api`, `?token=`, `wrangler tail` |
+| Badge BROKEN | Export first; that’s the detector working |
+| Agent events sealed as the wrong WHO | That client reused another pin; give it its own `RETRACE_TOKEN` and respawn MCP |
+| npm publish `EOTP` / `BROWSER` | Passkey is web-only; `export BROWSER='/mnt/c/Windows/System32/cmd.exe /c start'` in WSL, one package at a time |
+
+---
+
+## What this repo is not asking you to do next
+
+Cursor is half-wired in code (`CLIENT_SYSTEM` / git families) and **not** on the git allow-list. Don’t mint a Cursor credential until a Cursor window is actually on this folder. Copilot CLI is pinned; if quota is exhausted, skip that tab until GitHub resets it.

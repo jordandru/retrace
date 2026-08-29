@@ -11,6 +11,8 @@ apps/worker          Cloudflare Worker + D1 — REST API + serves the same UI at
 
 ## Quick start (local, no cloud needed)
 
+Walkthrough (clone → MCP → Worker → GitHub/Drive): [SETUP-GUIDE.md](SETUP-GUIDE.md). Published CLI: `npx @retrace-dev/cli` (`@retrace-dev/core` is the library).
+
 ```bash
 npm install
 npm run build
