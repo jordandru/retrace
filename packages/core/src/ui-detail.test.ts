@@ -11,7 +11,7 @@ import { join, dirname } from "node:path";
 const html = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../ui/retrace.html"), "utf8");
 const script = html.match(/<script>([\s\S]*)<\/script>/)![1];
 
-function runUI(events: any[]) {
+function runUI(events: any[], opts: { status?: any } = {}) {
   const clicks: ((ev: any) => void)[] = [];
   const els = new Map<string, any>();
   const makeEl = (): any => ({
@@ -31,12 +31,15 @@ function runUI(events: any[]) {
   const fetchStub = async (url: any) => {
     const path = String(url);
     const body = path.includes("/verify") ? { ok: true, checked: events.length }
+      : path.includes("/status") ? (opts.status ?? null)
       : path.includes("/events") ? events
       : ["p"];
     return { ok: true, status: 200, json: async () => body, text: async () => "" };
   };
+  // Timers the UI arms (the toast auto-hide) must not keep the test process alive.
+  const timer = (fn: any, ms: number) => { const t = setTimeout(fn, ms); t.unref(); return t; };
   new Function("document", "location", "fetch", "setInterval", "setTimeout", "URLSearchParams", "CSS", "window", "navigator", script)(
-    doc, { search: "", pathname: "/", origin: "http://t" }, fetchStub, () => 0, setTimeout, URLSearchParams, { escape: (s: string) => s }, {}, {});
+    doc, { search: "", pathname: "/", origin: "http://t" }, fetchStub, () => 0, timer, URLSearchParams, { escape: (s: string) => s }, {}, {});
   const select = async (id: string): Promise<string> => {
     await new Promise((r) => setTimeout(r, 10)); // let boot() settle
     clicks[0]({ target: { closest: () => ({ dataset: { id }, classList: { contains: (c: string) => c === "ev" } }) }, stopPropagation() {}, preventDefault() {} });
@@ -50,7 +53,13 @@ function runUI(events: any[]) {
     const closest = (sel: string) => (Object.keys(dataset).some((k) => sel.includes(`[data-${k}]`)) ? el : null);
     clicks[0]({ target: { closest }, stopPropagation() {}, preventDefault() {} });
   };
-  return { select, clickChip, search: () => $("#q").value as string, timeline: () => $("#timeline").innerHTML as string };
+  return {
+    select, clickChip,
+    search: () => $("#q").value as string, setSearch: (v: string) => { $("#q").value = v; },
+    ftype: () => $("#ftype").value as string,
+    timeline: () => $("#timeline").innerHTML as string, detail: () => $("#detail").innerHTML as string,
+    toast: () => $("#toast").textContent as string,
+  };
 }
 
 const ev = (seq: number, over: any) => ({
@@ -80,7 +89,7 @@ test("detail pane: git-hook committed event renders where, how and tags", async 
   assert.match(section(detail, "Where")!, /git · local · \/home\/j\/retrace · JordansLaptop/);
   assert.match(section(detail, "How")!, /<b>git<\/b>/);
   assert.match(section(detail, "How")!, /automated/);
-  assert.match(section(detail, "Tags")!, /class="chip">git</);
+  assert.match(section(detail, "Tags")!, /class="chip" data-q="git"[^>]*>git</);
   assert.ok(!detail.includes("(not recorded)"));
 });
 
@@ -142,7 +151,7 @@ test("detail pane: one unrenderable section never blanks the rest", async () => 
   assert.match(section(detail, "How")!, /could not render/);
   assert.match(section(detail, "Where")!, /git · \/x/);
   assert.match(section(detail, "Why")!, /still visible/);
-  assert.match(section(detail, "Tags")!, /class="chip">git</);
+  assert.match(section(detail, "Tags")!, /class="chip" data-q="git"[^>]*>git</);
   assert.ok(detail.includes("raw JSON")); // the guarded raw-JSON block rendered too
 });
 
@@ -181,4 +190,130 @@ test("detail pane: clicking a session or workspace chip actually searches for it
   assert.equal(ui.search(), "sess-abc", "the chip must reach the search box — asserting the markup alone missed that [data-q] was not in the delegated click selector");
   await ui.clickChip({ q: "wt_feature_x" });
   assert.equal(ui.search(), "wt_feature_x");
+});
+
+// ---- "looks clickable, does nothing" regressions. Each of these was inert before 2026-08-29: the markup had the
+// affordance (cursor, hover, chip styling) but no branch in the delegated click handler, or the branch changed state
+// that nothing on screen reflected.
+
+test("tag chips search for the tag", async () => {
+  const ui = runUI([ev(0, { tags: ["git", "release"] })]);
+  const detail = await ui.select("evt_0");
+  assert.match(section(detail, "Tags")!, /data-q="release"/);
+  await ui.clickChip({ q: "release" });
+  assert.equal(ui.search(), "release");
+});
+
+test("actor names filter the timeline, and clicking the active one again clears it", async () => {
+  const ui = runUI([ev(0, {}), ev(1, { actor: { type: "human", id: "j@example.com" }, action: "instructed" })]);
+  const detail = await ui.select("evt_0");
+  assert.match(section(detail, "Who")!, /class="who" data-actor="claude-code"/);
+  await ui.clickChip({ actor: "claude-code" });
+  assert.match(ui.timeline(), /actor: <span class="chip" data-clear="actor"/);
+  assert.ok(!ui.timeline().includes('data-id="evt_1"'), "the human's event is filtered out");
+  await ui.clickChip({ actor: "claude-code" });
+  assert.ok(!ui.timeline().includes('data-clear="actor"'), "second click on the same actor clears the filter");
+  assert.ok(ui.timeline().includes('data-id="evt_1"'));
+});
+
+test("artifact chips toggle: the second click on the filtered artifact clears the filter", async () => {
+  const ui = runUI([ev(0, {})]);
+  await ui.select("evt_0");
+  await ui.clickChip({ art: "repo:x#f" });
+  assert.match(ui.timeline(), /artifact: <span class="chip" data-clear="artifact"/);
+  await ui.clickChip({ art: "repo:x#f" });
+  assert.ok(!ui.timeline().includes('data-clear="artifact"'));
+});
+
+test("legend / stat counts filter by actor type and toggle off", async () => {
+  const ui = runUI([ev(0, {}), ev(1, { actor: { type: "human", id: "j@example.com" }, action: "instructed" })]);
+  await ui.select("evt_0");
+  assert.match(ui.timeline(), /<span data-ftype="human"[^>]*><b>1<\/b> humans/);
+  await ui.clickChip({ ftype: "human" });
+  assert.equal(ui.ftype(), "human");
+  assert.ok(!ui.timeline().includes('data-id="evt_0"') && ui.timeline().includes('data-id="evt_1"'));
+  assert.match(ui.timeline(), /data-ftype="human" class="on"/);
+  await ui.clickChip({ ftype: "human" });
+  assert.equal(ui.ftype(), "");
+});
+
+test("a caused-by jump lifts the filter that would hide its target, and says so", async () => {
+  const ui = runUI([
+    ev(0, { actor: { type: "human", id: "j@example.com" }, action: "instructed", intent: "do the thing" }),
+    ev(1, { caused_by: "evt_0" }),
+  ]);
+  await ui.select("evt_1");
+  ui.setSearch("nothing-matches-this");
+  await ui.clickChip({ goto: "evt_0" });
+  assert.equal(ui.search(), "", "search cleared so the target is visible");
+  assert.match(ui.detail(), /Event #0/);
+  assert.match(ui.toast(), /Cleared the search/);
+  // A jump to an id that is not loaded cannot select anything: it says so instead of silently doing nothing.
+  await ui.clickChip({ goto: "evt_nope" });
+  assert.match(ui.toast(), /evt_nope is not among the loaded events/);
+  assert.match(ui.detail(), /Event #0/, "selection unchanged");
+});
+
+test("timeline 'caused by' is a link only when the parent is in view", async () => {
+  const ui = runUI([
+    ev(0, { actor: { type: "human", id: "j@example.com" }, action: "instructed" }),
+    ev(1, { caused_by: "evt_0" }),
+    ev(2, { caused_by: "evt_elsewhere" }),
+  ]);
+  await ui.select("evt_1");
+  assert.match(ui.timeline(), /data-goto="evt_0"/);
+  assert.ok(!ui.timeline().includes('data-goto="evt_elsewhere"'), "no dead link to an event that is not loaded");
+  assert.match(ui.timeline(), /evt_elsewhere… <i>\(not in view\)<\/i>/);
+});
+
+test("'no events match' offers a clear-all chip that resets every filter", async () => {
+  const ui = runUI([ev(0, {})]);
+  await ui.select("evt_0");
+  await ui.clickChip({ q: "zzz-no-match" });
+  assert.match(ui.timeline(), /No events match these filters\. <span class="chip" data-clear="all"/);
+  await ui.clickChip({ clear: "all" });
+  assert.equal(ui.search(), "");
+  assert.match(ui.timeline(), /data-id="evt_0"/);
+});
+
+test("the header badges open a status pane whose numbers are the ledger's own /status answer", async () => {
+  const status = {
+    project: "p", generated_at: "2026-08-29T02:18:50.128Z",
+    integrity: { ok: true, checked: 2 }, events: { total: 2, last_event_at: "2026-08-29T02:18:28.000Z" },
+    capture: { artifact_refs: 3, artifact_refs_without_role: 1, agent_events: 1, agent_events_without_model: 0, instructions: 1, instructions_without_followup: 0, commits: 4, unlinked_commits: 2 },
+    causality: { eligible_events: 4, rooted_in_human_instruction: 3, broken_links: 0, unlinked: 1, coverage_pct: 75 },
+    actors: [
+      { type: "agent", id: "claude-code", events: 1, last_seen: "2026-08-29T01:56:35.759Z", models: ["claude-fable-5"] },
+      { type: "agent", id: "mystery", events: 1, last_seen: "2026-08-20T18:41:04.000Z", models: [] },
+      { type: "human", id: "j@example.com", events: 1, last_seen: "2026-08-29T02:18:27.805Z", models: [] },
+    ],
+    integrations: [{ system: "git", events: 4, last_seen: "2026-08-29T02:18:28.000Z" }],
+  };
+  const ui = runUI([ev(0, {}), ev(1, { actor: { type: "human", id: "j@example.com" }, action: "instructed" })], { status });
+  await ui.select("evt_0");
+  await ui.clickChip({ pane: "status" });
+  const d = ui.detail();
+  assert.match(d, /Project status · p/);
+  assert.match(d, /<span class="num ok">intact<\/span> · 2 events re-hashed/);
+  assert.match(d, /<span class="num bad">75<\/span>% — 3 of 4 eligible events/);
+  assert.match(d, /commits without a causal root<\/td><td><span class="num bad">2<\/span> \/ 4/);
+  assert.match(d, /agent events without a model<\/td><td><span class="num ok">0<\/span> \/ 1/);
+  assert.match(d, /data-actor="claude-code"[^>]*>claude-code<\/span>/);
+  assert.match(d, /data-actor="mystery"[^>]*>mystery<\/span>.*<span class="num bad">none recorded<\/span>/);
+  assert.match(d, /data-q="git"/);
+  // Actors in the pane filter the timeline like everywhere else, and the pane stays open while they do.
+  await ui.clickChip({ actor: "j@example.com" });
+  assert.match(ui.timeline(), /actor: <span class="chip" data-clear="actor"/);
+  assert.match(ui.detail(), /Project status/);
+  // Selecting an event leaves the pane.
+  await ui.select("evt_1");
+  assert.match(ui.detail(), /Event #1/);
+});
+
+test("status pane without a /status answer says why, instead of showing nothing", async () => {
+  const ui = runUI([ev(0, {})]);
+  await ui.select("evt_0");
+  await ui.clickChip({ pane: "status" });
+  assert.match(ui.detail(), /intact<\/span> · 1 events re-hashed/);
+  assert.match(ui.detail(), /\/status<\/span> endpoint, which did not answer/);
 });

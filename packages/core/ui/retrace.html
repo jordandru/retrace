@@ -53,6 +53,17 @@
   .chip:hover { border-color: var(--accent); }
   .chip.more { color: var(--accent); border-style: dashed; }
   .chip .role { font-style: normal; font-size: 9px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin-right: 4px; }
+  /* Everything that LOOKS clickable must do something: these are the affordances the click handler honours. */
+  .badge.click { cursor: pointer; } .badge.click:hover { border-color: var(--accent); }
+  .who[data-actor] { cursor: pointer; } .who[data-actor]:hover { text-decoration: underline; }
+  [data-ftype] { cursor: pointer; } [data-ftype]:hover { color: var(--text); } .legend [data-ftype].on { color: var(--text); font-weight: 600; }
+  .stable { border-collapse: collapse; font-size: 12px; width: 100%; margin-bottom: 14px; }
+  .stable td, .stable th { padding: 3px 8px 3px 0; text-align: left; vertical-align: top; }
+  .stable th { color: var(--muted); font-weight: 500; text-transform: uppercase; letter-spacing: .06em; font-size: 11px; }
+  .num.bad { color: var(--bad); font-weight: 600; } .num.ok { color: var(--ok); }
+  #toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 8px 14px; font-size: 13px; z-index: 30; box-shadow: 0 4px 16px rgba(0,0,0,.3); display: none; max-width: 90vw; }
+  #toast.on { display: block; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
   #detail h2 { font-size: 14px; margin: 0 0 8px; color: var(--muted); font-weight: 500; text-transform: uppercase; letter-spacing: .08em; }
   .kv { display: grid; grid-template-columns: 62px 1fr; gap: 6px 10px; margin-bottom: 14px; }
   .kv .k { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; padding-top: 2px; }
@@ -101,8 +112,8 @@
   <select id="ftype"><option value="">all actors</option><option value="human">humans</option><option value="agent">agents</option><option value="system">system</option></select>
   <select id="faction"><option value="">any action</option></select>
   <span class="seg"><button id="vTimeline" class="on">Timeline</button><button id="vGraph">Graph</button></span>
-  <span id="verify" class="badge"><span class="dot"></span><span>verifying…</span></span>
-  <span id="status" class="badge" title="Capture completeness and causal coverage">capture…</span>
+  <span id="verify" class="badge click" data-pane="status" title="Chain integrity — click for details"><span class="dot"></span><span>verifying…</span></span>
+  <span id="status" class="badge click" data-pane="status" title="Capture completeness and causal coverage — click for details">capture…</span>
   <span id="sharedBadge" class="badge" style="display:none" title="Read-only shared view">🔗 shared view</span>
   <button id="report" title="Printable report (save as PDF)">Report</button>
   <button id="export" title="Download signed JSON bundle">Export</button>
@@ -124,14 +135,15 @@
     </div>
   </div>
 </div>
+<div id="toast" role="status"></div>
 <main>
   <section id="timeline"><div class="empty">Loading…</div></section>
   <section id="graph">
     <div class="gctl">
-      <span><b id="gStat"></b></span>
+      <span><b id="gStat"></b></span><span id="gFilters" class="stat" style="margin:0"></span>
       <label><input type="checkbox" id="gActors"> show people & agents</label>
       <label><input type="checkbox" id="gFlow" checked> causal flow edges</label>
-      <span style="margin-left:auto">━ derived_from &nbsp; → causal flow &nbsp; ┈ touched &nbsp;·&nbsp; click a node to filter the timeline</span>
+      <span style="margin-left:auto">━ derived_from &nbsp; → causal flow &nbsp; ┈ touched &nbsp;·&nbsp; click a node to highlight it and filter the timeline · click it again to clear</span>
       <button id="gDot" title="Download Graphviz DOT">DOT</button><button id="gMmd" title="Copy Mermaid">Mermaid</button>
     </div>
     <div id="gsvg"></div>
@@ -141,7 +153,8 @@
 <script>
 (() => {
   const $ = (s) => document.querySelector(s);
-  const state = { events: [], project: null, projects: [], sel: null, filterArtifact: null, filterActor: null, verify: null, status: null, offline: false, expanded: new Set(), newestFirst: true };
+  // pane: what the right-hand pane shows when no event is selected — "status" (chain + capture detail) or "mermaid" (copy fallback).
+  const state = { events: [], project: null, projects: [], sel: null, pane: null, filterArtifact: null, filterActor: null, verify: null, status: null, offline: false, expanded: new Set(), newestFirst: true, fp: null };
   const params = new URLSearchParams(location.search);
   if (params.get("order") === "asc") state.newestFirst = false;
   let apiBase = params.get("api") ?? "";
@@ -204,8 +217,10 @@
     state.projects = await P.projects();
     const sel = $("#project");
     sel.innerHTML = state.projects.map((p) => `<option>${esc(p)}</option>`).join("") || "<option value=''>(no projects yet)</option>";
-    const want = params.get("project");
-    state.project = state.projects.includes(want) ? want : state.projects[0] ?? null;
+    // Keep the project the user switched to: ↻ and Connect re-run this, and silently jumping back to the first
+    // project made refresh look like it had discarded their selection.
+    const want = params.get("project"), keep = state.project;
+    state.project = state.projects.includes(keep) ? keep : state.projects.includes(want) ? want : state.projects[0] ?? null;
     if (state.project) sel.value = state.project;
   }
 
@@ -213,26 +228,31 @@
     if (state.offline) return render();
     if (!state.project) { state.events = []; return render(); }
     const [events, verify, status] = await Promise.all([P.events(state.project), P.verify(state.project).catch(() => null), P.status(state.project).catch(() => null)]);
-    state.events = events; state.verify = verify; state.status = status;
+    // The 15 s poll must not rebuild the panes when nothing changed: that closed an open "raw JSON", reset the
+    // timeline scroll and blanked a half-read detail. Same length + same head hash + same verify result = same view.
+    const fp = `${state.project}:${events.length}:${events.at(-1)?.hash ?? ""}:${verify?.ok}:${verify?.checked}`;
+    const same = fp === state.fp;
+    state.events = events; state.verify = verify; state.status = status; state.fp = fp;
+    if (same) { localVerifyBadge(); statusBadge(); if (state.pane === "status") renderDetail(); return; }
     render();
   }
 
   function localVerifyBadge() {
     const b = $("#verify"); const v = state.verify;
-    if (!v) { b.className = "badge"; b.lastElementChild.textContent = state.offline ? "offline snapshot" : "not verified"; return; }
-    b.className = "badge " + (v.ok ? "ok" : "bad");
+    if (!v) { b.className = "badge click"; b.lastElementChild.textContent = state.offline ? "offline snapshot" : "not verified"; b.title = "Chain not verified — click for details"; return; }
+    b.className = "badge click " + (v.ok ? "ok" : "bad");
     b.lastElementChild.textContent = v.ok ? `chain intact · ${v.checked} events` : `chain BROKEN at #${v.first_bad_seq}`;
-    b.title = v.reason || "";
+    b.title = (v.ok ? "Every event re-hashed and every prev_hash link checked" : v.reason || "Chain broken") + " — click for details";
   }
 
   function statusBadge() {
     const b = $("#status"), s = state.status;
-    if (!s?.capture || !s?.causality) { b.style.display = state.offline || shareId ? "none" : ""; b.textContent = "capture unknown"; return; }
+    if (!s?.capture || !s?.causality) { b.style.display = state.offline || shareId ? "none" : ""; b.className = "badge click"; b.textContent = "capture unknown"; b.title = "No /status answer — click for details"; return; }
     b.style.display = "";
     const gaps = s.capture.unlinked_commits + s.causality.broken_links + s.capture.agent_events_without_model;
-    b.className = "badge " + (gaps ? "bad" : "ok");
+    b.className = "badge click " + (gaps ? "bad" : "ok");
     b.textContent = `${s.causality.coverage_pct}% causal · ${s.capture.unlinked_commits} unlinked commits`;
-    b.title = `${s.capture.instructions_without_followup} instructions without follow-up · ${s.capture.agent_events_without_model} agent events missing model · ${s.capture.artifact_refs_without_role} artifact refs missing role`;
+    b.title = `${s.capture.instructions_without_followup} instructions without follow-up · ${s.capture.agent_events_without_model} agent events missing model · ${s.capture.artifact_refs_without_role} artifact refs missing role — click for details`;
   }
 
   function filtered(opts = {}) {
@@ -248,10 +268,21 @@
     });
   }
 
+  // The active-filter chips (artifact · actor · search), each clearing itself on click. Shared by the timeline's
+  // stat bar and the graph's control bar — a filter set from a graph node used to be invisible, and unclearable,
+  // until you switched back to the timeline.
+  const filterChipsHtml = (labels) => {
+    const q = $("#q").value.trim();
+    return (state.filterArtifact ? `<span>artifact: <span class="chip" data-clear="artifact" title="${esc(state.filterArtifact)} — click to clear">${esc(labels.get(state.filterArtifact) || state.filterArtifact)} ✕</span></span>` : "") +
+      (state.filterActor ? `<span>actor: <span class="chip" data-clear="actor" title="click to clear">${esc(state.filterActor)} ✕</span></span>` : "") +
+      (q ? `<span>search: <span class="chip" data-clear="q" title="click to clear">${esc(q)} ✕</span></span>` : "");
+  };
+
   function render() {
     localVerifyBadge();
     statusBadge();
     const labels = latestLabels(state.events); const labelOf = (a) => labels.get(a.id) || artLabel(a);
+    const inView = new Set(state.events.map((e) => e.id));
     const acts = [...new Set(state.events.map((e) => e.action))].sort();
     const fa = $("#faction"); const cur = fa.value;
     fa.innerHTML = `<option value="">any action</option>` + acts.map((a) => `<option ${a === cur ? "selected" : ""}>${esc(a)}</option>`).join("");
@@ -259,11 +290,12 @@
     const humans = new Set(state.events.filter((e) => e.actor.type === "human").map((e) => e.actor.id)).size;
     const agents = new Set(state.events.filter((e) => e.actor.type === "agent").map((e) => e.actor.id)).size;
     const arts = new Set(state.events.flatMap((e) => e.artifacts.map((a) => a.id))).size;
-    let html = `<div class="stat"><span><b>${state.events.length}</b> events</span><span><b>${humans}</b> humans</span><span><b>${agents}</b> agents</span><span><b>${arts}</b> artifacts</span>` +
-      (state.filterArtifact ? `<span>artifact: <span class="chip" data-clear="artifact" title="${esc(state.filterArtifact)}">${esc(labels.get(state.filterArtifact) || state.filterArtifact)} ✕</span></span>` : "") +
-      (state.filterActor ? `<span>actor: <span class="chip" data-clear="actor">${esc(state.filterActor)} ✕</span></span>` : "") + `</div>`;
-    html += `<div class="legend"><span><i class="dot human" style="display:inline-block"></i> human</span><span><i class="dot agent" style="display:inline-block;border-radius:2px"></i> agent</span><span><i class="dot system" style="display:inline-block"></i> system</span><span style="margin-left:auto"><span class="chip" data-order="1" title="flip order">${state.newestFirst ? "newest first ▾" : "oldest first ▴"}</span></span></div>`;
-    if (!list.length) html += `<div class="empty">No events${state.events.length ? " match these filters" : " yet — log one with the MCP tool <code>retrace_log</code> or POST /events"}.</div>`;
+    const ft = $("#ftype").value;
+    let html = `<div class="stat"><span><b>${state.events.length}</b> events</span><span data-ftype="human" title="show only humans"><b>${humans}</b> humans</span><span data-ftype="agent" title="show only agents"><b>${agents}</b> agents</span><span><b>${arts}</b> artifacts</span>${filterChipsHtml(labels)}</div>`;
+    // Legend entries filter by actor type (and show which one is active); the same select in the header stays in sync.
+    const leg = (t, extra) => `<span data-ftype="${t}" class="${ft === t ? "on" : ""}" title="${ft === t ? `showing only ${t} — click to show all` : `show only ${t}`}"><i class="dot ${t}" style="display:inline-block${extra}"></i> ${t}</span>`;
+    html += `<div class="legend">${leg("human", "")}${leg("agent", ";border-radius:2px")}${leg("system", "")}<span style="margin-left:auto"><span class="chip" data-order="1" title="flip order">${state.newestFirst ? "newest first ▾" : "oldest first ▴"}</span></span></div>`;
+    if (!list.length) html += `<div class="empty">${state.events.length ? `No events match these filters. <span class="chip" data-clear="all" title="clear search, actor, action and artifact filters">clear all filters</span>` : "No events yet — log one with the MCP tool <code>retrace_log</code> or POST /events."}</div>`;
     let lastDay = "";
     for (const e of list) {
       const day = fmtDay(e.timestamp);
@@ -279,11 +311,14 @@
         <div>
           <div><span class="who" data-actor="${esc(e.actor.id)}">${esc(actorName(e.actor))}</span><span class="link">${esc(actorTag(e.actor))}${e.actor.on_behalf_of ? " · for " + esc(e.actor.on_behalf_of) : ""}</span> <span class="verb">${esc(verbOf(e))}</span> <span class="art">${arts}</span> <span class="link">${where ? "@ " + esc(where) + " " : ""}${how}</span></div>
           ${e.intent ? `<div class="why">${esc(e.intent)}</div>` : ""}
-          ${e.caused_by ? `<div class="link">↳ caused by <a href="#" data-goto="${esc(e.caused_by)}">${esc(e.caused_by.slice(0, 16))}…</a></div>` : ""}
+          ${e.caused_by ? `<div class="link">↳ caused by ${inView.has(e.caused_by) ? `<a href="#" data-goto="${esc(e.caused_by)}" title="jump to this event">${esc(e.caused_by.slice(0, 16))}…</a>` : `<span class="mono" title="${esc(e.caused_by)} — not among the loaded events (outside this view's scope)">${esc(e.caused_by.slice(0, 16))}… <i>(not in view)</i></span>`}</div>` : ""}
         </div></div>`;
     }
     $("#timeline").innerHTML = html;
     if (state.sel && !state.events.some((e) => e.id === state.sel)) state.sel = null;
+    // Report and Share are server features; on a loaded JSON snapshot they can only fail, so say so instead of opening a dead tab.
+    $("#report").disabled = state.offline; $("#report").title = state.offline ? "Report needs a live ledger — not available for an offline snapshot" : "Printable report (save as PDF)";
+    $("#share").disabled = state.offline; $("#share").title = state.offline ? "Share links need a live ledger — not available for an offline snapshot" : "Create a read-only share link";
     renderDetail();
     renderGraph();
   }
@@ -297,9 +332,12 @@
   function effects(id) { return state.events.filter((e) => e.caused_by === id); }
 
   function renderDetail() {
+    if (state.pane === "status") return renderStatus();
+    if (state.pane === "mermaid") { $("#detail").innerHTML = `<h2>Mermaid</h2><div class="link" style="margin-bottom:6px">The clipboard is not available here — copy the text below.</div><pre style="max-height:none">${esc(state.mermaidText || "")}</pre>`; return; }
     const e = state.events.find((x) => x.id === state.sel);
     const d = $("#detail");
     if (!e) { d.innerHTML = `<div class="empty">Select an event to see who / what / when / where / why / how.</div>`; return; }
+    const labels = latestLabels(state.events);
     const kv = (k, v, mono) => v ? `<div class="k">${k}</div><div class="v ${mono ? "mono" : ""}">${v}</div>` : "";
     // Every section always renders: absent data says "(not recorded)" instead of vanishing,
     // and a section that fails to render falls back on its own — it never blanks the rest of the pane.
@@ -308,26 +346,61 @@
     try {
       const chain = whyChain(e.id).slice(1); kids = effects(e.id);
       const parentMissing = e.caused_by && !state.events.some((x) => x.id === e.caused_by);
-      chainHtml = parentMissing ? `<div class="link" style="margin-bottom:12px">caused by <span class="mono">${esc(e.caused_by)}</span> — outside this view's scope</div>` : chain.length ? `<div class="why-chain">` + chain.map((c) => `<div class="step ${c.actor.type}"><span class="arrow">↳ because</span> <span class="who">${esc(actorName(c.actor))}</span> ${esc(verbOf(c))} ${esc(c.artifacts.map(artLabel).join(", "))}${c.intent ? ` — <i>${esc(c.intent)}</i>` : ""} <a href="#" data-goto="${esc(c.id)}" class="link">#${c.seq}</a></div>`).join("") + `</div>` : `<div class="link" style="margin-bottom:12px">no causal parent recorded — this is a root event</div>`;
-      kidsHtml = kids.length ? `<div class="why-chain">` + kids.map((c) => `<div class="step ${c.actor.type}"><span class="arrow">→ led to</span> <span class="who">${esc(actorName(c.actor))}</span> ${esc(verbOf(c))} ${esc(c.artifacts.map(artLabel).join(", "))} <a href="#" data-goto="${esc(c.id)}" class="link">#${c.seq}</a></div>`).join("") + `</div>` : "";
+      const who = (c) => `<span class="who" data-actor="${esc(c.actor.id)}" title="${esc(c.actor.id)} — filter the timeline by this actor">${esc(actorName(c.actor))}</span>`;
+      chainHtml = parentMissing ? `<div class="link" style="margin-bottom:12px">caused by <span class="mono">${esc(e.caused_by)}</span> — outside this view's scope</div>` : chain.length ? `<div class="why-chain">` + chain.map((c) => `<div class="step ${c.actor.type}"><span class="arrow">↳ because</span> ${who(c)} ${esc(verbOf(c))} ${esc(c.artifacts.map(artLabel).join(", "))}${c.intent ? ` — <i>${esc(c.intent)}</i>` : ""} <a href="#" data-goto="${esc(c.id)}" class="link" title="jump to event #${c.seq}">#${c.seq}</a></div>`).join("") + `</div>` : `<div class="link" style="margin-bottom:12px">no causal parent recorded — this is a root event</div>`;
+      kidsHtml = kids.length ? `<div class="why-chain">` + kids.map((c) => `<div class="step ${c.actor.type}"><span class="arrow">→ led to</span> ${who(c)} ${esc(verbOf(c))} ${esc(c.artifacts.map(artLabel).join(", "))} <a href="#" data-goto="${esc(c.id)}" class="link" title="jump to event #${c.seq}">#${c.seq}</a></div>`).join("") + `</div>` : "";
     } catch { chainHtml = `<div class="link" style="margin-bottom:12px">(could not render the causal chain — see raw JSON)</div>`; }
     let raw; try { raw = JSON.stringify(e, null, 2); } catch { raw = "(not serializable)"; }
     d.innerHTML = `
       <h2>Event #${e.seq}</h2>
       <div class="kv">
-        ${sect("Who", () => `<span style="color:var(--${e.actor.type});font-weight:600">${esc(actorName(e.actor))}</span> <span class="link">${esc(e.actor.type)}${e.actor.model ? " · " + esc(e.actor.model) : ""}${e.actor.version ? " " + esc(e.actor.version) : ""}${e.actor.on_behalf_of ? "<br>on behalf of " + esc(e.actor.on_behalf_of) : ""}</span>`)}
-        ${sect("What", () => `<b>${esc(verbOf(e))}</b> ${e.artifacts.map((a) => `<span class="chip" data-art="${esc(a.id)}" title="${esc(a.id + roleTitle(a.role))}">${roleTag(a)}${esc(artLabel(a))}</span>${a.kind && a.kind !== "file" ? `<span class="link">${esc(a.kind)}</span>` : ""}${a.derived_from?.length ? `<div class="link">derived from ${esc(a.derived_from.join(", "))}</div>` : ""}`).join(" ")}${e.change?.summary ? `<div>${esc(e.change.summary)}</div>` : ""}${e.change?.diff ? `<pre>${esc(e.change.diff)}</pre>` : ""}${e.change?.after_hash ? `<div class="hash">after ${esc(e.change.after_hash)}</div>` : ""}`)}
+        ${sect("Who", () => `<span class="who" data-actor="${esc(e.actor.id)}" style="color:var(--${esc(e.actor.type)});font-weight:600" title="${esc(e.actor.id)} — filter the timeline by this actor">${esc(actorName(e.actor))}</span> <span class="link">${esc(e.actor.type)}${e.actor.model ? " · " + esc(e.actor.model) : ""}${e.actor.version ? " " + esc(e.actor.version) : ""}${e.actor.on_behalf_of ? "<br>on behalf of " + esc(e.actor.on_behalf_of) : ""}</span>`)}
+        ${sect("What", () => `<b>${esc(verbOf(e))}</b> ${e.artifacts.map((a) => `<span class="chip" data-art="${esc(a.id)}" title="${esc(a.id + roleTitle(a.role))}">${roleTag(a)}${esc(artLabel(a))}</span>${a.kind && a.kind !== "file" ? `<span class="link">${esc(a.kind)}</span>` : ""}${a.derived_from?.length ? `<div class="link">derived from ${a.derived_from.map((s) => `<span class="chip" data-art="${esc(s)}" title="${esc(s)} — filter by this artifact">${esc(labels.get(s) || s)}</span>`).join("")}</div>` : ""}`).join(" ")}${e.change?.summary ? `<div>${esc(e.change.summary)}</div>` : ""}${e.change?.diff ? `<pre>${esc(e.change.diff)}</pre>` : ""}${e.change?.after_hash ? `<div class="hash">after ${esc(e.change.after_hash)}</div>` : ""}`)}
         ${sect("When", () => `${esc(new Date(e.timestamp).toLocaleString())}${e.duration_ms != null ? ` <span class="link">· took ${fmtDur(e.duration_ms)}</span>` : ""}<div class="link">received ${esc(new Date(e.received_at).toLocaleString())}</div>`)}
         ${sect("Where", () => e.location ? esc(whereText(e.location)) + whereExtra(e.location) : "")}
         ${sect("Why", () => e.intent ? esc(e.intent) : "")}
         ${sect("How", () => e.method ? `${e.method.tool ? `<b>${esc(e.method.tool)}</b> ` : ""}${e.method.automated != null ? `<span class="link">${e.method.automated ? "automated" : "manual"}</span>` : ""}${e.method.instruction ? `<div class="link">instruction: ${esc(e.method.instruction)}</div>` : ""}${e.method.tokens != null ? `<div class="link">${e.method.tokens} tokens${e.method.cost_usd != null ? ` · $${e.method.cost_usd}` : ""}</div>` : ""}${e.method.params ? `<pre>${esc(JSON.stringify(e.method.params, null, 2))}</pre>` : ""}` : "")}
-        ${sect("Tags", () => e.tags?.length ? e.tags.map((t) => `<span class="chip">${esc(t)}</span>`).join("") : "")}
+        ${sect("Tags", () => e.tags?.length ? e.tags.map((t) => `<span class="chip" data-q="${esc(t)}" title="search for ${esc(t)}">${esc(t)}</span>`).join("") : "")}
       </div>
       <h2>Causal chain</h2>${chainHtml}
       ${kids.length ? `<h2>Consequences</h2>${kidsHtml}` : ""}
       <h2>Integrity</h2>
       <div class="kv"><div class="k">id</div><div class="v mono">${esc(e.id)}</div><div class="k">hash</div><div class="v hash">${esc(e.hash)}</div><div class="k">prev</div><div class="v hash">${esc(e.prev_hash)}</div></div>
       <details><summary class="link">raw JSON</summary><pre>${esc(raw)}</pre></details>`;
+  }
+
+  // The status pane: what the two header badges summarise, in full. Every number is the ledger's own /status and
+  // /verify answer (packages/core/src/status.ts); the "what closes it" column states the capture rule, not a guess.
+  function renderStatus() {
+    const d = $("#detail"), s = state.status, v = state.verify;
+    const num = (x, bad = (n) => n > 0) => `<span class="num ${bad(x) ? "bad" : "ok"}">${esc(x)}</span>`;
+    const when = (iso) => iso ? esc(new Date(iso).toLocaleString()) : "—";
+    let chain;
+    if (v) chain = v.ok ? `<span class="num ok">intact</span> · ${esc(v.checked)} events re-hashed, every prev_hash link checked` : `<span class="num bad">BROKEN at #${esc(v.first_bad_seq)}</span>${v.reason ? `<div class="link">${esc(v.reason)}</div>` : ""}`;
+    else chain = `<span class="link">${state.offline ? "not verified — an offline snapshot cannot be checked against the ledger" : "not verified — /verify did not answer"}</span>`;
+    let html = `<h2>Project status${state.project ? ` · ${esc(state.project)}` : ""}</h2><div class="kv"><div class="k">Chain</div><div class="v">${chain}</div></div>`;
+    if (!s?.capture || !s?.causality) {
+      html += `<div class="link">Capture and causal coverage come from the ledger's <span class="mono">/status</span> endpoint, which ${shareId ? "is not exposed on share links" : state.offline ? "an offline snapshot cannot reach" : "did not answer"}.</div>`;
+      d.innerHTML = html; return;
+    }
+    const c = s.capture, z = s.causality;
+    html += `<h2>Causal coverage</h2><div class="kv">
+      <div class="k">Rooted</div><div class="v">${num(z.coverage_pct, (n) => n < 100)}% — ${esc(z.rooted_in_human_instruction)} of ${esc(z.eligible_events)} eligible events trace back, caused_by by caused_by, to a human instruction<div class="link">eligible = every agent event plus every commit and merge</div></div>
+      <div class="k">Unlinked</div><div class="v">${num(z.unlinked)} <span class="link">chains that stop at an event with no caused_by</span></div>
+      <div class="k">Broken</div><div class="v">${num(z.broken_links)} <span class="link">chains whose caused_by names an event that is not in the ledger</span></div>
+    </div>`;
+    html += `<h2>Capture gaps</h2><table class="stable"><tr><th>gap</th><th>count</th><th>what closes it</th></tr>
+      <tr><td>commits without a causal root</td><td>${num(c.unlinked_commits)} / ${esc(c.commits)}</td><td>a <span class="mono">Retrace-Caused-By</span> trailer naming the instruction</td></tr>
+      <tr><td>agent events without a model</td><td>${num(c.agent_events_without_model)} / ${esc(c.agent_events)}</td><td><span class="mono">actor.model</span> on every agent event</td></tr>
+      <tr><td>instructions without follow-up</td><td>${num(c.instructions_without_followup)} / ${esc(c.instructions)}</td><td>at least one event whose caused_by is the instruction</td></tr>
+      <tr><td>artifact refs without a role</td><td>${num(c.artifact_refs_without_role)} / ${esc(c.artifact_refs)}</td><td><span class="mono">role</span>: used · generated · both on each ref</td></tr>
+    </table>`;
+    html += `<h2>Actors</h2><table class="stable"><tr><th>who</th><th>events</th><th>models</th><th>last seen</th></tr>` +
+      s.actors.map((a) => `<tr><td><span class="who" data-actor="${esc(a.id)}" style="color:var(--${esc(a.type)})" title="${esc(a.id)} — filter the timeline by this actor">${esc(a.id)}</span> <span class="link">${esc(a.type)}</span></td><td>${esc(a.events)}</td><td class="mono">${a.models?.length ? esc(a.models.join(", ")) : a.type === "agent" ? `<span class="num bad">none recorded</span>` : "—"}</td><td>${when(a.last_seen)}</td></tr>`).join("") + `</table>`;
+    html += `<h2>Integrations</h2><table class="stable"><tr><th>location.system</th><th>events</th><th>last seen</th></tr>` +
+      s.integrations.map((i) => `<tr><td><span class="chip" data-q="${esc(i.system)}" title="search for ${esc(i.system)}">${esc(i.system)}</span></td><td>${esc(i.events)}</td><td>${when(i.last_seen)}</td></tr>`).join("") + `</table>`;
+    html += `<div class="link">${esc(s.events?.total ?? state.events.length)} events · last event ${when(s.events?.last_event_at)} · computed ${when(s.generated_at)}</div>`;
+    d.innerHTML = html;
   }
 
   // ---------- lineage graph ----------
@@ -359,6 +432,7 @@
     const events = filtered({ ignoreArtifact: true }); // artifact filter highlights in the graph instead of hiding
     const l = buildLineage(events, { includeActors: $("#gActors").checked, flow: $("#gFlow").checked });
     lastLineage = l;
+    $("#gFilters").innerHTML = filterChipsHtml(latestLabels(state.events));
     const arts = l.nodes.filter((n) => n.type === "artifact"), actors = l.nodes.filter((n) => n.type === "actor");
     $("#gStat").textContent = `${arts.length} artifacts · ${l.edges.filter((e) => e.type !== "touched").length} lineage edges${actors.length ? ` · ${actors.length} actors` : ""}`;
     if (!arts.length) { $("#gsvg").innerHTML = `<div class="empty">No artifacts in view.</div>`; return; }
@@ -419,30 +493,72 @@
   function lineageDot(l) { const q = JSON.stringify; const out = ["digraph retrace {", "  rankdir=LR; node [fontname=Helvetica, fontsize=10];"]; for (const n of l.nodes) out.push(`  ${q((n.type === "actor" ? "u:" : "") + n.id)} [label=${q(n.label + (n.type === "artifact" ? "\\n" + n.events + " ev" : ""))}, shape=${n.type === "actor" ? "ellipse" : "box"}${n.type === "actor" ? ", style=dashed" : ""}];`); for (const e of l.edges) out.push(`  ${q(e.from)} -> ${q(e.to)}${e.type === "derived" ? " [penwidth=2]" : e.type === "touched" ? " [style=dashed,color=gray]" : ""};`); out.push("}"); return out.join("\n"); }
   function lineageMermaid(l) { const ids = new Map(); let i = 0; const nid = (s) => { if (!ids.has(s)) ids.set(s, "n" + i++); return ids.get(s); }; const out = ["graph LR"]; for (const n of l.nodes) { const k = (n.type === "actor" ? "u:" : "") + n.id; const lbl = (n.label + (n.type === "artifact" ? ` (${n.events})` : "")).replace(/"/g, "'"); out.push(n.type === "actor" ? `  ${nid(k)}(["${lbl}"])` : `  ${nid(k)}["${lbl}"]`); } for (const e of l.edges) out.push(`  ${nid(e.from)} ${e.type === "derived" ? "==>" : e.type === "flow" ? "-->" : "-.->"} ${nid(e.to)}`); return out.join("\n"); }
   $("#gDot").addEventListener("click", () => lastLineage && dl(new Blob([lineageDot(lastLineage)], { type: "text/vnd.graphviz" }), `retrace-${state.project}-lineage.dot`));
-  $("#gMmd").addEventListener("click", () => { if (!lastLineage) return; const t = lineageMermaid(lastLineage); navigator.clipboard?.writeText(t); $("#gMmd").textContent = "copied"; setTimeout(() => ($("#gMmd").textContent = "Mermaid"), 1200); });
+  // "copied" is only shown when the copy actually happened; when the clipboard is unavailable (plain-http origins,
+  // some embedded browsers) the text is put on screen instead of silently going nowhere.
+  $("#gMmd").addEventListener("click", async () => {
+    if (!lastLineage) return toast("Open the Graph view first");
+    const t = lineageMermaid(lastLineage); const ok = await copyText(t);
+    if (ok) { $("#gMmd").textContent = "copied"; setTimeout(() => ($("#gMmd").textContent = "Mermaid"), 1200); }
+    else { state.mermaidText = t; state.pane = "mermaid"; state.sel = null; renderDetail(); revealDetail(); }
+  });
+  async function copyText(t) {
+    try { if (navigator.clipboard?.writeText) { await navigator.clipboard.writeText(t); return true; } } catch {}
+    try { const ta = document.createElement("textarea"); ta.value = t; ta.style.position = "fixed"; ta.style.opacity = "0"; document.body.appendChild(ta); ta.select(); const ok = document.execCommand?.("copy"); ta.remove(); return !!ok; } catch { return false; }
+  }
+  let toastTimer;
+  function toast(msg) { const t = $("#toast"); t.textContent = msg; t.classList.add("on"); clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove("on"), 3500); }
   if (params.get("view") === "graph") setTimeout(() => setView("graph"), 0);
 
   // events
+  // One delegated handler. Every data-* attribute the markup uses MUST be in this selector, or the element renders
+  // as clickable and does nothing (ui-detail.test.ts drives real clicks through it for that reason).
   document.addEventListener("click", (ev) => {
-    const t = ev.target.closest("[data-order],[data-expand],[data-art],[data-actor],[data-goto],[data-clear],[data-q],.ev");
+    const t = ev.target.closest("[data-order],[data-expand],[data-art],[data-actor],[data-goto],[data-clear],[data-q],[data-ftype],[data-pane],.ev");
     if (!t) return;
-    if (t.dataset.order) { ev.stopPropagation(); state.newestFirst = !state.newestFirst; return render(); }
-    if (t.dataset.expand) { ev.stopPropagation(); const id = t.dataset.expand; state.expanded.has(id) ? state.expanded.delete(id) : state.expanded.add(id); return render(); }
-    if (t.dataset.art) { state.filterArtifact = t.dataset.art; ev.stopPropagation(); return render(); }
-    if (t.dataset.actor) { state.filterActor = t.dataset.actor; ev.stopPropagation(); return render(); }
-    if (t.dataset.q) { $("#q").value = t.dataset.q; ev.stopPropagation(); return render(); }
-    if (t.dataset.goto) { ev.preventDefault(); state.sel = t.dataset.goto; state.filterArtifact = null; state.filterActor = null; render(); document.querySelector(`.ev[data-id="${CSS.escape(state.sel)}"]`)?.scrollIntoView({ block: "center", behavior: "smooth" }); return; }
-    if (t.dataset.clear) { if (t.dataset.clear === "artifact") state.filterArtifact = null; else state.filterActor = null; return render(); }
-    if (t.classList.contains("ev")) { state.sel = t.dataset.id; render(); }
+    const d = t.dataset;
+    if (d.order) { ev.stopPropagation(); state.newestFirst = !state.newestFirst; return render(); }
+    if (d.expand) { ev.stopPropagation(); state.expanded.has(d.expand) ? state.expanded.delete(d.expand) : state.expanded.add(d.expand); return render(); }
+    // Filters toggle: clicking the artifact / actor / actor-type you are already filtering on clears that filter.
+    if (d.art) { ev.stopPropagation(); state.filterArtifact = state.filterArtifact === d.art ? null : d.art; return render(); }
+    if (d.actor) { ev.stopPropagation(); state.filterActor = state.filterActor === d.actor ? null : d.actor; return render(); }
+    if (d.ftype) { ev.stopPropagation(); $("#ftype").value = $("#ftype").value === d.ftype ? "" : d.ftype; return render(); }
+    if (d.q) { ev.stopPropagation(); $("#q").value = d.q; return render(); }
+    if (d.pane) { ev.stopPropagation(); state.pane = d.pane; state.sel = null; render(); return revealDetail(); }
+    if (d.goto) { ev.preventDefault(); ev.stopPropagation(); return gotoEvent(d.goto); }
+    if (d.clear) { ev.stopPropagation(); clearFilters(d.clear); return render(); }
+    if (t.classList.contains("ev")) { state.sel = t.dataset.id; state.pane = null; render(); revealDetail(); }
   });
+  function clearFilters(which) {
+    if (which === "artifact" || which === "all") state.filterArtifact = null;
+    if (which === "actor" || which === "all") state.filterActor = null;
+    if (which === "q" || which === "all") $("#q").value = "";
+    if (which === "all") { $("#ftype").value = ""; $("#faction").value = ""; }
+  }
+  // Jump to an event. It must end up on screen: a filter that would hide it is lifted (and the toast says so), and
+  // the graph view yields to the timeline — a jump that changes nothing visible reads as a dead link.
+  function gotoEvent(id) {
+    if (!state.events.some((e) => e.id === id)) return toast(`${id} is not among the loaded events`);
+    state.sel = id; state.pane = null; state.filterArtifact = null; state.filterActor = null;
+    if (!filtered().some((e) => e.id === id)) { clearFilters("all"); toast("Cleared the search / actor / action filters to show the linked event"); }
+    if ($("#graph").classList.contains("on")) setView("timeline");
+    render();
+    document.querySelector(`.ev[data-id="${CSS.escape(id)}"]`)?.scrollIntoView?.({ block: "center", behavior: "smooth" });
+    revealDetail();
+  }
+  // Below the 900px breakpoint the detail pane sits under the timeline, where an update is off-screen and a click looks inert.
+  function revealDetail() { if (window.matchMedia?.("(max-width: 900px)")?.matches) $("#detail").scrollIntoView?.({ block: "start", behavior: "smooth" }); }
   $("#project").addEventListener("change", (e) => { state.project = e.target.value; state.sel = null; state.filterArtifact = null; state.filterActor = null; loadEvents().catch(showErr); });
   ["#q", "#ftype", "#faction"].forEach((s) => $(s).addEventListener("input", render));
   $("#refresh").addEventListener("click", () => boot());
-  $("#report").addEventListener("click", () => window.open(P.reportUrl(state.project, state.filterArtifact), "_blank"));
+  $("#report").addEventListener("click", () => { if (!state.project) return toast("No project loaded"); window.open(P.reportUrl(state.project, state.filterArtifact), "_blank"); });
   $("#export").addEventListener("click", async () => {
     if (state.offline) { const blob = new Blob([JSON.stringify({ format: "retrace-export/1", scope: { project: state.project }, events: state.events }, null, 2)], { type: "application/json" }); return dl(blob, `${state.project}-events.json`); }
-    const res = await fetch(P.exportUrl(state.project, state.filterArtifact), { headers: token ? { authorization: `Bearer ${token}` } : {} });
-    dl(await res.blob(), `retrace-${state.project}${state.filterArtifact ? "-" + state.filterArtifact.replace(/[^\w.-]+/g, "_") : ""}.json`);
+    if (!state.project) return toast("No project loaded");
+    try {
+      const res = await fetch(P.exportUrl(state.project, state.filterArtifact), { headers: token ? { authorization: `Bearer ${token}` } : {} });
+      if (!res.ok) throw new Error(`${res.status} ${(await res.text()).slice(0, 200)}`);
+      dl(await res.blob(), `retrace-${state.project}${state.filterArtifact ? "-" + state.filterArtifact.replace(/[^\w.-]+/g, "_") : ""}.json`);
+    } catch (e) { toast(`Export failed: ${e.message}`); }
   });
   function dl(blob, name) { const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 5000); }
   $("#share").addEventListener("click", () => { $("#shScope").value = state.filterArtifact ? "artifact" : "project"; $("#shScope").querySelector('[value=artifact]').disabled = !state.filterArtifact; $("#shResult").textContent = ""; $("#shareDlg").style.display = "flex"; });
@@ -454,7 +570,7 @@
       const r = await res.json(); if (!res.ok) throw new Error(r.error || res.status);
       const u = r.url.startsWith("http") ? r.url : location.origin + r.url;
       $("#shResult").innerHTML = `Link: <a href="${esc(u)}" target="_blank">${esc(u)}</a> <button id="shCopy">copy</button><br>Report: <a href="${esc(u)}/report" target="_blank">${esc(u)}/report</a>${r.share.expires_at ? `<br>expires ${esc(new Date(r.share.expires_at).toLocaleString())}` : ""}`;
-      $("#shCopy").addEventListener("click", () => navigator.clipboard?.writeText(u));
+      $("#shCopy").addEventListener("click", async () => { $("#shCopy").textContent = (await copyText(u)) ? "copied" : "clipboard unavailable — select the link"; });
     } catch (e) { $("#shResult").textContent = "Failed: " + e.message; }
   });
   $("#toggleConn").addEventListener("click", () => $("#conn").classList.toggle("open"));
