@@ -85,7 +85,7 @@ export function planCredentials(spec: TeamSpec, rand: (n: number) => Buffer = ra
     for (const h of spec.harnesses) {
       out.push({
         token: mintToken(rand),
-        name: `${spec.project} · ${h} for ${member} (pinned)`,
+        name: `${spec.project} · ${h} for ${member}`,
         actor: { type: "agent", id: h, on_behalf_of: member },
         trust: "pinned",
         projects: [spec.project],
@@ -94,7 +94,7 @@ export function planCredentials(spec: TeamSpec, rand: (n: number) => Buffer = ra
   }
   out.push({
     token: mintToken(rand),
-    name: `${spec.project} · git hook (assert)`,
+    name: `${spec.project} · git hook`,
     actor: { type: "system", id: gitHookActorId(spec.project) },
     trust: "assert",
     projects: [spec.project],
@@ -105,7 +105,7 @@ export function planCredentials(spec: TeamSpec, rand: (n: number) => Buffer = ra
   });
   out.push({
     token: mintToken(rand),
-    name: `${spec.project} · CI gate reader (pinned)`,
+    name: `${spec.project} · CI gate reader`,
     actor: { type: "system", id: ciActorId(spec.project) },
     trust: "pinned",
     projects: [spec.project],
