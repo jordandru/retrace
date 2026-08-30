@@ -25,9 +25,9 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import {
   Actor, Action, ArtifactRef, Change, Location, Method, EventInput, applyDefaultRoles,
@@ -38,7 +38,6 @@ import {
   buildProjectStatus, renderProjectStatus,
   AMENDMENT_ACTION_DETAIL, causalRootState, collectProvenanceAmendments,
 } from "@retrace-dev/core";
-import { writeFileSync } from "node:fs";
 import { ensureSigningKey } from "./keys.js";
 import { SqliteStore } from "./sqlite-store.js";
 import { RemoteStore } from "./remote-store.js";
@@ -46,6 +45,17 @@ import { isMainModule } from "./is-main.js";
 
 const env = process.env;
 const DEFAULT_PROJECT = env.RETRACE_PROJECT ?? "default";
+
+/** Confine retrace_export out_json/out_html to the process cwd (audit 2026-08-30). Absolute paths that escape cwd fail. */
+export function confinedWritePath(p: string, cwd: string = process.cwd()): string {
+  const root = resolve(cwd);
+  const abs = resolve(root, p);
+  const rel = relative(root, abs);
+  if (!rel || rel.split(/[/\\]/)[0] === ".." || isAbsolute(rel)) {
+    throw new Error(`out path must stay under the working directory, not ${p}`);
+  }
+  return abs;
+}
 /** Read at buildServer() time (not module load) so tests and embedders can configure it via env before building. */
 const readDefaultActor = () => ({
   type: "agent" as const,
@@ -441,10 +451,12 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
         try { const wk: any = await (await fetch(env.RETRACE_URL!.replace(/\/+$/, "") + "/.well-known/retrace-pubkey")).json(); if (wk?.public_key?.x) trustedKey = wk.public_key; } catch {}
       }
       const verdict = await verifyExportBundle(bundle, trustedKey);
-      if (args.out_json) writeFileSync(args.out_json, JSON.stringify(bundle, null, 2));
-      if (args.out_html) writeFileSync(args.out_html, renderReportHtml(bundle, verdict));
+      const outJson = args.out_json ? confinedWritePath(args.out_json) : undefined;
+      const outHtml = args.out_html ? confinedWritePath(args.out_html) : undefined;
+      if (outJson) writeFileSync(outJson, JSON.stringify(bundle, null, 2));
+      if (outHtml) writeFileSync(outHtml, renderReportHtml(bundle, verdict));
       const summary = `${bundle.events.length} events · chain ${bundle.chain.ok ? "intact" : "BROKEN"} · signature ${verdict.signature}${bundle.issuer ? " (kid " + bundle.issuer.kid + ")" : ""} · coverage ${verdict.coverage.scope === "full" ? (verdict.coverage.complete ? "complete" : "INCOMPLETE") : "scoped"} (${verdict.coverage.events}/${verdict.coverage.total_events})` +
-        (args.out_json ? `\njson → ${args.out_json}` : "") + (args.out_html ? `\nreport → ${args.out_html}` : "");
+        (outJson ? `\njson → ${outJson}` : "") + (outHtml ? `\nreport → ${outHtml}` : "");
       return { content: [{ type: "text", text: summary }], structuredContent: { events: bundle.events.length, chain_ok: bundle.chain.ok, signature: verdict.signature, coverage: verdict.coverage, kid: bundle.issuer?.kid, ...(args.out_json || args.out_html ? {} : { bundle }) } };
     },
   );

@@ -2,11 +2,11 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { buildServer, enrichLocation, clientSystem, detectIde, harnessSession } from "./index.js";
+import { buildServer, enrichLocation, clientSystem, detectIde, harnessSession, confinedWritePath } from "./index.js";
 import { appendEvent } from "@retrace-dev/core";
 import { mkdtempSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { SqliteStore } from "./sqlite-store.js";
 
 /** Hermetic actor env: the dev shell may export RETRACE_ACTOR/ON_BEHALF_OF/ACTOR_LOCK (see 3c4b3e5). The harness and
@@ -490,3 +490,10 @@ test("location: server-only fields are dropped from caller input — an agent ca
   assert.deepEqual(enrichLocation({ session: "x", device: "y", client: "z", ide: "i", workspace: "w", surface: "tty", path: "p" }, { session: "s" }),
     { session: "s", path: "p" });
 }));
+
+test("confinedWritePath refuses absolute paths outside cwd", () => {
+  const cwd = "/home/jordandrumiler/provenance/retrace";
+  assert.equal(confinedWritePath("out/bundle.json", cwd), resolve(cwd, "out/bundle.json"));
+  assert.throws(() => confinedWritePath("/tmp/evil.json", cwd), /working directory/);
+  assert.throws(() => confinedWritePath("../../etc/passwd", cwd), /working directory/);
+});

@@ -122,6 +122,19 @@ const AGENT_COAUTHOR = /claude|copilot|codex|cursor|devin|aider|gpt|gemini|grok|
 /** Agent families a Co-Authored-By name is mapped onto (first match wins) — the actor id (backlog #12). */
 const AGENT_FAMILIES = ["claude", "copilot", "codex", "cursor", "devin", "aider", "gemini", "grok", "gpt"];
 const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+/** Retrace-Caused-By must be a real event id; junk trailers are dropped rather than sealed (audit 2026-08-30). */
+export const CAUSED_BY_RE = /^evt_[0-9a-f]{32}$/i;
+/** Retrace-Actor trailer: agent slug only (not an email, URL, or free text). */
+export const ACTOR_ID_RE = /^[a-z][a-z0-9_-]{0,63}$/i;
+export function validCausedById(s: string | undefined): string | undefined {
+  const t = s?.trim();
+  return t && CAUSED_BY_RE.test(t) ? t : undefined;
+}
+export function validActorId(s: string | undefined): string | undefined {
+  const t = s?.trim();
+  return t && ACTOR_ID_RE.test(t) ? t : undefined;
+}
+
 /** A trailer line, per git: token, colon, whitespace, non-blank value. */
 const TRAILER_LINE = /^[A-Za-z][\w-]*:\s+\S/;
 
@@ -189,7 +202,7 @@ export function commitToEvent(repo: string, sha: string, cfg: Cfg, live = false)
   const repoName = cfg.repoName ?? remoteName(repo) ?? basename(repo);
 
   const coauthors = trailers["co-authored-by"] ?? [];
-  const agentId = trailers["retrace-actor"]?.[0];
+  const agentId = validActorId(trailers["retrace-actor"]?.[0]);
   const agentCo = coauthors.find((c) => AGENT_COAUTHOR.test(c));
   const isBot = /\[bot\]/i.test(an);
   let actor: EventInput["actor"];
@@ -198,11 +211,11 @@ export function commitToEvent(repo: string, sha: string, cfg: Cfg, live = false)
   else if (isBot) actor = { type: "system", id: ae || an, display_name: an };
   else actor = { type: "human", id: ae || an, display_name: an };
 
-  let causedBy: string | undefined = trailers["retrace-caused-by"]?.[0] ?? process.env.RETRACE_CAUSED_BY;
+  let causedBy: string | undefined = validCausedById(trailers["retrace-caused-by"]?.[0] ?? process.env.RETRACE_CAUSED_BY);
   if (!causedBy) {
     const f = join(git(repo, ["rev-parse", "--git-dir"]), "retrace-caused-by");
     const fp = resolve(repo, f);
-    if (existsSync(fp)) causedBy = readFileSync(fp, "utf8").trim() || undefined;
+    if (existsSync(fp)) causedBy = validCausedById(readFileSync(fp, "utf8"));
   }
   const isMerge = parentList.length > 1;
   const cleanBody = stripTrailers(body, trailerText.length); // prose "Key: value" lines survive (backlog #12)

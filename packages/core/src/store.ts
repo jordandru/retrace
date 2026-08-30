@@ -31,6 +31,8 @@ export interface EventStore {
   head(project: string): Promise<ChainHead | null>;
   createShare(share: Share): Promise<void>;
   getShare(id: string): Promise<Share | null>;
+  /** Owner-only share revoke (audit 2026-08-30). Optional — stores without it 501 DELETE /s/:id. */
+  deleteShare?(id: string): Promise<boolean>;
   insert(e: Event): Promise<void>;
   byIdempotencyKey(project: string, key: string): Promise<Event | null>;
   get(id: string): Promise<Event | null>;

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createHandler, parseCredentials, Credential, EventStore, Event, Share, appendEvent, EventInput, verifyProject, ChainHead, HeadMovedError, schemaSurface, Location, Action } from "./index.js";
+import { createHandler, parseCredentials, Credential, EventStore, Event, Share, appendEvent, EventInput, verifyProject, ChainHead, HeadMovedError, schemaSurface, Location, Action, tokenEquals, parseGithubRepoProjects, resolveGithubProject } from "./index.js";
 
 /** minimal in-memory store for tests */
 class MemStore implements EventStore {
@@ -14,6 +14,7 @@ class MemStore implements EventStore {
   async history(q: any) { return this.all(q.project); }
   async createShare(s: Share) { this.shares.set(s.id, s); }
   async getShare(id: string) { return this.shares.get(id) ?? null; }
+  async deleteShare(id: string) { return this.shares.delete(id); }
   async deleteProject(p: string, audit: Event, expectedHead: ChainHead) {
     const head = await this.head(p);
     if (!head || head.seq !== expectedHead.seq || head.hash !== expectedHead.hash) throw new HeadMovedError(p, expectedHead);
@@ -167,7 +168,7 @@ test("DELETE /projects/:p: audit event is attributed to ownerActor, records the 
   const audit = store.events.find((e) => e.id === opsEvent)!;
   assert.deepEqual(audit.actor, { type: "human", id: "jordan@example.com", display_name: "Jordan" });
   assert.equal(audit.caused_by, ins.event.id);
-  assert.deepEqual(audit.method, { tool: "http", automated: false, params: { route: "DELETE /projects/:p", principal: "owner" } });
+  assert.deepEqual(audit.method, { tool: "http", automated: false, params: { route: "DELETE /projects/:p", principal: "owner", sealed_by: "owner" } });
   assert.equal(audit.location?.system, "retrace-api");
   assert.match(audit.location?.url ?? "", /\/projects\/junk$/);
   const why = await (await handle(new Request(`http://test/events/${audit.id}/why`, { headers: AUTH }))).json();
@@ -567,4 +568,159 @@ test("POST /events stamps method.params.sealed_by server-side: owner, pinned:<na
   const st = await (await get(h, "/projects/p/status", "tok")).json();
   assert.deepEqual(st.capture.sealed_by, { pinned: 2, assert: 1, webhook: 0, owner: 1, unauthenticated: 0, unstamped: 0 });
   assert.equal(st.capture.agent_events_not_pinned, 1, "the owner-asserted agent event is the one a skeptic cannot trust");
+});
+
+// ---- security assessment 2026-08-30 (evt_5e0caa58) — Grok follow-up on router/store ----
+
+async function ghSigned(secret: string, body: string): Promise<string> {
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  return "sha256=" + [...new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(body)))].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+test("tokenEquals is length-independent and matches only equal strings", async () => {
+  assert.equal(await tokenEquals("tok", "tok"), true);
+  assert.equal(await tokenEquals("tok", "tok2"), false);
+  assert.equal(await tokenEquals("", "tok"), false);
+});
+
+test("resolveGithubProject never takes ?project=; unmapped repo uses full_name; mapped repo is allow-listed", () => {
+  assert.deepEqual(resolveGithubProject("jordandru/retrace", undefined), { project: "jordandru/retrace" });
+  assert.deepEqual(resolveGithubProject("jordandru/retrace", { "jordandru/retrace": "retrace" }), { project: "retrace" });
+  assert.match((resolveGithubProject("evil/repo", { "jordandru/retrace": "retrace" }) as any).error, /not in RETRACE_GITHUB_PROJECTS/);
+  assert.deepEqual(parseGithubRepoProjects('{"a/b":"p"}'), { "a/b": "p" });
+});
+
+test("POST /hooks/github: project comes from HMAC-covered repo, not ?project=; delivery cannot replay across projects", async () => {
+  const store = new MemStore();
+  const h = createHandler(store, { token: "tok", githubSecret: "s3cret", githubRepoProjects: { "jordandru/retrace": "retrace" } });
+  const payload = JSON.stringify({
+    action: "opened",
+    repository: { full_name: "jordandru/retrace" },
+    sender: { login: "jordandru" },
+    pull_request: { number: 1, title: "t", html_url: "https://github.com/jordandru/retrace/pull/1", updated_at: "2026-08-30T00:00:00Z", head: { sha: "abc", ref: "f" }, base: { ref: "main" } },
+  });
+  const sig = await ghSigned("s3cret", payload);
+  const replay = (projectQ: string) => h(new Request(`http://test/hooks/github?project=${projectQ}`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-hub-signature-256": sig, "x-github-event": "pull_request", "x-github-delivery": "deliv-1" },
+    body: payload,
+  }));
+  const first = await replay("attacker");
+  assert.equal(first.status, 201);
+  assert.equal((await first.json()).project, "retrace");
+  assert.equal(store.events[0].project, "retrace");
+  const second = await replay("other");
+  assert.equal(second.status, 201);
+  assert.equal((await second.json()).logged[0].deduped, true, "same delivery+project is idempotent");
+  // unknown repo with a map configured is 403 even with a valid signature
+  const otherRepo = JSON.stringify({ ...JSON.parse(payload), repository: { full_name: "evil/repo" } });
+  const otherSig = await ghSigned("s3cret", otherRepo);
+  const blocked = await h(new Request("http://test/hooks/github?project=retrace", {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-hub-signature-256": otherSig, "x-github-event": "pull_request", "x-github-delivery": "deliv-2" },
+    body: otherRepo,
+  }));
+  assert.equal(blocked.status, 403);
+  await appendEvent(store, ev({
+    project: "other",
+    idempotency_key: "gh:deliv-cross",
+    method: { tool: "github" },
+    tags: ["github"],
+    artifacts: [{ id: "pr:jordandru/retrace#9" }],
+  }));
+  const cross = await h(new Request("http://test/hooks/github", {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-hub-signature-256": sig, "x-github-event": "pull_request", "x-github-delivery": "deliv-cross" },
+    body: payload,
+  }));
+  assert.equal(cross.status, 409);
+});
+
+test("POST /hooks/gdrive: assert credential applies allowed_actors to the mapped actors map", async () => {
+  const store = new MemStore();
+  const h = createHandler(store, { token: "tok", credentials: parseCredentials(JSON.stringify([HOOK])) });
+  const activity = (person: string) => ({
+    primaryActionDetail: { edit: {} },
+    actors: [{ user: { knownUser: { personName: person } } }],
+    targets: [{ driveItem: { name: "items/DOC1", title: "doc", mimeType: "application/vnd.google-apps.document" } }],
+    timestamp: "2026-08-30T12:00:00.000Z",
+  });
+  const ok = await post(h, "/hooks/gdrive?project=retrace", { actors: { "people/111": { email: "jordan@example.com" } }, activities: [activity("people/111")] }, HOOK.token);
+  assert.equal(ok.status, 201);
+  assert.equal((await ok.json()).logged, 1);
+  const forged = await post(h, "/hooks/gdrive?project=retrace", { actors: { "people/222": { email: "mallory@example.com" } }, activities: [activity("people/222")] }, HOOK.token);
+  assert.equal(forged.status, 201);
+  const body = await forged.json();
+  assert.equal(body.logged, 0);
+  assert.match(body.results[0].error, /mallory@example.com.*allowed_actors/);
+  assert.equal(store.events.length, 1);
+});
+
+test("?token= is accepted on GET only; POST/DELETE need Bearer", async () => {
+  const store = await seeded();
+  const h = createHandler(store, { token: "tok", opsProject: "ops" });
+  assert.equal((await get(h, "/projects?token=tok")).status, 200);
+  assert.equal((await post(h, "/events?token=tok", ev({}))).status, 401);
+  assert.equal((await del(h, "/projects/junk?confirm=junk&token=tok")).status, 401);
+  assert.equal(store.events.filter((e) => e.project === "junk").length, 2);
+});
+
+test("credentials.projects scopes POST and reads; unset still sees every project", async () => {
+  const store = await seeded();
+  const scoped = Credential.parse({ token: "scoped-token-01234567", actor: { type: "agent", id: "codex" }, projects: ["keep"] });
+  const h = createHandler(store, { token: "tok", credentials: [scoped] });
+  assert.equal((await post(h, "/events", ev({ project: "junk" }), scoped.token)).status, 403);
+  assert.equal((await post(h, "/events", ev({ project: "keep" }), scoped.token)).status, 201);
+  const list = await (await get(h, "/projects", scoped.token)).json();
+  assert.deepEqual(list, ["keep"]);
+  assert.equal((await get(h, "/projects/junk/events", scoped.token)).status, 403);
+  const keepEvt = store.events.find((e) => e.project === "keep")!;
+  assert.equal((await get(h, `/events/${keepEvt.id}`, scoped.token)).status, 200);
+  const junkEvt = store.events.find((e) => e.project === "junk")!;
+  assert.equal((await get(h, `/events/${junkEvt.id}`, scoped.token)).status, 404);
+});
+
+test("POST /events strips caller relayed_by and location.client on non-relayed paths", async () => {
+  const store = new MemStore();
+  const h = createHandler(store, { token: "tok", credentials: parseCredentials(JSON.stringify([CLAUDE])) });
+  const res = await post(h, "/events", ev({
+    method: { tool: "Edit", params: { relayed_by: "forged-agent", sealed_by: "pinned:forged" } },
+    location: { client: "forged-client", path: "/x" },
+  }), CLAUDE.token);
+  assert.equal(res.status, 201);
+  const e = (await res.json()).event;
+  assert.equal(e.method.params.relayed_by, undefined);
+  assert.equal(e.method.params.sealed_by, "pinned:agent/claude-code");
+  assert.equal(e.location.client, undefined);
+  assert.equal(e.location.path, "/x");
+});
+
+test("share: expires_in_days is bounded, created_by is not taken from the client, meta hides it, DELETE revokes", async () => {
+  const store = await seeded();
+  const h = createHandler(store, { token: "tok", ownerActor: { type: "human", id: "jordan@example.com" } });
+  assert.equal((await post(h, "/projects/junk/share", { expires_in_days: 0 }, "tok")).status, 400);
+  assert.equal((await post(h, "/projects/junk/share", { expires_in_days: 9999 }, "tok")).status, 400);
+  const created = await post(h, "/projects/junk/share", { label: "pub", created_by: "mallory" }, "tok");
+  assert.equal(created.status, 201);
+  const body = await created.json();
+  assert.equal(body.share.created_by, undefined);
+  const id = body.share.id;
+  const meta = await (await get(h, `/s/${id}/meta`)).json();
+  assert.equal(meta.created_by, undefined);
+  assert.equal(meta.label, "pub");
+  const gone = await del(h, `/s/${id}`, AUTH);
+  assert.equal(gone.status, 200);
+  assert.equal((await get(h, `/s/${id}/meta`)).status, 404);
+});
+
+test("500 handler does not echo the internal error text", async () => {
+  const store = new MemStore();
+  store.projects = async () => { throw new Error("SQL boom /secret/path"); };
+  const h = createHandler(store, { token: "tok" });
+  const res = await get(h, "/projects", "tok");
+  assert.equal(res.status, 500);
+  const body = await res.json();
+  assert.match(body.error, /^internal error \(ref [0-9a-f]{8}\)$/);
+  assert.equal(body.error.includes("SQL"), false);
+  assert.equal(body.error.includes("/secret/path"), false);
 });

@@ -10,7 +10,7 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { SqliteStore } from "./sqlite-store.js";
 import { appendEvent, verifyProject } from "@retrace-dev/core";
-import { parseTrailers, resolveHookToken, ttySurface, guardRemoteWrite } from "./git-hook.js";
+import { parseTrailers, resolveHookToken, ttySurface, guardRemoteWrite, validCausedById, validActorId } from "./git-hook.js";
 
 async function seedInstruct(db: string, project = "rpg"): Promise<string> {
   const { event } = await appendEvent(new SqliteStore(db), {
@@ -208,6 +208,14 @@ test("git adapter: trailers from all trailing paragraphs; consistent Co-Authored
   assert.deepEqual(t5.trailers, { "retrace-actor": ["claude-code"], "retrace-model": ["m"], "co-authored-by": ["Claude <n@a>"] });
   assert.deepEqual(t5.trailerText, ["Retrace-Actor: claude-code", "Retrace-Model: m", "Co-Authored-By: Claude <n@a>"]);
   assert.deepEqual(parseTrailers("s\n\nCo-Authored-By: A\u2028B <a@b>").trailers, { "co-authored-by": ["A\u2028B <a@b>"] });
+
+  assert.equal(validCausedById("evt_deadbeefdeadbeefdeadbeefdeadbeef"), "evt_deadbeefdeadbeefdeadbeefdeadbeef");
+  assert.equal(validCausedById("evt_abc123"), undefined);
+  assert.equal(validCausedById("not-an-id"), undefined);
+  assert.equal(validActorId("claude-code"), "claude-code");
+  assert.equal(validActorId("grok"), "grok");
+  assert.equal(validActorId("mallory@example.com"), undefined);
+  assert.equal(validActorId("https://evil.example"), undefined);
 
   // end-to-end through the hook
   const dir = mkdtempSync(join(tmpdir(), "retrace-git12-"));

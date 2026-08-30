@@ -1,7 +1,7 @@
 /**
  * Shared HTTP router (fetch API) — used by the Cloudflare Worker and the local Node server.
  *
- * Owner routes (auth: Bearer token or ?token= when a token is configured). Per-actor credentials (RETRACE_CREDENTIALS,
+ * Owner routes (auth: Bearer token, or ?token= on GET/UI only). Per-actor credentials (RETRACE_CREDENTIALS,
  * Bearer only) may also POST /events and read; "pinned" credentials have their actor stamped by the server (with one
  * carve-out: an agent credential may record "instructed" roots for its configured on_behalf_of human), "assert"
  * credentials (git hook, backfill forwarders) may assert only the actors in their allowed_actors list. DELETE/share
@@ -20,13 +20,16 @@
  *                                        an ops-project audit event attributed to ownerActor (RETRACE_OWNER) and linked to caused_by
  *
  * Webhooks (auth: HMAC signature, not the bearer token):
- *   POST /hooks/github?project=<name>     GitHub webhook receiver (pull_request, pull_request_review, issue_comment, workflow_run[, push])
+ *   POST /hooks/github                    GitHub webhook; project is mapped from HMAC-covered repository.full_name via
+ *                                         RETRACE_GITHUB_PROJECTS (never from ?project=, which sits outside the signature).
  *   POST /hooks/gdrive?project=<name>     Google Drive Activity forwarder (Apps Script / retrace-gdrive CLI); bearer-token auth.
- *                                         Optional payload.caused_by is stored on mapped events; empty/absent → root.
+ *                                         Assert credentials apply allowed_actors to each mapped actor. Optional payload.caused_by
+ *                                         is stored on mapped events; empty/absent → root.
  *
- * Share routes (no auth; scope locked to the share's project/artifact; read-only):
+ * Share routes (no auth on GET; scope locked to the share's project/artifact; read-only):
  *   GET  /s/:id                          UI in shared mode
  *   GET  /s/:id/meta · /s/:id/events · /s/:id/verify · /s/:id/export · /s/:id/report · /s/:id/lineage
+ *   DELETE /s/:id                        owner-only revoke
  */
 import { z } from "zod";
 import { Actor, ActorType, EventInput, schemaSurface } from "./schema.js";
@@ -47,6 +50,52 @@ function writeClientError(e: unknown): string | undefined {
   if (e instanceof CausedByError || name === "CausedByError") return (e as Error).message;
 }
 
+const enc = new TextEncoder();
+
+/** Constant-time compare: SHA-256 both sides then XOR, same loop as verifyGithubSignature (audit 2026-08-30). */
+export async function tokenEquals(a: string, b: string): Promise<boolean> {
+  const [ha, hb] = await Promise.all([
+    crypto.subtle.digest("SHA-256", enc.encode(a)),
+    crypto.subtle.digest("SHA-256", enc.encode(b)),
+  ]);
+  const xa = new Uint8Array(ha), xb = new Uint8Array(hb);
+  let diff = 0;
+  for (let i = 0; i < xa.length; i++) diff |= xa[i] ^ xb[i];
+  return diff === 0;
+}
+
+/** Parse RETRACE_GITHUB_PROJECTS (JSON object of "owner/repo" → project). Throws on malformed config. */
+export function parseGithubRepoProjects(raw?: string | null): Record<string, string> {
+  if (!raw) return {};
+  const obj = JSON.parse(raw);
+  if (typeof obj !== "object" || obj === null || Array.isArray(obj)) throw new Error("RETRACE_GITHUB_PROJECTS must be a JSON object of repo → project");
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (typeof v !== "string" || !v.trim()) throw new Error(`RETRACE_GITHUB_PROJECTS["${k}"] must be a non-empty project name`);
+    out[k] = v;
+  }
+  return out;
+}
+
+/** Project for a GitHub delivery: HMAC-covered repository.full_name, optionally remapped. Query ?project= is never used. */
+export function resolveGithubProject(repoFull: string, map: Record<string, string> | undefined): { project: string } | { error: string } {
+  const m = map ?? {};
+  if (Object.prototype.hasOwnProperty.call(m, repoFull)) return { project: m[repoFull] };
+  if (Object.keys(m).length) return { error: `github repo "${repoFull}" is not in RETRACE_GITHUB_PROJECTS` };
+  return { project: repoFull };
+}
+
+function publicShare(s: Share): Omit<Share, "created_by"> {
+  const { created_by: _drop, ...rest } = s;
+  return rest;
+}
+
+function errorRef(): string {
+  const b = new Uint8Array(4);
+  crypto.getRandomValues(b);
+  return [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
+}
+
 /** A per-actor credential (security review 2026-08-21, backlog #6). Holders can POST /events and read; they cannot
  *  DELETE or create shares. trust "pinned" (default): the Worker stamps `actor` from the credential — the body may only
  *  add display_name/version and may not claim human/system, except that an agent credential with `actor.on_behalf_of`
@@ -59,11 +108,12 @@ export const Credential = z.object({
   name: z.string().optional(),
   actor: Actor,
   trust: z.enum(["pinned", "assert"]).default("pinned"),
-  /** For assert trust: the ONLY actors this credential may assert on POST /events, matched on exact type + id
-   *  (audit 2026-08-22, P1: an unbounded assert credential could seal events claiming any actor — a human, or the
-   *  pinned agent's id — into any project). Absent or empty = may assert none; routes that map actors server-side
-   *  (/hooks/gdrive) are unaffected. Ignored for pinned trust. */
+  /** For assert trust: the ONLY actors this credential may assert on POST /events and /hooks/gdrive, matched on exact
+   *  type + id (audit 2026-08-22, P1; Drive actors-map bypass 2026-08-30). Absent or empty = may assert none on those
+   *  writes. Ignored for pinned trust. */
   allowed_actors: z.array(z.object({ type: ActorType, id: z.string().min(1) })).optional(),
+  /** Optional project allow-list (audit 2026-08-30). Unset = every project; set = POST/hooks/reads only those names. */
+  projects: z.array(z.string().min(1)).optional(),
 });
 export type Credential = z.infer<typeof Credential>;
 /** Parse the RETRACE_CREDENTIALS secret (JSON array). Throws on malformed config so a bad deploy fails loudly. */
@@ -73,7 +123,7 @@ export function parseCredentials(raw?: string | null): Credential[] {
 }
 
 export interface RouterOptions {
-  /** Owner token: full access, body actor stored verbatim. Accepted as Bearer or ?token= (the UI uses the latter). */
+  /** Owner token: full access, body actor stored verbatim. Bearer on every method; ?token= on GET/UI only. */
   token?: string;
   /** Per-actor credentials; see Credential. Bearer only (never ?token=, which leaks into logs). */
   credentials?: Credential[];
@@ -81,8 +131,10 @@ export interface RouterOptions {
   issuerName?: string;
   /** Public base URL used when building share links (defaults to request origin) */
   publicUrl?: string;
-  /** GitHub webhook secret; POST /hooks/github?project=… is authenticated by X-Hub-Signature-256 instead of the bearer token */
+  /** GitHub webhook secret; POST /hooks/github is authenticated by X-Hub-Signature-256 instead of the bearer token */
   githubSecret?: string;
+  /** owner/repo → Retrace project. The HMAC covers the repo, not ?project= (audit 2026-08-30). */
+  githubRepoProjects?: Record<string, string>;
   /** Also log `push` commits from GitHub (off by default — the git adapter covers commits, and idempotency keys match anyway) */
   githubIncludePush?: boolean;
   /** Project that receives the audit event when a project is deleted (default "retrace") */
@@ -94,17 +146,31 @@ export interface RouterOptions {
 }
 
 const CORS = { "access-control-allow-origin": "*", "access-control-allow-headers": "authorization,content-type", "access-control-allow-methods": "GET,POST,DELETE,OPTIONS" };
-const json = (data: unknown, status = 200) => new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json", ...CORS } });
-const html = (body: string, status = 200) => new Response(body, { status, headers: { "content-type": "text/html; charset=utf-8" } });
+const SHARE_CACHE = { "cache-control": "public, max-age=15" };
+const json = (data: unknown, status = 200, extra?: Record<string, string>) =>
+  new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json", ...CORS, ...extra } });
+const html = (body: string, status = 200, extra?: Record<string, string>) =>
+  new Response(body, { status, headers: { "content-type": "text/html; charset=utf-8", ...extra } });
 
 /** deliveries that map to exactly one event can use the delivery id as idempotency key */
 const inputs_needs_unique = (ghEvent: string) => ghEvent !== "push";
+
+const SHARE_WINDOW_MS = 60_000;
+const SHARE_MAX = 60;
 
 export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOptions) {
   const opts: RouterOptions = typeof tokenOrOpts === "string" ? { token: tokenOrOpts } : tokenOrOpts ?? {};
   const { token } = opts;
   const credentials = opts.credentials ?? [];
   type Principal = { kind: "owner" } | { kind: "credential"; credential: Credential } | null;
+  const shareHits = new Map<string, { n: number; t: number }>();
+  const shareLimited = (id: string): boolean => {
+    const now = Date.now();
+    const w = shareHits.get(id);
+    if (!w || now - w.t > SHARE_WINDOW_MS) { shareHits.set(id, { n: 1, t: now }); return false; }
+    w.n++;
+    return w.n > SHARE_MAX;
+  };
   /** WHO SEALED IT. Stamped server-side on every write so a reader can tell a pinned-credential event (the Worker
    *  fixed the actor) from an owner-asserted one (the body actor was stored verbatim) — without this the two are
    *  indistinguishable in the ledger, which is the hole a skeptic attacks first. Server wins over any caller value. */
@@ -116,13 +182,31 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
   };
   const stampSealedBy = <T extends { method?: EventInput["method"] }>(input: T, by: string): T =>
     ({ ...input, method: { ...input.method, params: { ...input.method?.params, [SEALED_BY_PARAM]: by } } });
+  const projectAllowed = (principal: Principal, project: string): boolean => {
+    if (principal?.kind !== "credential") return true;
+    const allowed = principal.credential.projects;
+    if (allowed === undefined) return true;
+    return allowed.includes(project);
+  };
+  const actorAllowed = (principal: Principal, actor: Actor): boolean => {
+    if (principal?.kind !== "credential" || principal.credential.trust !== "assert") return true;
+    const allowed = principal.credential.allowed_actors ?? [];
+    return allowed.some((a) => a.type === actor.type && a.id === actor.id);
+  };
   /** Who is calling. `null` = unauthenticated (only valid when no token is configured at all). */
-  const authenticate = (req: Request, url: URL): Principal | "unauthorized" => {
+  const authenticate = async (req: Request, url: URL): Promise<Principal | "unauthorized"> => {
     const auth = req.headers.get("authorization") ?? "";
     const bearer = auth.startsWith("Bearer ") ? auth.slice(7) : null;
-    if (token && (bearer === token || url.searchParams.get("token") === token)) return { kind: "owner" };
-    const credential = bearer ? credentials.find((c) => c.token === bearer) : undefined;
-    if (credential) return { kind: "credential", credential };
+    const queryTok = req.method === "GET" ? url.searchParams.get("token") : null;
+    if (token) {
+      if (bearer && await tokenEquals(bearer, token)) return { kind: "owner" };
+      if (queryTok && await tokenEquals(queryTok, token)) return { kind: "owner" };
+    }
+    if (bearer) {
+      for (const c of credentials) {
+        if (await tokenEquals(bearer, c.token)) return { kind: "credential", credential: c };
+      }
+    }
     return token || credentials.length ? "unauthorized" : null;
   };
   /** Actor to store for POST /events under this principal (mirrors the MCP server's RETRACE_ACTOR_LOCK).
@@ -135,8 +219,7 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
     if (principal.credential.trust === "assert") {
       // Assert trust is now bounded (audit 2026-08-22, P1): the body actor must be in the credential's explicit
       // allow-list — otherwise the holder of e.g. the git-hook token could forge events from any human or agent.
-      const allowed = principal.credential.allowed_actors ?? [];
-      if (!allowed.some((a) => a.type === body.type && a.id === body.id))
+      if (!actorAllowed(principal, body))
         return { error: `actor ${body.type} "${body.id}" is not in this credential's allowed_actors: an assert credential may only record the actors explicitly listed for it in RETRACE_CREDENTIALS.` };
       return { actor: body };
     }
@@ -212,7 +295,22 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
         const ghEvent = req.headers.get("x-github-event") ?? "";
         const delivery = req.headers.get("x-github-delivery") ?? undefined;
         if (ghEvent === "ping") return json({ ok: true, pong: true });
-        const inputs = mapGithubWebhook(ghEvent, JSON.parse(raw), { project: url.searchParams.get("project") ?? undefined, includePush: opts.githubIncludePush, deliveryId: delivery && inputs_needs_unique(ghEvent) ? delivery : undefined });
+        let payload: any;
+        try { payload = JSON.parse(raw); } catch { return json({ error: "invalid json" }, 400); }
+        const repoFull = typeof payload?.repository?.full_name === "string" ? payload.repository.full_name : "";
+        if (!repoFull) return json({ error: "github payload missing repository.full_name" }, 400);
+        const resolved = resolveGithubProject(repoFull, opts.githubRepoProjects);
+        if ("error" in resolved) return json({ error: resolved.error }, 403);
+        const project = resolved.project;
+        const deliveryKey = delivery && inputs_needs_unique(ghEvent) ? `gh:${delivery}` : undefined;
+        if (deliveryKey) {
+          for (const p of await store.projects()) {
+            if (p === project) continue;
+            if (await store.byIdempotencyKey(p, deliveryKey))
+              return json({ error: `github delivery already sealed in project "${p}"` }, 409);
+          }
+        }
+        const inputs = mapGithubWebhook(ghEvent, payload, { project, includePush: opts.githubIncludePush, deliveryId: delivery && inputs_needs_unique(ghEvent) ? delivery : undefined });
         const results = [];
         for (const input of inputs) {
           const parsed = EventInput.safeParse(input);
@@ -227,19 +325,25 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
             }
           }
         }
-        return json({ ok: true, event: ghEvent, logged: results }, 201);
+        return json({ ok: true, event: ghEvent, project, logged: results }, 201);
       }
       // ---- Google Drive activity forwarder (owner token or an assert-trust credential: it relays other people's edits) ----
       if (req.method === "POST" && parts[0] === "hooks" && parts[1] === "gdrive") {
-        const principal = authenticate(req, url);
+        const principal = await authenticate(req, url);
         if (principal === "unauthorized") return json({ error: "unauthorized" }, 401);
         if (principal?.kind === "credential" && principal.credential.trust !== "assert") return json({ error: "forbidden: the Drive forwarder needs the owner token or an assert-trust credential" }, 403);
         const payload = (await req.json()) as DrivePayload;
-        const inputs = mapDriveActivities({ ...payload, project: url.searchParams.get("project") ?? payload.project }, "google-drive");
+        const project = url.searchParams.get("project") ?? payload.project ?? "google-drive";
+        if (!projectAllowed(principal, project)) return json({ error: `forbidden: this credential is not scoped to project "${project}"` }, 403);
+        const inputs = mapDriveActivities({ ...payload, project }, "google-drive");
         const results = [];
         for (const input of inputs) {
           const parsed = EventInput.safeParse(input);
           if (!parsed.success) { results.push({ error: parsed.error.issues }); continue; }
+          if (!actorAllowed(principal, parsed.data.actor)) {
+            results.push({ error: `actor ${parsed.data.actor.type} "${parsed.data.actor.id}" is not in this credential's allowed_actors` });
+            continue;
+          }
           const stamped = stampSealedBy(parsed.data, sealedBy(principal));
           for (let attempt = 0; ; attempt++) {
             try { const r = await appendEvent(store, stamped); results.push({ id: r.event.id, seq: r.event.seq, deduped: r.deduped }); break; }
@@ -252,33 +356,42 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
         }
         return json({ ok: true, received: (payload.activities ?? []).length, logged: results.filter((r: any) => r.id && !r.deduped).length, deduped: results.filter((r: any) => r.deduped).length, results }, 201);
       }
-      // ---- shared, read-only, scope-locked ----
+      // ---- share revoke (owner) then public read-only, scope-locked ----
       if (parts[0] === "s" && parts[1]) {
+        if (req.method === "DELETE" && parts.length === 2) {
+          const principal = await authenticate(req, url);
+          if (principal === "unauthorized") return json({ error: "unauthorized" }, 401);
+          if (principal?.kind !== "owner") return json({ error: "forbidden: this route needs the owner token" }, 403);
+          if (!store.deleteShare) return json({ error: "share revocation not supported by this store" }, 501);
+          const existed = await store.deleteShare(parts[1]);
+          return existed ? json({ ok: true, id: parts[1] }) : json({ error: "share not found" }, 404);
+        }
+        if (shareLimited(parts[1])) return json({ error: "rate limited" }, 429);
         const share = await store.getShare(parts[1]);
         if (!share || !shareIsLive(share)) return parts.length === 2 ? html("<h1>Share link not found or expired</h1>", 404) : json({ error: "share not found or expired" }, 404);
         const sub = parts[2];
-        if (!sub) return html(UI_HTML);
-        if (sub === "meta") return json(share);
-        if (sub === "verify") return json(await verifyProject(store, share.project));
+        if (!sub) return html(UI_HTML, 200, SHARE_CACHE);
+        if (sub === "meta") return json(publicShare(share), 200, SHARE_CACHE);
+        if (sub === "verify") return json(await verifyProject(store, share.project), 200, SHARE_CACHE);
         if (sub === "events") {
           // same selection as the export (in-scope events + causal ancestors) so the shared UI can answer "why"
           const b = await buildExportBundle(store, { project: share.project, artifact_id: share.artifact_id });
-          return json(b.events);
+          return json(b.events, 200, SHARE_CACHE);
         }
-        if (sub === "export") return json(await exportFor({ project: share.project, artifact_id: share.artifact_id }));
+        if (sub === "export") return json(await exportFor({ project: share.project, artifact_id: share.artifact_id }), 200, SHARE_CACHE);
         if (sub === "lineage") {
           const b = await buildExportBundle(store, { project: share.project, artifact_id: share.artifact_id });
           return lineageResponse(b.events, url.searchParams.get("format"), url.searchParams.get("actors") === "1");
         }
         if (sub === "report") {
           const b = await exportFor({ project: share.project, artifact_id: share.artifact_id });
-          return html(renderReportHtml(b, await verifyExportBundle(b), { baseUrl: base, title: share.label ? `Provenance report — ${share.label}` : undefined }));
+          return html(renderReportHtml(b, await verifyExportBundle(b), { baseUrl: base, title: share.label ? `Provenance report — ${share.label}` : undefined }), 200, SHARE_CACHE);
         }
         return json({ error: "not found" }, 404);
       }
 
       // ---- owner routes ----
-      const principal = authenticate(req, url);
+      const principal = await authenticate(req, url);
       if (principal === "unauthorized") return json({ error: "unauthorized" }, 401);
       // Per-actor credentials may append and read; anything destructive or outward-facing stays owner-only.
       if (principal?.kind === "credential" && (req.method === "DELETE" || (req.method === "POST" && parts[0] !== "events")))
@@ -286,14 +399,26 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
       if (req.method === "POST" && parts[0] === "events" && parts.length === 1) {
         const parsed = EventInput.safeParse(await req.json());
         if (!parsed.success) return json({ error: "invalid event", issues: parsed.error.issues }, 400);
+        if (!projectAllowed(principal, parsed.data.project))
+          return json({ error: `forbidden: this credential is not scoped to project "${parsed.data.project}"` }, 403);
         const resolved = resolveActor(principal, parsed.data.actor, parsed.data.action);
         if ("error" in resolved) return json(resolved, 403);
-        const input = stampSealedBy({ ...parsed.data, actor: resolved.actor }, sealedBy(principal));
+        const params = { ...parsed.data.method?.params };
+        delete params.relayed_by;
+        delete params[SEALED_BY_PARAM];
+        const location = parsed.data.location ? { ...parsed.data.location } : undefined;
+        if (location && !resolved.relayed) delete location.client;
+        let input = stampSealedBy({
+          ...parsed.data,
+          actor: resolved.actor,
+          method: parsed.data.method ? { ...parsed.data.method, params } : undefined,
+          location,
+        }, sealedBy(principal));
         // A relayed instruction root is stamped with the credential's agent id, so the chain records that the human
         // did not write this event themselves — their agent did, on their behalf. Keyed on the carve-out's own flag:
         // assert-trust human events (git hook, forwarders) and other human paths must NOT get a relayed_by stamp.
         if (resolved.relayed && principal?.kind === "credential")
-          input.method = { ...input.method, params: { ...input.method?.params, relayed_by: principal.credential.actor.id } };
+          input = { ...input, method: { ...input.method, params: { ...input.method?.params, relayed_by: principal.credential.actor.id } } };
         for (let attempt = 0; ; attempt++) {
           try {
             const r = await appendEvent(store, input);
@@ -306,13 +431,21 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
         }
       }
       if (req.method === "GET" && parts[0] === "events" && parts[1]) {
+        const e = parts[2] === "why" ? (await store.get(parts[1])) : await store.get(parts[1]);
+        if (!e) return json({ error: "not found" }, 404);
+        if (!projectAllowed(principal, e.project)) return json({ error: "not found" }, 404);
         if (parts[2] === "why") return json(await explainEvent(store, parts[1]));
-        const e = await store.get(parts[1]);
-        return e ? json(e) : json({ error: "not found" }, 404);
+        return json(e);
       }
       if (parts[0] === "projects") {
-        if (parts.length === 1) return json(await store.projects());
+        if (parts.length === 1) {
+          const names = await store.projects();
+          if (principal?.kind === "credential" && principal.credential.projects)
+            return json(names.filter((p) => principal.credential.projects!.includes(p)));
+          return json(names);
+        }
         const project = parts[1];
+        if (!projectAllowed(principal, project)) return json({ error: `forbidden: this credential is not scoped to project "${project}"` }, 403);
         const sub = parts[2];
         const q = Object.fromEntries(url.searchParams) as Record<string, string>;
         delete q.token;
@@ -346,17 +479,17 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
             // Attribute the audit to whoever holds the owner token (the only principal allowed here), not to the server.
             const head = await store.head(project);
             if (!head) return json({ error: "project not found" }, 404);
-            const auditInput: EventInput = {
+            const auditInput = stampSealedBy({
               project: opsProject,
               actor: opts.ownerActor ?? { type: "system", id: "worker" },
-              action: "deleted",
+              action: "deleted" as const,
               artifacts: [{ id: `project:${project}`, kind: "project", label: project }],
               intent: "project deleted via DELETE route",
               caused_by: url.searchParams.get("caused_by") ?? undefined,
               method: { tool: "http", automated: !opts.ownerActor, params: { route: "DELETE /projects/:p", principal: "owner" } },
               location: { url: `${base}/projects/${encodeURIComponent(project)}`, system: "retrace-api" },
               change: { summary: `deleted project "${project}" (${head.seq + 1} events) at head ${head.hash} seq ${head.seq}`, before_hash: head.hash },
-            };
+            } satisfies EventInput, SEALED_BY_OWNER);
             const audit = await sealEvent(auditInput, await store.head(opsProject));
             try {
               const deleted = await store.deleteProject(project, audit, head);
@@ -370,6 +503,11 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
         }
         if (req.method === "POST" && sub === "share") {
           const body = (await req.json().catch(() => ({}))) as { artifact_id?: string; label?: string; expires_in_days?: number; created_by?: string };
+          if (body.expires_in_days !== undefined) {
+            const d = body.expires_in_days;
+            if (typeof d !== "number" || !Number.isFinite(d) || d < 1 || d > 365)
+              return json({ error: "expires_in_days must be a number of days between 1 and 365" }, 400);
+          }
           const now = new Date();
           const share: Share = {
             id: newShareId(),
@@ -378,15 +516,17 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
             label: body.label || undefined,
             created_at: now.toISOString(),
             expires_at: body.expires_in_days ? new Date(now.getTime() + body.expires_in_days * 86400000).toISOString() : undefined,
-            created_by: body.created_by,
+            created_by: opts.ownerActor?.id,
           };
           await store.createShare(share);
-          return json({ share, url: `${base}/s/${share.id}`, report_url: `${base}/s/${share.id}/report`, export_url: `${base}/s/${share.id}/export` }, 201);
+          return json({ share: publicShare(share), url: `${base}/s/${share.id}`, report_url: `${base}/s/${share.id}/report`, export_url: `${base}/s/${share.id}/export` }, 201);
         }
       }
       return json({ error: "not found" }, 404);
     } catch (e: any) {
-      return json({ error: String(e?.message ?? e) }, 500);
+      const ref = errorRef();
+      console.error(`retrace-api: request failed [${ref}] ${req.method} ${url.pathname}: ${e?.stack ?? e?.message ?? e}`);
+      return json({ error: `internal error (ref ${ref})` }, 500);
     }
   };
 }

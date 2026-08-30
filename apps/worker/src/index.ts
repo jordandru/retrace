@@ -9,9 +9,9 @@
  *   RETRACE_CREDENTIALS (secret, JSON array of {token, actor, trust?}) — per-actor tokens that may POST /events + read;
  *   "pinned" (default) stamps the actor server-side, "assert" stores the body actor verbatim. See core Credential.
  *   GET /projects/:p/export|report|lineage · POST /projects/:p/share · GET /.well-known/retrace-pubkey
- *   POST /hooks/github?project=…  (GitHub webhook; HMAC-verified with RETRACE_GITHUB_SECRET)
+ *   POST /hooks/github  (GitHub webhook; HMAC-verified with RETRACE_GITHUB_SECRET; project from repo via RETRACE_GITHUB_PROJECTS)
  */
-import { createHandler, parseCredentials, parseSigningKey } from "@retrace-dev/core";
+import { createHandler, parseCredentials, parseGithubRepoProjects, parseSigningKey } from "@retrace-dev/core";
 import { D1Store } from "./d1-store.js";
 
 export interface Env {
@@ -25,6 +25,8 @@ export interface Env {
   RETRACE_PUBLIC_URL?: string;
   /** `wrangler secret put RETRACE_GITHUB_SECRET` — same value as the webhook secret in GitHub repo settings */
   RETRACE_GITHUB_SECRET?: string;
+  /** JSON object of "owner/repo" → Retrace project. The HMAC covers the repo, not ?project=. */
+  RETRACE_GITHUB_PROJECTS?: string;
   RETRACE_GITHUB_PUSH?: string;
   /** Project that receives the audit event when DELETE /projects/:p runs (default "retrace") */
   RETRACE_OPS_PROJECT?: string;
@@ -41,6 +43,7 @@ export default {
       issuerName: env.RETRACE_ISSUER,
       publicUrl: env.RETRACE_PUBLIC_URL,
       githubSecret: env.RETRACE_GITHUB_SECRET,
+      githubRepoProjects: parseGithubRepoProjects(env.RETRACE_GITHUB_PROJECTS),
       githubIncludePush: env.RETRACE_GITHUB_PUSH === "1",
       opsProject: env.RETRACE_OPS_PROJECT,
       ownerActor: env.RETRACE_OWNER ? { type: "human", id: env.RETRACE_OWNER } : undefined,

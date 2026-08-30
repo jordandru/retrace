@@ -68,6 +68,10 @@ export class SqliteStore implements EventStore {
     if (!r) return null;
     return { id: r.id, project: r.project, artifact_id: r.artifact_id ?? undefined, label: r.label ?? undefined, created_at: r.created_at, expires_at: r.expires_at ?? undefined, created_by: r.created_by ?? undefined } as Share;
   }
+  async deleteShare(id: string) {
+    const r = this.db.prepare("DELETE FROM shares WHERE id = ?").run(id);
+    return r.changes > 0;
+  }
 
   async byIdempotencyKey(project: string, key: string) {
     const row = this.db.prepare("SELECT body FROM events WHERE project = ? AND idempotency_key = ? LIMIT 1").get(project, key) as { body: string } | undefined;

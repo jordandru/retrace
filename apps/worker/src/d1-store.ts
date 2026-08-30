@@ -61,6 +61,10 @@ export class D1Store implements EventStore {
     if (!r) return null;
     return { id: r.id, project: r.project, artifact_id: r.artifact_id ?? undefined, label: r.label ?? undefined, created_at: r.created_at, expires_at: r.expires_at ?? undefined, created_by: r.created_by ?? undefined } as Share;
   }
+  async deleteShare(id: string) {
+    const r = await this.db.prepare("DELETE FROM shares WHERE id = ?").bind(id).run();
+    return (r.meta.changes ?? 0) > 0;
+  }
 
   async byIdempotencyKey(project: string, key: string) {
     const row = await this.db.prepare("SELECT body FROM events WHERE project = ? AND idempotency_key = ? LIMIT 1").bind(project, key).first<{ body: string }>();
