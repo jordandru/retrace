@@ -249,7 +249,7 @@
     const b = $("#status"), s = state.status;
     if (!s?.capture || !s?.causality) { b.style.display = state.offline || shareId ? "none" : ""; b.className = "badge click"; b.textContent = "capture unknown"; b.title = "No /status answer — click for details"; return; }
     b.style.display = "";
-    const gaps = s.capture.unlinked_commits + s.causality.broken_links + s.capture.agent_events_without_model;
+    const gaps = s.capture.unlinked_commits + s.causality.broken_links + s.capture.agent_events_without_model + (s.capture.unverified_links ?? 0);
     b.className = "badge click " + (gaps ? "bad" : "ok");
     b.textContent = `${s.causality.coverage_pct}% causal · ${s.capture.unlinked_commits} unlinked commits`;
     b.title = `${s.capture.instructions_without_followup} instructions without follow-up · ${s.capture.agent_events_without_model} agent events missing model · ${s.capture.artifact_refs_without_role} artifact refs missing role — click for details`;
@@ -395,6 +395,7 @@
       <tr><td>instructions without follow-up</td><td>${num(c.instructions_without_followup)} / ${esc(c.instructions)}</td><td>at least one event whose caused_by is the instruction</td></tr>
       <tr><td>artifact refs without a role</td><td>${num(c.artifact_refs_without_role)} / ${esc(c.artifact_refs)}</td><td><span class="mono">role</span>: used · generated · both on each ref</td></tr>
       <tr><td>append-only amendments</td><td>${esc(c.amended_unlinked_commits ?? 0)} commits · ${esc(c.amended_artifact_refs ?? 0)} roles</td><td>sealed originals remain unchanged; rooted amendment events supply the correction</td></tr>
+      <tr><td>unverified caused_by links</td><td>${num(c.unverified_links ?? 0)}</td><td>the claimed parent exists, is older, and is in the same project — git hook / Drive keep a stale trailer and tag <span class="mono">caused_by:unverified</span></td></tr>
     </table>`;
     html += `<h2>Actors</h2><table class="stable"><tr><th>who</th><th>events</th><th>models</th><th>last seen</th></tr>` +
       s.actors.map((a) => `<tr><td><span class="who" data-actor="${esc(a.id)}" style="color:var(--${esc(a.type)})" title="${esc(a.id)} — filter the timeline by this actor">${esc(a.id)}</span> <span class="link">${esc(a.type)}</span></td><td>${esc(a.events)}</td><td class="mono">${a.models?.length ? esc(a.models.join(", ")) : a.type === "agent" ? `<span class="num bad">none recorded</span>` : "—"}</td><td>${when(a.last_seen)}</td></tr>`).join("") + `</table>`;

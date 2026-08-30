@@ -441,15 +441,20 @@ test("POST /hooks/gdrive: optional caused_by is stored; empty/absent stays a roo
   assert.equal(store.events[0].change?.summary, "edited");
 
   const dangling = await post(h, "/hooks/gdrive?project=retrace", body({ caused_by: "evt_abc123" }, "2026-08-29T12:01:00.000Z"), HOOK.token);
-  assert.equal(dangling.status, 400);
-  assert.match((await dangling.json()).error, /does not name an event/);
+  assert.equal(dangling.status, 201);
+  assert.equal(store.events.at(-1)!.caused_by, "evt_abc123");
+  assert.ok(store.events.at(-1)!.tags?.includes("caused_by:unverified"));
+  assert.equal(store.events.at(-1)!.method?.params?.caused_by_problem, "missing");
 
   const ins = await post(h, "/events", ev({ project: "retrace", action: "instructed", actor: { type: "human", id: "jordan@example.com" }, artifacts: [{ id: "task:1" }] }), "tok");
   assert.equal(ins.status, 201);
   const parent = (await ins.json()).event.id;
-  const linked = await post(h, "/hooks/gdrive?project=retrace", body({ caused_by: parent }, "2026-08-29T12:01:00.000Z"), HOOK.token);
+  const linked = await post(h, "/hooks/gdrive?project=retrace", body({ caused_by: parent }, "2026-08-29T12:01:30.000Z"), HOOK.token);
   assert.equal(linked.status, 201);
   assert.equal(store.events.at(-1)!.caused_by, parent);
+  // Activity timestamp predates the instruct — keep the link, mark not_older (do not drop the Drive event).
+  assert.ok(store.events.at(-1)!.tags?.includes("caused_by:unverified"));
+  assert.equal(store.events.at(-1)!.method?.params?.caused_by_problem, "not_older");
 
   const empty = await post(h, "/hooks/gdrive?project=retrace", body({ caused_by: "   " }, "2026-08-29T12:02:00.000Z"), HOOK.token);
   assert.equal(empty.status, 201);
@@ -483,18 +488,22 @@ test("GET /api publishes the schema surface, unauthenticated, and it matches thi
   assert.deepEqual(missing, []);
 });
 
-test("POST /events: caused_by must name an existing same-project event", async () => {
+test("POST /events: dangling caused_by is sealed with the link kept, not 400", async () => {
   const store = new MemStore();
   const h = createHandler(store, { token: "tok" });
   const missing = await post(h, "/events", ev({ caused_by: "evt_deadbeefdeadbeefdeadbeefdeadbeef" }), "tok");
-  assert.equal(missing.status, 400);
-  assert.match((await missing.json()).error, /does not name an event/);
+  assert.equal(missing.status, 201);
+  const sealed = (await missing.json()).event;
+  assert.equal(sealed.caused_by, "evt_deadbeefdeadbeefdeadbeefdeadbeef");
+  assert.ok(sealed.tags.includes("caused_by:unverified"));
+  assert.equal(sealed.method.params.caused_by_problem, "missing");
   const root = await post(h, "/events", ev({ action: "instructed", actor: { type: "human", id: "jordan@example.com" }, artifacts: [{ id: "task:1" }] }), "tok");
   assert.equal(root.status, 201);
   const id = (await root.json()).event.id;
   const child = await post(h, "/events", ev({ caused_by: id }), "tok");
   assert.equal(child.status, 201);
-  assert.equal(store.events[1].caused_by, id);
+  assert.equal(store.events.at(-1)!.caused_by, id);
+  assert.ok(!store.events.at(-1)!.tags?.includes("caused_by:unverified"));
 });
 
 test("POST /events: reserved adapter idempotency prefixes cannot shadow the git hook", async () => {

@@ -118,12 +118,49 @@ export class AdapterIdempotencyError extends Error {
   }
 }
 
-/** Thrown when caused_by is set but does not name an existing event in the same project. */
+/** Thrown when retrace_log (MCP) is given a caused_by the agent can fix and retry.
+ *  POST /events and appendEvent do not throw this: adapters (git hook, Drive) must still seal the event. */
 export class CausedByError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "CausedByError";
   }
+}
+
+/** Hash-covered tag stamped when a caused_by is kept but does not pass exists/older/same-project. */
+export const CAUSED_BY_UNVERIFIED_TAG = "caused_by:unverified";
+export type CausedByProblem = "missing" | "wrong_project" | "not_older";
+
+/** Classify a claimed parent. `not_older` is timestamp (Drive Activity can predate the current instruct). */
+export function causedByProblem(
+  parent: Event | null | undefined,
+  input: Pick<EventInput, "caused_by" | "project" | "timestamp">,
+): CausedByProblem | undefined {
+  if (!input.caused_by) return undefined;
+  if (!parent) return "missing";
+  if (parent.project !== input.project) return "wrong_project";
+  if (input.timestamp && parent.timestamp > input.timestamp) return "not_older";
+  return undefined;
+}
+
+export function causedByErrorMessage(
+  causedBy: string,
+  problem: CausedByProblem,
+  opts?: { parentProject?: string; project?: string },
+): string {
+  if (problem === "missing") return `caused_by "${causedBy}" does not name an event in this ledger`;
+  if (problem === "wrong_project")
+    return `caused_by "${causedBy}" is in project "${opts?.parentProject}", not "${opts?.project}"`;
+  return `caused_by "${causedBy}" is newer than this event`;
+}
+
+export function markCausedByUnverified(input: EventInput, problem: CausedByProblem): EventInput {
+  const tags = input.tags ?? [];
+  return {
+    ...input,
+    tags: tags.includes(CAUSED_BY_UNVERIFIED_TAG) ? tags : [...tags, CAUSED_BY_UNVERIFIED_TAG],
+    method: { ...input.method, params: { ...input.method?.params, caused_by_problem: problem } },
+  };
 }
 
 const GIT_IDEMPOTENCY_ACTIONS = new Set(["committed", "merged"]);
@@ -155,21 +192,20 @@ export function adapterIdempotencyError(input: EventInput): string | undefined {
 export async function appendEvent(store: EventStore, input: EventInput): Promise<{ event: Event; deduped: boolean }> {
   const reserved = adapterIdempotencyError(input);
   if (reserved) throw new AdapterIdempotencyError(reserved);
+  let toSeal = input;
   if (input.caused_by) {
     const parent = await store.get(input.caused_by);
-    if (!parent) throw new CausedByError(`caused_by "${input.caused_by}" does not name an event in this ledger`);
-    if (parent.project !== input.project)
-      throw new CausedByError(`caused_by "${input.caused_by}" is in project "${parent.project}", not "${input.project}"`);
-    // "Older" is seq (same rule as retrace_amend). A parent that already exists in this project
-    // always has seq <= current head, so the child will be newer. Do not compare timestamps:
-    // Drive Activity timestamps can predate the current instruct (testOnce / poll).
+    const problem = causedByProblem(parent, input);
+    // Keep the claimed link. Adapters (git hook, Drive) must not drop an event because a trailer is stale
+    // or the instruct lives in another project/clone. retrace_log rejects instead (agent can retry).
+    if (problem) toSeal = markCausedByUnverified(input, problem);
   }
-  if (input.idempotency_key) {
-    const existing = await store.byIdempotencyKey(input.project, input.idempotency_key);
+  if (toSeal.idempotency_key) {
+    const existing = await store.byIdempotencyKey(toSeal.project, toSeal.idempotency_key);
     if (existing) return { event: existing, deduped: true };
   }
-  const head = await store.head(input.project);
-  const event = await sealEvent(input, head);
+  const head = await store.head(toSeal.project);
+  const event = await sealEvent(toSeal, head);
   await store.insert(event);
   return { event, deduped: false };
 }

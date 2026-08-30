@@ -280,7 +280,7 @@ test("the header badges open a status pane whose numbers are the ledger's own /s
   const status = {
     project: "p", generated_at: "2026-08-29T02:18:50.128Z",
     integrity: { ok: true, checked: 2 }, events: { total: 2, last_event_at: "2026-08-29T02:18:28.000Z" },
-    capture: { artifact_refs: 3, artifact_refs_without_role: 1, amended_artifact_refs: 0, agent_events: 1, agent_events_without_model: 0, instructions: 1, instructions_without_followup: 0, commits: 4, unlinked_commits: 2, amended_unlinked_commits: 0, ineffective_amendments: 0 },
+    capture: { artifact_refs: 3, artifact_refs_without_role: 1, amended_artifact_refs: 0, agent_events: 1, agent_events_without_model: 0, instructions: 1, instructions_without_followup: 0, commits: 4, unlinked_commits: 2, amended_unlinked_commits: 0, ineffective_amendments: 0, unverified_links: 0 },
     causality: { eligible_events: 4, rooted_in_human_instruction: 3, attested_events: 0, broken_links: 0, unlinked: 1, coverage_pct: 75 },
     actors: [
       { type: "agent", id: "claude-code", events: 1, last_seen: "2026-08-29T01:56:35.759Z", models: ["claude-fable-5"] },
@@ -297,6 +297,7 @@ test("the header badges open a status pane whose numbers are the ledger's own /s
   assert.match(d, /<span class="num ok">intact<\/span> · 2 events re-hashed/);
   assert.match(d, /<span class="num bad">75<\/span>% — 3 rooted of 4 eligible events/);
   assert.match(d, /append-only amendments<\/td><td>0 commits · 0 roles/);
+  assert.match(d, /unverified caused_by links<\/td><td><span class="num ok">0<\/span>/);
   assert.match(d, /commits without a causal root<\/td><td><span class="num bad">2<\/span> \/ 4/);
   assert.match(d, /agent events without a model<\/td><td><span class="num ok">0<\/span> \/ 1/);
   assert.match(d, /data-actor="claude-code"[^>]*>claude-code<\/span>/);

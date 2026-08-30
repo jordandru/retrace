@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { buildServer, enrichLocation, clientSystem, detectIde, harnessSession } from "./index.js";
+import { appendEvent } from "@retrace-dev/core";
 import { mkdtempSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -125,6 +126,30 @@ test("project pin: writes to a non-pinned project are rejected, reads are not", 
   await c2.connect(ct2);
   const free = (await c2.callTool({ name: "retrace_log", arguments: { project: "anything", action: "edited", artifacts: [{ id: "repo:x#a", kind: "file" }] } })) as any;
   assert.notEqual(free.isError, true);
+}));
+
+test("retrace_log rejects a dangling or cross-project caused_by and writes nothing", async () => withActorEnv({ RETRACE_ON_BEHALF_OF: "jordan" }, async () => {
+  const store = new SqliteStore(":memory:");
+  const client = await connect(store);
+  await client.callTool({ name: "retrace_instruct", arguments: { project: "rpg", human_id: "jordan", instruction: "add a jab" } });
+  const dangling = (await client.callTool({
+    name: "retrace_log",
+    arguments: { project: "rpg", action: "edited", artifacts: [{ id: "repo:rpg#a.ts" }], caused_by: "evt_deadbeefdeadbeefdeadbeefdeadbeef" },
+  })) as any;
+  assert.equal(dangling.isError, true);
+  assert.match(dangling.content[0].text, /does not name an event/);
+  assert.equal((await store.all("rpg")).length, 1, "instruct only — agent can fix and retry");
+
+  const other = (await appendEvent(store, {
+    project: "other", actor: { type: "human", id: "jordan" }, action: "instructed", artifacts: [{ id: "task:other", role: "generated" }],
+  })).event;
+  const cross = (await client.callTool({
+    name: "retrace_log",
+    arguments: { project: "rpg", action: "edited", artifacts: [{ id: "repo:rpg#b.ts" }], caused_by: other.id },
+  })) as any;
+  assert.equal(cross.isError, true);
+  assert.match(cross.content[0].text, /project "other"/);
+  assert.equal((await store.all("rpg")).length, 1);
 }));
 
 test('commit guard: retrace_log rejects action "committed" and writes nothing', async () => {

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  adapterIdempotencyError, AdapterIdempotencyError, CausedByError, appendEvent,
+  adapterIdempotencyError, AdapterIdempotencyError, CAUSED_BY_UNVERIFIED_TAG, appendEvent,
   EventInput, Event, EventStore, Share,
 } from "./index.js";
 
@@ -61,20 +61,32 @@ test("appendEvent: a planted git: key on a non-commit does not shadow a later gi
   assert.equal(again.event.id, event.id);
 });
 
-test("appendEvent: caused_by is optional; if set it must name an event in the same project", async () => {
+test("appendEvent: caused_by is optional; dangling/cross-project/newer is sealed with the link kept", async () => {
   const store = new MemStore();
   const root = (await appendEvent(store, ev({ action: "instructed", actor: { type: "human", id: "j@x" }, artifacts: [{ id: "task:1" }] }))).event;
   const child = await appendEvent(store, ev({ caused_by: root.id }));
   assert.equal(child.event.caused_by, root.id);
-  await assert.rejects(
-    () => appendEvent(store, ev({ caused_by: "evt_deadbeefdeadbeefdeadbeefdeadbeef" })),
-    (e: unknown) => e instanceof CausedByError && /does not name an event/.test((e as Error).message),
-  );
+  assert.ok(!child.event.tags?.includes(CAUSED_BY_UNVERIFIED_TAG));
+
+  const missing = (await appendEvent(store, ev({ caused_by: "evt_deadbeefdeadbeefdeadbeefdeadbeef" }))).event;
+  assert.equal(missing.caused_by, "evt_deadbeefdeadbeefdeadbeefdeadbeef");
+  assert.ok(missing.tags?.includes(CAUSED_BY_UNVERIFIED_TAG));
+  assert.equal(missing.method?.params?.caused_by_problem, "missing");
+
   const other = (await appendEvent(store, ev({ project: "other", action: "instructed", actor: { type: "human", id: "j@x" } }))).event;
-  await assert.rejects(
-    () => appendEvent(store, ev({ caused_by: other.id })),
-    (e: unknown) => e instanceof CausedByError && /project "other"/.test((e as Error).message),
-  );
+  const cross = (await appendEvent(store, ev({ caused_by: other.id }))).event;
+  assert.equal(cross.caused_by, other.id);
+  assert.ok(cross.tags?.includes(CAUSED_BY_UNVERIFIED_TAG));
+  assert.equal(cross.method?.params?.caused_by_problem, "wrong_project");
+
+  const newer = (await appendEvent(store, ev({
+    caused_by: root.id,
+    timestamp: "2020-01-01T00:00:00.000Z",
+  }))).event;
+  assert.equal(newer.caused_by, root.id);
+  assert.ok(newer.tags?.includes(CAUSED_BY_UNVERIFIED_TAG));
+  assert.equal(newer.method?.params?.caused_by_problem, "not_older");
+
   const none = await appendEvent(store, ev({}));
   assert.equal(none.event.caused_by, undefined);
 });

@@ -32,6 +32,7 @@ test("project status: integrity, causal coverage, capture gaps, actors and integ
   assert.equal(s.capture.amended_artifact_refs, 0);
   assert.equal(s.capture.amended_unlinked_commits, 0);
   assert.equal(s.capture.ineffective_amendments, 0);
+  assert.equal(s.capture.unverified_links, 0);
   assert.deepEqual(s.actors.map((a) => [a.type, a.id, a.events]), [["agent", "gemini", 2], ["human", "jordan@example.com", 2]]);
   assert.deepEqual(s.integrations.map((i) => [i.system, i.events]), [["gemini-cli", 2], ["git", 2]]);
 });
@@ -68,6 +69,14 @@ test("status counts sealed amendments that fail exists/older/same-project instea
   assert.equal(s.capture.ineffective_amendments, 1);
   assert.equal(s.capture.amended_unlinked_commits, 0);
   assert.match(renderProjectStatus(s), /1 rejected links/);
+});
+
+test("status counts sealed unverified caused_by links", async () => {
+  const store = new MemStore();
+  await appendEvent(store, { project: "p", actor: { type: "agent", id: "a" }, action: "edited", artifacts: [{ id: "x" }], caused_by: "evt_stale_from_another_clone" });
+  const s = await buildProjectStatus(store, "p");
+  assert.equal(s.capture.unverified_links, 1);
+  assert.match(renderProjectStatus(s), /1 unverified links/);
 });
 
 test("causalRootState distinguishes missing parents and absent links", async () => {

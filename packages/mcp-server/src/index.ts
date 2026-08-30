@@ -31,7 +31,8 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import {
   Actor, Action, ArtifactRef, Change, Location, Method, EventInput, applyDefaultRoles,
-  appendEvent, verifyProject, explainEvent, renderTimeline, renderWhyChain, describeEvent,
+  appendEvent, CausedByError, causedByProblem, causedByErrorMessage,
+  verifyProject, explainEvent, renderTimeline, renderWhyChain, describeEvent,
   buildExportBundle, verifyExportBundle, renderReportHtml, parseSigningKey, newShareId,
   buildLineage, renderLineageDot, renderLineageMermaid, renderLineageText,
   buildProjectStatus, renderProjectStatus,
@@ -219,7 +220,7 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
           "executed/sent action (a deployment, a report, a message) — the default treats those refs as inputs.",
         ),
         intent: z.string().optional().describe("WHY: the reason for this action, in one sentence"),
-        caused_by: z.string().optional().describe("Event id of the instruction/action that caused this one"),
+        caused_by: z.string().optional().describe("Event id of the instruction/action that caused this one. Must name an existing same-project event; a dangling or cross-project id is rejected so the agent can fix and retry. Adapters (git hook, Drive) keep the link and mark it unverified instead."),
         actor: Actor.partial().optional().describe("Override the default actor (defaults from env)"),
         change: Change.optional().describe("WHAT changed: summary, diff, before/after hashes"),
         location: Location.optional().describe("WHERE: path/url/environment/system. session/device/client/ide/workspace/surface are stamped by the server and ignored if you send them."),
@@ -241,6 +242,11 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
         artifacts: applyDefaultRoles(args.action, args.artifacts),
         location: enrichLocation(args.location, locationDefaults()),
       });
+      if (input.caused_by) {
+        const parent = await store.get(input.caused_by);
+        const problem = causedByProblem(parent, input);
+        if (problem) throw new CausedByError(causedByErrorMessage(input.caused_by, problem, { parentProject: parent?.project, project: input.project }));
+      }
       const { event, deduped } = remote ? await remote.append(input) : await appendEvent(store, input);
       return {
         content: [{ type: "text", text: `${deduped ? "(deduped) " : ""}logged ${event.id} seq=${event.seq}\n${describeEvent(event)}` }],

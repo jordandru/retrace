@@ -288,6 +288,29 @@ test("git adapter: grok trailers and Co-Authored-By map to actor id grok, not cl
   assert.deepEqual(coauthored.actor, { type: "agent", id: "grok", model: "grok-4-6", display_name: "Grok 4.6", on_behalf_of: "jordan@slcwitit.com" });
 });
 
+test("git adapter: a stale Retrace-Caused-By still logs the commit, marked unverified", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "retrace-git-stale-"));
+  const db = join(dir, "ledger.db");
+  const env = { RETRACE_DB: db, RETRACE_PROJECT: "rpg" };
+  sh(dir, "git", ["init", "-q", "-b", "main"]);
+  writeFileSync(join(dir, "a.ts"), "export const a = 1;\n");
+  sh(dir, "git", ["add", "."]);
+  sh(dir, "git", ["commit", "-qm", "initial"]);
+  sh(dir, "node", [bin, "install", "--repo", dir], env);
+  writeFileSync(join(dir, "a.ts"), "export const a = 2;\n");
+  sh(dir, "git", ["commit", "-qam", "bump"], env);
+  writeFileSync(join(dir, "a.ts"), "export const a = 3;\n");
+  sh(dir, "git", ["commit", "-qam", "stale trailer\n\nRetrace-Actor: grok\nRetrace-Model: grok-4.6\nRetrace-Caused-By: evt_deadbeefdeadbeefdeadbeefdeadbeef"], env);
+
+  const commits = (await new SqliteStore(db).all("rpg")).filter((e) => e.action === "committed");
+  assert.equal(commits.length, 2, "hook must not drop a commit because the trailer names a missing event");
+  const stale = commits[1];
+  assert.equal(stale.actor.id, "grok");
+  assert.equal(stale.caused_by, "evt_deadbeefdeadbeefdeadbeefdeadbeef");
+  assert.ok(stale.tags?.includes("caused_by:unverified"));
+  assert.equal(stale.method?.params?.caused_by_problem, "missing");
+});
+
 // ---- WHERE: the shared session key, and tty vs agent (see ttySurface) ----
 
 test("ttySurface: reads the controlling terminal from /proc/self/stat, surviving the hook's own output redirection", () => {

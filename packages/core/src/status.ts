@@ -2,6 +2,7 @@ import { Event } from "./schema.js";
 import { VerifyResult } from "./chain.js";
 import { EventStore, verifyProject } from "./store.js";
 import { collectProvenanceAmendments, collectRejectedAmendments } from "./amendment.js";
+import { CAUSED_BY_UNVERIFIED_TAG } from "./store.js";
 
 export type StatusActor = { type: Event["actor"]["type"]; id: string; events: number; last_seen: string; models: string[] };
 export type StatusIntegration = { system: string; events: number; last_seen: string };
@@ -22,6 +23,7 @@ export type ProjectStatus = {
     amended_unlinked_commits: number;
     amended_artifact_refs: number;
     ineffective_amendments: number;
+    unverified_links: number;
   };
   causality: { eligible_events: number; rooted_in_human_instruction: number; attested_events: number; broken_links: number; unlinked: number; coverage_pct: number };
   actors: StatusActor[];
@@ -96,6 +98,7 @@ export async function buildProjectStatus(store: EventStore, project: string, now
       unlinked_commits: commits.filter((e) => causalRootState(e, byId) !== "rooted" && !attested.has(e.id)).length,
       amended_unlinked_commits: commits.filter((e) => attested.has(e.id)).length,
       ineffective_amendments: rejectedAmendments.length,
+      unverified_links: events.filter((e) => e.tags?.includes(CAUSED_BY_UNVERIFIED_TAG)).length,
     },
     causality: {
       eligible_events: eligible.length,
@@ -113,7 +116,7 @@ export async function buildProjectStatus(store: EventStore, project: string, now
 export function renderProjectStatus(s: ProjectStatus): string {
   const health = s.integrity.ok ? "VERIFIED" : "BROKEN";
   return `${s.project} — ${health}\n` +
-    `${s.events.total} events · ${s.causality.coverage_pct}% causal coverage · ${s.capture.unlinked_commits}/${s.capture.commits} unlinked commits\n` +
+    `${s.events.total} events · ${s.causality.coverage_pct}% causal coverage · ${s.capture.unlinked_commits}/${s.capture.commits} unlinked commits · ${s.capture.unverified_links} unverified links\n` +
     `${s.capture.agent_events_without_model}/${s.capture.agent_events} agent events missing model · ${s.capture.instructions_without_followup}/${s.capture.instructions} instructions without follow-up · ${s.capture.artifact_refs_without_role}/${s.capture.artifact_refs} artifact refs missing role\n` +
     `append-only amendments: ${s.capture.amended_unlinked_commits} commits attested · ${s.capture.amended_artifact_refs} artifact roles supplied · ${s.capture.ineffective_amendments} rejected links\n` +
     `actors: ${s.actors.map((a) => `${a.type}/${a.id} (${a.events})`).join(", ") || "none"}\n` +

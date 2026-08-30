@@ -54,7 +54,13 @@ export class RemoteStore implements EventStore {
     return null;
   }
   async get(id: string) {
-    return this.req<Event | null>("GET", `/events/${encodeURIComponent(id)}`);
+    const res = await fetch(this.baseUrl + `/events/${encodeURIComponent(id)}`, {
+      method: "GET",
+      headers: retraceHeaders(this.token),
+    });
+    if (res.status === 404) return null;
+    if (!res.ok) throw new Error(`Retrace API GET /events/${id} → ${res.status}: ${await res.text()}`);
+    return (await res.json()) as Event;
   }
   async all(project: string) {
     return this.req<Event[]>("GET", `/projects/${encodeURIComponent(project)}/events?limit=100000`);
