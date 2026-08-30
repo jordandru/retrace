@@ -50,6 +50,30 @@ export function instructRootFinding(actorType: string, why: Event[]): Finding {
   return result("fail", "instruct root", `${head.id} is not rooted in a human instruction; add Retrace-Caused-By: evt_…`);
 }
 
+/**
+ * Trailer-omit: an agent shell with no Retrace-Actor is stored as human, so instruct-root is skipped.
+ * Evidence lives on the sealed ledger event (`location.session` / `surface=agent` from the live hook),
+ * not on doctor's reconstruct of HEAD (that path is not `live`, so it never stamps session/surface).
+ */
+export function agentEvidenceOnHuman(event: { actor: { type: string; id?: string }; location?: { session?: string; surface?: string } }): string[] {
+  if (event.actor.type !== "human") return [];
+  const clues: string[] = [];
+  if (event.location?.session) clues.push("location.session");
+  if (event.location?.surface === "agent") clues.push("location.surface=agent");
+  return clues;
+}
+
+export function attributionFinding(
+  gate: boolean,
+  event: { actor: { type: string; id?: string }; location?: { session?: string; surface?: string } },
+): Finding {
+  const clues = agentEvidenceOnHuman(event);
+  if (!clues.length) return result("pass", "attribution", `${event.actor.type}${event.actor.id ? "/" + event.actor.id : ""} has no agent-evidence mismatch`);
+  const who = event.actor.id ? `human/${event.actor.id}` : "human";
+  const detail = `${who} but carries ${clues.join(" · ")}; trailer-omit looks human and bypasses the instruct-root gate — add Retrace-Actor and Retrace-Caused-By`;
+  return result(gate ? "fail" : "warn", "attribution", detail);
+}
+
 export function missingSchema(remote: Record<string, unknown>, local = schemaSurface()): string[] {
   return Object.entries(local).flatMap(([group, keys]) => {
     const seen = Array.isArray(remote[group]) ? remote[group] as unknown[] : [];
@@ -157,16 +181,18 @@ async function main() {
         if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
         const events: Event[] = await res.json();
         const delivery = headDelivery(gate, commit, events.length > 0);
-        findings.push(events.length ? result("pass", "HEAD delivery", `${commit} is event #${events.at(-1)?.seq}`) : delivery);
-        if (gate && events.length && headEvent.actor.type !== "agent") {
-          findings.push(instructRootFinding(headEvent.actor.type, []));
-        } else if (gate && events.length) {
-          const eventId = events.at(-1)?.id;
+        const sealed = events.at(-1);
+        findings.push(events.length ? result("pass", "HEAD delivery", `${commit} is event #${sealed?.seq}`) : delivery);
+        if (sealed) findings.push(attributionFinding(gate, sealed));
+        if (gate && events.length && (sealed?.actor.type ?? headEvent.actor.type) === "agent") {
+          const eventId = sealed?.id;
           try {
             const whyRes = await fetch(`${url}/events/${encodeURIComponent(eventId ?? "")}/why`, { headers });
             if (!whyRes.ok) throw new Error(`HTTP ${whyRes.status}: ${await whyRes.text()}`);
-            findings.push(instructRootFinding(headEvent.actor.type, await whyRes.json() as Event[]));
+            findings.push(instructRootFinding("agent", await whyRes.json() as Event[]));
           } catch (e: any) { findings.push(result("fail", "instruct root", e.message)); }
+        } else if (gate && events.length) {
+          findings.push(instructRootFinding(sealed?.actor.type ?? headEvent.actor.type, []));
         }
       } catch (e: any) { findings.push(result("fail", "HEAD delivery", e.message)); }
     }

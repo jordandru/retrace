@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Credential, Event, schemaSurface } from "@retrace-dev/core";
-import { credentialAuthorization, headDelivery, instructRootFinding, missingSchema, parseDoctorArgs } from "./doctor.js";
+import { attributionFinding, credentialAuthorization, headDelivery, instructRootFinding, missingSchema, parseDoctorArgs } from "./doctor.js";
 
 const why = (rows: Array<{ id: string; action: Event["action"]; type: Event["actor"]["type"]; caused_by?: string }>): Event[] =>
   rows.map((r, seq) => ({
@@ -62,4 +62,18 @@ test("doctor: instruct root is required for agent commits only", () => {
   assert.equal(instructRootFinding("agent", []).level, "fail");
   assert.equal(instructRootFinding("agent", why([{ id: "evt_commit", action: "committed", type: "agent" }])).level, "fail");
   assert.equal(instructRootFinding("agent", why([{ id: "evt_commit", action: "committed", type: "agent", caused_by: "evt_missing" }])).level, "fail");
+});
+
+test("doctor: a human commit with agent session/surface is warn locally and fail in --gate", () => {
+  const human = { actor: { type: "human" as const, id: "jordan@example.com" } };
+  assert.equal(attributionFinding(false, human).level, "pass");
+  assert.equal(attributionFinding(true, { ...human, location: { surface: "tty" } }).level, "pass");
+  assert.equal(attributionFinding(true, { actor: { type: "agent", id: "grok" }, location: { session: "sess", surface: "agent" } }).level, "pass");
+  const omitted = attributionFinding(false, { ...human, location: { session: "sess-abc", surface: "agent" } });
+  assert.equal(omitted.level, "warn");
+  assert.match(omitted.detail, /location.session/);
+  assert.match(omitted.detail, /location.surface=agent/);
+  const gated = attributionFinding(true, { ...human, location: { session: "sess-abc" } });
+  assert.equal(gated.level, "fail");
+  assert.match(gated.detail, /trailer-omit/);
 });
