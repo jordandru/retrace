@@ -1,4 +1,4 @@
-# Retrace — setup walkthrough (v0.1.1)
+# Retrace — setup walkthrough (v0.1.2)
 
 Work top to bottom. Each stage ends with a check. Commands assume macOS/Linux or **Ubuntu WSL**. Fill in `<angle brackets>`.
 
@@ -43,7 +43,7 @@ Note the absolute path for MCP configs:
 pwd
 ```
 
-Consumers who only need the CLI can skip the clone and use `npx @retrace-dev/cli` / `npm i -g @retrace-dev/cli@0.1.1`.
+Consumers who only need the CLI can skip the clone and use `npx @retrace-dev/cli` / `npm i -g @retrace-dev/cli@0.1.2`. Bundles sealed after 2026-08-30 need verify >= 0.1.2.
 
 ---
 
