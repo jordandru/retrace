@@ -161,6 +161,19 @@ Omitting trailers still looks human and bypasses the instruct-root check. Do not
 
 ---
 
+### 4d. Scheduled head checkpoint (optional, recommended)
+
+`.github/workflows/retrace-checkpoint.yml` appends a signed head checkpoint to `.retrace/checkpoints.jsonl` daily and opens a PR; merge it and the head is witnessed by git, GitHub and the ledger's own `merged` event. One-time setup:
+
+```bash
+RETRACE_SIGNING_KEY_FILE=~/.retrace/checkpoint-key.json node packages/mcp-server/dist/export-cli.js keygen --print-private   # a NEW key, not the Worker's
+gh secret set RETRACE_CHECKPOINT_KEY      # paste the private JWK printed above
+# Settings → Actions → General → "Allow GitHub Actions to create and approve pull requests" must be on
+gh workflow run retrace-checkpoint.yml    # first run on demand; merge the PR it opens
+```
+
+**Check:** `retrace-export verify <bundle.json> --checkpoint .retrace/checkpoints.jsonl` on a fresh export reports `MATCHES` or `EXTENDS`; a bundle missing the checkpointed seq reports `CONFLICT` and is `NOT VALID`.
+
 ## Stage 5 — Cloudflare Worker + D1
 
 Already applied in this checkout (`apps/worker/wrangler.toml` → `retrace-db`). On a new account:

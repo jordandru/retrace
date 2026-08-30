@@ -1,0 +1,84 @@
+# Scheduled head checkpoint. A hash chain proves present events were not altered; a checkpoint committed to git
+# proves the head existed at a point in time, so a later export that drops the tail is detectable
+# (`retrace-export verify <bundle> --checkpoint .retrace/checkpoints.jsonl`). This job takes a verified full export
+# of the ledger, appends a signed checkpoint to .retrace/checkpoints.jsonl, and opens a pull request — a human merge
+# is the witness, and the GitHub webhook logs that merge into the ledger, which is how the merge commit passes the gate.
+#
+# Secrets: RETRACE_CI_TOKEN (Worker credential that can GET; same as the gate) and RETRACE_CHECKPOINT_KEY (a private
+# Ed25519 JWK used ONLY for checkpoints — never the Worker's signing key). Mint it with
+#   RETRACE_SIGNING_KEY_FILE=~/.retrace/checkpoint-key.json node packages/mcp-server/dist/export-cli.js keygen --print-private
+# and `gh secret set RETRACE_CHECKPOINT_KEY`. The repo must allow Actions to create pull requests
+# (Settings → Actions → General → "Allow GitHub Actions to create and approve pull requests").
+name: retrace-checkpoint
+on:
+  schedule:
+    - cron: "17 6 * * *"   # daily 06:17 UTC
+  workflow_dispatch:
+permissions:
+  contents: write
+  pull-requests: write
+concurrency:
+  group: retrace-checkpoint
+  cancel-in-progress: false
+jobs:
+  checkpoint:
+    runs-on: ubuntu-latest
+    env:
+      PROJECT: retrace
+      CHECKPOINTS: .retrace/checkpoints.jsonl
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Append a signed checkpoint from a verified full export
+        id: cp
+        env:
+          RETRACE_URL: https://retrace-api.slcwitit.workers.dev
+          RETRACE_TOKEN: ${{ secrets.RETRACE_CI_TOKEN }}
+          RETRACE_SIGNING_KEY: ${{ secrets.RETRACE_CHECKPOINT_KEY }}
+          RETRACE_ISSUER: retrace-checkpoint (GitHub Actions)
+        run: |
+          set -euo pipefail
+          if [ -z "${RETRACE_SIGNING_KEY}" ]; then
+            echo "::error::RETRACE_CHECKPOINT_KEY is not set; refusing to sign a checkpoint with a throwaway key" >&2
+            exit 1
+          fi
+          out=$(node packages/mcp-server/dist/export-cli.js checkpoint "$PROJECT" --out "$CHECKPOINTS" 2>&1 | grep -v ExperimentalWarning | grep -v 'trace-warnings' || true)
+          echo "$out"
+          if echo "$out" | grep -q '^unchanged'; then echo "changed=false" >> "$GITHUB_OUTPUT"; exit 0; fi
+          if ! echo "$out" | grep -q '^appended head'; then echo "::error::checkpoint did not append" >&2; exit 1; fi
+          line=$(tail -n 1 "$CHECKPOINTS")
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "seq=$(echo "$line" | jq -r .seq)" >> "$GITHUB_OUTPUT"
+          echo "head=$(echo "$line" | jq -r '.head_hash[0:12]')" >> "$GITHUB_OUTPUT"
+          echo "total=$(echo "$line" | jq -r .total_events)" >> "$GITHUB_OUTPUT"
+          echo "signer=$(echo "$line" | jq -r '.signer.kid // "unsigned"')" >> "$GITHUB_OUTPUT"
+          echo "issuer=$(echo "$line" | jq -r '.source.issuer_kid // "unsigned"')" >> "$GITHUB_OUTPUT"
+      - name: Open a pull request with the new checkpoint
+        if: steps.cp.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SEQ: ${{ steps.cp.outputs.seq }}
+          HEAD12: ${{ steps.cp.outputs.head }}
+          TOTAL: ${{ steps.cp.outputs.total }}
+          SIGNER: ${{ steps.cp.outputs.signer }}
+          ISSUER: ${{ steps.cp.outputs.issuer }}
+        run: |
+          set -euo pipefail
+          branch="checkpoint/$(date -u +%Y%m%d)-${SEQ}"
+          git config user.name "retrace-checkpoint[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          git add "$CHECKPOINTS"
+          git commit -m "Checkpoint ${PROJECT} head #${SEQ} ${HEAD12}" \
+            -m "Signed head checkpoint from a verified full export (${TOTAL} events, issuer kid ${ISSUER}, checkpoint signer kid ${SIGNER}). Merging this PR is the witness: a later export that no longer contains #${SEQ} with this hash is NOT VALID under verify --checkpoint."
+          git push -u origin "$branch"
+          gh pr create --base main --head "$branch" \
+            --title "Checkpoint ${PROJECT} head #${SEQ}" \
+            --body "$(printf 'Scheduled head checkpoint for project `%s`: seq **#%s**, head `%s…`, %s events, issuer kid `%s`, checkpoint signer kid `%s`.\n\nMerging records that this head existed now. Verify any later bundle with:\n\n    retrace-export verify <bundle.json> --checkpoint .retrace/checkpoints.jsonl\n\nRetrace-Caused-By: evt_4b37cc72831a4434937b339a1873e27f' "$PROJECT" "$SEQ" "$HEAD12" "$TOTAL" "$ISSUER" "$SIGNER")"
