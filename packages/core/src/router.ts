@@ -30,7 +30,7 @@
  */
 import { z } from "zod";
 import { Actor, ActorType, EventInput, schemaSurface } from "./schema.js";
-import { EventStore, appendEvent, AdapterIdempotencyError, CausedByError, verifyProject, explainEvent, newShareId, shareIsLive, Share, isHeadMovedError } from "./store.js";
+import { EventStore, appendEvent, AdapterIdempotencyError, CausedByError, verifyProject, explainEvent, newShareId, shareIsLive, Share, isHeadMovedError, SEALED_BY_PARAM, SEALED_BY_OWNER, SEALED_BY_UNAUTHENTICATED, SEALED_BY_GITHUB_WEBHOOK } from "./store.js";
 import { sealEvent } from "./chain.js";
 import { buildExportBundle, verifyExportBundle } from "./export.js";
 import { renderReportHtml } from "./report.js";
@@ -105,6 +105,17 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
   const { token } = opts;
   const credentials = opts.credentials ?? [];
   type Principal = { kind: "owner" } | { kind: "credential"; credential: Credential } | null;
+  /** WHO SEALED IT. Stamped server-side on every write so a reader can tell a pinned-credential event (the Worker
+   *  fixed the actor) from an owner-asserted one (the body actor was stored verbatim) — without this the two are
+   *  indistinguishable in the ledger, which is the hole a skeptic attacks first. Server wins over any caller value. */
+  const sealedBy = (principal: Principal): string => {
+    if (!principal) return SEALED_BY_UNAUTHENTICATED;
+    if (principal.kind === "owner") return SEALED_BY_OWNER;
+    const c = principal.credential;
+    return `${c.trust === "assert" ? "assert" : "pinned"}:${c.name ?? `${c.actor.type}/${c.actor.id}`}`;
+  };
+  const stampSealedBy = <T extends { method?: EventInput["method"] }>(input: T, by: string): T =>
+    ({ ...input, method: { ...input.method, params: { ...input.method?.params, [SEALED_BY_PARAM]: by } } });
   /** Who is calling. `null` = unauthenticated (only valid when no token is configured at all). */
   const authenticate = (req: Request, url: URL): Principal | "unauthorized" => {
     const auth = req.headers.get("authorization") ?? "";
@@ -206,8 +217,9 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
         for (const input of inputs) {
           const parsed = EventInput.safeParse(input);
           if (!parsed.success) { results.push({ error: parsed.error.issues }); continue; }
+          const stamped = stampSealedBy(parsed.data, SEALED_BY_GITHUB_WEBHOOK);
           for (let attempt = 0; ; attempt++) {
-            try { const r = await appendEvent(store, parsed.data); results.push({ id: r.event.id, seq: r.event.seq, deduped: r.deduped }); break; }
+            try { const r = await appendEvent(store, stamped); results.push({ id: r.event.id, seq: r.event.seq, deduped: r.deduped }); break; }
             catch (e: any) {
               const client = writeClientError(e);
               if (client) return json({ error: client }, 400);
@@ -228,8 +240,9 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
         for (const input of inputs) {
           const parsed = EventInput.safeParse(input);
           if (!parsed.success) { results.push({ error: parsed.error.issues }); continue; }
+          const stamped = stampSealedBy(parsed.data, sealedBy(principal));
           for (let attempt = 0; ; attempt++) {
-            try { const r = await appendEvent(store, parsed.data); results.push({ id: r.event.id, seq: r.event.seq, deduped: r.deduped }); break; }
+            try { const r = await appendEvent(store, stamped); results.push({ id: r.event.id, seq: r.event.seq, deduped: r.deduped }); break; }
             catch (e: any) {
               const client = writeClientError(e);
               if (client) return json({ error: client }, 400);
@@ -275,7 +288,7 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
         if (!parsed.success) return json({ error: "invalid event", issues: parsed.error.issues }, 400);
         const resolved = resolveActor(principal, parsed.data.actor, parsed.data.action);
         if ("error" in resolved) return json(resolved, 403);
-        const input = { ...parsed.data, actor: resolved.actor };
+        const input = stampSealedBy({ ...parsed.data, actor: resolved.actor }, sealedBy(principal));
         // A relayed instruction root is stamped with the credential's agent id, so the chain records that the human
         // did not write this event themselves — their agent did, on their behalf. Keyed on the carve-out's own flag:
         // assert-trust human events (git hook, forwarders) and other human paths must NOT get a relayed_by stamp.

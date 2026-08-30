@@ -348,7 +348,9 @@ test("credentials: assert-trust token and the owner token store the body actor v
   assert.equal((await post(h, "/events", ev({ actor: { type: "agent", id: "claude-cowork" } }), "tok")).status, 201);
   assert.deepEqual(store.events.map((e) => e.actor), [human, { type: "agent", id: "claude-cowork" }]);
   // an assert-trust credential RELAYS the human verbatim — it must not get the carve-out's relayed_by stamp
-  assert.deepEqual(store.events[0].method, { tool: "git" }); // exact match: no params, hence no relayed_by
+  assert.equal(store.events[0].method?.tool, "git");
+  assert.equal(store.events[0].method?.params?.relayed_by, undefined, "assert-trust human events are not relayed instruct roots");
+  assert.match(String(store.events[0].method?.params?.sealed_by), /^assert:/, "but every write is stamped with who sealed it");
 });
 
 test("credentials: Bearer only, unknown tokens 401, reads allowed, DELETE/share/gdrive forbidden for pinned tokens", async () => {
@@ -539,4 +541,30 @@ test("POST /events silently strips unknown keys — the exact failure the probe 
   assert.equal(stored.location?.path, "/x");
   assert.ok(!("a_field_from_a_newer_build" in (stored.location ?? {})),
     "accepted, sealed and hashed WITHOUT the field, and with no error anywhere — hence GET /api");
+});
+
+test("POST /events stamps method.params.sealed_by server-side: owner, pinned:<name>, assert:<name>; a caller value is overwritten; status counts them", async () => {
+  const store = new MemStore();
+  const creds = parseCredentials(JSON.stringify([
+    { token: "pinnedtoken12345", name: "claude-code MCP (pinned)", actor: { type: "agent", id: "claude-code", on_behalf_of: "jordan@example.com" } },
+    { token: "asserttoken12345", trust: "assert", actor: { type: "system", id: "retrace-git" }, allowed_actors: [{ type: "human", id: "jordan@example.com" }] },
+    { token: "unnamedpin123456", actor: { type: "agent", id: "codex" } },
+  ]));
+  const h = createHandler(store, { token: "tok", credentials: creds });
+  const owner = await post(h, "/events", ev({ project: "p", method: { tool: "curl", params: { sealed_by: "pinned:forged" } } }), "tok");
+  assert.equal(owner.status, 201);
+  assert.equal((await owner.json()).event.method.params.sealed_by, "owner", "server wins over a caller-supplied sealed_by");
+  const pinned = await post(h, "/events", ev({ project: "p", actor: { type: "agent", id: "whatever" } }), "pinnedtoken12345");
+  assert.equal(pinned.status, 201);
+  const pe = (await pinned.json()).event;
+  assert.equal(pe.actor.id, "claude-code");
+  assert.equal(pe.method.params.sealed_by, "pinned:claude-code MCP (pinned)");
+  const unnamed = await post(h, "/events", ev({ project: "p" }), "unnamedpin123456");
+  assert.equal((await unnamed.json()).event.method.params.sealed_by, "pinned:agent/codex", "unnamed credentials fall back to type/id");
+  const asserted = await post(h, "/events", ev({ project: "p", actor: { type: "human", id: "jordan@example.com" }, action: "committed", method: { tool: "git" }, artifacts: [{ id: "commit:p@abc" }] }), "asserttoken12345");
+  assert.equal(asserted.status, 201);
+  assert.equal((await asserted.json()).event.method.params.sealed_by, "assert:system/retrace-git");
+  const st = await (await get(h, "/projects/p/status", "tok")).json();
+  assert.deepEqual(st.capture.sealed_by, { pinned: 2, assert: 1, webhook: 0, owner: 1, unauthenticated: 0, unstamped: 0 });
+  assert.equal(st.capture.agent_events_not_pinned, 1, "the owner-asserted agent event is the one a skeptic cannot trust");
 });

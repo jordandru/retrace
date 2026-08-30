@@ -87,3 +87,17 @@ test("causalRootState distinguishes missing parents and absent links", async () 
   assert.equal(causalRootState(unlinked, byId), "unlinked");
   assert.equal(causalRootState(broken, byId), "broken");
 });
+
+test("status: sealed_by counts and agent_events_not_pinned distinguish Worker-fixed WHO from producer testimony", async () => {
+  const store = new MemStore();
+  const root = (await appendEvent(store, { project: "p", actor: { type: "human", id: "jordan@example.com" }, action: "instructed", artifacts: [{ id: "task:1", role: "generated" }], method: { params: { sealed_by: "pinned:claude-code MCP (pinned)", relayed_by: "claude-code" } } })).event;
+  await appendEvent(store, { project: "p", actor: { type: "agent", id: "claude-code", model: "claude-fable-5" }, action: "edited", artifacts: [{ id: "repo:p#a.ts", role: "both" }], caused_by: root.id, method: { params: { sealed_by: "pinned:claude-code MCP (pinned)" } } });
+  await appendEvent(store, { project: "p", actor: { type: "agent", id: "claude-code", model: "claude-fable-5" }, action: "edited", artifacts: [{ id: "repo:p#b.ts", role: "both" }], caused_by: root.id, method: { params: { sealed_by: "owner" } } });
+  await appendEvent(store, { project: "p", actor: { type: "agent", id: "claude-code" }, action: "committed", artifacts: [{ id: "commit:p@abc", role: "generated" }], caused_by: root.id, method: { tool: "git", params: { sealed_by: "assert:git hook (assert)" } } });
+  await appendEvent(store, { project: "p", actor: { type: "system", id: "github-actions" }, action: "executed", artifacts: [{ id: "run:p#1", role: "generated" }], method: { params: { sealed_by: "webhook:github" } } });
+  await appendEvent(store, { project: "p", actor: { type: "agent", id: "gemini" }, action: "read", artifacts: [{ id: "repo:p#c.ts", role: "used" }], caused_by: root.id });
+  const s = await buildProjectStatus(store, "p", new Date("2026-01-01T00:00:00Z"));
+  assert.deepEqual(s.capture.sealed_by, { pinned: 2, assert: 1, webhook: 1, owner: 1, unauthenticated: 0, unstamped: 1 });
+  assert.equal(s.capture.agent_events_not_pinned, 3, "owner-asserted + assert-hook + unstamped agent events");
+  assert.match(renderProjectStatus(s), /sealed by: 2 pinned · 1 assert · 1 webhook · 1 owner-asserted · 0 unauthenticated · 1 unstamped; 3\/4 agent events not pinned/);
+});

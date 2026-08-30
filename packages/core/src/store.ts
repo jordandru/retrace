@@ -129,6 +129,25 @@ export class CausedByError extends Error {
 
 /** Hash-covered tag stamped when a caused_by is kept but does not pass exists/older/same-project. */
 export const CAUSED_BY_UNVERIFIED_TAG = "caused_by:unverified";
+
+/** method.params key the Worker stamps with WHO SEALED an event: "owner" (body actor stored verbatim under the owner
+ *  token), "pinned:<credential>" (actor fixed by the Worker), "assert:<credential>" (actor bounded by an allow-list),
+ *  "webhook:github" (HMAC-verified delivery) or "unauthenticated". Absent on events sealed by a local MCP/SQLite
+ *  process or before this stamp existed. Server wins; a caller-supplied value is overwritten. */
+export const SEALED_BY_PARAM = "sealed_by";
+export const SEALED_BY_OWNER = "owner";
+export const SEALED_BY_UNAUTHENTICATED = "unauthenticated";
+export const SEALED_BY_GITHUB_WEBHOOK = "webhook:github";
+/** Coarse class of a sealed_by value, for status counting. */
+export function sealedByKind(v: unknown): "owner" | "pinned" | "assert" | "webhook" | "unauthenticated" | "unstamped" {
+  if (typeof v !== "string" || !v) return "unstamped";
+  if (v === SEALED_BY_OWNER) return "owner";
+  if (v === SEALED_BY_UNAUTHENTICATED) return "unauthenticated";
+  if (v.startsWith("pinned:")) return "pinned";
+  if (v.startsWith("assert:")) return "assert";
+  if (v.startsWith("webhook:")) return "webhook";
+  return "unstamped";
+}
 export type CausedByProblem = "missing" | "wrong_project" | "not_older";
 
 /** Classify a claimed parent. `not_older` is timestamp (Drive Activity can predate the current instruct). */
