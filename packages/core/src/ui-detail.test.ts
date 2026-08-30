@@ -11,15 +11,21 @@ import { join, dirname } from "node:path";
 const html = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../ui/retrace.html"), "utf8");
 const script = html.match(/<script>([\s\S]*)<\/script>/)![1];
 
-function runUI(events: any[], opts: { status?: any } = {}) {
+function runUI(events: any[], opts: { status?: any; search?: string; apiTokens?: Record<string, string> } = {}) {
   const clicks: ((ev: any) => void)[] = [];
   const els = new Map<string, any>();
-  const makeEl = (): any => ({
-    innerHTML: "", value: "", textContent: "", title: "", style: {}, dataset: {},
-    classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
-    addEventListener() {}, querySelector: () => makeEl(), querySelectorAll: () => [],
-    lastElementChild: { textContent: "" }, clientWidth: 1000,
-  });
+  const makeEl = (): any => {
+    const listeners = new Map<string, (ev: any) => void>();
+    const el: any = {
+      innerHTML: "", value: "", textContent: "", title: "", style: {}, dataset: {},
+      classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+      addEventListener(type: string, fn: (ev: any) => void) { listeners.set(type, fn); },
+      dispatch(type: string) { return listeners.get(type)?.({ target: el }); },
+      querySelector: () => makeEl(), querySelectorAll: () => [],
+      lastElementChild: { textContent: "" }, clientWidth: 1000,
+    };
+    return el;
+  };
   const $ = (sel: string) => { if (!els.has(sel)) els.set(sel, makeEl()); return els.get(sel); };
   const doc = {
     querySelector: $,
@@ -28,6 +34,17 @@ function runUI(events: any[], opts: { status?: any } = {}) {
     body: { classList: { add() {} } },
     visibilityState: "hidden",
   };
+  const apiTokens = new Map(Object.entries(opts.apiTokens ?? {}));
+  const replacedUrls: string[] = [];
+  const windowStub = {
+    localStorage: {
+      getItem: (key: string) => apiTokens.get(key) ?? null,
+      setItem: (key: string, value: string) => apiTokens.set(key, value),
+      removeItem: (key: string) => apiTokens.delete(key),
+    },
+    history: { replaceState: (_state: any, _title: string, url: string) => replacedUrls.push(url) },
+  };
+  const locationStub = { search: opts.search ?? "", pathname: "/", origin: "http://t", hash: "", href: `http://t/${opts.search ?? ""}` };
   const fetchStub = async (url: any) => {
     const path = String(url);
     const body = path.includes("/verify") ? { ok: true, checked: events.length }
@@ -39,7 +56,7 @@ function runUI(events: any[], opts: { status?: any } = {}) {
   // Timers the UI arms (the toast auto-hide) must not keep the test process alive.
   const timer = (fn: any, ms: number) => { const t = setTimeout(fn, ms); t.unref(); return t; };
   new Function("document", "location", "fetch", "setInterval", "setTimeout", "URLSearchParams", "CSS", "window", "navigator", script)(
-    doc, { search: "", pathname: "/", origin: "http://t" }, fetchStub, () => 0, timer, URLSearchParams, { escape: (s: string) => s }, {}, {});
+    doc, locationStub, fetchStub, () => 0, timer, URLSearchParams, { escape: (s: string) => s }, windowStub, {});
   const select = async (id: string): Promise<string> => {
     await new Promise((r) => setTimeout(r, 10)); // let boot() settle
     clicks[0]({ target: { closest: () => ({ dataset: { id }, classList: { contains: (c: string) => c === "ev" } }) }, stopPropagation() {}, preventDefault() {} });
@@ -59,6 +76,10 @@ function runUI(events: any[], opts: { status?: any } = {}) {
     ftype: () => $("#ftype").value as string,
     timeline: () => $("#timeline").innerHTML as string, detail: () => $("#detail").innerHTML as string,
     toast: () => $("#toast").textContent as string,
+    tokenInput: () => $("#apiTok").value as string,
+    storedToken: (key: string) => apiTokens.get(key),
+    replacedUrl: () => replacedUrls.at(-1),
+    connect: (base: string, nextToken: string) => { $("#apiUrl").value = base; $("#apiTok").value = nextToken; $("#connect").dispatch("click"); },
   };
 }
 
@@ -76,6 +97,35 @@ const section = (detail: string, k: string) => {
   const m = detail.match(new RegExp(`<div class="k">${k}</div><div class="v[^"]*">([\\s\\S]*?)</div>\\n`));
   return m ? m[1] : null;
 };
+
+test("connection token: a query bootstrap is stored per API endpoint and scrubbed from browser history", () => {
+  assert.match(html, /<meta name="referrer" content="no-referrer" \/>/);
+  const ui = runUI([], { search: "?project=p&token=one-time-secret" });
+  assert.equal(ui.tokenInput(), "one-time-secret");
+  assert.equal(ui.storedToken("retrace.ui.token:http://t"), "one-time-secret");
+  assert.equal(ui.replacedUrl(), "/?project=p");
+});
+
+test("connection token: a saved endpoint token is restored, updated, and cleared from settings", () => {
+  const remoteKey = "retrace.ui.token:https://api.example.test";
+  const ui = runUI([], {
+    search: "?api=https%3A%2F%2Fapi.example.test",
+    apiTokens: { [remoteKey]: "remembered-secret" },
+  });
+  assert.equal(ui.tokenInput(), "remembered-secret");
+  ui.connect("https://next.example.test/", "replacement-secret");
+  assert.equal(ui.storedToken("retrace.ui.token:https://next.example.test"), "replacement-secret");
+  ui.connect("https://next.example.test", "");
+  assert.equal(ui.storedToken("retrace.ui.token:https://next.example.test"), undefined);
+});
+
+test("connection token: report and export URLs never include the credential", () => {
+  const exportLine = script.match(/exportUrl:[^\n]+/)?.[0] ?? "";
+  const reportLine = script.match(/reportUrl:[^\n]+/)?.[0] ?? "";
+  assert.ok(exportLine && reportLine);
+  assert.doesNotMatch(exportLine, /token/);
+  assert.doesNotMatch(reportLine, /token/);
+});
 
 test("detail pane: git-hook committed event renders where, how and tags", async () => {
   const events = [ev(0, {

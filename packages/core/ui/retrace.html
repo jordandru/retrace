@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="referrer" content="no-referrer" />
 <title>Retrace</title>
 <style>
   :root {
@@ -158,7 +159,24 @@
   const params = new URLSearchParams(location.search);
   if (params.get("order") === "asc") state.newestFirst = false;
   let apiBase = params.get("api") ?? "";
-  let token = params.get("token") ?? "";
+  const tokenStorageKey = (base = apiBase) => {
+    try { return `retrace.ui.token:${new URL(base || "/", location.origin).href.replace(/\/$/, "")}`; }
+    catch { return `retrace.ui.token:${base || location.origin}`; }
+  };
+  const storedToken = () => { try { return window.localStorage?.getItem(tokenStorageKey()) ?? ""; } catch { return ""; } };
+  const persistToken = (value) => {
+    try { value ? window.localStorage?.setItem(tokenStorageKey(), value) : window.localStorage?.removeItem(tokenStorageKey()); } catch {}
+  };
+  const queryToken = params.get("token");
+  let token = queryToken ?? storedToken();
+  // A generated retrace-serve link uses ?token= only to bootstrap this browser. Keep the credential per API endpoint,
+  // then remove it from the address bar/history so copies, screenshots and referrers do not carry it onward.
+  if (queryToken !== null) {
+    persistToken(queryToken);
+    params.delete("token");
+    const query = params.toString();
+    try { window.history?.replaceState(null, "", `${location.pathname}${query ? `?${query}` : ""}${location.hash || ""}`); } catch {}
+  }
   $("#apiUrl").value = apiBase; $("#apiTok").value = token;
   // Shared mode: /s/<id> → all reads go through /s/<id>/*, scope locked server-side
   const shareMatch = location.pathname.match(/\/s\/([^/]+)/);
@@ -173,8 +191,8 @@
     events: (p) => shareId ? api(`/s/${shareId}/events?limit=5000`) : api(`/projects/${encodeURIComponent(p)}/events?limit=5000`),
     verify: (p) => shareId ? api(`/s/${shareId}/verify`) : api(`/projects/${encodeURIComponent(p)}/verify`),
     status: (p) => shareId ? Promise.resolve(null) : api(`/projects/${encodeURIComponent(p)}/status`),
-    exportUrl: (p, art) => shareId ? `${apiBase}/s/${shareId}/export` : `${apiBase}/projects/${encodeURIComponent(p)}/export?${new URLSearchParams({ ...(art ? { artifact_id: art } : {}), ...(token ? { token } : {}) })}`,
-    reportUrl: (p, art) => shareId ? `${apiBase}/s/${shareId}/report` : `${apiBase}/projects/${encodeURIComponent(p)}/report?${new URLSearchParams({ ...(art ? { artifact_id: art } : {}), ...(token ? { token } : {}) })}`,
+    exportUrl: (p, art) => shareId ? `${apiBase}/s/${shareId}/export` : `${apiBase}/projects/${encodeURIComponent(p)}/export?${new URLSearchParams(art ? { artifact_id: art } : {})}`,
+    reportUrl: (p, art) => shareId ? `${apiBase}/s/${shareId}/report` : `${apiBase}/projects/${encodeURIComponent(p)}/report?${new URLSearchParams(art ? { artifact_id: art } : {})}`,
   };
 
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -552,7 +570,18 @@
   $("#project").addEventListener("change", (e) => { state.project = e.target.value; state.sel = null; state.filterArtifact = null; state.filterActor = null; loadEvents().catch(showErr); });
   ["#q", "#ftype", "#faction"].forEach((s) => $(s).addEventListener("input", render));
   $("#refresh").addEventListener("click", () => boot());
-  $("#report").addEventListener("click", () => { if (!state.project) return toast("No project loaded"); window.open(P.reportUrl(state.project, state.filterArtifact), "_blank"); });
+  $("#report").addEventListener("click", async () => {
+    if (!state.project) return toast("No project loaded");
+    if (shareId) return window.open(P.reportUrl(state.project, state.filterArtifact), "_blank");
+    const tab = window.open("", "_blank");
+    try {
+      const res = await fetch(P.reportUrl(state.project, state.filterArtifact), { headers: token ? { authorization: `Bearer ${token}` } : {} });
+      if (!res.ok) throw new Error(`${res.status} ${(await res.text()).slice(0, 200)}`);
+      const url = URL.createObjectURL(await res.blob());
+      if (tab) tab.location.href = url; else window.open(url, "_blank");
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+    } catch (e) { tab?.close(); toast(`Report failed: ${e.message}`); }
+  });
   $("#export").addEventListener("click", async () => {
     if (state.offline) { const blob = new Blob([JSON.stringify({ format: "retrace-export/1", scope: { project: state.project }, events: state.events }, null, 2)], { type: "application/json" }); return dl(blob, `${state.project}-events.json`); }
     if (!state.project) return toast("No project loaded");
@@ -576,7 +605,7 @@
     } catch (e) { $("#shResult").textContent = "Failed: " + e.message; }
   });
   $("#toggleConn").addEventListener("click", () => $("#conn").classList.toggle("open"));
-  $("#connect").addEventListener("click", () => { apiBase = $("#apiUrl").value.trim().replace(/\/$/, ""); token = $("#apiTok").value.trim(); state.offline = false; boot(); });
+  $("#connect").addEventListener("click", () => { apiBase = $("#apiUrl").value.trim().replace(/\/$/, ""); token = $("#apiTok").value.trim(); persistToken(token); state.offline = false; boot(); });
   $("#loadJson").addEventListener("click", () => $("#file").click());
   $("#file").addEventListener("change", async (e) => {
     const f = e.target.files[0]; if (!f) return;
