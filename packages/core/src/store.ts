@@ -160,6 +160,9 @@ export async function appendEvent(store: EventStore, input: EventInput): Promise
     if (!parent) throw new CausedByError(`caused_by "${input.caused_by}" does not name an event in this ledger`);
     if (parent.project !== input.project)
       throw new CausedByError(`caused_by "${input.caused_by}" is in project "${parent.project}", not "${input.project}"`);
+    // "Older" is seq (same rule as retrace_amend). A parent that already exists in this project
+    // always has seq <= current head, so the child will be newer. Do not compare timestamps:
+    // Drive Activity timestamps can predate the current instruct (testOnce / poll).
   }
   if (input.idempotency_key) {
     const existing = await store.byIdempotencyKey(input.project, input.idempotency_key);

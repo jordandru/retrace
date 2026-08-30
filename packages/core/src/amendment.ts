@@ -25,7 +25,7 @@ export function collectProvenanceAmendments(
     const params = event.method?.params;
     const targetId = typeof params?.target_event_id === "string" ? params.target_event_id : undefined;
     const target = targetId ? byId.get(targetId) : undefined;
-    if (!target || target.project !== event.project || target.seq >= event.seq) continue;
+    if (!target || target.project !== event.project || target.seq >= event.seq) continue; // ineligible links are counted in collectRejectedAmendments, not applied
     const roles = new Map<number, ArtifactRole>();
     if (Array.isArray(params?.artifact_roles)) {
       for (const item of params.artifact_roles) {
@@ -40,6 +40,29 @@ export function collectProvenanceAmendments(
     const list = out.get(target.id) ?? [];
     list.push(amendment);
     out.set(target.id, list);
+  }
+  return out;
+}
+
+export type RejectedAmendmentReason = "unrooted" | "missing_target" | "wrong_project" | "not_older";
+export type RejectedAmendment = { event: Event; reason: RejectedAmendmentReason };
+
+/** Sealed amendment events that do not qualify (same rules as collect: rooted, exists, same project, older). */
+export function collectRejectedAmendments(
+  events: Event[],
+  isRooted: (event: Event) => boolean,
+): RejectedAmendment[] {
+  const byId = new Map(events.map((e) => [e.id, e]));
+  const out: RejectedAmendment[] = [];
+  for (const event of events) {
+    if (event.action !== "other" || event.action_detail !== AMENDMENT_ACTION_DETAIL) continue;
+    if (!isRooted(event)) { out.push({ event, reason: "unrooted" }); continue; }
+    const params = event.method?.params;
+    const targetId = typeof params?.target_event_id === "string" ? params.target_event_id : undefined;
+    const target = targetId ? byId.get(targetId) : undefined;
+    if (!target) { out.push({ event, reason: "missing_target" }); continue; }
+    if (target.project !== event.project) { out.push({ event, reason: "wrong_project" }); continue; }
+    if (target.seq >= event.seq) { out.push({ event, reason: "not_older" }); continue; }
   }
   return out;
 }

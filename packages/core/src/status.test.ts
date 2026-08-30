@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { appendEvent } from "./store.js";
 import { Event, EventStore, Share } from "./index.js";
-import { buildProjectStatus, causalRootState } from "./status.js";
+import { buildProjectStatus, causalRootState, renderProjectStatus } from "./status.js";
 
 class MemStore implements EventStore {
   events: Event[] = [];
@@ -31,6 +31,7 @@ test("project status: integrity, causal coverage, capture gaps, actors and integ
   assert.equal(s.capture.artifact_refs_without_role, 1);
   assert.equal(s.capture.amended_artifact_refs, 0);
   assert.equal(s.capture.amended_unlinked_commits, 0);
+  assert.equal(s.capture.ineffective_amendments, 0);
   assert.deepEqual(s.actors.map((a) => [a.type, a.id, a.events]), [["agent", "gemini", 2], ["human", "jordan@example.com", 2]]);
   assert.deepEqual(s.integrations.map((i) => [i.system, i.events]), [["gemini-cli", 2], ["git", 2]]);
 });
@@ -51,7 +52,22 @@ test("rooted append-only amendments resolve debt without changing sealed targets
   assert.equal(s.capture.amended_artifact_refs, 1);
   assert.equal(s.causality.attested_events, 1);
   assert.equal(s.causality.coverage_pct, 100);
+  assert.equal(s.capture.ineffective_amendments, 0);
   assert.equal(target.artifacts[0].role, undefined, "sealed target remains unchanged");
+});
+
+test("status counts sealed amendments that fail exists/older/same-project instead of dropping them", async () => {
+  const store = new MemStore();
+  const root = (await appendEvent(store, { project: "p", actor: { type: "human", id: "jordan@example.com" }, action: "instructed", artifacts: [{ id: "task:1", role: "generated" }] })).event;
+  await appendEvent(store, {
+    project: "p", actor: { type: "agent", id: "auditor", model: "new" }, action: "other", action_detail: "amended",
+    artifacts: [{ id: "event:missing", role: "used" }], caused_by: root.id,
+    method: { tool: "retrace_amend", params: { target_event_id: "evt_no_such_target", attest_causal_root: true } },
+  });
+  const s = await buildProjectStatus(store, "p");
+  assert.equal(s.capture.ineffective_amendments, 1);
+  assert.equal(s.capture.amended_unlinked_commits, 0);
+  assert.match(renderProjectStatus(s), /1 rejected links/);
 });
 
 test("causalRootState distinguishes missing parents and absent links", async () => {

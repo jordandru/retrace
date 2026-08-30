@@ -1,7 +1,7 @@
 import { Event } from "./schema.js";
 import { VerifyResult } from "./chain.js";
 import { EventStore, verifyProject } from "./store.js";
-import { collectProvenanceAmendments } from "./amendment.js";
+import { collectProvenanceAmendments, collectRejectedAmendments } from "./amendment.js";
 
 export type StatusActor = { type: Event["actor"]["type"]; id: string; events: number; last_seen: string; models: string[] };
 export type StatusIntegration = { system: string; events: number; last_seen: string };
@@ -21,6 +21,7 @@ export type ProjectStatus = {
     unlinked_commits: number;
     amended_unlinked_commits: number;
     amended_artifact_refs: number;
+    ineffective_amendments: number;
   };
   causality: { eligible_events: number; rooted_in_human_instruction: number; attested_events: number; broken_links: number; unlinked: number; coverage_pct: number };
   actors: StatusActor[];
@@ -68,7 +69,9 @@ export async function buildProjectStatus(store: EventStore, project: string, now
       integrations.set(system, integration);
     }
   }
-  const amendments = collectProvenanceAmendments(events, (e) => causalRootState(e, byId) === "rooted");
+  const isRooted = (e: Event) => causalRootState(e, byId) === "rooted";
+  const amendments = collectProvenanceAmendments(events, isRooted);
+  const rejectedAmendments = collectRejectedAmendments(events, isRooted);
   const attested = new Set(eligible.filter((e) => causalRootState(e, byId) !== "rooted" && amendments.get(e.id)?.some((a) => a.attest_causal_root)).map((e) => e.id));
   const amendedRoles = new Set<string>();
   for (const [targetId, list] of amendments) for (const amendment of list) for (const index of amendment.artifact_roles.keys()) amendedRoles.add(`${targetId}:${index}`);
@@ -92,6 +95,7 @@ export async function buildProjectStatus(store: EventStore, project: string, now
       commits: commits.length,
       unlinked_commits: commits.filter((e) => causalRootState(e, byId) !== "rooted" && !attested.has(e.id)).length,
       amended_unlinked_commits: commits.filter((e) => attested.has(e.id)).length,
+      ineffective_amendments: rejectedAmendments.length,
     },
     causality: {
       eligible_events: eligible.length,
@@ -111,7 +115,7 @@ export function renderProjectStatus(s: ProjectStatus): string {
   return `${s.project} — ${health}\n` +
     `${s.events.total} events · ${s.causality.coverage_pct}% causal coverage · ${s.capture.unlinked_commits}/${s.capture.commits} unlinked commits\n` +
     `${s.capture.agent_events_without_model}/${s.capture.agent_events} agent events missing model · ${s.capture.instructions_without_followup}/${s.capture.instructions} instructions without follow-up · ${s.capture.artifact_refs_without_role}/${s.capture.artifact_refs} artifact refs missing role\n` +
-    `append-only amendments: ${s.capture.amended_unlinked_commits} commits attested · ${s.capture.amended_artifact_refs} artifact roles supplied\n` +
+    `append-only amendments: ${s.capture.amended_unlinked_commits} commits attested · ${s.capture.amended_artifact_refs} artifact roles supplied · ${s.capture.ineffective_amendments} rejected links\n` +
     `actors: ${s.actors.map((a) => `${a.type}/${a.id} (${a.events})`).join(", ") || "none"}\n` +
     `integrations: ${s.integrations.map((i) => `${i.system} (${i.events}, last ${i.last_seen})`).join(", ") || "none"}`;
 }
