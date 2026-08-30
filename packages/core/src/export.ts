@@ -5,7 +5,7 @@
  */
 import { Event } from "./schema.js";
 import { EventStore, verifyProject } from "./store.js";
-import { verifyChain, VerifyResult, computeHash } from "./chain.js";
+import { verifyChain, VerifyResult, computeHash, hashRule } from "./chain.js";
 import { GENESIS_HASH } from "./schema.js";
 import { keyId, publicFromPrivate, signCanonical, verifyCanonical } from "./signing.js";
 
@@ -85,11 +85,14 @@ export interface ExportCoverage {
 }
 
 export interface ExportVerdict {
-  signature: "valid" | "invalid" | "unsigned";
+  /** "valid" only against a trusted key; "self_attested" = verifies against the key the bundle carries (proves nothing about who issued it) */
+  signature: "valid" | "self_attested" | "invalid" | "unsigned";
   events_intact: boolean;        // every event's own hash recomputes
   links_consistent: boolean;     // consecutive events in the bundle that are adjacent by seq link prev_hash→hash
   chain_ok_at_export: boolean;   // server's full-chain verdict at export time
   coverage: ExportCoverage;      // omission check (see ExportCoverage)
+  /** events sealed under the legacy hash rule (no hash_v): their received_at is not provably covered */
+  legacy_hash_events: number;
   kid?: string;
   problems: string[];
 }
@@ -158,12 +161,20 @@ export async function verifyExportBundle(bundle: ExportBundle, trustedPublicKey?
     const pub = trustedPublicKey ?? bundle.issuer.public_key;
     if (trustedPublicKey && (await keyId(trustedPublicKey)) !== bundle.issuer.kid) problems.push("issuer kid does not match trusted key");
     const ok = await verifyCanonical(pub, { ...bundle, signature: undefined }, bundle.signature);
-    signature = ok ? "valid" : "invalid";
-    if (!ok) problems.push("signature does not verify — bundle altered or wrong key");
+    if (!ok) { signature = "invalid"; problems.push("signature does not verify — bundle altered or wrong key"); }
+    else if (trustedPublicKey) signature = "valid";
+    else {
+      // The bundle carries its own public key, so a verifier that trusts it only learns that the bundle is internally
+      // consistent — anyone can re-sign an altered bundle with a fresh key. That is not "valid"; it is self-attested.
+      signature = "self_attested";
+      problems.push(`signature verifies against the key embedded in the bundle (kid ${bundle.issuer.kid}) — not against a trusted key; confirm the kid with the issuer's /.well-known/retrace-pubkey or pass the issuer's public key`);
+    }
   } else problems.push("bundle is unsigned");
 
   let events_intact = true;
+  let legacy_hash_events = 0;
   for (const e of bundle.events) {
+    if (hashRule(e) === "legacy") legacy_hash_events++;
     if ((await computeHash(e)) !== e.hash) { events_intact = false; problems.push(`event #${e.seq} content hash mismatch`); }
   }
   let links_consistent = true;
@@ -174,10 +185,13 @@ export async function verifyExportBundle(bundle: ExportBundle, trustedPublicKey?
   }
   if (sorted[0]?.seq === 0 && sorted[0].prev_hash !== GENESIS_HASH) { links_consistent = false; problems.push("event #0 is not anchored to genesis"); }
   const coverage = checkCoverage(bundle, sorted, problems);
-  return { signature, events_intact, links_consistent, chain_ok_at_export: !!bundle.chain?.ok, coverage, kid: bundle.issuer?.kid, problems };
+  return { signature, events_intact, links_consistent, chain_ok_at_export: !!bundle.chain?.ok, coverage, legacy_hash_events, kid: bundle.issuer?.kid, problems };
 }
 
-/** One boolean for callers that gate on a bundle: signed, intact, linked, chain ok at export, and (for full exports) complete. */
+/**
+ * One boolean for callers that gate on a bundle: signed by a TRUSTED key, intact, linked, chain ok at export, and (for
+ * full exports) complete. A self-attested signature does not pass — pass the issuer's public key to verifyExportBundle.
+ */
 export function exportVerdictOk(v: ExportVerdict): boolean {
   return v.signature === "valid" && v.events_intact && v.links_consistent && v.chain_ok_at_export && v.coverage.complete !== false;
 }

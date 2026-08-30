@@ -28,10 +28,20 @@ test("signed export verifies; tampering or wrong key fails; artifact scope subse
   assert.equal(bundle.events.length, 3);
   assert.equal(bundle.chain.ok, true);
   assert.equal(bundle.issuer?.kid, key.kid);
-  const v = await verifyExportBundle(bundle);
-  assert.deepEqual([v.signature, v.events_intact, v.links_consistent, v.chain_ok_at_export], ["valid", true, true, true]);
+  // No trusted key: the signature only proves internal consistency → self-attested, and it does NOT pass exportVerdictOk.
+  const sa = await verifyExportBundle(bundle);
+  assert.deepEqual([sa.signature, sa.events_intact, sa.links_consistent, sa.chain_ok_at_export], ["self_attested", true, true, true]);
+  assert.equal(exportVerdictOk(sa), false, "a self-attested bundle is not VALID");
+  assert.ok(sa.problems.some((p) => /embedded in the bundle/.test(p)));
+  // re-signed by an impostor with a fresh key: internally consistent, still only self-attested; fails against the real key
+  const impostor = await generateSigningKey();
+  const forged = await buildExportBundle(store, { project: "p" }, { signingKey: impostor.privateKey, issuerName: "test" });
+  assert.equal((await verifyExportBundle(forged)).signature, "self_attested");
+  assert.equal((await verifyExportBundle(forged, key.publicKey)).signature, "invalid");
   // trusted key path
-  assert.equal((await verifyExportBundle(bundle, key.publicKey)).signature, "valid");
+  const v = await verifyExportBundle(bundle, key.publicKey);
+  assert.deepEqual([v.signature, v.events_intact, v.links_consistent, v.chain_ok_at_export, v.legacy_hash_events], ["valid", true, true, true, 0]);
+  assert.equal(exportVerdictOk(v), true);
   const other = await generateSigningKey();
   const w = await verifyExportBundle(bundle, other.publicKey);
   assert.equal(w.signature, "invalid");
@@ -52,7 +62,7 @@ test("signed export verifies; tampering or wrong key fails; artifact scope subse
   const scoped = await buildExportBundle(store, { project: "p", artifact_id: "a" }, { signingKey: key.privateKey });
   assert.equal(scoped.events.length, 2);
   assert.equal(scoped.chain.total_events, 3);
-  assert.equal((await verifyExportBundle(scoped)).signature, "valid");
+  assert.equal((await verifyExportBundle(scoped, key.publicKey)).signature, "valid");
 
   // unsigned bundle
   const un = await buildExportBundle(store, { project: "p" });
@@ -72,7 +82,7 @@ test("coverage: a full export must carry every claimed event — tail truncation
   const key = await generateSigningKey();
   const bundle = await buildExportBundle(store, { project: "p" }, { signingKey: key.privateKey });
 
-  const full = await verifyExportBundle(bundle);
+  const full = await verifyExportBundle(bundle, key.publicKey);
   assert.equal(full.coverage.scope, "full");
   assert.equal(full.coverage.complete, true);
   assert.equal(full.coverage.head_hash_matches, true);
@@ -116,7 +126,7 @@ test("coverage: a full export must carry every claimed event — tail truncation
 
   // Scoped export: omission is not claimable; complete stays undefined and the note says why; ok does not fail on it.
   const scoped = await buildExportBundle(store, { project: "p", artifact_id: "a" }, { signingKey: key.privateKey });
-  const s = await verifyExportBundle(scoped);
+  const s = await verifyExportBundle(scoped, key.publicKey);
   assert.equal(s.coverage.scope, "scoped");
   assert.equal(s.coverage.complete, undefined);
   assert.match(s.coverage.note, /cannot be verified offline/);

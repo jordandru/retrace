@@ -167,6 +167,9 @@ export const Event = EventInput.extend({
   prev_hash: z.string(),
   hash: z.string(),
   received_at: z.string().datetime({ offset: true }),
+  /** Hash rule the seal used. 2 = the digest covers `received_at` and this field; absent = legacy seal (pre-2026-08-30),
+   *  whose digest may or may not cover `received_at`. Covered by the hash, so it cannot be stripped to downgrade a verifier. */
+  hash_v: z.literal(2).optional(),
 });
 export type Event = z.infer<typeof Event>;
 

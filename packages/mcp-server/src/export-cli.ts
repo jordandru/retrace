@@ -3,7 +3,9 @@
  * retrace-export — signing keys, signed exports, offline verification.
  *   retrace-export keygen [--print-private]           create ~/.retrace/signing-key.json if missing; print kid + public JWK
  *   retrace-export export <project> [--artifact <id>] [--out file.json] [--report file.html]
- *   retrace-export verify <bundle.json> [--pubkey <jwk.json|url>] [--checkpoint <checkpoints.jsonl>]
+ *   retrace-export verify <bundle.json> [--pubkey <jwk.json|https-url>] [--checkpoint <checkpoints.jsonl>] [--allow-self-attested]
+ *       Trusted key: --pubkey, else RETRACE_PUBKEY (JWK/file/https url), else RETRACE_URL/.well-known/retrace-pubkey (https only).
+ *       Without one the bundle is only self-attested and verify exits 2 unless --allow-self-attested.
  *   retrace-export checkpoint <project> [--bundle file.json] [--out .retrace/checkpoints.jsonl]   append a signed head checkpoint; commit the file
  *   retrace-export share <project> [--artifact <id>] [--label ..] [--days n]      (local server must be running for the link to resolve)
  * Uses the same store config as the MCP server (RETRACE_DB / RETRACE_URL+RETRACE_TOKEN).
@@ -15,6 +17,33 @@ import { makeStore } from "./index.js";
 import { RemoteStore } from "./remote-store.js";
 import { ensureSigningKey, loadSigningKey } from "./keys.js";
 import { isMainModule } from "./is-main.js";
+
+/** Load a public JWK from a file path, an https URL, or an inline JSON string. Plain http is refused: a key fetched over
+ *  an interceptable channel is not a trusted key. Accepts a bare JWK or a /.well-known/retrace-pubkey document. */
+async function loadPublicKey(src: string, label: string): Promise<JsonWebKey> {
+  let raw: any;
+  if (/^https:/i.test(src)) raw = await (await fetch(src)).json();
+  else if (/^http:/i.test(src)) throw new Error(`${label}: refusing to fetch a trusted key over plain http (${src}) — use https or a local file`);
+  else if (src.trim().startsWith("{")) raw = JSON.parse(src);
+  else raw = JSON.parse(readFileSync(src, "utf8"));
+  const jwk = raw?.public_key ?? raw;
+  if (!jwk || jwk.kty !== "OKP" || jwk.crv !== "Ed25519" || typeof jwk.x !== "string") throw new Error(`${label}: not an Ed25519 public JWK`);
+  if ("d" in jwk) throw new Error(`${label}: that is a PRIVATE key — pass the public JWK`);
+  return jwk;
+}
+
+/** Resolve the trusted issuer key for verification: explicit flag, RETRACE_PUBKEY, or the issuer's well-known URL. */
+async function resolveTrustedKey(flag: unknown): Promise<{ key: JsonWebKey; from: string } | undefined> {
+  if (flag) return { key: await loadPublicKey(String(flag), "--pubkey"), from: `--pubkey ${flag}` };
+  if (process.env.RETRACE_PUBKEY) return { key: await loadPublicKey(process.env.RETRACE_PUBKEY, "RETRACE_PUBKEY"), from: "RETRACE_PUBKEY" };
+  const base = process.env.RETRACE_URL;
+  if (base && /^https:/i.test(base)) {
+    const url = base.replace(/\/+$/, "") + "/.well-known/retrace-pubkey";
+    try { return { key: await loadPublicKey(url, url), from: url }; }
+    catch (e: any) { console.error(`  (could not load the issuer key from ${url}: ${e?.message ?? e})`); }
+  }
+  return undefined;
+}
 
 function parseArgs(argv: string[]) {
   const flags: Record<string, string | boolean> = {}; const pos: string[] = [];
@@ -50,16 +79,14 @@ async function main() {
   if (cmd === "verify") {
     const file = pos[1]; if (!file) throw new Error("usage: retrace-export verify <bundle.json> [--pubkey jwk.json|url]");
     const bundle = JSON.parse(readFileSync(file, "utf8")) as ExportBundle;
-    let trusted: JsonWebKey | undefined;
-    if (flags.pubkey) {
-      const src = String(flags.pubkey);
-      const raw = /^https?:/.test(src) ? await (await fetch(src)).json() : JSON.parse(readFileSync(src, "utf8"));
-      trusted = raw.public_key ?? raw;
-    }
-    const v = await verifyExportBundle(bundle, trusted);
+    const trusted = await resolveTrustedKey(flags.pubkey);
+    const v = await verifyExportBundle(bundle, trusted?.key);
     let ok = exportVerdictOk(v);
-    console.log(`${ok ? "VALID" : "NOT VALID"} — signature: ${v.signature}${v.kid ? " (kid " + v.kid + (trusted ? ", trusted key" : ", key embedded in bundle") + ")" : ""}; events intact: ${v.events_intact}; links: ${v.links_consistent}; chain ok at export: ${v.chain_ok_at_export}; coverage: ${v.coverage.scope === "full" ? (v.coverage.complete ? "complete" : "INCOMPLETE") : "scoped (omission not checkable offline)"} — ${v.coverage.events} of ${v.coverage.total_events} events`);
+    // Self-attested = the bundle verified against the key it carries. Anyone can produce that. Fail closed unless asked.
+    if (v.signature === "self_attested" && flags["allow-self-attested"] && v.events_intact && v.links_consistent && v.chain_ok_at_export && v.coverage.complete !== false) ok = true;
+    console.log(`${ok ? "VALID" : "NOT VALID"} — signature: ${v.signature}${v.kid ? " (kid " + v.kid + (trusted ? ", trusted key from " + trusted.from : ", key embedded in bundle — NOT a trusted key") + ")" : ""}; events intact: ${v.events_intact}; links: ${v.links_consistent}; chain ok at export: ${v.chain_ok_at_export}; coverage: ${v.coverage.scope === "full" ? (v.coverage.complete ? "complete" : "INCOMPLETE") : "scoped (omission not checkable offline)"} — ${v.coverage.events} of ${v.coverage.total_events} events${v.legacy_hash_events ? `; ${v.legacy_hash_events} legacy-hash event${v.legacy_hash_events === 1 ? "" : "s"} (received_at not provably covered)` : ""}`);
     console.log("  coverage: " + v.coverage.note);
+    if (v.signature === "self_attested" && !flags["allow-self-attested"]) console.log("  pass the issuer's public key (--pubkey, RETRACE_PUBKEY, or RETRACE_URL for its /.well-known/retrace-pubkey), or --allow-self-attested to accept an unattributed bundle");
     for (const p of v.problems) console.log("  - " + p);
     if (flags.checkpoint) {
       // Compare against the newest committed checkpoint: the checkpointed head must still be in a later bundle.
@@ -85,8 +112,12 @@ async function main() {
       if (store instanceof RemoteStore) bundle = await store.export({ project });
       else bundle = await buildExportBundle(store, { project }, { signingKey: parseSigningKey(process.env.RETRACE_SIGNING_KEY) ?? (await ensureSigningKey()).privateKey, issuerName: process.env.RETRACE_ISSUER });
     }
-    const v = await verifyExportBundle(bundle);
-    if (!exportVerdictOk(v)) { for (const p of v.problems) console.error("  - " + p); throw new Error("refusing to checkpoint a bundle that does not verify as a complete, signed full export"); }
+    // A checkpoint attests a head; it must never be derived from a bundle whose issuer could not be established.
+    const trusted = await resolveTrustedKey(flags.pubkey);
+    if (!trusted) throw new Error("no trusted issuer key: pass --pubkey <jwk.json|https-url>, set RETRACE_PUBKEY, or set RETRACE_URL to an https Retrace server (its /.well-known/retrace-pubkey is used)");
+    const v = await verifyExportBundle(bundle, trusted.key);
+    if (!exportVerdictOk(v)) { for (const p of v.problems) console.error("  - " + p); throw new Error("refusing to checkpoint a bundle that does not verify as a complete full export signed by the trusted key"); }
+    if (v.legacy_hash_events) console.error(`  note: ${v.legacy_hash_events} event(s) are under the legacy hash rule (received_at not provably covered)`);
     const key = parseSigningKey(process.env.RETRACE_SIGNING_KEY) ?? (await ensureSigningKey()).privateKey;
     const cp = await checkpointFromBundle(bundle, { signingKey: key, signerName: process.env.RETRACE_ISSUER });
     const out = String(flags.out ?? ".retrace/checkpoints.jsonl");
@@ -110,6 +141,6 @@ async function main() {
     console.log(`${base}/s/${id}\nreport: ${base}/s/${id}/report`);
     return;
   }
-  console.log("retrace-export <keygen|export <project>|verify <bundle.json>|checkpoint <project>|share <project>> [--artifact id] [--out f] [--report f.html] [--pubkey jwk|url] [--checkpoint f.jsonl] [--bundle f.json] [--label s] [--days n]");
+  console.log("retrace-export <keygen|export <project>|verify <bundle.json>|checkpoint <project>|share <project>> [--artifact id] [--out f] [--report f.html] [--pubkey jwk|https-url] [--allow-self-attested] [--checkpoint f.jsonl] [--bundle f.json] [--label s] [--days n]");
 }
 if (isMainModule(import.meta.url)) main().catch((e) => { console.error("retrace-export:", e.message ?? e); process.exit(1); });

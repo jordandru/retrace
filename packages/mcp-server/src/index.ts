@@ -33,7 +33,7 @@ import {
   Actor, Action, ArtifactRef, Change, Location, Method, EventInput, applyDefaultRoles,
   appendEvent, CausedByError, causedByProblem, causedByErrorMessage,
   verifyProject, explainEvent, renderTimeline, renderWhyChain, describeEvent,
-  buildExportBundle, verifyExportBundle, renderReportHtml, parseSigningKey, newShareId,
+  buildExportBundle, verifyExportBundle, renderReportHtml, parseSigningKey, publicFromPrivate, newShareId,
   buildLineage, renderLineageDot, renderLineageMermaid, renderLineageText,
   buildProjectStatus, renderProjectStatus,
   AMENDMENT_ACTION_DETAIL, causalRootState, collectProvenanceAmendments,
@@ -433,7 +433,14 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
       const bundle = remote
         ? await remote.export({ project, artifact_id: args.artifact_id })
         : await buildExportBundle(store, { project, artifact_id: args.artifact_id }, { signingKey: parseSigningKey(env.RETRACE_SIGNING_KEY) ?? (await ensureSigningKey()).privateKey, issuerName: env.RETRACE_ISSUER });
-      const verdict = await verifyExportBundle(bundle);
+      // Verify against a trusted key, not the one the bundle carries: locally that is our own signing key; for a
+      // remote server it is the key published at /.well-known/retrace-pubkey (https only). Otherwise "self_attested".
+      let trustedKey: JsonWebKey | undefined;
+      if (!remote) { const k = parseSigningKey(env.RETRACE_SIGNING_KEY) ?? (await ensureSigningKey()).privateKey; trustedKey = publicFromPrivate(k); }
+      else if (/^https:/i.test(env.RETRACE_URL ?? "")) {
+        try { const wk: any = await (await fetch(env.RETRACE_URL!.replace(/\/+$/, "") + "/.well-known/retrace-pubkey")).json(); if (wk?.public_key?.x) trustedKey = wk.public_key; } catch {}
+      }
+      const verdict = await verifyExportBundle(bundle, trustedKey);
       if (args.out_json) writeFileSync(args.out_json, JSON.stringify(bundle, null, 2));
       if (args.out_html) writeFileSync(args.out_html, renderReportHtml(bundle, verdict));
       const summary = `${bundle.events.length} events · chain ${bundle.chain.ok ? "intact" : "BROKEN"} · signature ${verdict.signature}${bundle.issuer ? " (kid " + bundle.issuer.kid + ")" : ""} · coverage ${verdict.coverage.scope === "full" ? (verdict.coverage.complete ? "complete" : "INCOMPLETE") : "scoped"} (${verdict.coverage.events}/${verdict.coverage.total_events})` +

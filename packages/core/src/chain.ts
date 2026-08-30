@@ -39,14 +39,27 @@ export function hashPayload(e: object, opts?: { includeReceivedAt?: boolean }): 
   return canonicalize(include ? { ...rest, received_at } : rest);
 }
 
+/** Current hash rule: the digest covers `received_at` and the `hash_v` marker itself. */
+export const HASH_VERSION = 2 as const;
+
+/** Which rule verifies this event: "v2" (marker present, strict) or "legacy" (no marker; best-effort, see below). */
+export function hashRule(e: object): "v2" | "legacy" {
+  return (e as { hash_v?: number }).hash_v === HASH_VERSION ? "v2" : "legacy";
+}
+
 /**
  * Hash of an event's canonical content.
- * New seals cover `received_at`. When `e.hash` is already set and does not match that digest, recompute
- * without `received_at` so events sealed before this change still verify. A later `received_at` edit on
- * those legacy events is not detectable — they were never covered.
+ * Events sealed with `hash_v: 2` have exactly one valid digest — the one covering `received_at` and the marker — and
+ * are never re-tried under another rule. The marker is inside the hash, so stripping it changes the digest: a
+ * downgrade is detected as tampering.
+ * Legacy events (no marker) were sealed either before `received_at` was covered or in the window before the marker
+ * existed; for those, and only those, the digest without `received_at` is accepted when the covered one does not
+ * match. A `received_at` edit on a legacy event is therefore not detectable — verifiers report how many events sit
+ * under this weaker rule (VerifyResult.legacy_events / ExportVerdict.legacy_hash_events).
  */
 export async function computeHash(e: object): Promise<string> {
   const covered = await sha256Hex(hashPayload(e));
+  if (hashRule(e) === "v2") return covered;
   const stored = (e as { hash?: string }).hash;
   if (!stored || stored === covered) return covered;
   return sha256Hex(hashPayload(e, { includeReceivedAt: false }));
@@ -72,6 +85,7 @@ export async function sealEvent(
     timestamp: input.timestamp ?? received_at,
     prev_hash,
     received_at,
+    hash_v: HASH_VERSION,
   };
   const hash = await computeHash(base);
   return Event.parse({ ...base, hash });
@@ -82,13 +96,17 @@ export interface VerifyResult {
   checked: number;
   first_bad_seq?: number;
   reason?: string;
+  /** events verified under the legacy rule (no `hash_v`): their `received_at` is not provably covered */
+  legacy_events?: number;
 }
 
 /** Verify a project's chain, given events sorted by seq ascending. */
 export async function verifyChain(events: Event[]): Promise<VerifyResult> {
   let prevHash = GENESIS_HASH;
   let expectedSeq = 0;
+  let legacy = 0;
   for (const e of events) {
+    if (hashRule(e) === "legacy") legacy++;
     if (e.seq !== expectedSeq) return { ok: false, checked: expectedSeq, first_bad_seq: e.seq, reason: `sequence gap: expected ${expectedSeq}, got ${e.seq}` };
     if (e.prev_hash !== prevHash) return { ok: false, checked: expectedSeq, first_bad_seq: e.seq, reason: "prev_hash mismatch (chain broken)" };
     const recomputed = await computeHash(e);
@@ -96,5 +114,5 @@ export async function verifyChain(events: Event[]): Promise<VerifyResult> {
     prevHash = e.hash;
     expectedSeq++;
   }
-  return { ok: true, checked: expectedSeq };
+  return { ok: true, checked: expectedSeq, legacy_events: legacy };
 }

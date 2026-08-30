@@ -19,8 +19,8 @@ export async function ensureSigningKey(): Promise<{ privateKey: JsonWebKey; publ
   const existing = loadSigningKey();
   if (existing) return { privateKey: existing, publicKey: publicFromPrivate(existing), kid: await keyId(publicFromPrivate(existing)), path: p, created: false };
   const kp = await generateSigningKey();
-  mkdirSync(dirname(p), { recursive: true });
-  writeFileSync(p, JSON.stringify(kp.privateKey, null, 2) + "\n");
-  try { chmodSync(p, 0o600); } catch {}
+  mkdirSync(dirname(p), { recursive: true, mode: 0o700 });
+  writeFileSync(p, JSON.stringify(kp.privateKey, null, 2) + "\n", { mode: 0o600 });
+  try { chmodSync(p, 0o600); } catch (e: any) { console.error(`warning: could not restrict permissions on ${p}: ${e?.message ?? e}`); }
   return { ...kp, path: p, created: true };
 }

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { sealEvent, verifyChain, canonicalize, computeHash, hashPayload, EventInput, Event, GENESIS_HASH, defaultArtifactRole, applyDefaultRoles, Action } from "./index.js";
+import { sealEvent, verifyChain, canonicalize, computeHash, hashPayload, hashRule, HASH_VERSION, sha256Hex, EventInput, Event, GENESIS_HASH, defaultArtifactRole, applyDefaultRoles, Action } from "./index.js";
 
 const base = (over: Partial<EventInput> = {}): EventInput => ({
   project: "test",
@@ -23,7 +23,7 @@ test("chain seals and verifies", async () => {
   const e1 = await sealEvent(base({ caused_by: e0.id }), { seq: e0.seq, hash: e0.hash });
   assert.equal(e1.prev_hash, e0.hash);
   const r = await verifyChain([e0, e1]);
-  assert.deepEqual(r, { ok: true, checked: 2 });
+  assert.deepEqual(r, { ok: true, checked: 2, legacy_events: 0 });
 });
 
 test("tampering is detected", async () => {
@@ -105,4 +105,32 @@ test("defaultArtifactRole table and applyDefaultRoles fill-absent semantics", ()
   const untouched = applyDefaultRoles("deleted", refs);
   assert.deepEqual(untouched, refs);
   assert.equal(untouched[0], refs[0], "no default → the same object, no role key added");
+});
+
+test("hash_v marker: a received_at edit on a v2 event is tampering; stripping the marker cannot downgrade the check", async () => {
+  const e0 = await sealEvent(base(), null, new Date("2026-08-30T10:00:00Z"));
+  assert.equal(e0.hash_v, HASH_VERSION);
+  assert.equal(hashRule(e0), "v2");
+  assert.equal(await computeHash(e0), e0.hash);
+
+  // Edit received_at, keep the stored hash: before the marker this re-verified via the legacy digest.
+  const edited = { ...e0, received_at: "2026-08-30T09:00:00Z" };
+  assert.notEqual(await computeHash(edited), e0.hash, "received_at edit detected");
+  assert.equal((await verifyChain([edited as Event])).ok, false);
+
+  // Strip the marker to force the legacy rule: the stored hash covered the marker, so no digest matches.
+  const { hash_v: _v, ...stripped } = edited as any;
+  assert.equal(hashRule(stripped), "legacy");
+  assert.notEqual(await computeHash(stripped), e0.hash, "downgrade detected");
+  const { hash_v: _v2, ...strippedOnly } = e0 as any;
+  assert.notEqual(await computeHash(strippedOnly), e0.hash, "marker removal alone is tampering");
+
+  // Legacy events (sealed without a marker) still verify under either rule and are counted.
+  const legacy: any = { ...e0 }; delete legacy.hash_v;
+  legacy.hash = await sha256Hex(hashPayload(legacy, { includeReceivedAt: false }));
+  const legacyEdited = { ...legacy, received_at: "2026-08-30T09:00:00Z" };
+  const r = await verifyChain([legacyEdited as Event]);
+  assert.equal(r.ok, true, "legacy events are best-effort by design");
+  assert.equal(r.legacy_events, 1);
+  assert.equal((await verifyChain([e0])).legacy_events, 0);
 });

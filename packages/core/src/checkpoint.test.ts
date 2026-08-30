@@ -29,12 +29,12 @@ test("checkpoint: derived from a verified full export, signed, and detects tail 
   const t0 = new Date("2026-08-30T01:00:00Z");
 
   const bundle = await buildExportBundle(store, { project: "p" }, { signingKey: issuer.privateKey, now: t0 });
-  assert.equal(exportVerdictOk(await verifyExportBundle(bundle)), true);
+  assert.equal(exportVerdictOk(await verifyExportBundle(bundle, issuer.publicKey)), true);
   const cp = await checkpointFromBundle(bundle, { signingKey: signer.privateKey, signerName: "ci" });
   assert.deepEqual([cp.project, cp.seq, cp.total_events, cp.head_hash], ["p", 2, 3, bundle.chain.head_hash]);
   assert.equal(cp.source.kind, "export");
   assert.equal((cp.source as any).issuer_kid, issuer.kid);
-  assert.equal((await verifyCheckpoint(cp)).signature, "valid");
+  assert.equal((await verifyCheckpoint(cp)).signature, "self_attested");
   assert.equal((await verifyCheckpoint(cp, signer.publicKey)).signature, "valid");
   const wrong = await verifyCheckpoint(cp, issuer.publicKey);
   assert.equal(wrong.signature, "invalid");
@@ -66,9 +66,14 @@ test("checkpoint: derived from a verified full export, signed, and detects tail 
   const rewritten = JSON.parse(JSON.stringify(later)); rewritten.events[2].hash = "ab".repeat(32);
   assert.equal(compareBundleToCheckpoint(rewritten, cp).relation, "conflict");
 
-  // A bundle generated before the checkpoint cannot be judged by it.
+  // A FULL bundle that claims to predate the checkpoint is still a conflict: generated_at is the issuer's own claim,
+  // so truncate-and-backdate must not pass. Only a scoped bundle earns "predates".
   const old = await buildExportBundle(store2, { project: "p" }, { signingKey: issuer.privateKey, now: new Date("2026-08-30T00:30:00Z") });
-  assert.equal(compareBundleToCheckpoint(old, cp).relation, "predates");
+  const oc = compareBundleToCheckpoint(old, cp);
+  assert.equal(oc.relation, "conflict");
+  assert.ok(oc.problems.some((p) => /does not excuse/.test(p)), oc.problems.join(" | "));
+  const oldScoped = await buildExportBundle(store2, { project: "p", artifact_id: "a" }, { signingKey: issuer.privateKey, now: new Date("2026-08-30T00:30:00Z") });
+  assert.equal(compareBundleToCheckpoint(oldScoped, cp).relation, "predates");
 
   // Scoped bundles: contains the checkpointed seq → extends; otherwise unverifiable, unless the size claim contradicts.
   const scopedWith = await buildExportBundle(store, { project: "p", artifact_id: "b" }, { signingKey: issuer.privateKey, now: new Date("2026-08-30T02:00:00Z") });

@@ -17,7 +17,10 @@ export function renderReportHtml(bundle: ExportBundle, verdict?: ExportVerdict, 
   const agents = new Set(events.filter((e) => e.actor.type === "agent").map((e) => e.actor.id));
   const arts = new Set(events.flatMap((e) => e.artifacts.map((a) => a.id)));
   const first = events[0]?.timestamp, last = events.at(-1)?.timestamp;
-  const sigLine = !bundle.signature ? "unsigned" : verdict ? (verdict.signature === "valid" ? "valid" : "INVALID") : "present (not verified here)";
+  const sigLine = !bundle.signature ? "unsigned" : !verdict ? "present (not verified here)"
+    : verdict.signature === "valid" ? "valid (trusted key)"
+    : verdict.signature === "self_attested" ? `self-attested — verifies against the key embedded in the bundle (kid ${verdict.kid ?? "?"}); confirm the kid against the issuer's /.well-known/retrace-pubkey`
+    : "INVALID";
   const chainLine = bundle.chain.ok ? `intact — ${bundle.chain.checked} of ${bundle.chain.total_events} events verified at export` : `BROKEN at #${bundle.chain.first_bad_seq}: ${bundle.chain.reason}`;
   // Omission: a chain proves present events were not altered; coverage says whether any were left out (full exports only).
   const cov = verdict?.coverage;

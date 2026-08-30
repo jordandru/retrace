@@ -49,8 +49,13 @@ jobs:
             echo "::error::RETRACE_CHECKPOINT_KEY is not set; refusing to sign a checkpoint with a throwaway key" >&2
             exit 1
           fi
-          out=$(node packages/mcp-server/dist/export-cli.js checkpoint "$PROJECT" --out "$CHECKPOINTS" 2>&1 | grep -v ExperimentalWarning | grep -v 'trace-warnings' || true)
+          set +e
+          out=$(node packages/mcp-server/dist/export-cli.js checkpoint "$PROJECT" --out "$CHECKPOINTS" 2>&1)
+          rc=$?
+          set -e
+          out=$(echo "$out" | grep -v ExperimentalWarning | grep -v 'trace-warnings' || true)
           echo "$out"
+          if [ "$rc" -ne 0 ]; then echo "::error::export-cli checkpoint exited $rc" >&2; exit "$rc"; fi
           if echo "$out" | grep -q '^unchanged'; then echo "changed=false" >> "$GITHUB_OUTPUT"; exit 0; fi
           if ! echo "$out" | grep -q '^appended head'; then echo "::error::checkpoint did not append" >&2; exit 1; fi
           line=$(tail -n 1 "$CHECKPOINTS")

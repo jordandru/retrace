@@ -83,7 +83,7 @@ export async function checkpointFromStore(store: EventStore, project: string, op
   return sign(cp, opts);
 }
 
-export interface CheckpointVerdict { signature: "valid" | "invalid" | "unsigned"; kid?: string; problems: string[] }
+export interface CheckpointVerdict { signature: "valid" | "self_attested" | "invalid" | "unsigned"; kid?: string; problems: string[] }
 
 /** Check a checkpoint's own signature (and, if given, that it was signed by a trusted key). */
 export async function verifyCheckpoint(cp: Checkpoint, trustedPublicKey?: JsonWebKey): Promise<CheckpointVerdict> {
@@ -93,14 +93,15 @@ export async function verifyCheckpoint(cp: Checkpoint, trustedPublicKey?: JsonWe
   const pub = trustedPublicKey ?? cp.signer.public_key;
   if (trustedPublicKey && (await keyId(trustedPublicKey)) !== cp.signer.kid) problems.push("checkpoint signer kid does not match trusted key");
   const ok = await verifyCanonical(pub, { ...cp, signature: undefined }, cp.signature);
-  if (!ok) problems.push("checkpoint signature does not verify — altered or wrong key");
-  return { signature: ok ? "valid" : "invalid", kid: cp.signer.kid, problems };
+  if (!ok) { problems.push("checkpoint signature does not verify — altered or wrong key"); return { signature: "invalid", kid: cp.signer.kid, problems }; }
+  if (!trustedPublicKey) problems.push(`checkpoint signature verifies against its own embedded key (kid ${cp.signer.kid}) — trust comes from where the checkpoint is committed, not from the signature`);
+  return { signature: trustedPublicKey ? "valid" : "self_attested", kid: cp.signer.kid, problems };
 }
 
 export type CheckpointRelation =
   | "matches"        // bundle head is exactly the checkpointed head
   | "extends"        // bundle contains the checkpointed head and continues past it
-  | "predates"       // bundle was generated before the checkpoint; cannot be compared (not a failure)
+  | "predates"       // SCOPED bundle generated before the checkpoint; cannot be compared (not a failure). A full bundle never predates: see below.
   | "unverifiable"   // scoped bundle without the checkpointed seq; only the size claim could be compared
   | "conflict"       // the checkpointed event is missing or different: tail removed or history rewritten
   | "other_project";
@@ -137,9 +138,13 @@ export function compareBundleToCheckpoint(bundle: ExportBundle, cp: Checkpoint):
       checkpoint: ref,
     };
   }
-  if (bundleOlder) {
-    return { relation: "predates", problems, note: `bundle was generated ${bundle.generated_at}, before the checkpoint at ${cp.at}; it cannot be checked against it`, checkpoint: ref };
+  // `generated_at` is written by the issuer, so it cannot excuse a full bundle from carrying the checkpointed event:
+  // truncate the tail, re-export with a backdated timestamp, and "predates" would pass. A full bundle that lacks the
+  // checkpointed seq is a conflict whatever it says about its age; only scoped bundles get the benefit of the doubt.
+  if (bundleOlder && !full) {
+    return { relation: "predates", problems, note: `scoped bundle was generated ${bundle.generated_at}, before the checkpoint at ${cp.at}; it cannot be checked against it`, checkpoint: ref };
   }
+  if (bundleOlder && full) problems.push(`bundle claims generated_at ${bundle.generated_at}, before the checkpoint at ${cp.at}; that timestamp is the issuer's own and does not excuse a full export from containing #${cp.seq}`);
   if (full) {
     problems.push(
       total <= cp.seq
