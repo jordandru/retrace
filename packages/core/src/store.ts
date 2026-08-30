@@ -118,6 +118,14 @@ export class AdapterIdempotencyError extends Error {
   }
 }
 
+/** Thrown when caused_by is set but does not name an existing event in the same project. */
+export class CausedByError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CausedByError";
+  }
+}
+
 const GIT_IDEMPOTENCY_ACTIONS = new Set(["committed", "merged"]);
 
 /** Adapter key namespaces (`git:` / `gd:` / `gh:`) may only be claimed by matching adapter-shaped events.
@@ -147,6 +155,12 @@ export function adapterIdempotencyError(input: EventInput): string | undefined {
 export async function appendEvent(store: EventStore, input: EventInput): Promise<{ event: Event; deduped: boolean }> {
   const reserved = adapterIdempotencyError(input);
   if (reserved) throw new AdapterIdempotencyError(reserved);
+  if (input.caused_by) {
+    const parent = await store.get(input.caused_by);
+    if (!parent) throw new CausedByError(`caused_by "${input.caused_by}" does not name an event in this ledger`);
+    if (parent.project !== input.project)
+      throw new CausedByError(`caused_by "${input.caused_by}" is in project "${parent.project}", not "${input.project}"`);
+  }
   if (input.idempotency_key) {
     const existing = await store.byIdempotencyKey(input.project, input.idempotency_key);
     if (existing) return { event: existing, deduped: true };

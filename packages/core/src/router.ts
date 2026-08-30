@@ -30,7 +30,7 @@
  */
 import { z } from "zod";
 import { Actor, ActorType, EventInput, schemaSurface } from "./schema.js";
-import { EventStore, appendEvent, AdapterIdempotencyError, verifyProject, explainEvent, newShareId, shareIsLive, Share, isHeadMovedError } from "./store.js";
+import { EventStore, appendEvent, AdapterIdempotencyError, CausedByError, verifyProject, explainEvent, newShareId, shareIsLive, Share, isHeadMovedError } from "./store.js";
 import { sealEvent } from "./chain.js";
 import { buildExportBundle, verifyExportBundle } from "./export.js";
 import { renderReportHtml } from "./report.js";
@@ -40,6 +40,12 @@ import { mapDriveActivities, DrivePayload } from "./gdrive.js";
 import { buildProjectStatus } from "./status.js";
 import { publicFromPrivate, keyId } from "./signing.js";
 import { UI_HTML } from "./ui-html.js";
+
+function writeClientError(e: unknown): string | undefined {
+  const name = (e as any)?.name;
+  if (e instanceof AdapterIdempotencyError || name === "AdapterIdempotencyError") return (e as Error).message;
+  if (e instanceof CausedByError || name === "CausedByError") return (e as Error).message;
+}
 
 /** A per-actor credential (security review 2026-08-21, backlog #6). Holders can POST /events and read; they cannot
  *  DELETE or create shares. trust "pinned" (default): the Worker stamps `actor` from the credential — the body may only
@@ -202,7 +208,11 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
           if (!parsed.success) { results.push({ error: parsed.error.issues }); continue; }
           for (let attempt = 0; ; attempt++) {
             try { const r = await appendEvent(store, parsed.data); results.push({ id: r.event.id, seq: r.event.seq, deduped: r.deduped }); break; }
-            catch (e: any) { if (!/UNIQUE/i.test(String(e?.message)) || attempt >= 4) throw e; }
+            catch (e: any) {
+              const client = writeClientError(e);
+              if (client) return json({ error: client }, 400);
+              if (!/UNIQUE/i.test(String(e?.message)) || attempt >= 4) throw e;
+            }
           }
         }
         return json({ ok: true, event: ghEvent, logged: results }, 201);
@@ -220,7 +230,11 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
           if (!parsed.success) { results.push({ error: parsed.error.issues }); continue; }
           for (let attempt = 0; ; attempt++) {
             try { const r = await appendEvent(store, parsed.data); results.push({ id: r.event.id, seq: r.event.seq, deduped: r.deduped }); break; }
-            catch (e: any) { if (!/UNIQUE/i.test(String(e?.message)) || attempt >= 4) throw e; }
+            catch (e: any) {
+              const client = writeClientError(e);
+              if (client) return json({ error: client }, 400);
+              if (!/UNIQUE/i.test(String(e?.message)) || attempt >= 4) throw e;
+            }
           }
         }
         return json({ ok: true, received: (payload.activities ?? []).length, logged: results.filter((r: any) => r.id && !r.deduped).length, deduped: results.filter((r: any) => r.deduped).length, results }, 201);
@@ -272,8 +286,8 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
             const r = await appendEvent(store, input);
             return json(r, r.deduped ? 200 : 201);
           } catch (e: any) {
-            if (e instanceof AdapterIdempotencyError || e?.name === "AdapterIdempotencyError")
-              return json({ error: e.message }, 400);
+            const client = writeClientError(e);
+            if (client) return json({ error: client }, 400);
             if (!/UNIQUE/i.test(String(e?.message)) || attempt >= 4) throw e;
           }
         }

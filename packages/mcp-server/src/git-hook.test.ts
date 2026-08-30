@@ -9,8 +9,18 @@ import { fileURLToPath } from "node:url";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { SqliteStore } from "./sqlite-store.js";
-import { verifyProject } from "@retrace-dev/core";
+import { appendEvent, verifyProject } from "@retrace-dev/core";
 import { parseTrailers, resolveHookToken, ttySurface, guardRemoteWrite } from "./git-hook.js";
+
+async function seedInstruct(db: string, project = "rpg"): Promise<string> {
+  const { event } = await appendEvent(new SqliteStore(db), {
+    project,
+    actor: { type: "human", id: "jordan@slcwitit.com" },
+    action: "instructed",
+    artifacts: [{ id: "task:seed", role: "generated" }],
+  });
+  return event.id;
+}
 
 const bin = fileURLToPath(new URL("./git-hook.js", import.meta.url));
 // Hermetic: drop inherited RETRACE_* (a dev shell exports RETRACE_URL/TOKEN, which would redirect the
@@ -46,12 +56,14 @@ test("git adapter: install hook, human commit, agent commit with trailers, backf
 
   writeFileSync(join(dir, "fight.ts"), "export const jab = () => 1;\n");
   sh(dir, "git", ["add", "."]);
-  sh(dir, "git", ["commit", "-qm", "add jab\n\nRetrace-Actor: claude-code\nRetrace-Model: claude-fable-5\nRetrace-Caused-By: evt_root123\nCo-Authored-By: Claude <noreply@anthropic.com>"], env);
+  const root = await seedInstruct(db);
+  sh(dir, "git", ["commit", "-qm", `add jab\n\nRetrace-Actor: claude-code\nRetrace-Model: claude-fable-5\nRetrace-Caused-By: ${root}\nCo-Authored-By: Claude <noreply@anthropic.com>`], env);
 
   const store = new SqliteStore(db);
   let events = await store.all("rpg");
-  assert.equal(events.length, 2, "hook logged two commits");
-  const human = events[0], agent = events[1];
+  const commits = events.filter((e) => e.action === "committed");
+  assert.equal(commits.length, 2, "hook logged two commits");
+  const human = commits[0], agent = commits[1];
   assert.equal(human.actor.type, "human");
   assert.equal(human.actor.id, "jordan@slcwitit.com");
   assert.equal(human.action, "committed");
@@ -69,7 +81,7 @@ test("git adapter: install hook, human commit, agent commit with trailers, backf
   assert.equal(agent.actor.id, "claude-code");
   assert.equal(agent.actor.model, "claude-fable-5");
   assert.equal(agent.actor.on_behalf_of, "jordan@slcwitit.com");
-  assert.equal(agent.caused_by, "evt_root123");
+  assert.equal(agent.caused_by, root);
   assert.equal(agent.intent, "add jab");
   assert.equal(agent.method?.automated, true);
 
@@ -79,7 +91,7 @@ test("git adapter: install hook, human commit, agent commit with trailers, backf
   const bf2 = sh(dir, "node", [bin, "backfill", "--repo", dir], env);
   assert.match(bf2, /0 logged, 3 already present/);
   events = await store.all("rpg");
-  assert.equal(events.length, 3);
+  assert.equal(events.length, 4, "3 commits + 1 seeded instruct");
   assert.equal((await verifyProject(store, "rpg")).ok, true);
 });
 
@@ -206,11 +218,15 @@ test("git adapter: trailers from all trailing paragraphs; consistent Co-Authored
   sh(dir, "git", ["add", "."]);
   sh(dir, "git", ["commit", "-qm", "initial"]);
   sh(dir, "node", [bin, "install", "--repo", dir], env);
+  writeFileSync(join(dir, "seed.ts"), "export const seed = 1;\n");
+  sh(dir, "git", ["add", "."]);
+  sh(dir, "git", ["commit", "-qm", "seed db"], env);
+  const root12 = await seedInstruct(db);
 
   // (b) the 68c343f layout: Retrace-* paragraph, then a Co-Authored-By paragraph; prose keeps its "Note:" line
   writeFileSync(join(dir, "hook.ts"), "export const hook = 1;\n");
   sh(dir, "git", ["add", "."]);
-  sh(dir, "git", ["commit", "-qm", "add hook\n\nLonger text.\nNote: keep me\n\nRetrace-Actor: claude-code\nRetrace-Model: claude-fable-5\nRetrace-Caused-By: evt_root456\n\nCo-Authored-By: Claude Fable 5 <noreply@anthropic.com>"], env);
+  sh(dir, "git", ["commit", "-qm", `add hook\n\nLonger text.\nNote: keep me\n\nRetrace-Actor: claude-code\nRetrace-Model: claude-fable-5\nRetrace-Caused-By: ${root12}\n\nCo-Authored-By: Claude Fable 5 <noreply@anthropic.com>`], env);
   // (c) Co-Authored-By only → family id + model from the full name
   writeFileSync(join(dir, "hook.ts"), "export const hook = 2;\n");
   sh(dir, "git", ["commit", "-qam", "bump hook\n\nCo-Authored-By: Claude Fable 5 <noreply@anthropic.com>"], env);
@@ -219,17 +235,17 @@ test("git adapter: trailers from all trailing paragraphs; consistent Co-Authored
   sh(dir, "git", ["commit", "-qam", "human note\n\nThis paragraph mentions\nRetrace-Actor: claude-code\nin passing, as prose."], env);
   // (e) the 68c343f layout with CRLF endings kept verbatim (`-m` cleanup would strip the CRs; verbatim does not)
   writeFileSync(join(dir, "hook.ts"), "export const hook = 4;\n");
-  sh(dir, "git", ["commit", "-qa", "--cleanup=verbatim", "-m", "crlf hook\r\n\r\nLonger text.\r\nNote: keep me\r\n\r\nRetrace-Actor: claude-code\r\nRetrace-Model: claude-fable-5\r\nRetrace-Caused-By: evt_root789\r\n\r\nCo-Authored-By: Claude Fable 5 <noreply@anthropic.com>\r\n"], env);
+  sh(dir, "git", ["commit", "-qa", "--cleanup=verbatim", "-m", `crlf hook\r\n\r\nLonger text.\r\nNote: keep me\r\n\r\nRetrace-Actor: claude-code\r\nRetrace-Model: claude-fable-5\r\nRetrace-Caused-By: ${root12}\r\n\r\nCo-Authored-By: Claude Fable 5 <noreply@anthropic.com>\r\n`], env);
   // (f) `git commit-tree` runs no cleanup and no hook — logged explicitly, as backfill would
   const ct = sh(dir, "git", ["commit-tree", "HEAD^{tree}", "-p", "HEAD", "-m", "ct\r\n\r\nRetrace-Actor: claude-code\r\nRetrace-Model: m\r\n"]).trim();
   sh(dir, "node", [bin, "commit", "--repo", dir, ct], env);
 
   const store = new SqliteStore(db);
-  const events = await store.all("rpg");
-  assert.equal(events.length, 5, "hook logged four commits + one explicit commit-tree");
-  const [layout, coauthored, human, crlf, tree] = events;
+  const events = (await store.all("rpg")).filter((e) => e.action === "committed");
+  assert.equal(events.length, 6, "hook logged seed + four commits + one explicit commit-tree");
+  const [, layout, coauthored, human, crlf, tree] = events;
   assert.deepEqual(layout.actor, { type: "agent", id: "claude-code", model: "claude-fable-5", on_behalf_of: "jordan@slcwitit.com" });
-  assert.equal(layout.caused_by, "evt_root456");
+  assert.equal(layout.caused_by, root12);
   assert.equal(layout.intent, "add hook\n\nLonger text.\nNote: keep me");
   assert.equal(layout.method?.automated, true);
   assert.deepEqual(coauthored.actor, { type: "agent", id: "claude", model: "claude-fable-5", display_name: "Claude Fable 5", on_behalf_of: "jordan@slcwitit.com" });
@@ -241,7 +257,7 @@ test("git adapter: trailers from all trailing paragraphs; consistent Co-Authored
   assert.equal(human.method?.automated, false);
   assert.ok(sh(dir, "git", ["log", "-1", "--format=%B"]).includes("\r"), "CRLF commit stored verbatim");
   assert.deepEqual(crlf.actor, { type: "agent", id: "claude-code", model: "claude-fable-5", on_behalf_of: "jordan@slcwitit.com" });
-  assert.equal(crlf.caused_by, "evt_root789");
+  assert.equal(crlf.caused_by, root12);
   assert.equal(crlf.intent, "crlf hook\n\nLonger text.\nNote: keep me");
   assert.deepEqual(tree.actor, { type: "agent", id: "claude-code", model: "m", on_behalf_of: "jordan@slcwitit.com" });
   assert.equal(tree.intent, "ct");
@@ -257,15 +273,18 @@ test("git adapter: grok trailers and Co-Authored-By map to actor id grok, not cl
   sh(dir, "git", ["add", "."]);
   sh(dir, "git", ["commit", "-qm", "initial"]);
   sh(dir, "node", [bin, "install", "--repo", dir], env);
+  writeFileSync(join(dir, "a.ts"), "export const a = 1.5;\n");
+  sh(dir, "git", ["commit", "-qam", "seed db"], env);
+  const grokRoot = await seedInstruct(db);
 
   writeFileSync(join(dir, "a.ts"), "export const a = 2;\n");
-  sh(dir, "git", ["commit", "-qam", "grok trailers\n\nRetrace-Actor: grok\nRetrace-Model: grok-4.6\nRetrace-Caused-By: evt_grok1\nCo-Authored-By: Grok <noreply@x.ai>"], env);
+  sh(dir, "git", ["commit", "-qam", `grok trailers\n\nRetrace-Actor: grok\nRetrace-Model: grok-4.6\nRetrace-Caused-By: ${grokRoot}\nCo-Authored-By: Grok <noreply@x.ai>`], env);
   writeFileSync(join(dir, "a.ts"), "export const a = 3;\n");
   sh(dir, "git", ["commit", "-qam", "grok coauthor only\n\nCo-Authored-By: Grok 4.6 <noreply@x.ai>"], env);
 
-  const [trailed, coauthored] = await new SqliteStore(db).all("rpg");
+  const [trailed, coauthored] = (await new SqliteStore(db).all("rpg")).filter((e) => e.action === "committed").slice(-2);
   assert.deepEqual(trailed.actor, { type: "agent", id: "grok", model: "grok-4.6", on_behalf_of: "jordan@slcwitit.com" });
-  assert.equal(trailed.caused_by, "evt_grok1");
+  assert.equal(trailed.caused_by, grokRoot);
   assert.deepEqual(coauthored.actor, { type: "agent", id: "grok", model: "grok-4-6", display_name: "Grok 4.6", on_behalf_of: "jordan@slcwitit.com" });
 });
 
