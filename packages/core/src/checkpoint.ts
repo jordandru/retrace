@@ -91,9 +91,11 @@ export async function verifyCheckpoint(cp: Checkpoint, trustedPublicKey?: JsonWe
   if (cp.format !== CHECKPOINT_FORMAT) problems.push(`unknown checkpoint format ${String(cp.format)}`);
   if (!cp.signature || !cp.signer) { problems.push("checkpoint is unsigned"); return { signature: "unsigned", problems }; }
   const pub = trustedPublicKey ?? cp.signer.public_key;
-  if (trustedPublicKey && (await keyId(trustedPublicKey)) !== cp.signer.kid) problems.push("checkpoint signer kid does not match trusted key");
+  const trustedKidMismatch = !!trustedPublicKey && (await keyId(trustedPublicKey)) !== cp.signer.kid;
+  if (trustedKidMismatch) problems.push("checkpoint signer kid does not match trusted key");
   const ok = await verifyCanonical(pub, { ...cp, signature: undefined }, cp.signature);
-  if (!ok) { problems.push("checkpoint signature does not verify — altered or wrong key"); return { signature: "invalid", kid: cp.signer.kid, problems }; }
+  if (!ok) problems.push("checkpoint signature does not verify — altered or wrong key");
+  if (!ok || trustedKidMismatch) return { signature: "invalid", kid: cp.signer.kid, problems };
   if (!trustedPublicKey) problems.push(`checkpoint signature verifies against its own embedded key (kid ${cp.signer.kid}) — trust comes from where the checkpoint is committed, not from the signature`);
   return { signature: trustedPublicKey ? "valid" : "self_attested", kid: cp.signer.kid, problems };
 }

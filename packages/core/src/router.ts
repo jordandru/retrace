@@ -123,6 +123,9 @@ export function parseCredentials(raw?: string | null): Credential[] {
 }
 
 export interface RouterOptions {
+  /** Refuse every request when neither an owner token nor a scoped credential is configured. Cloud deployments set
+   *  this so a missing secret cannot silently turn authenticated owner routes into unauthenticated routes. */
+  requireAuth?: boolean;
   /** Owner token: full access, body actor stored verbatim. Bearer on every method; ?token= on GET/UI only. */
   token?: string;
   /** Per-actor credentials; see Credential. Bearer only (never ?token=, which leaks into logs). */
@@ -162,6 +165,7 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
   const opts: RouterOptions = typeof tokenOrOpts === "string" ? { token: tokenOrOpts } : tokenOrOpts ?? {};
   const { token } = opts;
   const credentials = opts.credentials ?? [];
+  const authConfigured = !!token || credentials.length > 0;
   type Principal = { kind: "owner" } | { kind: "credential"; credential: Credential } | null;
   const shareHits = new Map<string, { n: number; t: number }>();
   const shareLimited = (id: string): boolean => {
@@ -269,6 +273,8 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
   const exportFor = (scope: { project: string; artifact_id?: string }) => buildExportBundle(store, scope, { signingKey: opts.signingKey, issuerName: opts.issuerName });
 
   return async function handle(req: Request): Promise<Response> {
+    if (opts.requireAuth && !authConfigured)
+      return json({ error: "server authentication is not configured" }, 503);
     const url = new URL(req.url);
     const parts = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
     const base = (opts.publicUrl ?? url.origin).replace(/\/$/, "");

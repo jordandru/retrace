@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  generateSigningKey, buildExportBundle, verifyExportBundle, exportVerdictOk, appendEvent,
+  generateSigningKey, signCanonical, buildExportBundle, verifyExportBundle, exportVerdictOk, appendEvent,
   checkpointFromBundle, checkpointFromStore, verifyCheckpoint, compareBundleToCheckpoint, parseCheckpointLog, latestCheckpoint,
-  EventStore, Event, EventInput, Share,
+  EventStore, Event, EventInput, Share, Checkpoint,
 } from "./index.js";
 
 class MemStore implements EventStore {
@@ -39,6 +39,10 @@ test("checkpoint: derived from a verified full export, signed, and detects tail 
   const wrong = await verifyCheckpoint(cp, issuer.publicKey);
   assert.equal(wrong.signature, "invalid");
   assert.ok(wrong.problems.some((p) => /kid does not match/.test(p)));
+  const falseKid: Checkpoint = { ...cp, signer: { ...cp.signer!, kid: "not-the-trusted-key" }, signature: undefined };
+  falseKid.signature = await signCanonical(signer.privateKey, falseKid);
+  const falseKidVerdict = await verifyCheckpoint(falseKid, signer.publicKey);
+  assert.equal(falseKidVerdict.signature, "invalid", "a valid signature cannot excuse a signer kid that contradicts the trusted key");
   const forged = { ...cp, head_hash: "00".repeat(32) };
   assert.equal((await verifyCheckpoint(forged)).signature, "invalid");
 

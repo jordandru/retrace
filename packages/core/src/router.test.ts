@@ -491,6 +491,30 @@ test("GET /api publishes the schema surface, unauthenticated, and it matches thi
   assert.deepEqual(missing, []);
 });
 
+test("requireAuth: a cloud handler with no owner token or credentials fails closed", async () => {
+  const store = new MemStore();
+  const handle = createHandler(store, { requireAuth: true });
+  const requests = [
+    new Request("https://x/api"),
+    new Request("https://x/projects"),
+    new Request("https://x/events", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(ev({ project: "public" })),
+    }),
+    new Request("https://x/projects/public?confirm=public", { method: "DELETE" }),
+  ];
+  for (const req of requests) {
+    const res = await handle(req);
+    assert.equal(res.status, 503, `${req.method} ${new URL(req.url).pathname}`);
+    assert.deepEqual(await res.json(), { error: "server authentication is not configured" });
+  }
+  assert.equal(store.events.length, 0, "a missing Worker secret cannot write anything");
+
+  const configured = createHandler(store, { requireAuth: true, token: "secret" });
+  assert.equal((await configured(new Request("https://x/api"))).status, 200, "configured deployments retain the public schema probe");
+});
+
 test("POST /events: dangling caused_by is sealed with the link kept, not 400", async () => {
   const store = new MemStore();
   const h = createHandler(store, { token: "tok" });

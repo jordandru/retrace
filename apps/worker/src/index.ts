@@ -37,6 +37,9 @@ export interface Env {
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     return createHandler(new D1Store(env.DB), {
+      // Cloud deployments have no safe implicit-open mode: missing secrets must make the service unavailable rather
+      // than granting anonymous read, append, share, and delete access. Local RETRACE_OPEN remains explicit in serve.ts.
+      requireAuth: true,
       token: env.RETRACE_TOKEN,
       credentials: parseCredentials(env.RETRACE_CREDENTIALS),
       signingKey: parseSigningKey(env.RETRACE_SIGNING_KEY),

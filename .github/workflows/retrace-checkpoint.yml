@@ -1,6 +1,7 @@
 # Scheduled head checkpoint. A hash chain proves present events were not altered; a checkpoint committed to git
 # proves the head existed at a point in time, so a later export that drops the tail is detectable
-# (`retrace-export verify <bundle> --checkpoint .retrace/checkpoints.jsonl`). This job takes a verified full export
+# (`retrace-export verify <bundle> --checkpoint .retrace/checkpoints.jsonl`, using the committed public JWK).
+# This job takes a verified full export
 # of the ledger, appends a signed checkpoint to .retrace/checkpoints.jsonl, and opens a pull request — a human merge
 # is the witness, and the GitHub webhook logs that merge into the ledger, which is how the merge commit passes the gate.
 #
@@ -86,4 +87,4 @@ jobs:
           git push -u origin "$branch"
           gh pr create --base main --head "$branch" \
             --title "Checkpoint ${PROJECT} head #${SEQ}" \
-            --body "$(printf 'Scheduled head checkpoint for project `%s`: seq **#%s**, head `%s…`, %s events, issuer kid `%s`, checkpoint signer kid `%s`.\n\nMerging records that this head existed now. Verify any later bundle with:\n\n    retrace-export verify <bundle.json> --checkpoint .retrace/checkpoints.jsonl\n\nRetrace-Caused-By: evt_4b37cc72831a4434937b339a1873e27f' "$PROJECT" "$SEQ" "$HEAD12" "$TOTAL" "$ISSUER" "$SIGNER")"
+            --body "$(printf 'Scheduled head checkpoint for project `%s`: seq **#%s**, head `%s…`, %s events, issuer kid `%s`, checkpoint signer kid `%s`.\n\nMerging records that this head existed now. Verify any later bundle with the committed `.retrace/checkpoint-public.jwk`:\n\n    retrace-export verify <bundle.json> --checkpoint .retrace/checkpoints.jsonl\n\nRetrace-Caused-By: evt_4b37cc72831a4434937b339a1873e27f' "$PROJECT" "$SEQ" "$HEAD12" "$TOTAL" "$ISSUER" "$SIGNER")"

@@ -3,9 +3,12 @@
  * retrace-export — signing keys, signed exports, offline verification.
  *   retrace-export keygen [--print-private]           create ~/.retrace/signing-key.json if missing; print kid + public JWK
  *   retrace-export export <project> [--artifact <id>] [--out file.json] [--report file.html]
- *   retrace-export verify <bundle.json> [--pubkey <jwk.json|https-url>] [--checkpoint <checkpoints.jsonl>] [--allow-self-attested]
+ *   retrace-export verify <bundle.json> [--pubkey <jwk.json|https-url>] [--checkpoint <checkpoints.jsonl> --checkpoint-pubkey <jwk.json|https-url>] [--allow-self-attested]
  *       Trusted key: --pubkey, else RETRACE_PUBKEY (JWK/file/https url), else RETRACE_URL/.well-known/retrace-pubkey (https only).
  *       Without one the bundle is only self-attested and verify exits 2 unless --allow-self-attested.
+ *       Checkpoints require their own trusted key from --checkpoint-pubkey or RETRACE_CHECKPOINT_PUBKEY; the production
+ *       checkpoint signer is intentionally separate from the export issuer. A committed
+ *       .retrace/checkpoint-public.jwk is the final repository-local fallback.
  *   retrace-export checkpoint <project> [--bundle file.json] [--out .retrace/checkpoints.jsonl]   append a signed head checkpoint; commit the file
  *   retrace-export share <project> [--artifact <id>] [--label ..] [--days n]      (local server must be running for the link to resolve)
  * Uses the same store config as the MCP server (RETRACE_DB / RETRACE_URL+RETRACE_TOKEN).
@@ -42,6 +45,16 @@ async function resolveTrustedKey(flag: unknown): Promise<{ key: JsonWebKey; from
     try { return { key: await loadPublicKey(url, url), from: url }; }
     catch (e: any) { console.error(`  (could not load the issuer key from ${url}: ${e?.message ?? e})`); }
   }
+  return undefined;
+}
+
+/** Checkpoint witnesses use a separate signing key, so never silently reuse the export issuer key. */
+async function resolveCheckpointTrustedKey(flag: unknown): Promise<{ key: JsonWebKey; from: string } | undefined> {
+  if (flag) return { key: await loadPublicKey(String(flag), "--checkpoint-pubkey"), from: `--checkpoint-pubkey ${flag}` };
+  if (process.env.RETRACE_CHECKPOINT_PUBKEY)
+    return { key: await loadPublicKey(process.env.RETRACE_CHECKPOINT_PUBKEY, "RETRACE_CHECKPOINT_PUBKEY"), from: "RETRACE_CHECKPOINT_PUBKEY" };
+  const repoKey = ".retrace/checkpoint-public.jwk";
+  if (existsSync(repoKey)) return { key: await loadPublicKey(repoKey, repoKey), from: repoKey };
   return undefined;
 }
 
@@ -92,13 +105,27 @@ async function main() {
       // Compare against the newest committed checkpoint: the checkpointed head must still be in a later bundle.
       const cps = parseCheckpointLog(readFileSync(String(flags.checkpoint), "utf8"));
       const cp = latestCheckpoint(cps, bundle.scope.project);
-      if (!cp) console.log(`  checkpoint: none for project ${bundle.scope.project} in ${flags.checkpoint}`);
+      if (!cp) {
+        ok = false;
+        console.log(`  checkpoint: NOT VERIFIED — none for project ${bundle.scope.project} in ${flags.checkpoint}`);
+      }
       else {
-        const cv = await verifyCheckpoint(cp);
-        const cmp = compareBundleToCheckpoint(bundle, cp);
-        if (cmp.relation === "conflict" || cmp.relation === "other_project") ok = false;
-        console.log(`  checkpoint #${cp.seq} (${cp.at}, signature ${cv.signature}${cv.kid ? ", kid " + cv.kid : ""}): ${cmp.relation.toUpperCase()} — ${cmp.note}`);
-        for (const p of [...cv.problems, ...cmp.problems]) console.log("  - " + p);
+        const checkpointTrusted = await resolveCheckpointTrustedKey(flags["checkpoint-pubkey"]);
+        if (!checkpointTrusted) {
+          ok = false;
+          const cv = await verifyCheckpoint(cp);
+          console.log(`  checkpoint #${cp.seq} (${cp.at}, signature ${cv.signature}${cv.kid ? ", kid " + cv.kid : ""}): NOT VERIFIED — no trusted checkpoint key`);
+          console.log("  - pass --checkpoint-pubkey <jwk.json|https-url>, set RETRACE_CHECKPOINT_PUBKEY, or commit .retrace/checkpoint-public.jwk");
+          for (const p of cv.problems) console.log("  - " + p);
+        } else {
+          const cv = await verifyCheckpoint(cp, checkpointTrusted.key);
+          const cmp = compareBundleToCheckpoint(bundle, cp);
+          const relationVerified = cmp.relation === "matches" || cmp.relation === "extends";
+          if (cv.signature !== "valid" || !relationVerified) ok = false;
+          console.log(`  checkpoint #${cp.seq} (${cp.at}, signature ${cv.signature}${cv.kid ? ", kid " + cv.kid : ""}, trusted key from ${checkpointTrusted.from}): ${cmp.relation.toUpperCase()} — ${cmp.note}`);
+          for (const p of [...cv.problems, ...cmp.problems]) console.log("  - " + p);
+          if (!relationVerified && !cmp.problems.length) console.log(`  - checkpoint relation ${cmp.relation} does not verify this bundle`);
+        }
       }
     }
     process.exit(ok ? 0 : 2);
@@ -141,6 +168,6 @@ async function main() {
     console.log(`${base}/s/${id}\nreport: ${base}/s/${id}/report`);
     return;
   }
-  console.log("retrace-export <keygen|export <project>|verify <bundle.json>|checkpoint <project>|share <project>> [--artifact id] [--out f] [--report f.html] [--pubkey jwk|https-url] [--allow-self-attested] [--checkpoint f.jsonl] [--bundle f.json] [--label s] [--days n]");
+  console.log("retrace-export <keygen|export <project>|verify <bundle.json>|checkpoint <project>|share <project>> [--artifact id] [--out f] [--report f.html] [--pubkey jwk|https-url] [--allow-self-attested] [--checkpoint f.jsonl] [--checkpoint-pubkey jwk|https-url] [--bundle f.json] [--label s] [--days n]");
 }
 if (isMainModule(import.meta.url)) main().catch((e) => { console.error("retrace-export:", e.message ?? e); process.exit(1); });

@@ -168,11 +168,12 @@ Omitting trailers still looks human and bypasses the instruct-root check. Do not
 ```bash
 RETRACE_SIGNING_KEY_FILE=~/.retrace/checkpoint-key.json node packages/mcp-server/dist/export-cli.js keygen --print-private   # a NEW key, not the Worker's
 gh secret set RETRACE_CHECKPOINT_KEY      # paste the private JWK printed above
+# Commit the printed public JWK as .retrace/checkpoint-public.jwk for verification.
 # Settings → Actions → General → "Allow GitHub Actions to create and approve pull requests" must be on
 gh workflow run retrace-checkpoint.yml    # first run on demand; merge the PR it opens
 ```
 
-**Check:** `retrace-export verify <bundle.json> --checkpoint .retrace/checkpoints.jsonl` on a fresh export reports `MATCHES` or `EXTENDS`; a bundle missing the checkpointed seq reports `CONFLICT` and is `NOT VALID`.
+**Check:** `retrace-export verify <bundle.json> --checkpoint .retrace/checkpoints.jsonl` on a fresh export uses `.retrace/checkpoint-public.jwk` and reports `MATCHES` or `EXTENDS`; a missing, unsigned, invalid, untrusted, or non-matching checkpoint is `NOT VALID` and exits nonzero. `--checkpoint-pubkey` and `RETRACE_CHECKPOINT_PUBKEY` override the repository key.
 
 ## Stage 5 — Cloudflare Worker + D1
 
@@ -188,6 +189,8 @@ npx wrangler secret put RETRACE_GITHUB_SECRET
 npx wrangler deploy
 npm run check-deploy                           # from repo root; no token, no writes
 ```
+
+At least one of `RETRACE_TOKEN` or a non-empty `RETRACE_CREDENTIALS` array is mandatory. Without either, the Worker fails closed with `503` on every route instead of exposing an anonymous ledger.
 
 `RETRACE_CREDENTIALS`: pinned agents (Worker stamps WHO) plus `trust: "assert"` for `retrace-git` / Drive, with `allowed_actors`. After changing credentials, `wrangler secret put RETRACE_CREDENTIALS` again from `~/.retrace/worker-credentials.json`.
 
