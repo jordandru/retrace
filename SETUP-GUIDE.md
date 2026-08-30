@@ -1,4 +1,4 @@
-# Retrace — setup walkthrough (v0.1.2)
+# Retrace — setup walkthrough (v0.1.3)
 
 Work top to bottom. Each stage ends with a check. Commands assume macOS/Linux or **Ubuntu WSL**. Fill in `<angle brackets>`.
 
@@ -43,7 +43,7 @@ Note the absolute path for MCP configs:
 pwd
 ```
 
-Consumers who only need the CLI can skip the clone and use `npx @retrace-dev/cli` / `npm i -g @retrace-dev/cli@0.1.2`. Bundles sealed after 2026-08-30 need verify >= 0.1.2.
+Consumers who only need the CLI can skip the clone and use `npx @retrace-dev/cli` / `npm i -g @retrace-dev/cli@0.1.3`. Bundles sealed after 2026-08-30 need verify >= 0.1.2; the strict rules (`hash_v`, trusted-key signatures, checkpoint conflicts) ship in >= 0.1.3.
 
 ---
 
@@ -51,21 +51,23 @@ Consumers who only need the CLI can skip the clone and use `npx @retrace-dev/cli
 
 ```bash
 RETRACE_DB=/tmp/demo.db node scripts/seed-demo.mjs
-RETRACE_DB=/tmp/demo.db npm run serve
+RETRACE_DB=/tmp/demo.db RETRACE_TOKEN=demo npm run serve
 ```
 
-Open http://localhost:7777.
+`retrace-serve` is **default-closed**: without a token it generates a one-time one and prints the URL. For this walkthrough set `RETRACE_TOKEN=demo` and open **http://localhost:7777/?token=demo** (the UI stores the token and scrubs it from the address bar).
 
 **Check:** chain-intact badge, a short Boxing-RPG demo timeline. Click an event → WHO · WHAT · WHEN · WHERE · WHY · HOW. Toggle **Graph**. **Report** / **Export** / **Share** (`/s/…`, open in a private window).
 
 Optional, same `RETRACE_DB`, while the server runs:
 
 ```bash
-RETRACE_DB=/tmp/demo.db RETRACE_GITHUB_SECRET=hooksecret node scripts/simulate-github.mjs
-# start serve with RETRACE_GITHUB_SECRET=hooksecret too
+# start serve with RETRACE_GITHUB_SECRET=hooksecret too; the script needs the serve token for its initial read
+RETRACE_TOKEN=demo RETRACE_GITHUB_SECRET=hooksecret node scripts/simulate-github.mjs
 RETRACE_DB=/tmp/demo.db node packages/mcp-server/dist/gdrive-cli.js replay \
   packages/core/test-fixtures/drive-activity.json --project boxing-rpg
 ```
+
+The simulated webhook events land under the project named after the repo (`slcwitit/rpg`), not `boxing-rpg`: since the 2026-08-30 hardening the webhook derives the project from the HMAC-covered `repository.full_name` (optionally via `RETRACE_GITHUB_PROJECTS='{"owner/repo":"project"}'`) and ignores `?project=`. Pick the repo project in the UI's project switcher to see them.
 
 Stop the server (Ctrl-C). Throw away `/tmp/demo.db`. The real local ledger is `~/.retrace/retrace.db` when `RETRACE_DB` is unset.
 
@@ -75,7 +77,7 @@ Stop the server (Ctrl-C). Throw away `/tmp/demo.db`. The real local ledger is `~
 
 ```bash
 node packages/mcp-server/dist/export-cli.js keygen
-# or: npx retrace-export keygen   (from @retrace-dev/cli)
+# or: npm exec --package=@retrace-dev/cli -- retrace-export keygen   (there is no npm package named "retrace-export" — it's a bin inside @retrace-dev/cli)
 ```
 
 Writes `~/.retrace/signing-key.json` (private). Prints `kid`. `--print-private` later for the Worker secret (Stage 5).
@@ -100,7 +102,7 @@ Commit `.retrace.json` (name only — no owner token). For a remote ledger, set 
 npm exec --package=@retrace-dev/cli -- retrace doctor
 ```
 
-READY. Failures name the repair. Hook misses go in `.git/retrace-hook.log`; re-log with `retrace-git commit <sha>`.
+READY when the repo is wired to a ledger it can reach. On a **local-only** scratch repo (no Worker URL, no credential) expect `FAIL credential` — that's doctor telling you the hook has no token, not a broken install; add `"db": "<path>"` to `.retrace.json` for a purely local ledger, or the `url` + `credential` pair for a remote one. Failures name the repair. Hook misses go in `.git/retrace-hook.log`; re-log with `retrace-git commit <sha>`.
 
 Without `.retrace.json`, `retrace-git` **refuses** a remote write so a stray `RETRACE_URL` cannot create junk projects on the live Worker.
 
@@ -138,7 +140,7 @@ Leave `RETRACE_ACTOR_MODEL` unset so the agent reports the model it actually ran
 
 Per-harness notes: `CLAUDE.md`, `GEMINI.md`, `GROK.md`, `AGENTS.md` (Codex), `.github/copilot-instructions.md`. Grok also loads `.grok/rules/retrace.md` (it still auto-loads `CLAUDE.md` via compatibility).
 
-**Check:** client shows Retrace tools (10). One real `retrace_instruct` → timeline shows an amber instruction, then blue agent events with `caused_by`.
+**Check:** client shows Retrace tools (11). One real `retrace_instruct` → timeline shows an amber instruction, then blue agent events with `caused_by`.
 
 This repo’s project name is `retrace` (see `.retrace.json`). Boxing-RPG is a separate project.
 
@@ -147,8 +149,9 @@ This repo’s project name is `retrace` (see `.retrace.json`). Boxing-RPG is a s
 `retrace doctor` is a local preflight (hook installed, credential file). CI has neither. Use:
 
 ```bash
-node packages/mcp-server/dist/doctor.js doctor --gate
-# env: RETRACE_URL, RETRACE_TOKEN
+RETRACE_URL=https://retrace-api.<you>.workers.dev RETRACE_TOKEN=<read-capable credential> \
+  node packages/mcp-server/dist/doctor.js doctor --gate
+# both env vars are required: without them the gate reports FAIL credential + FAIL deployment
 ```
 
 `--gate` skips the hook and `~/.retrace` file. It **fails** if HEAD is not in the ledger. If HEAD is an **agent** commit (`Retrace-Actor` or agent `Co-Authored-By`), it also fails unless that event walks `caused_by` to a human `instructed` root. Human commits pass without a trailer.
@@ -173,7 +176,7 @@ gh secret set RETRACE_CHECKPOINT_KEY      # paste the private JWK printed above
 gh workflow run retrace-checkpoint.yml    # first run on demand; merge the PR it opens
 ```
 
-**Check:** `retrace-export verify <bundle.json> --checkpoint .retrace/checkpoints.jsonl` on a fresh export uses `.retrace/checkpoint-public.jwk` and reports `MATCHES` or `EXTENDS`; a missing, unsigned, invalid, untrusted, or non-matching checkpoint is `NOT VALID` and exits nonzero. `--checkpoint-pubkey` and `RETRACE_CHECKPOINT_PUBKEY` override the repository key.
+**Check:** `retrace-export verify <bundle.json> --checkpoint .retrace/checkpoints.jsonl` on a fresh **full export of the same project** uses `.retrace/checkpoint-public.jwk` and reports `MATCHES` or `EXTENDS` (checkpoints are per-project — this repo's file covers `retrace`, so a `boxing-rpg` bundle has nothing to match); remember `verify` also needs the issuer key (`--pubkey` or `RETRACE_URL`) or the bundle is only self-attested; a missing, unsigned, invalid, untrusted, or non-matching checkpoint is `NOT VALID` and exits nonzero. `--checkpoint-pubkey` and `RETRACE_CHECKPOINT_PUBKEY` override the repository key.
 
 ## Stage 5 — Cloudflare Worker + D1
 

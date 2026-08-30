@@ -1,7 +1,11 @@
 // Simulates signed GitHub webhook deliveries against a running Retrace server (default http://localhost:7777).
-// Usage: RETRACE_GITHUB_SECRET=... node scripts/simulate-github.mjs [baseUrl] [project]
+// Usage: RETRACE_GITHUB_SECRET=... RETRACE_TOKEN=... node scripts/simulate-github.mjs [baseUrl] [project]
+// The webhook route authenticates by HMAC, but the initial read of the project's events does not: retrace-serve is
+// default-closed (SETUP-GUIDE Stage 2), so pass the same RETRACE_TOKEN you started the server with.
 import { createHmac } from "node:crypto";
 const base = process.argv[2] ?? "http://localhost:7777", project = process.argv[3] ?? "boxing-rpg", secret = process.env.RETRACE_GITHUB_SECRET ?? "hooksecret";
+const token = process.env.RETRACE_TOKEN;
+const auth = token ? { authorization: `Bearer ${token}` } : {};
 const repo = { full_name: "slcwitit/rpg" }, jordan = { login: "jordan", type: "User" }, mike = { login: "coach-mike", type: "User" };
 const pr = { number: 57, title: "Jab counter + triple flash", body: "Adds jab counter to the HUD, flashes red on a triple.\n\nRetrace-Caused-By: PLACEHOLDER", html_url: "https://github.com/slcwitit/rpg/pull/57", head: { ref: "feat/jab-counter", sha: "6557ce5aa11bb22cc33dd44ee55ff6677889900" }, base: { ref: "main" }, additions: 61, deletions: 4, changed_files: 3, user: jordan };
 async function send(event, payload, id) {
@@ -11,7 +15,14 @@ async function send(event, payload, id) {
   console.log(event, res.status, (await res.text()).slice(0, 160));
 }
 // find the last human instruction in the project to link the PR to
-const evs = await (await fetch(`${base}/projects/${project}/events?actor_type=human&action=instructed`)).json();
+const evsRes = await fetch(`${base}/projects/${project}/events?actor_type=human&action=instructed`, { headers: auth });
+const evsBody = await evsRes.json();
+if (!evsRes.ok) {
+  console.error(`GET /projects/${project}/events → ${evsRes.status}: ${JSON.stringify(evsBody).slice(0, 120)}`);
+  console.error("retrace-serve is default-closed — start it with RETRACE_TOKEN=<t> and run this script with the same RETRACE_TOKEN.");
+  process.exit(1);
+}
+const evs = Array.isArray(evsBody) ? evsBody : evsBody.events ?? [];
 const root = evs.at(-1)?.id; if (root) pr.body = pr.body.replace("PLACEHOLDER", root);
 const t = (m) => new Date(Date.parse("2026-08-16T14:24:00Z") + m * 60000).toISOString();
 await send("ping", { zen: "Keep it logically awesome.", repository: repo }, "d-ping");
