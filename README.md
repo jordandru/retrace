@@ -44,11 +44,13 @@ Same block works in Claude Desktop's `claude_desktop_config.json`. Other harness
 ### See the timeline
 
 ```bash
-npm run serve            # → http://localhost:7777  (reads ~/.retrace/retrace.db, or RETRACE_DB)
+npm run serve            # → http://127.0.0.1:7777/?token=…  (reads ~/.retrace/retrace.db, or RETRACE_DB; loopback + token by default, see below)
 node scripts/seed-demo.mjs   # optional: seed a demo Boxing-RPG session first (RETRACE_DB=/tmp/demo.db to keep it separate)
 ```
 
 The UI shows a per-project timeline (humans amber ●, agents blue ■, system grey), the chain-integrity badge, filters by actor type / action / artifact / text, and a detail panel with WHO · WHAT · WHEN · WHERE · WHY · HOW, the causal chain back to the originating instruction, downstream consequences, and hashes. It auto-refreshes every 15 s. Click any artifact chip or actor name to filter. ⚙ lets you point it at a remote Worker (URL + token) or load a JSON export offline. Deep link: `/?project=boxing-rpg&api=https://…&token=…`.
+
+`retrace-serve` is **default-closed**: it binds `127.0.0.1` only and every read and write needs a token. With no `RETRACE_TOKEN` (and no `RETRACE_CREDENTIALS`) it generates a one-time token for that run and prints the URL with `?token=…` — set `RETRACE_TOKEN` for a stable one. `RETRACE_HOST` widens the bind (e.g. `0.0.0.0` for a LAN demo) and still requires the token. `RETRACE_OPEN=1` restores the old unauthenticated server, on a loopback host only — combining it with a non-loopback `RETRACE_HOST` is refused at startup rather than served. `GET /api` (the schema probe) stays public.
 
 ### Git adapter — commits become events automatically
 
@@ -230,7 +232,7 @@ survives. Native macOS/Linux panes need nothing. In the UI, click a session or w
 1. Completeness — `verifyExportBundle` reports omission for full exports (count, contiguous seq, head hash; scoped bundles say “not checkable”); `retrace-export checkpoint` + `verify --checkpoint` pin the head in a git-committed `.retrace/checkpoints.jsonl`, and `retrace-checkpoint.yml` appends one daily via a PR you merge. Still open: a transparency-log witness (Rekor / OpenTimestamps), pagination / export truncation, capture windows, and reconciling Git / GitHub / Drive vs the ledger.
 2. Seal what the server actually knows — `received_at` is hash-covered on new seals (`chain.ts` `hashPayload`). Verify still accepts pre-change digests that omitted it, so the live chain checks; rewriting `received_at` on those legacy events is not detectable. A caller `timestamp` can still be earlier than `received_at`; both times are sealed, so backdating is visible. `caused_by` that fails exists/older/same-project is sealed with the link kept and tagged `caused_by:unverified` (`method.params.caused_by_problem`); status counts `unverified_links`. The git hook must not drop a commit because a trailer is stale or the instruct lives in another project/clone. `retrace_log` (MCP) still 400s so the agent can fix and retry. Sealed amendments that fail those rules are `ineffective_amendments`. Adapter idempotency prefixes (`git:` / `gd:` / `gh:`) are reserved at write so a caller key cannot shadow the git hook / Drive / GitHub mapper.
 3. Attribution — `retrace doctor` uses the sealed `committed`/`merged` event for HEAD (not `events.at(-1)`). A human actor with `location.surface=agent` is warn locally and fail under `--gate`, including instruct-root. Replay with no surface is not a false positive. Still open: distinguish content author, committer, relayer, and credential principal; pin / session mismatch across MCP vs git.
-4. Local `retrace-serve` — default-closed auth and bind host.
+4. Local `retrace-serve` — default-closed since 2026-08-30: binds `127.0.0.1` and requires a token (a per-run one is generated and printed when none is configured); `RETRACE_OPEN=1` is honoured on loopback only. Still open: the UI could carry the token in local storage instead of the URL.
 5. Dogfood — boxing-rpg coverage is the honest metric; a second project above 95% beats another integration.
 
 **Not next:** C2PA / line attribution, LangSmith / tracing, an IdP, TRACE/TEE, AI-BOM, a compliance-deadline pitch, a Cursor credential or sixth agent, a fourth trailer vocabulary, Claude-Code-only managed hooks as the completeness strategy, more adapters, batch-amending the ledger. Signed checkpoints / Rekor are a later export of completeness, not a reason to pause the gate.
