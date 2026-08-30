@@ -28,14 +28,28 @@ export async function sha256Hex(text: string): Promise<string> {
   return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-/** The fields that are covered by the hash. */
-export function hashPayload(e: Omit<Event, "hash" | "received_at">): string {
-  const { hash: _h, received_at: _r, ...rest } = e as any;
-  return canonicalize(rest);
+/**
+ * The fields that are covered by the hash.
+ * `received_at` is included for events sealed after this change (the server's arrival time, not the caller's
+ * `timestamp`). Pass `includeReceivedAt: false` to recompute a pre-change digest.
+ */
+export function hashPayload(e: object, opts?: { includeReceivedAt?: boolean }): string {
+  const { hash: _h, received_at, ...rest } = e as any;
+  const include = opts?.includeReceivedAt !== false && received_at !== undefined;
+  return canonicalize(include ? { ...rest, received_at } : rest);
 }
 
-export async function computeHash(e: Omit<Event, "hash" | "received_at">): Promise<string> {
-  return sha256Hex(hashPayload(e));
+/**
+ * Hash of an event's canonical content.
+ * New seals cover `received_at`. When `e.hash` is already set and does not match that digest, recompute
+ * without `received_at` so events sealed before this change still verify. A later `received_at` edit on
+ * those legacy events is not detectable — they were never covered.
+ */
+export async function computeHash(e: object): Promise<string> {
+  const covered = await sha256Hex(hashPayload(e));
+  const stored = (e as { hash?: string }).hash;
+  if (!stored || stored === covered) return covered;
+  return sha256Hex(hashPayload(e, { includeReceivedAt: false }));
 }
 
 export function newId(): string {
@@ -50,15 +64,17 @@ export async function sealEvent(
 ): Promise<Event> {
   const seq = prev ? prev.seq + 1 : 0;
   const prev_hash = prev ? prev.hash : GENESIS_HASH;
+  const received_at = now.toISOString();
   const base = {
     ...input,
     id: newId(),
     seq,
-    timestamp: input.timestamp ?? now.toISOString(),
+    timestamp: input.timestamp ?? received_at,
     prev_hash,
+    received_at,
   };
-  const hash = await computeHash(base as any);
-  return Event.parse({ ...base, hash, received_at: now.toISOString() });
+  const hash = await computeHash(base);
+  return Event.parse({ ...base, hash });
 }
 
 export interface VerifyResult {

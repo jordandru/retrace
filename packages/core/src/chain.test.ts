@@ -71,6 +71,24 @@ test("hash invariance: a real event sealed before `role` existed re-parses byte-
   assert.ok(parsed.artifacts.every((a) => !("role" in a)));
   assert.equal(await computeHash(parsed), raw.hash, "sealed hash still recomputes — never backfilled, never re-hashed");
   assert.equal(raw.hash, "73793107015d76d66b257fcae57df5faa722bde9f79868bc84b48dff607242c1");
+  // Pre-change digest omitted received_at, so rewriting it still matches (the hole this change closes for new seals).
+  const rewritten = { ...parsed, received_at: "2099-01-01T00:00:00.000Z" };
+  assert.equal(await computeHash(rewritten), raw.hash, "legacy digest does not cover received_at");
+});
+
+test("received_at is hash-covered on new seals; a backdated timestamp is visible against it", async () => {
+  const now = new Date("2026-08-30T12:00:00.000Z");
+  const e = await sealEvent(base({ timestamp: "2020-01-01T00:00:00.000Z" }), null, now);
+  assert.equal(e.timestamp, "2020-01-01T00:00:00.000Z");
+  assert.equal(e.received_at, now.toISOString());
+  assert.notEqual(hashPayload(e), hashPayload(e, { includeReceivedAt: false }), "received_at is in the attested content");
+  assert.equal(await computeHash(e), e.hash);
+  assert.equal((await verifyChain([e])).ok, true);
+
+  const tamperedArrival = { ...e, received_at: "2020-01-01T00:00:00.000Z" };
+  const r = await verifyChain([tamperedArrival]);
+  assert.equal(r.ok, false);
+  assert.match(r.reason!, /tampered/);
 });
 
 test("defaultArtifactRole table and applyDefaultRoles fill-absent semantics", () => {
