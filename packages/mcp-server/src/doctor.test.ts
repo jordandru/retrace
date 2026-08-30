@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Credential, Event, schemaSurface } from "@retrace-dev/core";
-import { attributionFinding, credentialAuthorization, headDelivery, instructRootFinding, missingSchema, parseDoctorArgs } from "./doctor.js";
+import { attributionFinding, credentialAuthorization, headDelivery, instructRootFinding, missingSchema, parseDoctorArgs, sealedCommitEvent, sealedLooksAgent } from "./doctor.js";
 
 const why = (rows: Array<{ id: string; action: Event["action"]; type: Event["actor"]["type"]; caused_by?: string }>): Event[] =>
   rows.map((r, seq) => ({
@@ -64,16 +64,36 @@ test("doctor: instruct root is required for agent commits only", () => {
   assert.equal(instructRootFinding("agent", why([{ id: "evt_commit", action: "committed", type: "agent", caused_by: "evt_missing" }])).level, "fail");
 });
 
-test("doctor: a human commit with agent session/surface is warn locally and fail in --gate", () => {
-  const human = { actor: { type: "human" as const, id: "jordan@example.com" } };
-  assert.equal(attributionFinding(false, human).level, "pass");
-  assert.equal(attributionFinding(true, { ...human, location: { surface: "tty" } }).level, "pass");
-  assert.equal(attributionFinding(true, { actor: { type: "agent", id: "grok" }, location: { session: "sess", surface: "agent" } }).level, "pass");
-  const omitted = attributionFinding(false, { ...human, location: { session: "sess-abc", surface: "agent" } });
-  assert.equal(omitted.level, "warn");
-  assert.match(omitted.detail, /location.session/);
-  assert.match(omitted.detail, /location.surface=agent/);
-  const gated = attributionFinding(true, { ...human, location: { session: "sess-abc" } });
-  assert.equal(gated.level, "fail");
-  assert.match(gated.detail, /trailer-omit/);
+const commitEvt = (over: Partial<Event> & { id: string; seq: number }): Event => ({
+  project: "retrace", action: "committed", actor: { type: "human", id: "jordan@example.com" },
+  artifacts: [{ id: "commit:retrace@abc123def456", kind: "commit", role: "generated" }],
+  timestamp: "2026-08-29T00:00:00Z", received_at: "2026-08-29T00:00:00Z", prev_hash: "0", hash: "0",
+  ...over,
+});
+
+test("doctor: human+surface=agent fails instruct-root under --gate; human+tty and replay pass", () => {
+  const tty = commitEvt({ id: "evt_tty", seq: 1, location: { surface: "tty" } });
+  const replay = commitEvt({ id: "evt_replay", seq: 2 });
+  const omitted = commitEvt({ id: "evt_omit", seq: 3, location: { surface: "agent" } });
+  assert.equal(attributionFinding(true, tty).level, "pass");
+  assert.equal(instructRootFinding(tty.actor.type, [tty]).level, "pass");
+  assert.equal(sealedLooksAgent(tty), false);
+  assert.equal(attributionFinding(true, replay).level, "pass");
+  assert.equal(sealedLooksAgent(replay), false);
+  assert.equal(attributionFinding(false, omitted).level, "warn");
+  assert.equal(attributionFinding(true, omitted).level, "fail");
+  assert.equal(sealedLooksAgent(omitted), true);
+  assert.equal(instructRootFinding("agent", [omitted]).level, "fail");
+});
+
+test("doctor: a later non-commit event on the same artifact cannot shadow the commit", () => {
+  const commit = commitEvt({ id: "evt_commit", seq: 4, location: { surface: "tty" } });
+  const later = commitEvt({
+    id: "evt_amend", seq: 9, action: "other", action_detail: "amended",
+    actor: { type: "agent", id: "auditor" }, location: { surface: "agent" },
+  });
+  const picked = sealedCommitEvent([commit, later]);
+  assert.equal(picked?.id, "evt_commit");
+  assert.equal(attributionFinding(true, picked!).level, "pass");
+  assert.equal(sealedLooksAgent(picked!), false);
 });

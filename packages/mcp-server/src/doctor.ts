@@ -52,20 +52,25 @@ export function instructRootFinding(actorType: string, why: Event[]): Finding {
 
 /**
  * Trailer-omit: an agent shell with no Retrace-Actor is stored as human, so instruct-root is skipped.
- * Evidence lives on the sealed ledger event (`location.session` / `surface=agent` from the live hook),
- * not on doctor's reconstruct of HEAD (that path is not `live`, so it never stamps session/surface).
+ * Evidence is the sealed ledger event only: actor.type=agent, or location.surface=agent from the live hook.
+ * Never doctor's process env / session. Later events that mention the same commit artifact must not win.
  */
-export function agentEvidenceOnHuman(event: { actor: { type: string; id?: string }; location?: { session?: string; surface?: string } }): string[] {
+export function sealedCommitEvent(events: Event[]): Event | undefined {
+  return events.filter((e) => e.action === "committed" || e.action === "merged").sort((a, b) => a.seq - b.seq)[0];
+}
+
+export function sealedLooksAgent(event: { actor: { type: string }; location?: { surface?: string } }): boolean {
+  return event.actor.type === "agent" || event.location?.surface === "agent";
+}
+
+export function agentEvidenceOnHuman(event: { actor: { type: string; id?: string }; location?: { surface?: string } }): string[] {
   if (event.actor.type !== "human") return [];
-  const clues: string[] = [];
-  if (event.location?.session) clues.push("location.session");
-  if (event.location?.surface === "agent") clues.push("location.surface=agent");
-  return clues;
+  return event.location?.surface === "agent" ? ["location.surface=agent"] : [];
 }
 
 export function attributionFinding(
   gate: boolean,
-  event: { actor: { type: string; id?: string }; location?: { session?: string; surface?: string } },
+  event: { actor: { type: string; id?: string }; location?: { surface?: string } },
 ): Finding {
   const clues = agentEvidenceOnHuman(event);
   if (!clues.length) return result("pass", "attribution", `${event.actor.type}${event.actor.id ? "/" + event.actor.id : ""} has no agent-evidence mismatch`);
@@ -177,22 +182,22 @@ async function main() {
     if (headEvent) {
       const commit = headEvent.artifacts.find((a) => a.kind === "commit")?.id;
       try {
-        const res = await fetch(`${url}/projects/${encodeURIComponent(project)}/events?artifact_id=${encodeURIComponent(commit ?? "")}`, { headers });
+        const action = headEvent.action === "merged" ? "merged" : "committed";
+        const res = await fetch(`${url}/projects/${encodeURIComponent(project)}/events?artifact_id=${encodeURIComponent(commit ?? "")}&action=${action}`, { headers });
         if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
         const events: Event[] = await res.json();
-        const delivery = headDelivery(gate, commit, events.length > 0);
-        const sealed = events.at(-1);
-        findings.push(events.length ? result("pass", "HEAD delivery", `${commit} is event #${sealed?.seq}`) : delivery);
+        const sealed = sealedCommitEvent(events);
+        const delivery = headDelivery(gate, commit, !!sealed);
+        findings.push(sealed ? result("pass", "HEAD delivery", `${commit} is event #${sealed.seq}`) : delivery);
         if (sealed) findings.push(attributionFinding(gate, sealed));
-        if (gate && events.length && (sealed?.actor.type ?? headEvent.actor.type) === "agent") {
-          const eventId = sealed?.id;
+        if (gate && sealed && sealedLooksAgent(sealed)) {
           try {
-            const whyRes = await fetch(`${url}/events/${encodeURIComponent(eventId ?? "")}/why`, { headers });
+            const whyRes = await fetch(`${url}/events/${encodeURIComponent(sealed.id)}/why`, { headers });
             if (!whyRes.ok) throw new Error(`HTTP ${whyRes.status}: ${await whyRes.text()}`);
             findings.push(instructRootFinding("agent", await whyRes.json() as Event[]));
           } catch (e: any) { findings.push(result("fail", "instruct root", e.message)); }
-        } else if (gate && events.length) {
-          findings.push(instructRootFinding(sealed?.actor.type ?? headEvent.actor.type, []));
+        } else if (gate && sealed) {
+          findings.push(instructRootFinding(sealed.actor.type, []));
         }
       } catch (e: any) { findings.push(result("fail", "HEAD delivery", e.message)); }
     }
