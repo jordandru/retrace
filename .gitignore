@@ -6,3 +6,11 @@ src/ui-html.ts
 .claude/worktrees/
 .gemini/.env
 .grok/.env
+# secrets never belong in the tree (a `git add -A` in the shared checkout has happened before)
+.env
+.env.*
+**/.dev.vars
+**/.dev.vars.*
+*signing-key*.json
+*checkpoint-key*.json
+worker-credentials.json

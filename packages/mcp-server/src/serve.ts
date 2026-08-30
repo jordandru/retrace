@@ -94,8 +94,11 @@ export function startServer(over: Partial<Pick<ServeConfig, "host" | "port" | "t
       res.writeHead(out.status, hdrs);
       res.end(Buffer.from(await out.arrayBuffer()));
     } catch (e: any) {
+      // Never echo internal error text (SQL, paths) to a caller who may be unauthenticated; keep it on stderr.
+      const ref = randomBytes(4).toString("hex");
+      console.error(`retrace-serve: request failed [${ref}] ${req.method} ${req.url}: ${e?.stack ?? e?.message ?? e}`);
       res.writeHead(500, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error: String(e?.message ?? e) }));
+      res.end(JSON.stringify({ error: `internal error (ref ${ref})` }));
     }
   });
   const urlHost = config.host.includes(":") ? `[${config.host}]` : config.host;
