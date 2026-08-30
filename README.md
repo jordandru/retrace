@@ -222,7 +222,7 @@ survives. Native macOS/Linux panes need nothing. In the UI, click a session or w
 
 **Next (earn “verifiable”, not more connectors):**
 1. Completeness — pagination / export truncation, capture windows, reconcile Git / GitHub / Drive vs the ledger. A hash chain does not prove no event was omitted. `verifyExportBundle` should report gaps, not only “present events were not altered.”
-2. Seal what the server actually knows — `received_at` is stamped then dropped from the hash (`chain.ts` `hashPayload`), so a caller `timestamp` can be backdated undetectably. Validate `caused_by` at write (exists, same project). Reserve adapter idempotency prefixes (`git:`, `gd:`, `gh:`): a caller-supplied `idempotency_key` can shadow the git hook (`store.ts` `appendEvent` + `git:${sha}`).
+2. Seal what the server actually knows — `received_at` is stamped then dropped from the hash (`chain.ts` `hashPayload`), so a caller `timestamp` can be backdated undetectably. Validate `caused_by` at write (exists, same project). Adapter idempotency prefixes (`git:` / `gd:` / `gh:`) are reserved at write so a caller key cannot shadow the git hook / Drive / GitHub mapper.
 3. Attribution — distinguish content author, committer, relayer, and credential principal. Trailer-omit still looks human and bypasses the gate. Detect trailer / pin / session mismatch.
 4. Local `retrace-serve` — default-closed auth and bind host.
 5. Dogfood — boxing-rpg coverage is the honest metric; a second project above 95% beats another integration.

@@ -476,6 +476,22 @@ test("GET /api publishes the schema surface, unauthenticated, and it matches thi
   assert.deepEqual(missing, []);
 });
 
+test("POST /events: reserved adapter idempotency prefixes cannot shadow the git hook", async () => {
+  const store = new MemStore();
+  const h = createHandler(store, { token: "tok" });
+  const planted = await post(h, "/events", ev({ idempotency_key: "git:deadbeefcafe", action: "edited", method: { tool: "Edit" } }), "tok");
+  assert.equal(planted.status, 400);
+  assert.match((await planted.json()).error, /git:/);
+  assert.equal(store.events.length, 0);
+  const hook = await post(h, "/events", ev({
+    action: "committed", method: { tool: "git" }, idempotency_key: "git:deadbeefcafe",
+    artifacts: [{ id: "commit:junk@deadbeefcafe", kind: "commit" }],
+    actor: { type: "human", id: "jordan@example.com" },
+  }), "tok");
+  assert.equal(hook.status, 201);
+  assert.equal(store.events[0].action, "committed");
+});
+
 test("POST /events silently strips unknown keys — the exact failure the probe exists to surface", async () => {
   const store = new MemStore();
   const handle = createHandler(store, { token: "secret" });

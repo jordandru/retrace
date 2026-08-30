@@ -30,7 +30,7 @@
  */
 import { z } from "zod";
 import { Actor, ActorType, EventInput, schemaSurface } from "./schema.js";
-import { EventStore, appendEvent, verifyProject, explainEvent, newShareId, shareIsLive, Share, isHeadMovedError } from "./store.js";
+import { EventStore, appendEvent, AdapterIdempotencyError, verifyProject, explainEvent, newShareId, shareIsLive, Share, isHeadMovedError } from "./store.js";
 import { sealEvent } from "./chain.js";
 import { buildExportBundle, verifyExportBundle } from "./export.js";
 import { renderReportHtml } from "./report.js";
@@ -272,6 +272,8 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
             const r = await appendEvent(store, input);
             return json(r, r.deduped ? 200 : 201);
           } catch (e: any) {
+            if (e instanceof AdapterIdempotencyError || e?.name === "AdapterIdempotencyError")
+              return json({ error: e.message }, 400);
             if (!/UNIQUE/i.test(String(e?.message)) || attempt >= 4) throw e;
           }
         }

@@ -110,8 +110,43 @@ export function shareIsLive(s: Share, now: Date = new Date()): boolean {
   return !s.expires_at || new Date(s.expires_at) > now;
 }
 
+/** Thrown when a caller claims a git/Drive/GitHub idempotency prefix on an event those adapters would not emit. */
+export class AdapterIdempotencyError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AdapterIdempotencyError";
+  }
+}
+
+const GIT_IDEMPOTENCY_ACTIONS = new Set(["committed", "merged"]);
+
+/** Adapter key namespaces (`git:` / `gd:` / `gh:`) may only be claimed by matching adapter-shaped events.
+ *  Otherwise a POST /events or retrace_log can plant a key the git hook / Drive / GitHub mapper later
+ *  treats as already logged (Claude 2026-08-29, store.ts appendEvent lookup). */
+export function adapterIdempotencyError(input: EventInput): string | undefined {
+  const k = input.idempotency_key;
+  if (!k) return undefined;
+  const tool = input.method?.tool ?? "";
+  const tags = input.tags ?? [];
+  if (k.startsWith("git:")) {
+    if (tool === "git" && GIT_IDEMPOTENCY_ACTIONS.has(input.action)) return undefined;
+    return 'idempotency_key prefix "git:" is reserved for the git adapter (action committed/merged, method.tool=git)';
+  }
+  if (k.startsWith("gd:")) {
+    if (tags.includes("google-drive") || tool.startsWith("google-")) return undefined;
+    return 'idempotency_key prefix "gd:" is reserved for the Drive adapter';
+  }
+  if (k.startsWith("gh:")) {
+    if (tool.startsWith("github") || tags.includes("github")) return undefined;
+    return 'idempotency_key prefix "gh:" is reserved for the GitHub adapter';
+  }
+  return undefined;
+}
+
 /** Append an event: idempotent, sealed onto the current chain head. */
 export async function appendEvent(store: EventStore, input: EventInput): Promise<{ event: Event; deduped: boolean }> {
+  const reserved = adapterIdempotencyError(input);
+  if (reserved) throw new AdapterIdempotencyError(reserved);
   if (input.idempotency_key) {
     const existing = await store.byIdempotencyKey(input.project, input.idempotency_key);
     if (existing) return { event: existing, deduped: true };
