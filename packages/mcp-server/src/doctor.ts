@@ -79,6 +79,35 @@ export function attributionFinding(
   return result(gate ? "fail" : "warn", "attribution", detail);
 }
 
+/** Agent (or surface=agent) events on the why-chain that are not the commit and not the instruct root. */
+export function mcpPeers(commit: Event, why: Event[]): Event[] {
+  return why.filter((e) => e.id !== commit.id && e.action !== "instructed" && (e.actor.type === "agent" || e.location?.surface === "agent"));
+}
+
+/**
+ * Pin: commit actor.id must be among sealed MCP peers. Session: if the live hook stamped
+ * location.session, it must appear on those peers. Replay (no commit session) is not a miss.
+ * Never reads process env.
+ */
+export function pinSessionFinding(gate: boolean, commit: Event, why: Event[]): Finding {
+  const peers = mcpPeers(commit, why);
+  if (!peers.length) return result("pass", "pin/session", "no MCP peers in the why-chain to compare");
+  const problems: string[] = [];
+  if (commit.actor.type === "agent") {
+    const peerIds = [...new Set(peers.filter((p) => p.actor.type === "agent").map((p) => p.actor.id))];
+    if (peerIds.length && !peerIds.includes(commit.actor.id))
+      problems.push(`commit actor agent/${commit.actor.id} is not among MCP peers ${peerIds.map((id) => "agent/" + id).join(", ")}`);
+  }
+  const commitSession = commit.location?.session;
+  if (commitSession) {
+    const peerSessions = [...new Set(peers.map((p) => p.location?.session).filter((s): s is string => !!s))];
+    if (peerSessions.length && !peerSessions.includes(commitSession))
+      problems.push(`commit session ${commitSession} does not match MCP session ${peerSessions.join(", ")}`);
+  }
+  if (!problems.length) return result("pass", "pin/session", "commit actor and session match MCP peers in the why-chain");
+  return result(gate ? "fail" : "warn", "pin/session", problems.join("; "));
+}
+
 export function missingSchema(remote: Record<string, unknown>, local = schemaSurface()): string[] {
   return Object.entries(local).flatMap(([group, keys]) => {
     const seen = Array.isArray(remote[group]) ? remote[group] as unknown[] : [];
@@ -190,11 +219,13 @@ async function main() {
         const delivery = headDelivery(gate, commit, !!sealed);
         findings.push(sealed ? result("pass", "HEAD delivery", `${commit} is event #${sealed.seq}`) : delivery);
         if (sealed) findings.push(attributionFinding(gate, sealed));
-        if (gate && sealed && sealedLooksAgent(sealed)) {
+        if (sealed && sealedLooksAgent(sealed)) {
           try {
             const whyRes = await fetch(`${url}/events/${encodeURIComponent(sealed.id)}/why`, { headers });
             if (!whyRes.ok) throw new Error(`HTTP ${whyRes.status}: ${await whyRes.text()}`);
-            findings.push(instructRootFinding("agent", await whyRes.json() as Event[]));
+            const why = await whyRes.json() as Event[];
+            findings.push(pinSessionFinding(gate, sealed, why));
+            if (gate) findings.push(instructRootFinding("agent", why));
           } catch (e: any) { findings.push(result("fail", "instruct root", e.message)); }
         } else if (gate && sealed) {
           findings.push(instructRootFinding(sealed.actor.type, []));

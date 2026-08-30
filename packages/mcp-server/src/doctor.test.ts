@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Credential, Event, schemaSurface } from "@retrace-dev/core";
-import { attributionFinding, credentialAuthorization, headDelivery, instructRootFinding, missingSchema, parseDoctorArgs, sealedCommitEvent, sealedLooksAgent } from "./doctor.js";
+import { attributionFinding, credentialAuthorization, headDelivery, instructRootFinding, missingSchema, parseDoctorArgs, pinSessionFinding, sealedCommitEvent, sealedLooksAgent } from "./doctor.js";
 
 const why = (rows: Array<{ id: string; action: Event["action"]; type: Event["actor"]["type"]; caused_by?: string }>): Event[] =>
   rows.map((r, seq) => ({
@@ -96,4 +96,37 @@ test("doctor: a later non-commit event on the same artifact cannot shadow the co
   assert.equal(picked?.id, "evt_commit");
   assert.equal(attributionFinding(true, picked!).level, "pass");
   assert.equal(sealedLooksAgent(picked!), false);
+});
+
+test("doctor: pin/session compares sealed commit to MCP peers, never process env", () => {
+  const instruct = commitEvt({ id: "evt_ins", seq: 0, action: "instructed", actor: { type: "human", id: "jordan@example.com" } });
+  const edit = commitEvt({
+    id: "evt_edit", seq: 1, action: "edited",
+    actor: { type: "agent", id: "grok" }, location: { session: "sess-a", surface: "agent" }, caused_by: instruct.id,
+  });
+  const commit = commitEvt({
+    id: "evt_c", seq: 2, actor: { type: "agent", id: "grok" },
+    location: { session: "sess-a", surface: "agent" }, caused_by: edit.id,
+  });
+  const why = [commit, edit, instruct];
+  assert.equal(pinSessionFinding(true, commit, why).level, "pass");
+
+  const wrongPin = { ...commit, actor: { type: "agent" as const, id: "claude-code" } };
+  const pin = pinSessionFinding(true, wrongPin, why);
+  assert.equal(pin.level, "fail");
+  assert.match(pin.detail, /claude-code/);
+  assert.match(pin.detail, /agent\/grok/);
+  assert.equal(pinSessionFinding(false, wrongPin, why).level, "warn");
+
+  const wrongSess = { ...commit, location: { session: "sess-b", surface: "agent" as const } };
+  const sess = pinSessionFinding(true, wrongSess, [wrongSess, edit, instruct]);
+  assert.equal(sess.level, "fail");
+  assert.match(sess.detail, /sess-b/);
+  assert.match(sess.detail, /sess-a/);
+
+  const replay = commitEvt({ id: "evt_replay_c", seq: 2, actor: { type: "agent", id: "grok" }, caused_by: edit.id });
+  assert.equal(pinSessionFinding(true, replay, [replay, edit, instruct]).level, "pass", "replay with no session is not a miss");
+
+  const direct = commitEvt({ id: "evt_direct", seq: 1, actor: { type: "agent", id: "grok" }, location: { session: "sess-a", surface: "agent" }, caused_by: instruct.id });
+  assert.equal(pinSessionFinding(true, direct, [direct, instruct]).level, "pass", "commit → instruct with no MCP peers");
 });
