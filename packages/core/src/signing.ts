@@ -32,15 +32,23 @@ const b64u = {
   dec: (s: string) => Uint8Array.from(atob(s.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(s.length / 4) * 4, "=")), (c) => c.charCodeAt(0)),
 };
 
+/** Drop the JWK `alg` member before import. Node exports Ed25519 keys with alg "Ed25519"; Cloudflare's runtime
+ *  rejects anything but "EdDSA" for that member and fails the import ("does not match requested Ed25519 curve"),
+ *  which took the Worker's export/report/share-report routes down. Both runtimes accept a JWK without `alg`. */
+function importable(jwk: JsonWebKey): JsonWebKey {
+  const { alg: _alg, ...rest } = jwk as any;
+  return rest;
+}
+
 export async function signCanonical(priv: JsonWebKey, value: unknown): Promise<string> {
-  const key = await subtle.importKey("jwk", priv, ALG, false, ["sign"]);
+  const key = await subtle.importKey("jwk", importable(priv), ALG, false, ["sign"]);
   const sig = await subtle.sign(ALG, key, new TextEncoder().encode(canonicalize(value)));
   return b64u.enc(sig);
 }
 
 export async function verifyCanonical(pub: JsonWebKey, value: unknown, signature: string): Promise<boolean> {
   try {
-    const key = await subtle.importKey("jwk", { ...pub, key_ops: ["verify"] }, ALG, false, ["verify"]);
+    const key = await subtle.importKey("jwk", importable({ ...pub, key_ops: ["verify"] }), ALG, false, ["verify"]);
     return await subtle.verify(ALG, key, b64u.dec(signature), new TextEncoder().encode(canonicalize(value)));
   } catch {
     return false;
