@@ -430,9 +430,9 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
       const verdict = await verifyExportBundle(bundle);
       if (args.out_json) writeFileSync(args.out_json, JSON.stringify(bundle, null, 2));
       if (args.out_html) writeFileSync(args.out_html, renderReportHtml(bundle, verdict));
-      const summary = `${bundle.events.length} events · chain ${bundle.chain.ok ? "intact" : "BROKEN"} · signature ${verdict.signature}${bundle.issuer ? " (kid " + bundle.issuer.kid + ")" : ""}` +
+      const summary = `${bundle.events.length} events · chain ${bundle.chain.ok ? "intact" : "BROKEN"} · signature ${verdict.signature}${bundle.issuer ? " (kid " + bundle.issuer.kid + ")" : ""} · coverage ${verdict.coverage.scope === "full" ? (verdict.coverage.complete ? "complete" : "INCOMPLETE") : "scoped"} (${verdict.coverage.events}/${verdict.coverage.total_events})` +
         (args.out_json ? `\njson → ${args.out_json}` : "") + (args.out_html ? `\nreport → ${args.out_html}` : "");
-      return { content: [{ type: "text", text: summary }], structuredContent: { events: bundle.events.length, chain_ok: bundle.chain.ok, signature: verdict.signature, kid: bundle.issuer?.kid, ...(args.out_json || args.out_html ? {} : { bundle }) } };
+      return { content: [{ type: "text", text: summary }], structuredContent: { events: bundle.events.length, chain_ok: bundle.chain.ok, signature: verdict.signature, coverage: verdict.coverage, kid: bundle.issuer?.kid, ...(args.out_json || args.out_html ? {} : { bundle }) } };
     },
   );
 

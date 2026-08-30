@@ -107,10 +107,12 @@ node packages/mcp-server/dist/gdrive-cli.js backfill --token "$(gcloud auth prin
 
 Every export is a JSON bundle (events in scope + causal ancestors + full-chain verdict at export time) signed with an **Ed25519** key; the issuer's public key is embedded and also published at `/.well-known/retrace-pubkey`. Anyone can verify offline.
 
+Verification checks four things and reports each: the **signature**, every event's **content hash**, the **prev_hash links** between adjacent events, and **coverage** — a hash chain only proves the events that are present were not altered, so for a full export (no `--artifact`/actor/time scope) `verify` also requires every claimed event to be present: exactly `chain.total_events` of them, contiguous `seq` from #0, ending at the claimed `head_hash`. A truncated tail, a dropped middle event, a duplicated event or a bundle with no head is `NOT VALID` with the missing seqs named. Scoped exports cannot be checked for omission offline; the verdict says so (`coverage: scoped`) instead of implying completeness. The head itself is still the issuer's claim at export time — pinning it needs a published checkpoint (next).
+
 ```bash
 node packages/mcp-server/dist/export-cli.js keygen                       # ~/.retrace/signing-key.json (auto-created on first export too)
 node packages/mcp-server/dist/export-cli.js export boxing-rpg --artifact "repo:rpg#src/ui/JabCounter.tsx" --out jab.json --report jab.html
-node packages/mcp-server/dist/export-cli.js verify jab.json              # VALID / NOT VALID + reasons; --pubkey <jwk.json|url> to pin a trusted key
+node packages/mcp-server/dist/export-cli.js verify jab.json              # VALID / NOT VALID + reasons (signature, hashes, links, coverage); --pubkey <jwk.json|url> to pin a trusted key
 node packages/mcp-server/dist/export-cli.js share boxing-rpg --label "Jab counter — client review" --days 30
 ```
 
@@ -221,7 +223,7 @@ survives. Native macOS/Linux panes need nothing. In the UI, click a session or w
 **Now:** niche 5 first slice is live. Drive #776 walks `caused_by` to instruct #773. `RETRACE_CAUSED_BY` is cleared. That property is a **global operator flag**, not evidence that the edit belonged to the task — later Drive work must not treat it as a sealed fact. Event #594 stays a root unless attested later.
 
 **Next (earn “verifiable”, not more connectors):**
-1. Completeness — pagination / export truncation, capture windows, reconcile Git / GitHub / Drive vs the ledger. A hash chain does not prove no event was omitted. `verifyExportBundle` should report gaps, not only “present events were not altered.”
+1. Completeness — `verifyExportBundle` now reports omission for full exports (count, contiguous seq, head hash; scoped bundles say “not checkable”). Still open: a published head checkpoint the operator cannot rewrite (git-committed file first, Rekor / OpenTimestamps later), pagination / export truncation, capture windows, and reconciling Git / GitHub / Drive vs the ledger.
 2. Seal what the server actually knows — `received_at` is stamped then dropped from the hash (`chain.ts` `hashPayload`), so a caller `timestamp` can be backdated undetectably. Validate `caused_by` at write (exists, same project). Adapter idempotency prefixes (`git:` / `gd:` / `gh:`) are reserved at write so a caller key cannot shadow the git hook / Drive / GitHub mapper.
 3. Attribution — distinguish content author, committer, relayer, and credential principal. Trailer-omit still looks human and bypasses the gate. Detect trailer / pin / session mismatch.
 4. Local `retrace-serve` — default-closed auth and bind host.

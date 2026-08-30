@@ -19,6 +19,13 @@ export function renderReportHtml(bundle: ExportBundle, verdict?: ExportVerdict, 
   const first = events[0]?.timestamp, last = events.at(-1)?.timestamp;
   const sigLine = !bundle.signature ? "unsigned" : verdict ? (verdict.signature === "valid" ? "valid" : "INVALID") : "present (not verified here)";
   const chainLine = bundle.chain.ok ? `intact — ${bundle.chain.checked} of ${bundle.chain.total_events} events verified at export` : `BROKEN at #${bundle.chain.first_bad_seq}: ${bundle.chain.reason}`;
+  // Omission: a chain proves present events were not altered; coverage says whether any were left out (full exports only).
+  const cov = verdict?.coverage;
+  const coverageLine = !cov ? "not verified here"
+    : cov.scope === "scoped" ? `scoped — ${cov.events} of ${cov.total_events} project events; omission within the scope is not checkable offline`
+    : cov.complete ? `complete — all ${cov.total_events} events present, contiguous, ending at the claimed head`
+    : `INCOMPLETE — ${cov.events} of ${cov.total_events} claimed events${cov.missing_seqs?.length ? " (missing #" + cov.missing_seqs.slice(0, 10).join(", #") + (cov.missing_seqs.length > 10 ? " …" : "") + ")" : ""}`;
+  const coverageClass = !cov || cov.scope === "scoped" ? "" : cov.complete ? "ok" : "bad";
 
   const rows = events.map((e) => {
     const cause = e.caused_by ? byId.get(e.caused_by) : undefined;
@@ -66,6 +73,7 @@ export function renderReportHtml(bundle: ExportBundle, verdict?: ExportVerdict, 
   <div class="k">Actors</div><div>${[humans.size ? `${humans.size} human${humans.size === 1 ? "" : "s"} (${esc([...humans].join(", "))})` : "", agents.size ? `${agents.size} agent${agents.size === 1 ? "" : "s"} (${esc([...agents].join(", "))})` : ""].filter(Boolean).join("; ") || "—"}</div>
   <div class="k">Artifacts</div><div>${arts.size}</div>
   <div class="k">Chain integrity</div><div class="${bundle.chain.ok ? "ok" : "bad"}">${esc(chainLine)}</div>
+  <div class="k">Coverage</div><div class="${coverageClass}">${esc(coverageLine)}</div>
   <div class="k">Signature</div><div class="${sigLine === "valid" ? "ok" : sigLine === "INVALID" ? "bad" : ""}">${esc(sigLine)}${bundle.issuer ? ` · Ed25519 key <span class="mono">${esc(bundle.issuer.kid)}</span>${bundle.issuer.name ? " · " + esc(bundle.issuer.name) : ""}` : ""}</div>
   ${bundle.chain.head_hash ? `<div class="k">Head hash</div><div class="mono">${esc(bundle.chain.head_hash)}</div>` : ""}
 </div>

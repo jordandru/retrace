@@ -66,16 +66,91 @@ export async function buildExportBundle(store: EventStore, scope: ExportScope, o
   return bundle;
 }
 
+/**
+ * What the bundle covers, and whether omission can be ruled out offline.
+ * A hash chain only proves the events that are present were not altered; it says nothing about events that were left out.
+ * For a FULL export (no scope filters) the bundle must carry every event the issuer claims the project had at export time —
+ * contiguous seq from 0, exactly total_events of them, ending at head_hash — so a truncated tail or a dropped middle event
+ * is reported as a problem, not silently accepted. A SCOPED export cannot be checked for omission offline; `complete` is
+ * left undefined and the note says what would settle it (a full export or a head checkpoint).
+ */
+export interface ExportCoverage {
+  scope: "full" | "scoped";
+  events: number;            // events in the bundle, including causal context
+  total_events: number;      // project size the issuer claimed at export time
+  complete?: boolean;        // full scope only: every claimed event is present, contiguous, and ends at head_hash
+  head_hash_matches?: boolean;
+  missing_seqs?: number[];   // full scope only; capped at 50 entries
+  note: string;
+}
+
 export interface ExportVerdict {
   signature: "valid" | "invalid" | "unsigned";
   events_intact: boolean;        // every event's own hash recomputes
   links_consistent: boolean;     // consecutive events in the bundle that are adjacent by seq link prev_hash→hash
   chain_ok_at_export: boolean;   // server's full-chain verdict at export time
+  coverage: ExportCoverage;      // omission check (see ExportCoverage)
   kid?: string;
   problems: string[];
 }
 
-/** Offline verification: signature + per-event content hashes + adjacency links. */
+const MISSING_SEQ_CAP = 50;
+
+/** Omission check over a bundle whose events are sorted by seq. Pushes problems; returns the coverage record. */
+function checkCoverage(bundle: ExportBundle, sorted: Event[], problems: string[]): ExportCoverage {
+  const s = bundle.scope ?? ({} as ExportScope);
+  const scoped = !!(s.artifact_id || s.actor_id || s.since || s.until);
+  const total = bundle.chain?.total_events;
+  const n = sorted.length;
+  if (typeof total !== "number" || !Number.isInteger(total) || total < 0) {
+    problems.push("bundle does not state chain.total_events — omission cannot be checked");
+    return { scope: scoped ? "scoped" : "full", events: n, total_events: -1, complete: scoped ? undefined : false, note: "issuer did not declare the project size at export time" };
+  }
+  // Checks that hold for every bundle: no seq outside the claimed range, no duplicate seq.
+  const seen = new Set<number>();
+  for (const e of sorted) {
+    if (e.seq < 0 || e.seq >= total) problems.push(`event #${e.seq} lies outside the ${total} events claimed at export`);
+    if (seen.has(e.seq)) problems.push(`event #${e.seq} appears more than once`);
+    seen.add(e.seq);
+  }
+  if (scoped) {
+    return {
+      scope: "scoped", events: n, total_events: total,
+      note: `scoped bundle: ${n} of ${total} project events (${bundle.context_events ?? 0} causal context); omission within the scope cannot be verified offline — compare against a full export or a published head checkpoint`,
+    };
+  }
+  // Full export: every claimed event must be present, contiguous from 0, and end at the claimed head.
+  const missing: number[] = [];
+  for (let i = 0; i < total; i++) if (!seen.has(i)) { if (missing.length < MISSING_SEQ_CAP) missing.push(i); }
+  const missingCount = total - seen.size + [...seen].filter((x) => x < 0 || x >= total).length;
+  let complete = true;
+  if (n !== total || missingCount > 0) {
+    complete = false;
+    const tail = missing.length && missing[0] === n && missing.at(-1) === total - 1 && missingCount === total - n;
+    problems.push(
+      tail
+        ? `bundle ends at #${n - 1} but ${total} events were claimed at export — the tail (${missingCount} event${missingCount === 1 ? "" : "s"}) is missing`
+        : `bundle holds ${n} of ${total} claimed events — missing seq ${missing.slice(0, 10).join(", ")}${missingCount > 10 ? ` … (${missingCount} total)` : ""}`,
+    );
+  }
+  const last = sorted.at(-1);
+  let head_hash_matches: boolean | undefined;
+  if (!bundle.chain.head_hash) {
+    if (total > 0) { complete = false; problems.push("bundle does not state chain.head_hash — the export cannot be anchored to a chain head"); }
+  } else if (last) {
+    head_hash_matches = last.hash === bundle.chain.head_hash;
+    if (!head_hash_matches && complete) { complete = false; problems.push(`last event #${last.seq} hash does not match the head_hash claimed at export — tail truncated or altered`); }
+    else if (!head_hash_matches) problems.push("last event hash does not match the claimed head_hash");
+  } else if (total > 0) { complete = false; head_hash_matches = false; }
+  return {
+    scope: "full", events: n, total_events: total, complete, head_hash_matches, missing_seqs: missing.length ? missing : undefined,
+    note: complete
+      ? `full export: all ${total} events present, contiguous from #0, ending at the claimed head — no omission since export time (the head itself is the issuer's claim; pin it with a checkpoint)`
+      : `full export is incomplete: ${n} of ${total} claimed events`,
+  };
+}
+
+/** Offline verification: signature + per-event content hashes + adjacency links + omission (coverage). */
 export async function verifyExportBundle(bundle: ExportBundle, trustedPublicKey?: JsonWebKey): Promise<ExportVerdict> {
   const problems: string[] = [];
   let signature: ExportVerdict["signature"] = "unsigned";
@@ -98,7 +173,13 @@ export async function verifyExportBundle(bundle: ExportBundle, trustedPublicKey?
     if (b.seq === a.seq + 1 && b.prev_hash !== a.hash) { links_consistent = false; problems.push(`event #${b.seq} prev_hash does not link to #${a.seq}`); }
   }
   if (sorted[0]?.seq === 0 && sorted[0].prev_hash !== GENESIS_HASH) { links_consistent = false; problems.push("event #0 is not anchored to genesis"); }
-  return { signature, events_intact, links_consistent, chain_ok_at_export: !!bundle.chain?.ok, kid: bundle.issuer?.kid, problems };
+  const coverage = checkCoverage(bundle, sorted, problems);
+  return { signature, events_intact, links_consistent, chain_ok_at_export: !!bundle.chain?.ok, coverage, kid: bundle.issuer?.kid, problems };
+}
+
+/** One boolean for callers that gate on a bundle: signed, intact, linked, chain ok at export, and (for full exports) complete. */
+export function exportVerdictOk(v: ExportVerdict): boolean {
+  return v.signature === "valid" && v.events_intact && v.links_consistent && v.chain_ok_at_export && v.coverage.complete !== false;
 }
 
 export { verifyProject };

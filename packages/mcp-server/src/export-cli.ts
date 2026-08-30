@@ -8,7 +8,7 @@
  * Uses the same store config as the MCP server (RETRACE_DB / RETRACE_URL+RETRACE_TOKEN).
  */
 import { readFileSync, writeFileSync } from "node:fs";
-import { buildExportBundle, verifyExportBundle, renderReportHtml, parseSigningKey, ExportBundle, newShareId } from "@retrace-dev/core";
+import { buildExportBundle, verifyExportBundle, exportVerdictOk, renderReportHtml, parseSigningKey, ExportBundle, newShareId } from "@retrace-dev/core";
 import { makeStore } from "./index.js";
 import { RemoteStore } from "./remote-store.js";
 import { ensureSigningKey, loadSigningKey } from "./keys.js";
@@ -55,8 +55,9 @@ async function main() {
       trusted = raw.public_key ?? raw;
     }
     const v = await verifyExportBundle(bundle, trusted);
-    const ok = v.signature === "valid" && v.events_intact && v.links_consistent && v.chain_ok_at_export;
-    console.log(`${ok ? "VALID" : "NOT VALID"} — signature: ${v.signature}${v.kid ? " (kid " + v.kid + (trusted ? ", trusted key" : ", key embedded in bundle") + ")" : ""}; events intact: ${v.events_intact}; links: ${v.links_consistent}; chain ok at export: ${v.chain_ok_at_export}; ${bundle.events.length} events`);
+    const ok = exportVerdictOk(v);
+    console.log(`${ok ? "VALID" : "NOT VALID"} — signature: ${v.signature}${v.kid ? " (kid " + v.kid + (trusted ? ", trusted key" : ", key embedded in bundle") + ")" : ""}; events intact: ${v.events_intact}; links: ${v.links_consistent}; chain ok at export: ${v.chain_ok_at_export}; coverage: ${v.coverage.scope === "full" ? (v.coverage.complete ? "complete" : "INCOMPLETE") : "scoped (omission not checkable offline)"} — ${v.coverage.events} of ${v.coverage.total_events} events`);
+    console.log("  coverage: " + v.coverage.note);
     for (const p of v.problems) console.log("  - " + p);
     process.exit(ok ? 0 : 2);
   }
