@@ -164,6 +164,10 @@ npx wrangler deploy                        # prints https://retrace-api.<you>.wo
 
 The Worker refuses every request with `503` when neither `RETRACE_TOKEN` nor a non-empty `RETRACE_CREDENTIALS` array is configured. There is no implicit cloud open mode; configure at least one before deployment.
 
+### Hosting teams on one Worker
+
+`retrace-admin new-team <project> --member a@x.com,b@y.com [--harness claude-code,codex,gemini,grok,github-copilot]` provisions a paying team without touching their code: it mints **project-scoped** credentials (`Credential.projects = [<project>]`, so a leaked team token can read or write nothing else) — one pinned agent credential per member × harness (`on_behalf_of` = that member, so only their own instructions can be recorded as theirs), one assert credential for the team's git hook (`retrace-git-<project>`, `allowed_actors` = the team's agents and members) and one read-only CI credential — appends them to `~/.retrace/worker-credentials.json` (atomic, `0600`, refuses if the project already has a set), and writes `onboarding-<project>.md` (`0600`; it contains the tokens — send it like a password, then delete it). Nothing changes on the Worker until you run the printed `npx wrangler secret put RETRACE_CREDENTIALS < ~/.retrace/worker-credentials.json`. `retrace-admin list-teams` shows what the mirror holds. A project needs no creation step: it exists from its first event. Ceiling to know about: a Worker secret is limited to a few KB, i.e. tens of credentials — moving credentials into D1 is the next rung when that bites.
+
 Then point the MCP server at it by adding to its `env`:
 
 ```json

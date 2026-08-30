@@ -10,17 +10,34 @@
     "retrace": "dist/doctor.js",
     "retrace-export": "dist/export-cli.js",
     "retrace-github": "dist/github-cli.js",
-    "retrace-gdrive": "dist/gdrive-cli.js"
+    "retrace-gdrive": "dist/gdrive-cli.js",
+    "retrace-admin": "dist/admin.js"
   },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "files": ["dist", "!dist/*.test.js", "!dist/*.test.d.ts", "README.md", "LICENSE"],
-  "engines": { "node": ">=22" },
+  "files": [
+    "dist",
+    "!dist/*.test.js",
+    "!dist/*.test.d.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
   "license": "Apache-2.0",
-  "repository": { "type": "git", "url": "git+https://github.com/jordandru/retrace.git", "directory": "packages/mcp-server" },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jordandru/retrace.git",
+    "directory": "packages/mcp-server"
+  },
   "homepage": "https://github.com/jordandru/retrace#readme",
-  "bugs": { "url": "https://github.com/jordandru/retrace/issues" },
-  "publishConfig": { "access": "public" },
+  "bugs": {
+    "url": "https://github.com/jordandru/retrace/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "prepack": "npm run build",
