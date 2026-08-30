@@ -3,7 +3,9 @@
   "mcpServers": {
     "retrace": {
       "command": "node",
-      "args": ["packages/mcp-server/dist/index.js"],
+      "args": [
+        "packages/mcp-server/dist/index.js"
+      ],
       "cwd": ".",
       "env": {
         "RETRACE_URL": "https://retrace-api.slcwitit.workers.dev",
@@ -17,5 +19,8 @@
       "trust": false,
       "description": "Verifiable provenance for work performed in this repository"
     }
+  },
+  "model": {
+    "name": "gemini-3.5-flash"
   }
 }
