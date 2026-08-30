@@ -3,12 +3,14 @@
  * retrace-export — signing keys, signed exports, offline verification.
  *   retrace-export keygen [--print-private]           create ~/.retrace/signing-key.json if missing; print kid + public JWK
  *   retrace-export export <project> [--artifact <id>] [--out file.json] [--report file.html]
- *   retrace-export verify <bundle.json> [--pubkey <jwk.json|url>]
+ *   retrace-export verify <bundle.json> [--pubkey <jwk.json|url>] [--checkpoint <checkpoints.jsonl>]
+ *   retrace-export checkpoint <project> [--bundle file.json] [--out .retrace/checkpoints.jsonl]   append a signed head checkpoint; commit the file
  *   retrace-export share <project> [--artifact <id>] [--label ..] [--days n]      (local server must be running for the link to resolve)
  * Uses the same store config as the MCP server (RETRACE_DB / RETRACE_URL+RETRACE_TOKEN).
  */
-import { readFileSync, writeFileSync } from "node:fs";
-import { buildExportBundle, verifyExportBundle, exportVerdictOk, renderReportHtml, parseSigningKey, ExportBundle, newShareId } from "@retrace-dev/core";
+import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync } from "node:fs";
+import { dirname } from "node:path";
+import { buildExportBundle, verifyExportBundle, exportVerdictOk, renderReportHtml, parseSigningKey, ExportBundle, newShareId, checkpointFromBundle, verifyCheckpoint, compareBundleToCheckpoint, parseCheckpointLog, latestCheckpoint } from "@retrace-dev/core";
 import { makeStore } from "./index.js";
 import { RemoteStore } from "./remote-store.js";
 import { ensureSigningKey, loadSigningKey } from "./keys.js";
@@ -55,11 +57,47 @@ async function main() {
       trusted = raw.public_key ?? raw;
     }
     const v = await verifyExportBundle(bundle, trusted);
-    const ok = exportVerdictOk(v);
+    let ok = exportVerdictOk(v);
     console.log(`${ok ? "VALID" : "NOT VALID"} — signature: ${v.signature}${v.kid ? " (kid " + v.kid + (trusted ? ", trusted key" : ", key embedded in bundle") + ")" : ""}; events intact: ${v.events_intact}; links: ${v.links_consistent}; chain ok at export: ${v.chain_ok_at_export}; coverage: ${v.coverage.scope === "full" ? (v.coverage.complete ? "complete" : "INCOMPLETE") : "scoped (omission not checkable offline)"} — ${v.coverage.events} of ${v.coverage.total_events} events`);
     console.log("  coverage: " + v.coverage.note);
     for (const p of v.problems) console.log("  - " + p);
+    if (flags.checkpoint) {
+      // Compare against the newest committed checkpoint: the checkpointed head must still be in a later bundle.
+      const cps = parseCheckpointLog(readFileSync(String(flags.checkpoint), "utf8"));
+      const cp = latestCheckpoint(cps, bundle.scope.project);
+      if (!cp) console.log(`  checkpoint: none for project ${bundle.scope.project} in ${flags.checkpoint}`);
+      else {
+        const cv = await verifyCheckpoint(cp);
+        const cmp = compareBundleToCheckpoint(bundle, cp);
+        if (cmp.relation === "conflict" || cmp.relation === "other_project") ok = false;
+        console.log(`  checkpoint #${cp.seq} (${cp.at}, signature ${cv.signature}${cv.kid ? ", kid " + cv.kid : ""}): ${cmp.relation.toUpperCase()} — ${cmp.note}`);
+        for (const p of [...cv.problems, ...cmp.problems]) console.log("  - " + p);
+      }
+    }
     process.exit(ok ? 0 : 2);
+  }
+  if (cmd === "checkpoint") {
+    const project = pos[1]; if (!project) throw new Error("usage: retrace-export checkpoint <project> [--bundle file.json] [--out .retrace/checkpoints.jsonl]");
+    let bundle: ExportBundle;
+    if (flags.bundle) bundle = JSON.parse(readFileSync(String(flags.bundle), "utf8"));
+    else {
+      const store = makeStore();
+      if (store instanceof RemoteStore) bundle = await store.export({ project });
+      else bundle = await buildExportBundle(store, { project }, { signingKey: parseSigningKey(process.env.RETRACE_SIGNING_KEY) ?? (await ensureSigningKey()).privateKey, issuerName: process.env.RETRACE_ISSUER });
+    }
+    const v = await verifyExportBundle(bundle);
+    if (!exportVerdictOk(v)) { for (const p of v.problems) console.error("  - " + p); throw new Error("refusing to checkpoint a bundle that does not verify as a complete, signed full export"); }
+    const key = parseSigningKey(process.env.RETRACE_SIGNING_KEY) ?? (await ensureSigningKey()).privateKey;
+    const cp = await checkpointFromBundle(bundle, { signingKey: key, signerName: process.env.RETRACE_ISSUER });
+    const out = String(flags.out ?? ".retrace/checkpoints.jsonl");
+    if (existsSync(out)) {
+      const prev = latestCheckpoint(parseCheckpointLog(readFileSync(out, "utf8")), project);
+      if (prev && prev.seq === cp.seq && prev.head_hash === cp.head_hash) { console.log(`unchanged — ${out} already has head #${cp.seq} ${cp.head_hash.slice(0, 12)}… for ${project}`); return; }
+      if (prev && prev.seq > cp.seq) throw new Error(`${out} already records #${prev.seq} for ${project}; this bundle stops at #${cp.seq} — the ledger shrank, investigate before checkpointing`);
+    } else mkdirSync(dirname(out), { recursive: true });
+    appendFileSync(out, JSON.stringify(cp) + "\n");
+    console.log(`appended head #${cp.seq} ${cp.head_hash.slice(0, 12)}… (${cp.total_events} events, issuer kid ${(cp.source as any).issuer_kid ?? "unsigned"}, signer kid ${cp.signer?.kid}) to ${out}\ncommit and push ${out} — that commit is the witness a later verify --checkpoint compares against`);
+    return;
   }
   if (cmd === "share") {
     const project = pos[1]; if (!project) throw new Error("usage: retrace-export share <project>");
@@ -72,6 +110,6 @@ async function main() {
     console.log(`${base}/s/${id}\nreport: ${base}/s/${id}/report`);
     return;
   }
-  console.log("retrace-export <keygen|export <project>|verify <bundle.json>|share <project>> [--artifact id] [--out f] [--report f.html] [--pubkey jwk|url] [--label s] [--days n]");
+  console.log("retrace-export <keygen|export <project>|verify <bundle.json>|checkpoint <project>|share <project>> [--artifact id] [--out f] [--report f.html] [--pubkey jwk|url] [--checkpoint f.jsonl] [--bundle f.json] [--label s] [--days n]");
 }
 if (isMainModule(import.meta.url)) main().catch((e) => { console.error("retrace-export:", e.message ?? e); process.exit(1); });

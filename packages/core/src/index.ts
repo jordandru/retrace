@@ -5,6 +5,7 @@ export * from "./explain.js";
 export * from "./router.js";
 export * from "./signing.js";
 export * from "./export.js";
+export * from "./checkpoint.js";
 export * from "./report.js";
 export * from "./lineage.js";
 export * from "./github.js";
