@@ -1,6 +1,6 @@
 /** Local SQLite store using Node's built-in node:sqlite (Node >= 22.13). No native deps. */
 import { DatabaseSync } from "node:sqlite";
-import { ChainHead, Event, EventStore, HeadMovedError, HistoryQuery, SCHEMA_SQL, Share } from "@retrace-dev/core";
+import { ChainHead, Event, EventStore, HeadMovedError, HistoryQuery, SCHEMA_SQL, Share, clampHistoryLimit, likeContains } from "@retrace-dev/core";
 
 export class SqliteStore implements EventStore {
   private db: DatabaseSync;
@@ -107,10 +107,10 @@ export class SqliteStore implements EventStore {
     if (q.action) { where.push("e.action = ?"); params.push(q.action); }
     if (q.since) { where.push("e.timestamp >= ?"); params.push(q.since); }
     if (q.until) { where.push("e.timestamp <= ?"); params.push(q.until); }
-    if (q.text) { where.push("e.body LIKE ?"); params.push(`%${q.text}%`); }
-    const limit = Math.min(q.limit ?? 100, 1000);
-    const sql = `SELECT DISTINCT e.body, e.seq FROM events e ${join} WHERE ${where.join(" AND ")} ORDER BY e.seq ASC LIMIT ${limit}`;
-    const rows = this.db.prepare(sql).all(...params) as { body: string }[];
+    if (q.text) { const like = likeContains(q.text); where.push(like.sql); params.push(like.pattern); }
+    const limit = clampHistoryLimit(q.limit);
+    const sql = `SELECT DISTINCT e.body, e.seq FROM events e ${join} WHERE ${where.join(" AND ")} ORDER BY e.seq ASC LIMIT ?`;
+    const rows = this.db.prepare(sql).all(...params, limit) as { body: string }[];
     return rows.map((r) => JSON.parse(r.body) as Event);
   }
 }

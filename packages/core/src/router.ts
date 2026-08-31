@@ -160,6 +160,7 @@ const inputs_needs_unique = (ghEvent: string) => ghEvent !== "push";
 
 const SHARE_WINDOW_MS = 60_000;
 const SHARE_MAX = 60;
+const SHARE_BODY_MAX = 32;
 
 export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOptions) {
   const opts: RouterOptions = typeof tokenOrOpts === "string" ? { token: tokenOrOpts } : tokenOrOpts ?? {};
@@ -174,6 +175,22 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
     if (!w || now - w.t > SHARE_WINDOW_MS) { shareHits.set(id, { n: 1, t: now }); return false; }
     w.n++;
     return w.n > SHARE_MAX;
+  };
+  /** Heavy /s/* bodies (verify/export/report) are keyed by share id + project head hash so a new event
+   *  invalidates them and a repeat hit does not re-run store.all + Ed25519 (audit 2026-08-30). */
+  const shareBodies = new Map<string, { status: number; type: string; body: string }>();
+  const dropShareCache = (id: string) => {
+    for (const k of [...shareBodies.keys()]) if (k.startsWith(`${id}|`)) shareBodies.delete(k);
+  };
+  const cachedShare = async (key: string, build: () => Promise<Response>): Promise<Response> => {
+    const hit = shareBodies.get(key);
+    if (hit) return new Response(hit.body, { status: hit.status, headers: { "content-type": hit.type, ...CORS, ...SHARE_CACHE, "x-retrace-share-cache": "hit" } });
+    const res = await build();
+    const type = res.headers.get("content-type") ?? "application/json";
+    const body = await res.text();
+    if (shareBodies.size >= SHARE_BODY_MAX) shareBodies.delete(shareBodies.keys().next().value!);
+    shareBodies.set(key, { status: res.status, type, body });
+    return new Response(body, { status: res.status, headers: { "content-type": type, ...CORS, ...SHARE_CACHE, "x-retrace-share-cache": "miss" } });
   };
   /** WHO SEALED IT. Stamped server-side on every write so a reader can tell a pinned-credential event (the Worker
    *  fixed the actor) from an owner-asserted one (the body actor was stored verbatim) — without this the two are
@@ -370,6 +387,7 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
           if (principal?.kind !== "owner") return json({ error: "forbidden: this route needs the owner token" }, 403);
           if (!store.deleteShare) return json({ error: "share revocation not supported by this store" }, 501);
           const existed = await store.deleteShare(parts[1]);
+          if (existed) dropShareCache(parts[1]);
           return existed ? json({ ok: true, id: parts[1] }) : json({ error: "share not found" }, 404);
         }
         if (shareLimited(parts[1])) return json({ error: "rate limited" }, 429);
@@ -378,20 +396,28 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
         const sub = parts[2];
         if (!sub) return html(UI_HTML, 200, SHARE_CACHE);
         if (sub === "meta") return json(publicShare(share), 200, SHARE_CACHE);
-        if (sub === "verify") return json(await verifyProject(store, share.project), 200, SHARE_CACHE);
+        const head = await store.head(share.project);
+        const cacheKey = `${parts[1]}|${sub}|${url.searchParams.get("format") ?? ""}|${url.searchParams.get("actors") ?? ""}|${head?.hash ?? ""}`;
+        if (sub === "verify") return cachedShare(cacheKey, async () => json(await verifyProject(store, share.project), 200, SHARE_CACHE));
         if (sub === "events") {
           // same selection as the export (in-scope events + causal ancestors) so the shared UI can answer "why"
-          const b = await buildExportBundle(store, { project: share.project, artifact_id: share.artifact_id });
-          return json(b.events, 200, SHARE_CACHE);
+          return cachedShare(cacheKey, async () => {
+            const b = await buildExportBundle(store, { project: share.project, artifact_id: share.artifact_id });
+            return json(b.events, 200, SHARE_CACHE);
+          });
         }
-        if (sub === "export") return json(await exportFor({ project: share.project, artifact_id: share.artifact_id }), 200, SHARE_CACHE);
+        if (sub === "export") return cachedShare(cacheKey, async () => json(await exportFor({ project: share.project, artifact_id: share.artifact_id }), 200, SHARE_CACHE));
         if (sub === "lineage") {
-          const b = await buildExportBundle(store, { project: share.project, artifact_id: share.artifact_id });
-          return lineageResponse(b.events, url.searchParams.get("format"), url.searchParams.get("actors") === "1");
+          return cachedShare(cacheKey, async () => {
+            const b = await buildExportBundle(store, { project: share.project, artifact_id: share.artifact_id });
+            return lineageResponse(b.events, url.searchParams.get("format"), url.searchParams.get("actors") === "1");
+          });
         }
         if (sub === "report") {
-          const b = await exportFor({ project: share.project, artifact_id: share.artifact_id });
-          return html(renderReportHtml(b, await verifyExportBundle(b), { baseUrl: base, title: share.label ? `Provenance report — ${share.label}` : undefined }), 200, SHARE_CACHE);
+          return cachedShare(cacheKey, async () => {
+            const b = await exportFor({ project: share.project, artifact_id: share.artifact_id });
+            return html(renderReportHtml(b, await verifyExportBundle(b), { baseUrl: base, title: share.label ? `Provenance report — ${share.label}` : undefined }), 200, SHARE_CACHE);
+          });
         }
         return json({ error: "not found" }, 404);
       }

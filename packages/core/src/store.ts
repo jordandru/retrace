@@ -17,6 +17,19 @@ export interface HistoryQuery {
   limit?: number;
 }
 
+/** Max rows a history() query may return. Bound as a parameter, never interpolated (audit 2026-08-30). */
+export const HISTORY_LIMIT_MAX = 100_000;
+export function clampHistoryLimit(limit?: number): number {
+  if (typeof limit !== "number" || !Number.isFinite(limit) || limit < 1) return 100;
+  return Math.min(Math.floor(limit), HISTORY_LIMIT_MAX);
+}
+
+/** LIKE pattern for a substring search that treats % and _ as literals (audit 2026-08-30). */
+export function likeContains(text: string): { sql: string; pattern: string } {
+  const pattern = "%" + text.replace(/!/g, "!!").replace(/%/g, "!%").replace(/_/g, "!_") + "%";
+  return { sql: "e.body LIKE ? ESCAPE '!'", pattern };
+}
+
 export interface Share {
   id: string;
   project: string;

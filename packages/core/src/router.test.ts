@@ -737,6 +737,21 @@ test("share: expires_in_days is bounded, created_by is not taken from the client
   assert.equal((await get(h, `/s/${id}/meta`)).status, 404);
 });
 
+test("GET /s/:id/verify is cached by share id + head hash", async () => {
+  const store = await seeded();
+  const h = createHandler(store, { token: "tok" });
+  const a = await get(h, "/s/sh_1/verify");
+  assert.equal(a.status, 200);
+  assert.equal(a.headers.get("x-retrace-share-cache"), "miss");
+  const b = await get(h, "/s/sh_1/verify");
+  assert.equal(b.status, 200);
+  assert.equal(b.headers.get("x-retrace-share-cache"), "hit");
+  assert.deepEqual(await b.json(), await a.json());
+  await appendEvent(store, ev({}));
+  const c = await get(h, "/s/sh_1/verify");
+  assert.equal(c.headers.get("x-retrace-share-cache"), "miss");
+});
+
 test("500 handler does not echo the internal error text", async () => {
   const store = new MemStore();
   store.projects = async () => { throw new Error("SQL boom /secret/path"); };

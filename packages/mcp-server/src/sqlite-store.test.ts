@@ -19,6 +19,21 @@ test("SqliteStore: artifact role is body-only — survives insert → get/all/hi
   assert.deepEqual(cols, ["event_id", "project", "artifact_id"]);
 });
 
+test("SqliteStore.history: % and _ in text are literals; LIMIT is bound and clamped", async () => {
+  const store = new SqliteStore(":memory:");
+  await appendEvent(store, ev({ intent: "100% coverage", artifacts: [{ id: "pct" }] }));
+  await appendEvent(store, ev({ intent: "plain edit", artifacts: [{ id: "plain" }] }));
+  const pct = await store.history({ project: "junk", text: "100%" });
+  assert.equal(pct.length, 1);
+  assert.equal(pct[0].intent, "100% coverage");
+  const underscore = await store.history({ project: "junk", text: "plain_edit" });
+  assert.equal(underscore.length, 0, "unescaped _ would have matched 'plain edit'");
+  const one = await store.history({ project: "junk", limit: 1 });
+  assert.equal(one.length, 1);
+  const huge = await store.history({ project: "junk", limit: 9e9 });
+  assert.equal(huge.length, 2, "oversize limit is clamped, not interpolated");
+});
+
 test("SqliteStore.deleteProject: deletes + audit insert commit together", async () => {
   const store = new SqliteStore(":memory:");
   await appendEvent(store, ev({ artifacts: [{ id: "a" }, { id: "b" }] }));

@@ -1,4 +1,4 @@
-import { ChainHead, Event, EventStore, HeadMovedError, HistoryQuery, Share } from "@retrace-dev/core";
+import { ChainHead, Event, EventStore, HeadMovedError, HistoryQuery, Share, clampHistoryLimit, likeContains } from "@retrace-dev/core";
 
 export class D1Store implements EventStore {
   constructor(private db: D1Database) {}
@@ -96,10 +96,10 @@ export class D1Store implements EventStore {
     if (q.action) { where.push("e.action = ?"); params.push(q.action); }
     if (q.since) { where.push("e.timestamp >= ?"); params.push(q.since); }
     if (q.until) { where.push("e.timestamp <= ?"); params.push(q.until); }
-    if (q.text) { where.push("e.body LIKE ?"); params.push(`%${q.text}%`); }
-    const limit = Math.min(q.limit ?? 100, 100000);
-    const sql = `SELECT DISTINCT e.body, e.seq FROM events e ${join} WHERE ${where.join(" AND ")} ORDER BY e.seq ASC LIMIT ${limit}`;
-    const { results } = await this.db.prepare(sql).bind(...params).all<{ body: string }>();
+    if (q.text) { const like = likeContains(q.text); where.push(like.sql); params.push(like.pattern); }
+    const limit = clampHistoryLimit(q.limit);
+    const sql = `SELECT DISTINCT e.body, e.seq FROM events e ${join} WHERE ${where.join(" AND ")} ORDER BY e.seq ASC LIMIT ?`;
+    const { results } = await this.db.prepare(sql).bind(...params, limit).all<{ body: string }>();
     return results.map((r) => JSON.parse(r.body) as Event);
   }
 }

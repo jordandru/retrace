@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   adapterIdempotencyError, AdapterIdempotencyError, CAUSED_BY_UNVERIFIED_TAG, appendEvent,
-  EventInput, Event, EventStore, Share,
+  EventInput, Event, EventStore, Share, likeContains, clampHistoryLimit, HISTORY_LIMIT_MAX,
 } from "./index.js";
 
 class MemStore implements EventStore {
@@ -20,6 +20,18 @@ class MemStore implements EventStore {
 
 const ev = (over: Partial<EventInput>): EventInput => ({
   project: "p", actor: { type: "agent", id: "grok" }, action: "edited", artifacts: [{ id: "a" }], ...over,
+});
+
+test("likeContains treats % and _ as literals; clampHistoryLimit binds a finite cap", () => {
+  assert.equal(likeContains("100%").pattern, "%100!%%");
+  assert.equal(likeContains("a_b").pattern, "%a!_b%");
+  assert.equal(likeContains("a!b").pattern, "%a!!b%");
+  assert.match(likeContains("x").sql, /ESCAPE '!'/);
+  assert.equal(clampHistoryLimit(undefined), 100);
+  assert.equal(clampHistoryLimit(NaN), 100);
+  assert.equal(clampHistoryLimit(-4), 100);
+  assert.equal(clampHistoryLimit(3.9), 3);
+  assert.equal(clampHistoryLimit(HISTORY_LIMIT_MAX + 1), HISTORY_LIMIT_MAX);
 });
 
 test("adapter idempotency: git:/gd:/gh: are reserved unless the event is adapter-shaped", () => {
