@@ -11,8 +11,9 @@
  *   GET /projects/:p/export|report|lineage · POST /projects/:p/share · GET /.well-known/retrace-pubkey
  *   POST /hooks/github  (GitHub webhook; HMAC-verified with RETRACE_GITHUB_SECRET; project from repo via RETRACE_GITHUB_PROJECTS)
  */
-import { createHandler, parseCredentials, parseGithubRepoProjects, parseSigningKey } from "@retrace-dev/core";
+import { createHandler, parseCredentials, parseGithubRepoProjects, parseSigningKey, runCheckpointCron } from "@retrace-dev/core";
 import { D1Store } from "./d1-store.js";
+import { D1CheckpointLog } from "./checkpoint-log.js";
 
 export interface Env {
   DB: D1Database;
@@ -51,5 +52,19 @@ export default {
       opsProject: env.RETRACE_OPS_PROJECT,
       ownerActor: env.RETRACE_OWNER ? { type: "human", id: env.RETRACE_OWNER } : undefined,
     })(req);
+  },
+
+  /** Hourly cron (wrangler.toml [triggers]): checkpoint every moved head and witness it in Rekor (roadmap rung 2).
+   *  Signed with the Worker's own signing key — the witness's authority is Rekor's log, not the key. No signing key
+   *  configured → the run is skipped (an unsigned scheduled checkpoint asserts nothing worth storing). */
+  async scheduled(_controller: unknown, env: Env, ctx: { waitUntil(p: Promise<unknown>): void }): Promise<void> {
+    const signingKey = parseSigningKey(env.RETRACE_SIGNING_KEY);
+    if (!signingKey) return;
+    ctx.waitUntil(
+      runCheckpointCron(new D1Store(env.DB), new D1CheckpointLog(env.DB), { signingKey, signerName: env.RETRACE_ISSUER }).then(
+        (results) => console.log("checkpoint cron:", JSON.stringify(results)),
+        (e) => console.error("checkpoint cron failed:", String((e as Error)?.message ?? e)),
+      ),
+    );
   },
 };

@@ -17,3 +17,7 @@ database_id = "ae8ebc52-9784-4109-b421-f63676972dfe"
 RETRACE_OWNER = "jordansboxing@gmail.com"
 # HMAC-covered repository.full_name → Retrace project. Query ?project= is ignored (audit 2026-08-30).
 RETRACE_GITHUB_PROJECTS = "{\"jordandru/retrace\":\"retrace\"}"
+
+# Hourly head checkpoints witnessed in Rekor (roadmap rung 2); handler = `scheduled` in src/index.ts
+[triggers]
+crons = ["7 * * * *"]

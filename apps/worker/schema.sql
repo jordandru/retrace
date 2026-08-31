@@ -33,3 +33,16 @@ CREATE TABLE IF NOT EXISTS shares (
   expires_at TEXT,
   created_by TEXT
 );
+
+-- Hourly scheduled head checkpoints (roadmap rung 2): {signed checkpoint, Rekor witness} per moved head.
+CREATE TABLE IF NOT EXISTS checkpoints (
+  project TEXT NOT NULL,
+  seq INTEGER NOT NULL,
+  head_hash TEXT NOT NULL,
+  at TEXT NOT NULL,
+  checkpoint TEXT NOT NULL,
+  witness TEXT,
+  witness_error TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  PRIMARY KEY (project, seq)
+);
