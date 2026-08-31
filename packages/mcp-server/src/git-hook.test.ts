@@ -296,6 +296,30 @@ test("git adapter: grok trailers and Co-Authored-By map to actor id grok, not cl
   assert.deepEqual(coauthored.actor, { type: "agent", id: "grok", model: "grok-4-6", display_name: "Grok 4.6", on_behalf_of: "jordan@slcwitit.com" });
 });
 
+test("git adapter: Copilot Co-Authored-By maps to github-copilot, matching the Worker pin", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "retrace-git-copilot-"));
+  const db = join(dir, "ledger.db");
+  const env = { RETRACE_DB: db, RETRACE_PROJECT: "rpg" };
+  sh(dir, "git", ["init", "-q", "-b", "main"]);
+  writeFileSync(join(dir, "a.ts"), "export const a = 1;\n");
+  sh(dir, "git", ["add", "."]);
+  sh(dir, "git", ["commit", "-qm", "initial"]);
+  sh(dir, "node", [bin, "install", "--repo", dir], env);
+  writeFileSync(join(dir, "a.ts"), "export const a = 1.5;\n");
+  sh(dir, "git", ["commit", "-qam", "seed db"], env);
+  const copilotRoot = await seedInstruct(db);
+
+  writeFileSync(join(dir, "a.ts"), "export const a = 2;\n");
+  sh(dir, "git", ["commit", "-qam", `copilot trailers\n\nRetrace-Actor: github-copilot\nRetrace-Model: gpt-4.1\nRetrace-Caused-By: ${copilotRoot}\nCo-Authored-By: Copilot <noreply@github.com>`], env);
+  writeFileSync(join(dir, "a.ts"), "export const a = 3;\n");
+  sh(dir, "git", ["commit", "-qam", "copilot coauthor only\n\nCo-Authored-By: GitHub Copilot <noreply@github.com>"], env);
+
+  const [trailed, coauthored] = (await new SqliteStore(db).all("rpg")).filter((e) => e.action === "committed").slice(-2);
+  assert.deepEqual(trailed.actor, { type: "agent", id: "github-copilot", model: "gpt-4.1", on_behalf_of: "jordan@slcwitit.com" });
+  assert.equal(trailed.caused_by, copilotRoot);
+  assert.deepEqual(coauthored.actor, { type: "agent", id: "github-copilot", display_name: "GitHub Copilot", on_behalf_of: "jordan@slcwitit.com" });
+});
+
 test("git adapter: a stale Retrace-Caused-By still logs the commit, marked unverified", async () => {
   const dir = mkdtempSync(join(tmpdir(), "retrace-git-stale-"));
   const db = join(dir, "ledger.db");

@@ -121,6 +121,8 @@ function loadCfg(repo: string, flags: Record<string, string | boolean>): Cfg {
 const AGENT_COAUTHOR = /claude|copilot|codex|cursor|devin|aider|gpt|gemini|grok|\[bot\]/i;
 /** Agent families a Co-Authored-By name is mapped onto (first match wins) — the actor id (backlog #12). */
 const AGENT_FAMILIES = ["claude", "copilot", "codex", "cursor", "devin", "aider", "gemini", "grok", "gpt"];
+/** Family substring → pinned MCP actor id. Copilot's Co-Authored-By name is "Copilot"/"GitHub Copilot"; the Worker pin is `github-copilot`. */
+const PINNED_FAMILY_IDS: Record<string, string> = { copilot: "github-copilot" };
 const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
 /** Retrace-Caused-By must be a real event id; junk trailers are dropped rather than sealed (audit 2026-08-30). */
 export const CAUSED_BY_RE = /^evt_[0-9a-f]{32}$/i;
@@ -180,7 +182,9 @@ function coauthorActor(coauthor: string, ae: string): EventInput["actor"] {
   const name = coauthor.replace(/<.*>/, "").trim();
   const family = AGENT_FAMILIES.find((f) => name.toLowerCase().includes(f));
   const full = slug(name);
-  return { type: "agent", id: family ?? full, model: family && full !== family ? full : undefined, on_behalf_of: ae, display_name: name };
+  const id = (family && PINNED_FAMILY_IDS[family]) ?? family ?? full;
+  const model = family && full !== family && full !== id ? full : undefined;
+  return { type: "agent", id, model, on_behalf_of: ae, display_name: name };
 }
 
 export function commitToEvent(repo: string, sha: string, cfg: Cfg, live = false): EventInput {

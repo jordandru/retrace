@@ -1,0 +1,29 @@
+{
+  "inputs": [
+    {
+      "id": "retrace-github-copilot-token",
+      "type": "promptString",
+      "description": "Pinned github-copilot Retrace token (not the owner token, not another harness pin)",
+      "password": true
+    }
+  ],
+  "servers": {
+    "retrace": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "${workspaceFolder}/packages/mcp-server/dist/index.js"
+      ],
+      "env": {
+        "RETRACE_PROJECT": "retrace",
+        "RETRACE_ACTOR": "github-copilot",
+        "RETRACE_ON_BEHALF_OF": "jordansboxing@gmail.com",
+        "RETRACE_URL": "https://retrace-api.slcwitit.workers.dev",
+        "RETRACE_PROJECT_LOCK": "1",
+        "RETRACE_COMMIT_LOCK": "1",
+        "RETRACE_ACTOR_LOCK": "1",
+        "RETRACE_TOKEN": "${input:retrace-github-copilot-token}"
+      }
+    }
+  }
+}
