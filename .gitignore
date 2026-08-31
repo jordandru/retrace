@@ -14,3 +14,5 @@ src/ui-html.ts
 *signing-key*.json
 *checkpoint-key*.json
 worker-credentials.json
+# personal Cursor CLI allowlist — not harness identity (tokens stay in ~/.retrace/cursor.env)
+.cursor/cli.json

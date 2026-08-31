@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "retrace": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "${workspaceFolder}/packages/mcp-server/dist/index.js"
+      ],
+      "envFile": "${userHome}/.retrace/cursor.env",
+      "env": {
+        "RETRACE_PROJECT": "retrace",
+        "RETRACE_ACTOR": "cursor-agent",
+        "RETRACE_ON_BEHALF_OF": "jordansboxing@gmail.com",
+        "RETRACE_URL": "https://retrace-api.slcwitit.workers.dev"
+      }
+    }
+  }
+}

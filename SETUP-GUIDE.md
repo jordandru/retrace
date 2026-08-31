@@ -119,6 +119,7 @@ Each client gets its **own** `RETRACE_TOKEN` (pinned credential). Reusing Claude
 | Grok Build TUI | `grok` | `~/.grok/config.toml` |
 | Codex | `codex` | Codex MCP + `AGENTS.md` |
 | GitHub Copilot CLI | `github-copilot` | `~/.copilot/mcp-config.json` |
+| Cursor Agent | `cursor-agent` | committed `.cursor/mcp.json` (interpolated paths) + `~/.retrace/cursor.env` (`RETRACE_TOKEN=` only, mode 0600) |
 
 Claude example (`args` = absolute `packages/mcp-server/dist/index.js`):
 
@@ -138,7 +139,7 @@ Claude example (`args` = absolute `packages/mcp-server/dist/index.js`):
 
 Leave `RETRACE_ACTOR_MODEL` unset so the agent reports the model it actually ran. After `dist/` changes, **respawn** the MCP server (it keeps old `dist` and session id until restart).
 
-Per-harness notes: `CLAUDE.md`, `GEMINI.md`, `GROK.md`, `AGENTS.md` (Codex), `.github/copilot-instructions.md`. Grok also loads `.grok/rules/retrace.md` (it still auto-loads `CLAUDE.md` via compatibility).
+Per-harness notes: `CLAUDE.md`, `GEMINI.md`, `GROK.md`, `AGENTS.md` (Codex), `.github/copilot-instructions.md`, `.cursor/rules/retrace-provenance.mdc`. Grok also loads `.grok/rules/retrace.md` (it still auto-loads `CLAUDE.md` via compatibility). After changing `.cursor/mcp.json` or `cursor.env`, **reload MCP in that Cursor window** — a running agent session does not pick up a newly deployed token.
 
 **Check:** client shows Retrace tools (11). One real `retrace_instruct` → timeline shows an amber instruction, then blue agent events with `caused_by`.
 
@@ -272,6 +273,6 @@ When the task is done, **clear** `RETRACE_CAUSED_BY` (delete the property or set
 
 ## What this repo is not asking you to do next
 
-Cursor is half-wired in code (`CLIENT_SYSTEM` / git families) and **not** on the git allow-list. Don’t mint a Cursor credential until a Cursor window is actually on this folder. Copilot CLI is pinned; if quota is exhausted, skip that tab until GitHub resets it.
+Cursor Agent is pinned on this checkout (`cursor-agent`, Worker credential + git-hook allow-list). Token lives in `~/.retrace/cursor.env`, not in git. `retrace-admin` still does not mint Cursor — do not add it to `HARNESSES` while completeness and attribution are still weak. Copilot CLI is pinned; if quota is exhausted, skip that tab until GitHub resets it.
 
 Do not become C2PA, a trace viewer, or an identity provider. Do not add connectors, a sixth agent, an AI-BOM, or a compliance-deadline pitch while completeness (omission detection) and attribution (trailer-omit looks human; Drive `RETRACE_CAUSED_BY` is a global operator flag, not task evidence) are still weak. Do not re-run Apps Script `setup`.
