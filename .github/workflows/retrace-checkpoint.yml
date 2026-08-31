@@ -66,6 +66,13 @@ jobs:
           echo "total=$(echo "$line" | jq -r .total_events)" >> "$GITHUB_OUTPUT"
           echo "signer=$(echo "$line" | jq -r '.signer.kid // "unsigned"')" >> "$GITHUB_OUTPUT"
           echo "issuer=$(echo "$line" | jq -r '.source.issuer_kid // "unsigned"')" >> "$GITHUB_OUTPUT"
+      - name: Witness the new checkpoint in the Rekor transparency log
+        if: steps.cp.outputs.changed == 'true'
+        env:
+          RETRACE_SIGNING_KEY: ${{ secrets.RETRACE_CHECKPOINT_KEY }}
+        run: |
+          set -euo pipefail
+          node packages/mcp-server/dist/export-cli.js witness "$PROJECT" --checkpoints "$CHECKPOINTS" --witnesses .retrace/witnesses.jsonl
       - name: Open a pull request with the new checkpoint
         if: steps.cp.outputs.changed == 'true'
         env:
@@ -81,7 +88,7 @@ jobs:
           git config user.name "retrace-checkpoint[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -b "$branch"
-          git add "$CHECKPOINTS"
+          git add "$CHECKPOINTS" .retrace/witnesses.jsonl .retrace/rekor-public.pem
           git commit -m "Checkpoint ${PROJECT} head #${SEQ} ${HEAD12}" \
             -m "Signed head checkpoint from a verified full export (${TOTAL} events, issuer kid ${ISSUER}, checkpoint signer kid ${SIGNER}). Merging this PR is the witness: a later export that no longer contains #${SEQ} with this hash is NOT VALID under verify --checkpoint."
           git push -u origin "$branch"

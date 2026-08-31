@@ -10,6 +10,8 @@
  *       checkpoint signer is intentionally separate from the export issuer. A committed
  *       .retrace/checkpoint-public.jwk is the final repository-local fallback.
  *   retrace-export checkpoint <project> [--bundle file.json] [--out .retrace/checkpoints.jsonl]   append a signed head checkpoint; commit the file
+ *   retrace-export witness <project> [--checkpoints f.jsonl] [--witnesses f.jsonl] [--rekor url]   submit the newest checkpoint to the Rekor transparency log; commit both files
+ *       verify --checkpoint also takes [--witnesses f.jsonl] [--rekor-pubkey pem] to require the checkpointed head be witnessed by Rekor (offline SET check).
  *   retrace-export share <project> [--artifact <id>] [--label ..] [--days n]      (local server must be running for the link to resolve)
  * Uses the same store config as the MCP server (RETRACE_DB / RETRACE_URL+RETRACE_TOKEN).
  */
@@ -19,6 +21,7 @@ import { buildExportBundle, verifyExportBundle, exportVerdictOk, renderReportHtm
 import { makeStore } from "./index.js";
 import { RemoteStore } from "./remote-store.js";
 import { ensureSigningKey, loadSigningKey } from "./keys.js";
+import { witnessCheckpoint, verifyWitness, parseWitnessLog, witnessFor, fetchRekorPublicKey, DEFAULT_REKOR_URL } from "./witness.js";
 import { isMainModule } from "./is-main.js";
 
 /** Load a public JWK from a file path, an https URL, or an inline JSON string. Plain http is refused: a key fetched over
@@ -126,6 +129,23 @@ async function main() {
           for (const p of [...cv.problems, ...cmp.problems]) console.log("  - " + p);
           if (!relationVerified && !cmp.problems.length) console.log(`  - checkpoint relation ${cmp.relation} does not verify this bundle`);
         }
+        // --witnesses: the checkpointed head must also be witnessed by the Rekor transparency log (offline SET check).
+        // Passing the flag states the expectation, so a missing or failing witness is NOT VALID.
+        if (flags.witnesses) {
+          const witnesses = parseWitnessLog(readFileSync(String(flags.witnesses), "utf8"));
+          const w = witnessFor(witnesses, cp);
+          if (!w) { ok = false; console.log(`  witness: NONE for checkpoint #${cp.seq} in ${flags.witnesses}`); }
+          else {
+            const pemSrc = flags["rekor-pubkey"] ? String(flags["rekor-pubkey"]) : ".retrace/rekor-public.pem";
+            let pem: string;
+            try { pem = readFileSync(pemSrc, "utf8"); }
+            catch { pem = await fetchRekorPublicKey(w.rekor_url); console.log(`  (Rekor public key fetched from ${w.rekor_url} — commit it as .retrace/rekor-public.pem for offline verification)`); }
+            const wv = await verifyWitness(w, cp, pem);
+            if (!wv.ok) ok = false;
+            console.log(`  witness: ${wv.ok ? wv.note : "NOT VALID"} (${w.rekor_url}, uuid ${w.uuid.slice(0, 16)}…)`);
+            for (const p of wv.problems) console.log("  - " + p);
+          }
+        }
       }
     }
     process.exit(ok ? 0 : 2);
@@ -157,6 +177,25 @@ async function main() {
     console.log(`appended head #${cp.seq} ${cp.head_hash.slice(0, 12)}… (${cp.total_events} events, issuer kid ${(cp.source as any).issuer_kid ?? "unsigned"}, signer kid ${cp.signer?.kid}) to ${out}\ncommit and push ${out} — that commit is the witness a later verify --checkpoint compares against`);
     return;
   }
+  if (cmd === "witness") {
+    const project = pos[1]; if (!project) throw new Error("usage: retrace-export witness <project> [--checkpoints .retrace/checkpoints.jsonl] [--witnesses .retrace/witnesses.jsonl] [--rekor url]");
+    const cpsPath = String(flags.checkpoints ?? ".retrace/checkpoints.jsonl");
+    const wPath = String(flags.witnesses ?? ".retrace/witnesses.jsonl");
+    const rekorUrl = String(flags.rekor ?? DEFAULT_REKOR_URL);
+    const cp = latestCheckpoint(parseCheckpointLog(readFileSync(cpsPath, "utf8")), project);
+    if (!cp) throw new Error(`no checkpoint for project ${project} in ${cpsPath} — run \`retrace-export checkpoint ${project}\` first`);
+    const existing = existsSync(wPath) ? parseWitnessLog(readFileSync(wPath, "utf8")) : [];
+    if (witnessFor(existing, cp)) { console.log(`unchanged — ${wPath} already witnesses checkpoint #${cp.seq} for ${project}`); return; }
+    const key = parseSigningKey(process.env.RETRACE_SIGNING_KEY) ?? loadSigningKey();
+    if (!key) throw new Error("no signing key: set RETRACE_SIGNING_KEY (the checkpoint key) — the Rekor entry must be signed by the checkpoint's signer");
+    const rec = await witnessCheckpoint(cp, key, { rekorUrl });
+    mkdirSync(dirname(wPath), { recursive: true });
+    appendFileSync(wPath, JSON.stringify(rec) + "\n");
+    const pemPath = dirname(wPath) + "/rekor-public.pem";
+    if (!existsSync(pemPath)) { writeFileSync(pemPath, await fetchRekorPublicKey(rekorUrl)); console.log(`wrote ${pemPath} — Rekor's public key, committed so SETs verify offline`); }
+    console.log(`witnessed checkpoint #${cp.seq} ${cp.head_hash.slice(0, 12)}… in the Rekor transparency log: index ${rec.log_index}, ${new Date(rec.integrated_time * 1000).toISOString()}\nappended to ${wPath} — commit and push it with ${cpsPath}; verify with: retrace-export verify <bundle> --checkpoint ${cpsPath} --witnesses ${wPath}`);
+    return;
+  }
   if (cmd === "share") {
     const project = pos[1]; if (!project) throw new Error("usage: retrace-export share <project>");
     const store = makeStore();
@@ -168,6 +207,6 @@ async function main() {
     console.log(`${base}/s/${id}\nreport: ${base}/s/${id}/report`);
     return;
   }
-  console.log("retrace-export <keygen|export <project>|verify <bundle.json>|checkpoint <project>|share <project>> [--artifact id] [--out f] [--report f.html] [--pubkey jwk|https-url] [--allow-self-attested] [--checkpoint f.jsonl] [--checkpoint-pubkey jwk|https-url] [--bundle f.json] [--label s] [--days n]");
+  console.log("retrace-export <keygen|export <project>|verify <bundle.json>|checkpoint <project>|witness <project>|share <project>> [--artifact id] [--out f] [--report f.html] [--pubkey jwk|https-url] [--allow-self-attested] [--checkpoint f.jsonl] [--checkpoint-pubkey jwk|https-url] [--bundle f.json] [--label s] [--days n]");
 }
 if (isMainModule(import.meta.url)) main().catch((e) => { console.error("retrace-export:", e.message ?? e); process.exit(1); });

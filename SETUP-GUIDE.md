@@ -174,6 +174,9 @@ gh secret set RETRACE_CHECKPOINT_KEY      # paste the private JWK printed above
 # Commit the printed public JWK as .retrace/checkpoint-public.jwk for verification.
 # Settings → Actions → General → "Allow GitHub Actions to create and approve pull requests" must be on
 gh workflow run retrace-checkpoint.yml    # first run on demand; merge the PR it opens
+# optional but recommended — witness the checkpoint in the public Rekor transparency log:
+RETRACE_SIGNING_KEY_FILE=~/.retrace/checkpoint-key.json node packages/mcp-server/dist/export-cli.js witness <project>
+# commits .retrace/witnesses.jsonl + rekor-public.pem alongside checkpoints.jsonl; the daily workflow does this automatically
 ```
 
 **Check:** `retrace-export verify <bundle.json> --checkpoint .retrace/checkpoints.jsonl` on a fresh **full export of the same project** uses `.retrace/checkpoint-public.jwk` and reports `MATCHES` or `EXTENDS` (checkpoints are per-project — this repo's file covers `retrace`, so a `boxing-rpg` bundle has nothing to match); remember `verify` also needs the issuer key (`--pubkey` or `RETRACE_URL`) or the bundle is only self-attested; a missing, unsigned, invalid, untrusted, or non-matching checkpoint is `NOT VALID` and exits nonzero. `--checkpoint-pubkey` and `RETRACE_CHECKPOINT_PUBKEY` override the repository key.
