@@ -194,7 +194,8 @@ npx wrangler secret put RETRACE_TOKEN          # owner token: UI, DELETE, share
 npx wrangler secret put RETRACE_CREDENTIALS    # JSON array of per-actor credentials
 npx wrangler secret put RETRACE_SIGNING_KEY    # private JWK from keygen --print-private
 npx wrangler secret put RETRACE_GITHUB_SECRET
-npx wrangler deploy
+npm run migrate                       # apply schema.sql to D1 (once; also adds the hourly-checkpoint table)
+npx wrangler deploy   # also registers the hourly checkpoint cron
 npm run check-deploy                           # from repo root; no token, no writes
 ```
 
