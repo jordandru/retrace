@@ -86,7 +86,7 @@ jobs:
           set -euo pipefail
           since=$(git log -1 --format=%H -- "$CHECKPOINTS")
           set +e
-          node packages/mcp-server/dist/export-cli.js reconcile --repo . --since "$since" --gate 2>&1 | grep -v ExperimentalWarning | tee reconcile.txt
+          node packages/mcp-server/dist/export-cli.js reconcile --repo . --since "$since" --gate 2>&1 | grep -v -e ExperimentalWarning -e trace-warnings | tee reconcile.txt
           rc=${PIPESTATUS[0]}
           set -e
           exit "$rc"
