@@ -143,7 +143,7 @@ test("captureCoverageFinding: worst unacknowledged level wins; acknowledged and 
   const fail = captureCoverageFinding(base([{ kind: "uncovered", level: "warn", detail: "u" }, { kind: "misattributed", level: "fail", detail: "sealed as codex, but every logged edit is by claude-code" }]));
   assert.equal(fail.level, "fail");
   assert.match(fail.detail, /^misattributed: sealed as codex/);
-  const acked = captureCoverageFinding(base([{ kind: "misattributed", level: "info", detail: "x", acknowledged: { seq: 9, id: "evt_9" } }]));
+  const acked = captureCoverageFinding(base([{ kind: "misattributed", level: "info", detail: "x", acknowledged: { seq: 9, id: "evt_9", actor: "jordan@example.com" } }]));
   assert.equal(acked.level, "pass");
   assert.match(acked.detail, /acknowledged by a correction event/);
   assert.equal(captureCoverageFinding(base([{ kind: "non_agent", level: "info", detail: "sealed as human jordan; coverage is not evaluated" }], {})).detail, "sealed as human jordan; coverage is not evaluated");

@@ -36,8 +36,11 @@ export interface ReconcileFinding {
   sha?: string;
   file?: string;
   detail: string;
-  /** a later ledger event tagged `correction` that references this commit; the finding then never counts as a failure */
-  acknowledged?: { seq: number; id: string };
+  /** a `correction`-tagged event sealed AFTER this commit's seal, by an actor other than the accused committer (and in
+   *  opts.ackActors when set), that references the commit; the finding then never counts as a failure. Unsealed
+   *  commits cannot be acknowledged at all — a sha is computable before the commit exists, so a pre-logged
+   *  "correction" would let anyone whitelist a commit in advance. */
+  acknowledged?: { seq: number; id: string; actor: string };
 }
 
 export interface FileCoverage {
@@ -82,6 +85,9 @@ export interface ReconcileOptions {
   repoPath?: string;
   /** gate level for a file with no covering event (default warn — silent producers exist; promote per repo) */
   uncovered?: ReconcileLevel;
+  /** actor ids allowed to acknowledge findings with a `correction` event. Default: any actor other than the sealed
+   *  committer (humans always). Set this to a reviewer list to stop agents acknowledging each other. */
+  ackActors?: string[];
 }
 
 const EDIT_ACTIONS = new Set(["created", "edited", "deleted", "renamed", "moved"]);
@@ -103,11 +109,22 @@ export function artifactPath(id: string, opts: { repoNames: Set<string>; repoPat
   return { path: norm(id), loose: true }; // bare relative path
 }
 
-/** Correction events name commits at whatever length git printed them (7–40 hex); match on prefix. */
-function ackFor(acks: Map<string, { seq: number; id: string }>, sha12: string): { seq: number; id: string } | undefined {
-  const exact = acks.get(sha12); if (exact) return exact;
-  for (const [k, v] of acks) if (k.length >= 7 && sha12.startsWith(k)) return v;
-  return undefined;
+interface Ack { seq: number; id: string; actor: string; actorType: string }
+
+/** Correction events name commits at whatever length git printed them (7–40 hex); match on prefix. Only an ack
+ *  sealed after the commit's own seal, by someone other than the accused committer (humans always; agents only when
+ *  not restricted by ackActors), counts. */
+function ackFor(acks: Map<string, Ack[]>, sha12: string, sealedSeq: number, accused: string, ackActors: string[] | undefined): { seq: number; id: string; actor: string } | undefined {
+  const candidates: Ack[] = [];
+  for (const [k, list] of acks) if (k === sha12 || (k.length >= 7 && sha12.startsWith(k))) candidates.push(...list);
+  const ok = candidates.filter((a) => a.seq > sealedSeq && a.actor !== accused && (a.actorType === "human" || !ackActors || ackActors.includes(a.actor)));
+  ok.sort((a, b) => a.seq - b.seq);
+  return ok[0] ? { seq: ok[0].seq, id: ok[0].id, actor: ok[0].actor } : undefined;
+}
+
+function sealedByOf(e: Event): string | undefined {
+  const v = (e.method?.params as Record<string, unknown> | undefined)?.sealed_by;
+  return typeof v === "string" ? v : undefined;
 }
 
 function norm(p: string): string { return p.replace(/\\/g, "/").replace(/^\.\//, ""); }
@@ -129,8 +146,11 @@ export function reconcile(commits: CommitFacts[], events: Event[], opts: Reconci
   const commitTouches: { seq: number; paths: Set<string> }[] = [];
   // edit events with the repo paths they touch
   const edits: { e: Event; paths: { path: string; loose: boolean }[] }[] = [];
-  // acknowledgements: correction events → the commit sha12s they reference
-  const acks = new Map<string, { seq: number; id: string }>();
+  // acknowledgements: correction events → the commit shas they reference (validated per commit in ackFor)
+  const acks = new Map<string, Ack[]>();
+  // heads of PRs whose merge was sealed by the HMAC-verified GitHub webhook (server-stamped; a credentialed agent
+  // cannot produce that stamp). The one non-forgeable reason an unsealed commit is a warning instead of a failure.
+  const webhookMergedHeads = new Map<string, number>();
   for (const e of evs) {
     if (COMMIT_ACTIONS.has(e.action)) {
       const id = commitIdOf(e); const sha = id && commitSha12(id);
@@ -138,10 +158,19 @@ export function reconcile(commits: CommitFacts[], events: Event[], opts: Reconci
       const paths = new Set<string>();
       for (const a of e.artifacts) { const p = artifactPath(a.id, { repoNames, repoPath: opts.repoPath }); if (p) paths.add(p.path); }
       commitTouches.push({ seq: e.seq, paths });
+      if (e.action === "merged" && sealedByOf(e)?.startsWith("webhook:")) {
+        const head = (e.method?.params as Record<string, unknown> | undefined)?.head_sha;
+        if (typeof head === "string" && /^[0-9a-f]{7,40}$/i.test(head)) webhookMergedHeads.set(head.slice(0, 12).toLowerCase(), e.seq);
+        for (const a of e.artifacts) for (const d of a.derived_from ?? []) { const s = d.startsWith("commit:") ? commitSha12(d) : undefined; if (s && a.kind === "pr") webhookMergedHeads.set(s, e.seq); }
+      }
       continue;
     }
     if (e.tags?.includes("correction")) {
-      for (const a of e.artifacts) { const sha = a.id.startsWith("commit:") ? commitSha12(a.id) : undefined; if (sha && !acks.has(sha)) acks.set(sha, { seq: e.seq, id: e.id }); }
+      for (const a of e.artifacts) {
+        const sha = a.id.startsWith("commit:") ? commitSha12(a.id) : undefined;
+        if (!sha) continue;
+        const list = acks.get(sha) ?? []; list.push({ seq: e.seq, id: e.id, actor: e.actor.id, actorType: e.actor.type }); acks.set(sha, list);
+      }
     }
     if (EDIT_ACTIONS.has(e.action) && e.actor.type === "agent") {
       const paths: { path: string; loose: boolean }[] = [];
@@ -158,23 +187,24 @@ export function reconcile(commits: CommitFacts[], events: Event[], opts: Reconci
 
   const verdicts: CommitVerdict[] = [];
   const summary: ReconcileReport["summary"] = { commits: commits.length, sealed: 0, acknowledged: 0, missing_commit: 0, misattributed: 0, uncovered: 0, loose_match: 0, orphan_edit: 0, non_agent: 0 };
-  const consumed = new Set<number>(); // seqs of edit events covered by some commit
+  const consumed = new Set<string>(); // "<seq>\u0000<path>" pairs covered by some commit — an event naming A+B where only A was committed still leaves B an orphan
   for (const c of commits) {
     const short = c.sha.slice(0, 12);
     const sealedEvent = sealedBySha.get(short);
     const v: CommitVerdict = { sha: c.sha, short, coverage: {}, findings: [] };
-    const ack = ackFor(acks, short);
+    // Acknowledgement is resolved only for sealed commits (see ReconcileFinding.acknowledged); git author fields are
+    // never consulted for anything but the description — they are whatever the pusher typed.
+    const ack = sealedEvent ? ackFor(acks, short, sealedEvent.seq, sealedEvent.actor.id, opts.ackActors) : undefined;
     const add = (kind: ReconcileFindingKind, level: ReconcileLevel, detail: string, file?: string) => {
       const f: ReconcileFinding = { kind, level, sha: short, file, detail };
       if (ack && level !== "info") { f.acknowledged = ack; f.level = "info"; }
       v.findings.push(f);
     };
     if (!sealedEvent) {
-      // A bot's commit (a CI checkpoint branch, dependabot) is made where no hook runs; its PR merge is sealed by the
-      // webhook, so the gap is a known producer limit (enable RETRACE_GITHUB_PUSH), not a silent human or agent.
-      const who = `${c.author?.name ?? ""} <${c.author?.email ?? ""}>`;
-      const bot = /\[bot\]|noreply\.github\.com/i.test(who);
-      add("missing_commit", bot ? "warn" : "fail", `${short} (${c.author?.email ?? c.author?.name ?? "unknown author"}, ${c.time ?? "?"}) has no committed/merged event — ${bot ? "a bot commit made where no hook runs; enable the GitHub push webhook (RETRACE_GITHUB_PUSH=1) to seal it" : "the git hook or webhook missed it"}`);
+      const mergedIn = webhookMergedHeads.get(short);
+      const who = `${c.author?.email ?? c.author?.name ?? "unknown author"}, ${c.time ?? "?"}`;
+      if (mergedIn !== undefined) add("missing_commit", "warn", `${short} (${who}) has no committed event, but it is the head of a pull request whose merge #${mergedIn} was sealed by the GitHub webhook — made where no hook runs; enable the push webhook (RETRACE_GITHUB_PUSH=1) to seal it`);
+      else add("missing_commit", "fail", `${short} (${who}) has no committed/merged event — the git hook or webhook missed it`);
       verdicts.push(v); continue;
     }
     summary.sealed++;
@@ -195,7 +225,7 @@ export function reconcile(commits: CommitFacts[], events: Event[], opts: Reconci
         if (ed.e.seq <= after || ed.e.seq >= sealedEvent.seq) continue;
         const hit = ed.paths.filter((p) => names.has(p.path));
         if (!hit.length) continue;
-        n++; actors.add(ed.e.actor.id); consumed.add(ed.e.seq);
+        n++; actors.add(ed.e.actor.id); for (const p of hit) consumed.add(`${ed.e.seq}\u0000${p.path}`);
         if (hit.some((p) => !p.loose)) allLoose = false;
       }
       const cov: FileCoverage = { actors: [...actors], events: n, loose: n > 0 && allLoose, window: { after, before: sealedEvent.seq } };
@@ -229,10 +259,11 @@ export function reconcile(commits: CommitFacts[], events: Event[], opts: Reconci
   const lastSeq = sealedSeqs.length ? Math.max(...sealedSeqs) : null;
   const orphanMap = new Map<string, OrphanEdit>(); const pendingMap = new Map<string, OrphanEdit>();
   for (const ed of edits) {
-    if (consumed.has(ed.e.seq) || firstSeq === null) continue;
+    if (firstSeq === null) continue;
     const target = ed.e.seq > lastSeq! ? pendingMap : ed.e.seq > firstSeq ? orphanMap : undefined;
     if (!target) continue;
     for (const p of ed.paths) {
+      if (consumed.has(`${ed.e.seq}\u0000${p.path}`)) continue;
       const o = target.get(p.path) ?? { path: p.path, actors: [], events: 0, last_seq: 0 };
       o.events++; o.last_seq = Math.max(o.last_seq, ed.e.seq);
       if (!o.actors.includes(ed.e.actor.id)) o.actors.push(ed.e.actor.id);
@@ -251,7 +282,7 @@ export function renderReconcileReport(r: ReconcileReport): string {
   const s = r.summary;
   lines.push(`reconcile ${r.repo_name}: ${s.commits} commit${s.commits === 1 ? "" : "s"}, ${s.sealed} sealed — ${s.missing_commit} missing, ${s.misattributed} misattributed, ${s.uncovered} uncovered, ${s.loose_match} loose, ${s.non_agent} non-agent, ${s.orphan_edit} orphan path${s.orphan_edit === 1 ? "" : "s"}, ${r.pending.length} pending${s.acknowledged ? `, ${s.acknowledged} acknowledged` : ""} → ${r.ok ? "OK" : "NOT OK"}`);
   for (const v of r.commits) for (const f of v.findings) {
-    lines.push(`  ${f.acknowledged ? "ACK " : f.level.toUpperCase().padEnd(4)} ${f.kind.padEnd(14)} ${f.detail}${f.acknowledged ? ` (corrected by #${f.acknowledged.seq})` : ""}`);
+    lines.push(`  ${f.acknowledged ? "ACK " : f.level.toUpperCase().padEnd(4)} ${f.kind.padEnd(14)} ${f.detail}${f.acknowledged ? ` (corrected by #${f.acknowledged.seq}, ${f.acknowledged.actor})` : ""}`);
   }
   for (const o of r.orphans) lines.push(`  INFO orphan_edit    ${o.path}: ${o.events} edit${o.events === 1 ? "" : "s"} by ${o.actors.join(", ")} (last #${o.last_seq}) not carried by any commit in range`);
   return lines.join("\n");

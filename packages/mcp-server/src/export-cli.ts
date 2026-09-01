@@ -25,33 +25,7 @@ import { ensureSigningKey, loadSigningKey } from "./keys.js";
 import { witnessCheckpoint, verifyWitness, parseWitnessLog, witnessFor, fetchRekorPublicKey, DEFAULT_REKOR_URL } from "./witness.js";
 import { isMainModule } from "./is-main.js";
 import { reconcileMain } from "./reconcile.js";
-
-/** Load a public JWK from a file path, an https URL, or an inline JSON string. Plain http is refused: a key fetched over
- *  an interceptable channel is not a trusted key. Accepts a bare JWK or a /.well-known/retrace-pubkey document. */
-async function loadPublicKey(src: string, label: string): Promise<JsonWebKey> {
-  let raw: any;
-  if (/^https:/i.test(src)) raw = await (await fetch(src)).json();
-  else if (/^http:/i.test(src)) throw new Error(`${label}: refusing to fetch a trusted key over plain http (${src}) — use https or a local file`);
-  else if (src.trim().startsWith("{")) raw = JSON.parse(src);
-  else raw = JSON.parse(readFileSync(src, "utf8"));
-  const jwk = raw?.public_key ?? raw;
-  if (!jwk || jwk.kty !== "OKP" || jwk.crv !== "Ed25519" || typeof jwk.x !== "string") throw new Error(`${label}: not an Ed25519 public JWK`);
-  if ("d" in jwk) throw new Error(`${label}: that is a PRIVATE key — pass the public JWK`);
-  return jwk;
-}
-
-/** Resolve the trusted issuer key for verification: explicit flag, RETRACE_PUBKEY, or the issuer's well-known URL. */
-async function resolveTrustedKey(flag: unknown): Promise<{ key: JsonWebKey; from: string } | undefined> {
-  if (flag) return { key: await loadPublicKey(String(flag), "--pubkey"), from: `--pubkey ${flag}` };
-  if (process.env.RETRACE_PUBKEY) return { key: await loadPublicKey(process.env.RETRACE_PUBKEY, "RETRACE_PUBKEY"), from: "RETRACE_PUBKEY" };
-  const base = process.env.RETRACE_URL;
-  if (base && /^https:/i.test(base)) {
-    const url = base.replace(/\/+$/, "") + "/.well-known/retrace-pubkey";
-    try { return { key: await loadPublicKey(url, url), from: url }; }
-    catch (e: any) { console.error(`  (could not load the issuer key from ${url}: ${e?.message ?? e})`); }
-  }
-  return undefined;
-}
+import { loadPublicKey, resolveTrustedKey } from "./trusted-key.js";
 
 /** Checkpoint witnesses use a separate signing key, so never silently reuse the export issuer key. */
 async function resolveCheckpointTrustedKey(flag: unknown): Promise<{ key: JsonWebKey; from: string } | undefined> {

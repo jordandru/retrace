@@ -102,6 +102,50 @@ test("reconcile: a commit missing from the ledger keeps the file window open to 
   assert.equal(r2.range.head_seq, 2);
   const bot = { ...commit("d", ["a.ts"]), author: { name: "retrace-checkpoint[bot]", email: "41898282+github-actions[bot]@users.noreply.github.com" } };
   const r3 = reconcile([bot], events, { repoName: REPO });
-  assert.deepEqual([r3.commits[0].findings[0].kind, r3.commits[0].findings[0].level], ["missing_commit", "warn"], "a bot commit made where no hook runs is a producer gap, not a silent agent");
-  assert.equal(r3.ok, true);
+  assert.deepEqual([r3.commits[0].findings[0].kind, r3.commits[0].findings[0].level], ["missing_commit", "fail"], "a bot-looking author is still just a string the pusher typed");
+  assert.equal(r3.ok, false);
+});
+
+test("adversarial (Codex review of 48d7914): forged bot author never downgrades a missing commit; only a webhook-sealed merge head does", () => {
+  const events = [sealed(2, "a", codex, ["a.ts"])];
+  const forged = { ...commit("b", ["x.ts"]), author: { name: "retrace-checkpoint[bot]", email: "41898282+github-actions[bot]@users.noreply.github.com" } };
+  const r = reconcile([forged], events, { repoName: REPO });
+  assert.deepEqual([r.commits[0].findings[0].kind, r.commits[0].findings[0].level], ["missing_commit", "fail"], "author strings are whatever the pusher typed");
+  assert.equal(r.ok, false);
+  // a merged event stamped by the server as sealed by the GitHub webhook, naming this commit as the PR head
+  const merged = (seq: number, headSha: string, stamp?: string) => ev(seq, jordan, "merged", [`pr:${REPO}#7`, cid("e")], { method: { tool: "github", params: { head_sha: headSha, ...(stamp ? { sealed_by: stamp } : {}) } }, tags: ["github", "pr", "merge"] });
+  const r2 = reconcile([forged], [...events, merged(3, sha("b"), "webhook:github")], { repoName: REPO });
+  assert.deepEqual([r2.commits[0].findings[0].kind, r2.commits[0].findings[0].level], ["missing_commit", "warn"]);
+  assert.match(r2.commits[0].findings[0].detail, /merge #3 was sealed by the GitHub webhook/);
+  assert.equal(r2.ok, true);
+  // the same merged event without the server stamp (or stamped as a pinned agent) proves nothing
+  for (const stamp of [undefined, "pinned:agent/codex", "owner"]) {
+    const r3 = reconcile([forged], [...events, merged(3, sha("b"), stamp)], { repoName: REPO });
+    assert.equal(r3.commits[0].findings[0].level, "fail", `stamp ${stamp}`);
+  }
+});
+
+test("adversarial: acknowledgements must be sealed after the commit, by someone other than the accused, and never apply to unsealed commits", () => {
+  const base = [ev(7, claude, "edited", ["repo:retrace#z.ts"]), sealed(9, "c", codex, ["z.ts"])];
+  const correction = (seq: number, actor: any) => ev(seq, actor, "other", [cid("c")], { action_detail: "attributed", tags: ["correction"] });
+  const level = (evs: Event[], opts: Partial<Parameters<typeof reconcile>[2]> = {}) => reconcile([commit("c", ["z.ts"])], evs, { repoName: REPO, aliases: ["retrace"], ...opts }).commits[0].findings[0];
+  assert.equal(level(base).level, "fail");
+  assert.equal(level([...base, correction(8, claude)]).level, "fail", "a correction sealed before the commit is a pre-ack, not an acknowledgement");
+  assert.equal(level([...base, correction(10, codex)]).level, "fail", "the accused committer cannot acknowledge itself");
+  const other = level([...base, correction(10, claude)]);
+  assert.equal(other.level, "info"); assert.deepEqual(other.acknowledged?.actor, "claude-code");
+  assert.equal(level([...base, correction(10, jordan)]).level, "info", "a human always may");
+  assert.equal(level([...base, correction(10, claude)], { ackActors: ["jordan@example.com"] }).level, "fail", "ackActors restricts agents");
+  assert.equal(level([...base, correction(10, jordan)], { ackActors: ["jordan@example.com"] }).level, "info");
+  // an unsealed commit with a pre-logged correction (sha is computable before the commit exists) stays a failure
+  const pre = reconcile([commit("d", ["q.ts"])], [...base, ev(10, jordan, "other", [cid("d")], { tags: ["correction"] })], { repoName: REPO });
+  assert.equal(pre.commits[0].findings[0].level, "fail");
+  assert.equal(pre.commits[0].findings[0].acknowledged, undefined);
+});
+
+test("adversarial: one edit event naming A+B where only A was committed still reports B as an orphan", () => {
+  const events = [sealed(1, "0", codex, ["seed.ts"]), ev(2, codex, "edited", ["repo:retrace#a.ts", "repo:retrace#b.ts"]), sealed(3, "a", codex, ["a.ts"]), sealed(4, "e", codex, ["z.ts"])];
+  const r = reconcile([commit("0", ["seed.ts"]), commit("a", ["a.ts"]), commit("e", ["z.ts"])], events, { repoName: REPO, aliases: ["retrace"] });
+  assert.deepEqual(r.commits[1].findings, []);
+  assert.deepEqual(r.orphans.map((o) => o.path), ["b.ts"]);
 });
