@@ -382,6 +382,7 @@ test("clientSystem: known MCP client names map to a Retrace system slug; unknown
   assert.equal(clientSystem("grok"), "grok");
   assert.equal(clientSystem("grok-shell-retrace"), "grok");
   assert.equal(clientSystem("gemini-cli"), "gemini-cli");
+  assert.equal(clientSystem("copilot-cli"), "github-copilot");
   assert.equal(clientSystem("Some New Client 2.0"), "some-new-client-2-0");
   assert.equal(clientSystem("***"), "unknown", "a name with nothing sluggable still yields a value");
 });
@@ -392,6 +393,7 @@ test("harnessSession: Claude and Grok session ids are both first-class; RETRACE_
   assert.equal(harnessSession({ GROK_SESSION_ID: "g" }), "g");
   assert.equal(harnessSession({ CLAUDE_CODE_SESSION_ID: "c", GROK_SESSION_ID: "g" }), "c", "Claude var is older and stays first when both are set");
   assert.equal(harnessSession({ RETRACE_SESSION: "pin", CLAUDE_CODE_SESSION_ID: "c", GROK_SESSION_ID: "g" }), "pin");
+  assert.equal(harnessSession({ COPILOT_HOME: "/tmp" }), undefined, "Copilot CLI has no session env; do not treat COPILOT_* as a session id");
 });
 
 test("detectIde: Orca's own pane env identifies the IDE and the isolated worktree; nothing set stamps nothing", () => {

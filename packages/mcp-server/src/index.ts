@@ -92,6 +92,8 @@ const CLIENT_SYSTEM = new Map<string, string>([
   // Measured 2026-08-29 against Grok Build TUI 1.0.13: initialize.name is "grok-shell-retrace".
   ["grok-shell-retrace", "grok"],
   ["gemini-cli", "gemini-cli"],
+  // Measured 2026-08-31: Copilot CLI initialize.name is "copilot-cli" (client copilot-cli@0.0.0).
+  ["copilot-cli", "github-copilot"],
 ]);
 export function clientSystem(name: string): string {
   // A Map, not an object literal: the client picks this name in the handshake, and an object would resolve
@@ -118,6 +120,8 @@ export function detectIde(env: NodeJS.ProcessEnv): Pick<Location, "ide" | "works
 /** Harness session id when one is exposed. MCP and the live git hook must read the same keys so a commit joins the
  *  events that produced it. No fallback: absence is what makes the key discriminating (a human `git commit` has none). */
 export function harnessSession(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  // Copilot CLI 1.0.81/1.0.82 was measured 2026-08-31: the binary exports COPILOT_HOME / COPILOT_CACHE_HOME /
+  // COPILOT_AUTO_UPDATE, not a session id, so MCP events fall through to run_…. Do not invent COPILOT_SESSION_ID.
   return env.RETRACE_SESSION ?? env.CLAUDE_CODE_SESSION_ID ?? env.GROK_SESSION_ID;
 }
 

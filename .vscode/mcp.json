@@ -8,7 +8,7 @@
     }
   ],
   "servers": {
-    "retrace": {
+    "retrace-github-copilot": {
       "type": "stdio",
       "command": "node",
       "args": [

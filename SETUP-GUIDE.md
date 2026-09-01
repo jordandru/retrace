@@ -119,7 +119,7 @@ Each client gets its **own** `RETRACE_TOKEN` (pinned credential). Reusing Claude
 | Grok Build TUI | `grok` | `~/.grok/config.toml` |
 | Codex | `codex` | Codex MCP + `AGENTS.md` |
 | GitHub Copilot CLI | `github-copilot` | `~/.copilot/mcp-config.json` (user; already lists `retrace`) |
-| GitHub Copilot Chat (VS Code) | `github-copilot` | committed `.vscode/mcp.json` (token via `${input:…}`, not git) |
+| GitHub Copilot Chat (VS Code) | `github-copilot` | committed `.vscode/mcp.json` server `retrace-github-copilot` (token via `${input:…}`, not git). Cursor must not Start this server. |
 | Cursor Agent | `cursor-agent` | committed `.cursor/mcp.json` (interpolated paths) + `~/.retrace/cursor.env` (`RETRACE_TOKEN=` only, mode 0600) |
 
 Claude example (`args` = absolute `packages/mcp-server/dist/index.js`):
@@ -279,6 +279,6 @@ When the task is done, **clear** `RETRACE_CAUSED_BY` (delete the property or set
 
 ## What this repo is not asking you to do next
 
-Cursor Agent is pinned on this checkout (`cursor-agent`, Worker credential + git-hook allow-list). Token lives in `~/.retrace/cursor.env`, not in git. `retrace-admin` still does not mint Cursor — do not add it to `HARNESSES` while completeness and attribution are still weak. Copilot CLI is already a first-class harness (`github-copilot`); dogfood tonight is Copilot CLI + VS Code Copilot Chat, not GitHub.com coding agent (local stdio MCP). If Copilot returns 402 `quota_exceeded`, stop — do not reuse another pin.
+Cursor Agent is pinned on this checkout (`cursor-agent`, Worker credential + git-hook allow-list). Token lives in `~/.retrace/cursor.env`, not in git. `retrace-admin` still does not mint Cursor — do not add it to `HARNESSES` while completeness and attribution are still weak. Copilot CLI and VS Code Copilot Chat share the `github-copilot` pin; Cursor must not Start `.vscode/mcp.json` (`retrace-github-copilot`). GitHub.com coding agent stays out of scope. If Copilot returns 402 `quota_exceeded`, stop — do not reuse another pin.
 
 Do not become C2PA, a trace viewer, or an identity provider. Do not add connectors, a sixth agent, an AI-BOM, or a compliance-deadline pitch while completeness (omission detection) and attribution (trailer-omit looks human; Drive `RETRACE_CAUSED_BY` is a global operator flag, not task evidence) are still weak. Do not re-run Apps Script `setup`.
