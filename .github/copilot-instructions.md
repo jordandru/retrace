@@ -12,7 +12,7 @@ This repository records verifiable provenance through the `retrace` MCP server.
 - Never read, print, copy, or commit `~/.copilot/mcp-config.json`, `~/.retrace/cursor.env`, or other credential files.
 - After `packages/mcp-server/dist/` changes, restart the Retrace MCP server in this Copilot session.
 - If the model returns HTTP 402 `quota_exceeded`, stop. Do not reuse another harness's `RETRACE_TOKEN` to keep working.
-- GitHub.com Copilot coding agent cannot use this repo's local stdio MCP; dogfood is Copilot CLI (`~/.copilot/mcp-config.json`) and VS Code Copilot Chat (`.vscode/mcp.json` server `retrace-github-copilot`). Cursor must not Start that VS Code server — empty `${input:…}` is 401 and the pin is not `cursor-agent`.
+- GitHub.com Copilot coding agent cannot use this repo's local stdio MCP; dogfood is Copilot CLI (`~/.copilot/mcp-config.json`) and VS Code Copilot Chat via **VS Code user MCP** (`MCP: Open User Configuration`, same `github-copilot` pin). Do not commit `.vscode/mcp.json` — Cursor can Start a workspace MCP file; renaming the server key does not isolate it.
 - CLI and VS Code Chat share the **same** Worker pin (`github-copilot`). Do not mint a second Copilot token.
 - These instructions are authoritative for Copilot identity. Do not copy `Retrace-Actor` from `CLAUDE.md`, `GEMINI.md`, `GROK.md`, `AGENTS.md`, or `.cursor/rules/retrace-provenance.mdc`.
 - CLI dogfood 2026-08-31: verify instruct `evt_b1419fbeefc144329a25510fd5eafb89` sealed as `github-copilot` (`gpt-5.6-sol`).

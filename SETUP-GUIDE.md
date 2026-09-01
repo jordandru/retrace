@@ -119,8 +119,10 @@ Each client gets its **own** `RETRACE_TOKEN` (pinned credential). Reusing Claude
 | Grok Build TUI | `grok` | `~/.grok/config.toml` |
 | Codex | `codex` | Codex MCP + `AGENTS.md` |
 | GitHub Copilot CLI | `github-copilot` | `~/.copilot/mcp-config.json` (user; already lists `retrace`) |
-| GitHub Copilot Chat (VS Code) | `github-copilot` | committed `.vscode/mcp.json` server `retrace-github-copilot` (token via `${input:…}`, not git). Cursor must not Start this server. |
+| GitHub Copilot Chat (VS Code) | `github-copilot` | **VS Code user MCP** (`MCP: Open User Configuration`). Same pin as CLI. Do not commit `.vscode/mcp.json`. |
 | Cursor Agent | `cursor-agent` | committed `.cursor/mcp.json` (interpolated paths) + `~/.retrace/cursor.env` (`RETRACE_TOKEN=` only, mode 0600) |
+
+VS Code Copilot Chat: Command Palette → **MCP: Open User Configuration**. Paste a `servers` entry with `RETRACE_ACTOR=github-copilot`, the same token Copilot CLI already uses, and `args` pointing at this checkout's `packages/mcp-server/dist/index.js`. Prompt the token with `${input:…}` — never commit it. 2026-09-01 on this checkout, with `.vscode/mcp.json` still present: `agent mcp list` showed only `retrace` (from `.cursor/mcp.json`); `agent mcp list-tools retrace-github-copilot` returned **not found in config**. Cursor CLI does not import `.vscode/mcp.json`. The Cursor GUI can still Start a workspace MCP file if one exists (a server id is a label), so this repo does not ship `.vscode/mcp.json`.
 
 Claude example (`args` = absolute `packages/mcp-server/dist/index.js`):
 
@@ -279,6 +281,6 @@ When the task is done, **clear** `RETRACE_CAUSED_BY` (delete the property or set
 
 ## What this repo is not asking you to do next
 
-Cursor Agent is pinned on this checkout (`cursor-agent`, Worker credential + git-hook allow-list). Token lives in `~/.retrace/cursor.env`, not in git. `retrace-admin` still does not mint Cursor — do not add it to `HARNESSES` while completeness and attribution are still weak. Copilot CLI and VS Code Copilot Chat share the `github-copilot` pin; Cursor must not Start `.vscode/mcp.json` (`retrace-github-copilot`). GitHub.com coding agent stays out of scope. If Copilot returns 402 `quota_exceeded`, stop — do not reuse another pin.
+Cursor Agent is pinned on this checkout (`cursor-agent`, Worker credential + git-hook allow-list). Token lives in `~/.retrace/cursor.env`, not in git. `retrace-admin` still does not mint Cursor — do not add it to `HARNESSES` while completeness and attribution are still weak. Copilot CLI and VS Code Copilot Chat share the `github-copilot` pin; Chat config is VS Code user MCP, not a project `.vscode/mcp.json` (a renamed server id is a label, not isolation). GitHub.com coding agent stays out of scope. If Copilot returns 402 `quota_exceeded`, stop — do not reuse another pin.
 
 Do not become C2PA, a trace viewer, or an identity provider. Do not add connectors, a sixth agent, an AI-BOM, or a compliance-deadline pitch while completeness (omission detection) and attribution (trailer-omit looks human; Drive `RETRACE_CAUSED_BY` is a global operator flag, not task evidence) are still weak. Do not re-run Apps Script `setup`.

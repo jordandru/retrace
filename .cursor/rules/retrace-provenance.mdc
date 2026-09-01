@@ -14,5 +14,5 @@ This repository records verifiable provenance through the `retrace` MCP server.
 - Before committing, run `npm exec --package=@retrace-dev/cli -- retrace doctor` (or the local `node packages/mcp-server/dist/doctor.js doctor`) and resolve failures.
 - Add commit trailers `Retrace-Actor: cursor-agent`, `Retrace-Model: <actual model>`, and `Retrace-Caused-By: <instruction event id>`.
 - Never read, print, copy, or commit `~/.retrace/cursor.env` or other credential files.
-- Do not start the VS Code Copilot MCP server in `.vscode/mcp.json` (`retrace-github-copilot`). That pin is `github-copilot` and `${input:…}` is empty in Cursor (401). This checkout's Cursor Retrace server is `.cursor/mcp.json` only.
+- Copilot Chat MCP is VS Code **user** config, not a project `.vscode/mcp.json`. Do not add one here: a renamed server id is still a label, and Cursor can Start a workspace MCP file. This checkout's Cursor Retrace server is `.cursor/mcp.json` only.
 - These instructions are authoritative for Cursor identity. Cursor reads compatibility files for other harnesses, but must not copy `Retrace-Actor` values from `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `GROK.md`, or `.github/copilot-instructions.md`.

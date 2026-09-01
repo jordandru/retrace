@@ -17,3 +17,5 @@ src/ui-html.ts
 worker-credentials.json
 # personal Cursor CLI allowlist — not harness identity (tokens stay in ~/.retrace/cursor.env)
 .cursor/cli.json
+# Copilot Chat MCP belongs in VS Code user config, not a workspace file Cursor can Start
+.vscode/mcp.json
