@@ -68,20 +68,29 @@ export function repoNamesFor(repo: string, cfg: ReconcileCfg): { repoName: strin
   return { repoName, aliases };
 }
 
-/** Which of these shas the repository no longer contains — one `git cat-file --batch-check` call. */
-export function unreachableShas(repo: string, shas: string[]): string[] {
-  if (!shas.length) return [];
-  const out = execFileSync("git", ["-C", repo, "cat-file", "--batch-check"], { input: shas.join("\n") + "\n", encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] });
-  const missing: string[] = [];
-  for (const line of out.split("\n")) { const m = /^(\S+) (missing|ambiguous)$/.exec(line.trim()); if (m) missing.push(m[1]); }
-  return missing;
+/**
+ * Which sealed commits have VANISHED from history: not reachable from any ref (`git rev-list --all`, or the given
+ * refs) — object existence is not the test, since an amended original lingers as a loose object until gc — AND not
+ * older than the checkout's horizon. The horizon is the seq of the oldest seal that IS reachable: in a shallow clone
+ * everything before it is simply unfetched history, not evidence of a rewrite, and must keep bounding windows
+ * (Codex review of 05c61f9: excluding it let a stale edit cover an unlogged HEAD change). If nothing sealed is
+ * reachable at all the checkout tells us nothing, and nothing is excluded.
+ */
+export function unreachableSeals(repo: string, seals: { sha12: string; seq: number }[], refs: string[] = ["--all"]): string[] {
+  if (!seals.length) return [];
+  const listed = execFileSync("git", ["-C", repo, "rev-list", ...refs], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  const reachable = new Set(listed.split("\n").filter(Boolean).map((s) => s.slice(0, 12).toLowerCase()));
+  const sorted = [...seals].sort((a, b) => a.seq - b.seq);
+  const horizon = sorted.find((s) => reachable.has(s.sha12.toLowerCase()))?.seq;
+  if (horizon === undefined) return [];
+  return sorted.filter((s) => s.seq >= horizon && !reachable.has(s.sha12.toLowerCase())).map((s) => s.sha12);
 }
 
-/** Run reconcile twice at most: once to learn the sealed shas, then — if git lacks any — with those excluded from
- *  window boundaries and reported as unreachable seals. */
-export function reconcileWithGit(repo: string, commits: CommitFacts[], events: Event[], options: Omit<ReconcileOptions, "unreachableShas">): ReconcileReport {
+/** Run reconcile twice at most: once to learn the seals, then — if any vanished from history — with those excluded
+ *  from window boundaries and reported as unreachable seals. */
+export function reconcileWithGit(repo: string, commits: CommitFacts[], events: Event[], options: Omit<ReconcileOptions, "unreachableShas">, refs?: string[]): ReconcileReport {
   const first = reconcile(commits, events, options);
-  const gone = unreachableShas(repo, first.sealed_shas);
+  const gone = unreachableSeals(repo, first.seals, refs);
   return gone.length ? reconcile(commits, events, { ...options, unreachableShas: gone }) : first;
 }
 

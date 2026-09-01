@@ -247,7 +247,11 @@ async function main() {
             const bundle = await exp.json() as ExportBundle;
             // fail closed: the bundle must verify as a complete full export signed by the trusted issuer key
             const { events } = await verifiedExportEvents(bundle, undefined, url);
-            const report = reconcileWithGit(repo, [commitFacts(repo, "HEAD")], events, { ...repoNamesFor(repo, cfg), repoPath: repo, ...reconcileOptionsFrom(cfg) });
+            // Dual witness needs a push: a HEAD no remote-tracking ref contains cannot have reached the GitHub webhook
+            // yet, so locally that is a warning ("push, then re-check"); in CI the commit under test is always pushed.
+            let pushed = true;
+            try { pushed = git(repo, ["branch", "-r", "--contains", "HEAD"]).length > 0; } catch { pushed = false; }
+            const report = reconcileWithGit(repo, [commitFacts(repo, "HEAD")], events, { ...repoNamesFor(repo, cfg), repoPath: repo, ...reconcileOptionsFrom(cfg, pushed ? {} : { dualWitness: "warn" }) });
             findings.push(captureCoverageFinding(report));
           } catch (e: any) { findings.push(result("fail", "capture coverage", e.message)); }
         }

@@ -109,15 +109,14 @@ jobs:
           git commit -m "Checkpoint ${PROJECT} head #${SEQ} ${HEAD12}" \
             -m "Signed head checkpoint from a verified full export (${TOTAL} events, issuer kid ${ISSUER}, checkpoint signer kid ${SIGNER}). Merging this PR is the witness: a later export that no longer contains #${SEQ} with this hash is NOT VALID under verify --checkpoint."
           git push -u origin "$branch"
+          {
+            printf 'Scheduled head checkpoint for project `%s`: seq **#%s**, head `%s…`, %s events, issuer kid `%s`, checkpoint signer kid `%s`.\n\nMerging records that this head existed now. Verify any later bundle with the committed `.retrace/checkpoint-public.jwk`:\n\n    retrace-export verify <bundle.json> --checkpoint .retrace/checkpoints.jsonl\n\nRetrace-Caused-By: evt_4b37cc72831a4434937b339a1873e27f\n\n### Reconciliation since the previous checkpoint commit\n\n```\n' "$PROJECT" "$SEQ" "$HEAD12" "$TOTAL" "$ISSUER" "$SIGNER"
+            cat reconcile.txt 2>/dev/null || echo "reconcile did not run"
+            printf '```\n'
+          } > pr-body.md
           gh pr create --base main --head "$branch" \
             --title "Checkpoint ${PROJECT} head #${SEQ}" \
-            --body "$(printf 'Scheduled head checkpoint for project `%s`: seq **#%s**, head `%s…`, %s events, issuer kid `%s`, checkpoint signer kid `%s`.\n\nMerging records that this head existed now. Verify any later bundle with the committed `.retrace/checkpoint-public.jwk`:\n\n    retrace-export verify <bundle.json> --checkpoint .retrace/checkpoints.jsonl\n\nRetrace-Caused-By: evt_4b37cc72831a4434937b339a1873e27f' "$PROJECT" "$SEQ" "$HEAD12" "$TOTAL" "$ISSUER" "$SIGNER")
-
-### Reconciliation since the previous checkpoint commit
-
-\`\`\`
-$(cat reconcile.txt 2>/dev/null || echo "reconcile did not run")
-\`\`\`"
+            --body-file pr-body.md
       - name: Fail the job if reconciliation found unacknowledged failures
         if: steps.rec.outcome == 'failure'
         run: |

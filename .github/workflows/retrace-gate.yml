@@ -14,8 +14,9 @@ jobs:
         with:
           # pull_request default is a merge commit that is not in the ledger.
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
-          # capture coverage diffs HEAD against its parent(s); a depth-1 clone has no parent objects and would fail closed
-          fetch-depth: 2
+          # capture coverage needs full history: HEAD's diff against its parents, and every sealed commit the ledger
+          # names must be checkable for ref reachability (a shallow clone would look like vanished history)
+          fetch-depth: 0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"

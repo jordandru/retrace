@@ -42,7 +42,7 @@ test("reconcile: covered, uncovered, misattributed (+acknowledged), partial swee
     sealed(6, "b", codex, ["y.ts"]),                                   // uncovered
     ev(7, claude, "edited", ["repo:retrace#z.ts"]), ev(8, claude, "created", ["repo:retrace#w.ts"]),
     sealed(9, "c", codex, ["z.ts", "w.ts"]),                           // the bfe87c3 shape
-    ev(11, claude, "other", [`commit:${REPO}@${sha("c").slice(0, 7)}`, "repo:retrace#z.ts"], { action_detail: "attributed", tags: ["correction"] }), // 7-char sha, as git prints it
+    ev(11, jordan, "other", [`commit:${REPO}@${sha("c").slice(0, 7)}`, "repo:retrace#z.ts"], { action_detail: "attributed", tags: ["correction"] }), // 7-char sha, as git prints it; a human ack
     ev(12, claude, "edited", ["repo:retrace#p.ts"]), ev(13, codex, "edited", ["repo:retrace#q.ts"]),
     sealed(14, "d", codex, ["p.ts", "q.ts"]),                          // partial sweep of p.ts
     ev(15, codex, "edited", ["file:/repo/l.ts"]),
@@ -88,7 +88,7 @@ test("reconcile: covered, uncovered, misattributed (+acknowledged), partial swee
   assert.equal(r.summary.misattributed, 3);
   const text = renderReconcileReport(r);
   assert.match(text, /11 commits, 10 sealed — 1 missing, 3 misattributed, 0 producer-disagreement, 0 unreachable-seal, 2 uncovered, 1 loose, 1 non-agent, 1 orphan path, 1 pending, 1 acknowledged → NOT OK/);
-  assert.match(text, /ACK {2}misattributed .*corrected by #11/);
+  assert.match(text, /ACK {2}misattributed .*corrected by #11, jordan@example.com/);
 
   // without the missing commit the report is OK; with uncovered=fail it is not
   const okReport = reconcile(commits.filter((c) => c.sha[0] !== "9"), events, { repoName: REPO, aliases: ["retrace"], repoPath: "/repo" });
@@ -137,11 +137,11 @@ test("adversarial: acknowledgements must be sealed after the commit, by someone 
   assert.equal(level(base).level, "fail");
   assert.equal(level([...base, correction(8, claude)]).level, "fail", "a correction sealed before the commit is a pre-ack, not an acknowledgement");
   assert.equal(level([...base, correction(10, codex)]).level, "fail", "the accused committer cannot acknowledge itself");
-  const other = level([...base, correction(10, claude)]);
-  assert.equal(other.level, "info"); assert.deepEqual(other.acknowledged?.actor, "claude-code");
+  assert.equal(level([...base, correction(10, claude)]).level, "fail", "an agent cannot acknowledge by default — only a listed reviewer agent may");
   assert.equal(level([...base, correction(10, jordan)]).level, "info", "a human always may");
-  assert.equal(level([...base, correction(10, claude)], { ackActors: ["jordan@example.com"] }).level, "fail", "ackActors restricts agents");
-  assert.equal(level([...base, correction(10, jordan)], { ackActors: ["jordan@example.com"] }).level, "info");
+  const listed = level([...base, correction(10, claude)], { ackActors: ["claude-code"] });
+  assert.equal(listed.level, "info"); assert.deepEqual(listed.acknowledged?.actor, "claude-code");
+  assert.equal(level([...base, correction(10, jordan)], { ackActors: ["claude-code"] }).level, "info", "the allowlist never restricts humans");
   // an unsealed commit with a pre-logged correction (sha is computable before the commit exists) stays a failure
   const pre = reconcile([commit("d", ["q.ts"])], [...base, ev(10, jordan, "other", [cid("d")], { tags: ["correction"] })], { repoName: REPO });
   assert.equal(pre.commits[0].findings[0].level, "fail");
@@ -241,7 +241,7 @@ test("adversarial: an amend after the hook ran leaves the old seal behind and ma
   const oldSeal = sealed(2, "a", codex, ["a.ts"]);                                                      // hook sealed the original sha
   const pushNew = ev(3, codex, "committed", [cid("b"), `repo:${REPO}#a.ts`], { tags: ["github", "push"], method: { tool: "git", params: { producer: "github-push", sealed_by: "webhook:github" } }, idempotency_key: `gh:push:${REPO}:${sha("b")}` });
   const r0 = reconcile([commit("b", ["a.ts"])], [...edits, oldSeal, pushNew], { repoName: REPO, aliases: ["retrace"] }); // caller has not checked git yet
-  assert.deepEqual(r0.sealed_shas.sort(), [sha("a").slice(0, 12), sha("b").slice(0, 12)].sort(), "core hands back every sealed sha for the caller to check against git");
+  assert.deepEqual(r0.seals, [{ sha12: sha("a").slice(0, 12), seq: 2 }, { sha12: sha("b").slice(0, 12), seq: 3 }], "core hands back every seal for the caller to check against git reachability");
   // the caller found sha a is gone from the repository
   const r = reconcile([commit("b", ["a.ts"])], [...edits, oldSeal, pushNew], { repoName: REPO, aliases: ["retrace"], unreachableShas: [sha("a")] });
   assert.deepEqual(r.commits[0].findings.map((f) => `${f.kind}:${f.level}`), ["producer_disagreement:fail"], "the abandoned seal must not swallow the edit the amended commit carried");
@@ -270,4 +270,42 @@ test("adversarial: an explicit artifact role is authoritative — `edited` with 
   assert.deepEqual(run(withRole("used")).findings.map((f) => f.kind), ["uncovered"], "edited + used is a declared input, not a change");
   assert.deepEqual(run(withRole("both")).findings, []);
   assert.deepEqual(run(withRole(undefined)).findings, [], "no role: the verb decides");
+});
+
+test("legacy unstamped seals bound windows but are not trusted; an unstamped commit event after the first stamp bounds nothing", () => {
+  const push = (seq: number, c: string, files: string[]) => ev(seq, claude, "committed", [cid(c), ...files.map((f) => `repo:${REPO}#${f}`)], { tags: ["github", "push"], method: { tool: "git", params: { producer: "github-push", sealed_by: "webhook:github" } }, idempotency_key: `gh:push:${REPO}:${sha(c)}` });
+  // the aecf567 shape: grok edited package.json (#3); a pre-stamp commit carried it (#5, unstamped); the server started
+  // stamping at #6; claude-code then bumped package.json without logging and committed (#9, stamped) — that is
+  // `uncovered`, not "misattributed to grok": the legacy seal at #5 closes grok's edit out of the new window.
+  const events = [
+    ev(3, grok, "edited", ["repo:retrace#package.json"]),
+    sealed(5, "a", grok, ["package.json"], "committed", ""),
+    ev(6, claude, "edited", ["repo:retrace#other.ts"], { method: { tool: "mcp", params: { sealed_by: "pinned:claude" } } }),
+    sealed(9, "b", claude, ["package.json"]), push(10, "b", ["package.json"]),
+  ];
+  const r = reconcile([commit("b", ["package.json"])], events, { repoName: REPO, aliases: ["retrace"] });
+  assert.deepEqual(r.commits[0].findings.map((f) => `${f.kind}:${f.level}`), ["uncovered:warn"]);
+  assert.deepEqual(r.commits[0].coverage["package.json"].window, { after: 5, before: 9 });
+  // the legacy commit itself is still not a trusted seal without the flag…
+  const legacy = reconcile([commit("a", ["package.json"])], events, { repoName: REPO, aliases: ["retrace"] });
+  assert.equal(legacy.commits[0].findings[0].kind, "missing_commit");
+  // …and an UNSTAMPED commit event AFTER stamping began (a planted claim) bounds nothing: grok's edit stays in the window
+  const planted = [events[0], sealed(7, "a", codex, ["package.json"], "committed", ""), ev(6, claude, "edited", ["repo:retrace#other.ts"], { method: { tool: "mcp", params: { sealed_by: "pinned:claude" } } }), sealed(9, "b", claude, ["package.json"]), push(10, "b", ["package.json"])];
+  const r2 = reconcile([commit("b", ["package.json"])], planted, { repoName: REPO, aliases: ["retrace"] });
+  assert.deepEqual(r2.commits[0].coverage["package.json"].window, { after: -1, before: 9 });
+  assert.deepEqual(r2.commits[0].findings.map((f) => `${f.kind}:${f.level}`), ["misattributed:fail"]);
+});
+
+test("adversarial (event #1227): the accused model re-pinned as another harness cannot acknowledge its own commit, allowlisted or not", () => {
+  const grokSeal = { ...sealed(9, "c", { type: "agent", id: "grok", model: "grok-4.6" }, ["z.ts"]), location: { session: "sess-1" } };
+  const base: Event[] = [ev(7, claude, "edited", ["repo:retrace#z.ts"]), grokSeal];
+  const ack = (seq: number, actor: any, session?: string) => ev(seq, actor, "other", [cid("c")], { action_detail: "attributed", tags: ["correction"], ...(session ? { location: { session } } : {}) });
+  const run = (evs: Event[], ackActors?: string[]) => reconcile([commit("c", ["z.ts"])], evs, { repoName: REPO, aliases: ["retrace"], ackActors }).commits[0].findings[0];
+  const cursorOnGrok = { type: "agent", id: "cursor-agent", model: "grok-4.6" };
+  assert.equal(run([...base, ack(10, cursorOnGrok)]).level, "fail", "different pinned id, same model, not listed");
+  assert.equal(run([...base, ack(10, cursorOnGrok)], ["cursor-agent"]).level, "fail", "listed, but the same model as the accused seal");
+  assert.equal(run([...base, ack(10, { type: "agent", id: "cursor-agent", model: "claude-fable-5" }, "sess-1")], ["cursor-agent"]).level, "fail", "listed, different model, but the same session");
+  const clean = run([...base, ack(10, { type: "agent", id: "cursor-agent", model: "claude-fable-5" }, "sess-2")], ["cursor-agent"]);
+  assert.equal(clean.level, "info"); assert.equal(clean.acknowledged?.actor, "cursor-agent");
+  assert.equal(run([...base, ack(10, jordan)]).level, "info", "the human owner's acknowledgement stands");
 });
