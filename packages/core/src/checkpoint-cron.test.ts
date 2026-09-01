@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createPublicKey, createSign, generateKeyPairSync } from "node:crypto";
 import {
   generateSigningKey, appendEvent, EventStore, Event, EventInput, Share,
-  ed25519SpkiPem, witnessCheckpointRekor, runCheckpointCron, CheckpointLogStore, CheckpointLogRow, PortableFetch, checkpointFromStore,
+  ed25519SpkiPem, witnessCheckpointRekor, runCheckpointCron, parseCheckpointProjectAllowlist, CheckpointLogStore, CheckpointLogRow, PortableFetch, checkpointFromStore,
 } from "./index.js";
 
 class MemStore implements EventStore {
@@ -83,7 +83,8 @@ test("runCheckpointCron: checkpoints moved heads only, records Rekor failures wi
   const log = new MemLog();
   const rekor = fakeRekor();
 
-  const r1 = await runCheckpointCron(store, log, { signingKey: signer.privateKey, fetchImpl: rekor.fetchImpl, signerName: "cron" });
+  const projects = ["alpha", "beta"];
+  const r1 = await runCheckpointCron(store, log, { signingKey: signer.privateKey, projects, fetchImpl: rekor.fetchImpl, signerName: "cron" });
   assert.deepEqual(r1.map((r) => [r.project, r.action, r.witness]), [["alpha", "checkpointed", "ok"], ["beta", "checkpointed", "ok"]]);
   assert.equal(log.rows.length, 2);
   const alpha = log.rows.find((r) => r.project === "alpha")!;
@@ -93,7 +94,7 @@ test("runCheckpointCron: checkpoints moved heads only, records Rekor failures wi
 
   // nothing moved → nothing written, no Rekor calls
   const before = rekor.calls();
-  const r2 = await runCheckpointCron(store, log, { signingKey: signer.privateKey, fetchImpl: rekor.fetchImpl });
+  const r2 = await runCheckpointCron(store, log, { signingKey: signer.privateKey, projects, fetchImpl: rekor.fetchImpl });
   assert.deepEqual(r2.map((r) => r.action), ["unchanged", "unchanged"]);
   assert.equal(log.rows.length, 2);
   assert.equal(rekor.calls(), before);
@@ -101,7 +102,7 @@ test("runCheckpointCron: checkpoints moved heads only, records Rekor failures wi
   // alpha moves; Rekor is down → checkpoint still saved, error recorded
   await appendEvent(store, ev("alpha"));
   const down = fakeRekor(503);
-  const r3 = await runCheckpointCron(store, log, { signingKey: signer.privateKey, fetchImpl: down.fetchImpl });
+  const r3 = await runCheckpointCron(store, log, { signingKey: signer.privateKey, projects, fetchImpl: down.fetchImpl });
   const a3 = r3.find((r) => r.project === "alpha")!;
   assert.equal(a3.action, "checkpointed");
   assert.match(a3.witness!, /^failed: Rekor 503/);
@@ -109,4 +110,27 @@ test("runCheckpointCron: checkpoints moved heads only, records Rekor failures wi
   assert.equal(row3.witness, null);
   assert.match(row3.witness_error!, /Rekor 503/);
   assert.equal(JSON.parse(row3.checkpoint).seq, 2, "the checkpoint survives a witness outage");
+});
+
+test("checkpoint project opt-in: parser and cron fail closed instead of enumerating every store project", async () => {
+  assert.deepEqual(parseCheckpointProjectAllowlist(undefined), []);
+  assert.deepEqual(parseCheckpointProjectAllowlist("  "), []);
+  assert.deepEqual(parseCheckpointProjectAllowlist('["beta","beta"]'), ["beta"]);
+  for (const bad of ['{"project":"beta"}', '["beta",""]', '["beta",7]', "not json"]) {
+    assert.throws(() => parseCheckpointProjectAllowlist(bad), /JSON array of non-empty project names/);
+  }
+
+  const store = new MemStore();
+  await appendEvent(store, ev("alpha"));
+  await appendEvent(store, ev("beta"));
+  store.projects = async () => { throw new Error("cron must not enumerate projects"); };
+  const signer = await generateSigningKey();
+  const log = new MemLog();
+  const rekor = fakeRekor();
+
+  assert.deepEqual(await runCheckpointCron(store, log, { signingKey: signer.privateKey, projects: [], fetchImpl: rekor.fetchImpl }), []);
+  assert.equal(rekor.calls(), 0);
+  const result = await runCheckpointCron(store, log, { signingKey: signer.privateKey, projects: ["beta"], fetchImpl: rekor.fetchImpl });
+  assert.deepEqual(result.map((r) => r.project), ["beta"]);
+  assert.deepEqual(log.rows.map((r) => r.project), ["beta"]);
 });

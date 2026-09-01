@@ -11,7 +11,7 @@
  *   GET /projects/:p/export|report|lineage · POST /projects/:p/share · GET /.well-known/retrace-pubkey
  *   POST /hooks/github  (GitHub webhook; HMAC-verified with RETRACE_GITHUB_SECRET; project from repo via RETRACE_GITHUB_PROJECTS)
  */
-import { createHandler, parseCredentials, parseGithubRepoProjects, parseSigningKey, runCheckpointCron } from "@retrace-dev/core";
+import { createHandler, parseCheckpointProjectAllowlist, parseCredentials, parseGithubRepoProjects, parseSigningKey, runCheckpointCron } from "@retrace-dev/core";
 import { D1Store } from "./d1-store.js";
 import { D1CheckpointLog } from "./checkpoint-log.js";
 
@@ -28,6 +28,8 @@ export interface Env {
   RETRACE_GITHUB_SECRET?: string;
   /** JSON object of "owner/repo" → Retrace project. The HMAC covers the repo, not ?project=. */
   RETRACE_GITHUB_PROJECTS?: string;
+  /** JSON array of projects whose checkpoint contents may be published to the public Rekor log. Missing = none. */
+  RETRACE_CHECKPOINT_PROJECTS?: string;
   RETRACE_GITHUB_PUSH?: string;
   /** Project that receives the audit event when DELETE /projects/:p runs (default "retrace") */
   RETRACE_OPS_PROJECT?: string;
@@ -54,14 +56,19 @@ export default {
     })(req);
   },
 
-  /** Hourly cron (wrangler.toml [triggers]): checkpoint every moved head and witness it in Rekor (roadmap rung 2).
+  /** Hourly cron (wrangler.toml [triggers]): checkpoint explicitly opted-in moved heads and witness them in Rekor.
    *  Signed with the Worker's own signing key — the witness's authority is Rekor's log, not the key. No signing key
    *  configured → the run is skipped (an unsigned scheduled checkpoint asserts nothing worth storing). */
   async scheduled(_controller: unknown, env: Env, ctx: { waitUntil(p: Promise<unknown>): void }): Promise<void> {
+    const projects = parseCheckpointProjectAllowlist(env.RETRACE_CHECKPOINT_PROJECTS);
+    if (projects.length === 0) {
+      console.log("checkpoint cron skipped: RETRACE_CHECKPOINT_PROJECTS has no opted-in projects");
+      return;
+    }
     const signingKey = parseSigningKey(env.RETRACE_SIGNING_KEY);
     if (!signingKey) return;
     ctx.waitUntil(
-      runCheckpointCron(new D1Store(env.DB), new D1CheckpointLog(env.DB), { signingKey, signerName: env.RETRACE_ISSUER }).then(
+      runCheckpointCron(new D1Store(env.DB), new D1CheckpointLog(env.DB), { signingKey, projects, signerName: env.RETRACE_ISSUER }).then(
         (results) => console.log("checkpoint cron:", JSON.stringify(results)),
         (e) => console.error("checkpoint cron failed:", String((e as Error)?.message ?? e)),
       ),

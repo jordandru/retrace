@@ -199,6 +199,8 @@ npx wrangler deploy   # also registers the hourly checkpoint cron
 npm run check-deploy                           # from repo root; no token, no writes
 ```
 
+The hourly cron publishes checkpoint contents to the public Rekor log, so it is fail-closed behind an explicit `[vars]` opt-in: set `RETRACE_CHECKPOINT_PROJECTS = "[\"your-project\"]"` in `wrangler.toml`. Missing, blank, or `[]` publishes nothing; malformed JSON fails the scheduled run. Never derive this list automatically from D1.
+
 At least one of `RETRACE_TOKEN` or a non-empty `RETRACE_CREDENTIALS` array is mandatory. Without either, the Worker fails closed with `503` on every route instead of exposing an anonymous ledger.
 
 `RETRACE_CREDENTIALS`: pinned agents (Worker stamps WHO) plus `trust: "assert"` for `retrace-git` / Drive, with `allowed_actors`. After changing credentials, `wrangler secret put RETRACE_CREDENTIALS` again from `~/.retrace/worker-credentials.json`.

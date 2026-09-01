@@ -154,20 +154,37 @@ export interface CronResult {
   witness?: "ok" | `failed: ${string}`;
 }
 
+/** Parse the Worker's explicit public-witness opt-in. Missing/blank means no projects; malformed values fail closed. */
+export function parseCheckpointProjectAllowlist(raw: string | undefined): string[] {
+  if (!raw?.trim()) return [];
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    throw new Error("RETRACE_CHECKPOINT_PROJECTS must be a JSON array of non-empty project names");
+  }
+  if (!Array.isArray(value) || value.some((project) => typeof project !== "string" || project.length === 0)) {
+    throw new Error("RETRACE_CHECKPOINT_PROJECTS must be a JSON array of non-empty project names");
+  }
+  return [...new Set(value as string[])];
+}
+
 /**
- * One scheduled run: checkpoint every project whose head moved since its last logged checkpoint, witness each in
- * Rekor, and record the pair. A Rekor failure never blocks the checkpoint itself — the row is saved with
+ * One scheduled run: checkpoint every explicitly opted-in project whose head moved since its last logged checkpoint,
+ * witness each in Rekor, and record the pair. The caller must supply the allowlist; an empty list publishes nothing.
+ * A Rekor failure never blocks the checkpoint itself — the row is saved with
  * witness_error and the next run's new head gets a fresh chance. Store-derived checkpoints are signed by the host's
  * signing key; refuses to run unsigned (an unsigned scheduled checkpoint asserts nothing worth storing).
  */
 export async function runCheckpointCron(
   store: EventStore,
   log: CheckpointLogStore,
-  opts: { signingKey: JsonWebKey; signerName?: string; rekorUrl?: string; fetchImpl?: PortableFetch; now?: Date },
+  opts: { signingKey: JsonWebKey; projects: readonly string[]; signerName?: string; rekorUrl?: string; fetchImpl?: PortableFetch; now?: Date },
 ): Promise<CronResult[]> {
   if (!opts.signingKey) throw new Error("checkpoint cron needs the signing key");
+  if (opts.projects.some((project) => typeof project !== "string" || project.length === 0)) throw new Error("checkpoint cron project names must be non-empty strings");
   const results: CronResult[] = [];
-  for (const project of await store.projects()) {
+  for (const project of new Set(opts.projects)) {
     const head = await store.head(project);
     if (!head) continue;
     const last = await log.latest(project);
