@@ -39,9 +39,9 @@ test("doctor: pinned credentials require the commit actor to match", () => {
 });
 
 test("doctor: --gate is a flag, not a repo path", () => {
-  assert.deepEqual(parseDoctorArgs(["doctor", "--gate"]), { command: "doctor", gate: true, json: false, repo: undefined });
-  assert.deepEqual(parseDoctorArgs(["--gate", "/tmp/repo"]), { command: "doctor", gate: true, json: false, repo: "/tmp/repo" });
-  assert.deepEqual(parseDoctorArgs(["status", "retrace", "--json"]), { command: "status", gate: false, json: true, statusProject: "retrace" });
+  assert.deepEqual(parseDoctorArgs(["doctor", "--gate"]), { command: "doctor", gate: true, json: false, local: false, repo: undefined });
+  assert.deepEqual(parseDoctorArgs(["--gate", "/tmp/repo"]), { command: "doctor", gate: true, json: false, local: false, repo: "/tmp/repo" });
+  assert.deepEqual(parseDoctorArgs(["status", "retrace", "--json"]), { command: "status", gate: false, json: true, local: false, statusProject: "retrace" });
   assert.equal(parseDoctorArgs(["doctor", "."]).gate, false);
 });
 
@@ -148,4 +148,31 @@ test("captureCoverageFinding: worst unacknowledged level wins; acknowledged and 
   assert.match(acked.detail, /acknowledged by a correction event/);
   assert.equal(captureCoverageFinding(base([{ kind: "non_agent", level: "info", detail: "sealed as human jordan; coverage is not evaluated" }], {})).detail, "sealed as human jordan; coverage is not evaluated");
   assert.equal(captureCoverageFinding({ ...base([]), commits: [] }).level, "fail");
+});
+
+import { gateDualWitness, parseDoctorArgs as parseArgs2 } from "./doctor.js";
+import { execFileSync as execGit } from "node:child_process";
+import { mkdtempSync as mkTemp, writeFileSync as writeF } from "node:fs";
+import { tmpdir as tmpD } from "node:os";
+import { join as joinP } from "node:path";
+
+test("gate dual witness never infers leniency from the ref layout: a detached, pushed sha with no refs/remotes branch containing HEAD still fails on a lone producer; --local is explicit and refused under CI", () => {
+  // a checkout the way actions/checkout does it for pull_request: detached at an explicit sha, no remote-tracking branch contains it
+  const origin = mkTemp(joinP(tmpD(), "retrace-origin-"));
+  const env = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@x", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@x" };
+  const g = (repo: string, ...a: string[]) => execGit("git", ["-C", repo, ...a], { encoding: "utf8", env, stdio: ["ignore", "pipe", "pipe"] }).trim();
+  g(origin, "init", "-q", "-b", "main"); writeF(joinP(origin, "a"), "1"); g(origin, "add", "a"); g(origin, "commit", "-q", "-m", "one");
+  g(origin, "checkout", "-q", "-b", "feature"); writeF(joinP(origin, "a"), "2"); g(origin, "commit", "-q", "-am", "pr head"); const head = g(origin, "rev-parse", "HEAD");
+  const work = mkTemp(joinP(tmpD(), "retrace-work-"));
+  g(work, "init", "-q", "-b", "main"); g(work, "remote", "add", "origin", origin);
+  g(work, "fetch", "-q", "origin", head); g(work, "checkout", "-q", "--detach", head); // exactly what the gate does with pull_request.head.sha
+  assert.equal(g(work, "branch", "-r", "--contains", "HEAD"), "", "no remote-tracking branch contains HEAD, yet the commit IS pushed");
+  // the decision must not look at that at all
+  assert.deepEqual(gateDualWitness({ gate: true, local: false }, {}), {});
+  assert.deepEqual(gateDualWitness({ gate: true, local: false }, { GITHUB_ACTIONS: "true" }), {});
+  assert.deepEqual(gateDualWitness({ gate: true, local: true }, {}), { dualWitness: "warn" });
+  assert.throws(() => gateDualWitness({ gate: true, local: true }, { GITHUB_ACTIONS: "true" }), /not allowed under CI/);
+  assert.throws(() => gateDualWitness({ gate: true, local: true }, { CI: "1" }), /not allowed under CI/);
+  assert.equal(parseArgs2(["doctor", "--gate", "--local"]).local, true);
+  assert.equal(parseArgs2(["doctor", "--gate"]).local, false);
 });

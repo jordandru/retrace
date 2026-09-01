@@ -12,7 +12,7 @@ import { isMainModule } from "./is-main.js";
 
 type Level = "pass" | "warn" | "fail";
 export type Finding = { level: Level; label: string; detail: string };
-export type DoctorArgs = { command: "doctor" | "status"; gate: boolean; json: boolean; repo?: string; statusProject?: string };
+export type DoctorArgs = { command: "doctor" | "status"; gate: boolean; json: boolean; local: boolean; repo?: string; statusProject?: string };
 type RepoConfig = ReconcileCfg & { credential?: string };
 
 const git = (repo: string, args: string[]) => execFileSync("git", ["-C", repo, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
@@ -23,9 +23,23 @@ export function parseDoctorArgs(argv: string[]): DoctorArgs {
   const pos = argv.filter((a) => !a.startsWith("--"));
   const gate = flags.has("--gate");
   const json = flags.has("--json");
-  if (pos[0] === "status") return { command: "status", gate: false, json, statusProject: pos[1] };
+  const local = flags.has("--local");
+  if (pos[0] === "status") return { command: "status", gate: false, json, local: false, statusProject: pos[1] };
   const rest = pos[0] === "doctor" ? pos.slice(1) : pos;
-  return { command: "doctor", gate, json, repo: rest[0] };
+  return { command: "doctor", gate, json, local, repo: rest[0] };
+}
+
+/**
+ * Dual-witness level for the gate's capture-coverage check. A security gate never infers leniency from the local ref
+ * layout (Codex review of 5f951c6: a pull_request checkout of an explicit head sha is detached, and no refs/remotes
+ * branch need contain HEAD — a genuinely pushed commit looked "unpushed" and a lone producer became a warning).
+ * `--gate` fails on a lone producer, full stop. `--local` is the explicit opt-in for unpushed work on a developer
+ * machine and is REFUSED under CI (GITHUB_ACTIONS / CI set): the flag cannot be smuggled into a workflow.
+ */
+export function gateDualWitness(args: { gate: boolean; local: boolean }, env: NodeJS.ProcessEnv = process.env): { dualWitness?: "warn" } {
+  if (!args.local) return {};
+  if (env.GITHUB_ACTIONS || env.CI) throw new Error("--local is not allowed under CI (GITHUB_ACTIONS/CI is set): the gate must fail on a commit only one producer sealed");
+  return { dualWitness: "warn" };
 }
 
 /** Missing HEAD is a warning for local preflight and a failure for CI (`--gate`). */
@@ -176,7 +190,7 @@ async function main() {
   const args = parseDoctorArgs(argv);
   const first = argv.filter((a) => !a.startsWith("--"))[0];
   if (first && first !== "doctor" && first !== "status" && !first.startsWith(".") && !first.startsWith("/") && !existsSync(resolve(first))) {
-    console.error("usage: retrace <doctor [--gate] [repo] | status [project] [--json]>"); process.exit(2); return;
+    console.error("usage: retrace <doctor [--gate [--local]] [repo] | status [project] [--json]>"); process.exit(2); return;
   }
   const { command, gate } = args;
   let repo: string;
@@ -247,11 +261,9 @@ async function main() {
             const bundle = await exp.json() as ExportBundle;
             // fail closed: the bundle must verify as a complete full export signed by the trusted issuer key
             const { events } = await verifiedExportEvents(bundle, undefined, url);
-            // Dual witness needs a push: a HEAD no remote-tracking ref contains cannot have reached the GitHub webhook
-            // yet, so locally that is a warning ("push, then re-check"); in CI the commit under test is always pushed.
-            let pushed = true;
-            try { pushed = git(repo, ["branch", "-r", "--contains", "HEAD"]).length > 0; } catch { pushed = false; }
-            const report = reconcileWithGit(repo, [commitFacts(repo, "HEAD")], events, { ...repoNamesFor(repo, cfg), repoPath: repo, ...reconcileOptionsFrom(cfg, pushed ? {} : { dualWitness: "warn" }) });
+            // Dual witness: fail on a lone producer unless the operator passed --local on a developer machine (never
+            // under CI) — the local ref layout is not consulted (see gateDualWitness).
+            const report = reconcileWithGit(repo, [commitFacts(repo, "HEAD")], events, { ...repoNamesFor(repo, cfg), repoPath: repo, ...reconcileOptionsFrom(cfg, gateDualWitness(args)) });
             findings.push(captureCoverageFinding(report));
           } catch (e: any) { findings.push(result("fail", "capture coverage", e.message)); }
         }
