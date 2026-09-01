@@ -20,6 +20,8 @@ RETRACE_GITHUB_PROJECTS = "{\"jordandru/retrace\":\"retrace\"}"
 # Explicit opt-in: checkpoint contents include project metadata and are published to the public Rekor log.
 # Missing or [] means the hourly cron publishes nothing; never infer this list from D1.
 RETRACE_CHECKPOINT_PROJECTS = "[\"retrace\"]"
+# Reconciliation phase B: seal every pushed commit a second time from GitHub's HMAC-verified push delivery (key gh:push:…).
+RETRACE_GITHUB_PUSH = "1"
 
 # Hourly head checkpoints witnessed in Rekor (roadmap rung 2); handler = `scheduled` in src/index.ts
 [triggers]
