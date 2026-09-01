@@ -1,5 +1,5 @@
 {
   "extends": "../../tsconfig.base.json",
-  "compilerOptions": { "noEmit": true, "lib": ["ES2022"], "types": ["@cloudflare/workers-types"] },
+  "compilerOptions": { "noEmit": true, "lib": ["ES2022"], "types": ["@cloudflare/workers-types", "node"] },
   "include": ["src"]
 }

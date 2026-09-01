@@ -1,6 +1,7 @@
 node_modules/
 dist/
 .wrangler/
+.test-dist/
 *.db*
 src/ui-html.ts
 .claude/worktrees/

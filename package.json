@@ -10,7 +10,7 @@
   ],
   "scripts": {
     "build": "npm run build -w @retrace-dev/core && npm run build -w @retrace-dev/cli",
-    "test": "npm test -w @retrace-dev/core && npm test -w @retrace-dev/cli",
+    "test": "npm test -w @retrace-dev/core && npm test -w @retrace-dev/cli && npm test -w @retrace/worker",
     "mcp": "node packages/mcp-server/dist/index.js",
     "serve": "node packages/mcp-server/dist/serve.js",
     "check-deploy": "node scripts/check-deploy.mjs"
