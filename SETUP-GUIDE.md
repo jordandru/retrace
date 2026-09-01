@@ -176,8 +176,15 @@ Omitting trailers still looks human and bypasses the instruct-root check. Do not
 RETRACE_SIGNING_KEY_FILE=~/.retrace/checkpoint-key.json node packages/mcp-server/dist/export-cli.js keygen --print-private   # a NEW key, not the Worker's
 gh secret set RETRACE_CHECKPOINT_KEY      # paste the private JWK printed above
 # Commit the printed public JWK as .retrace/checkpoint-public.jwk for verification.
-# Settings → Actions → General → "Allow GitHub Actions to create and approve pull requests" must be on
-gh workflow run retrace-checkpoint.yml    # first run on demand; merge the PR it opens
+# The PR is opened by a GitHub App, not GITHUB_TOKEN — otherwise GitHub holds the PR's `gate` run for manual approval.
+# One-time: GitHub → Settings → Developer settings → GitHub Apps → New GitHub App: name `retrace-checkpoint`,
+#   Webhook: uncheck Active, Repository permissions Contents Read+write / Pull requests Read+write (Metadata Read),
+#   "Only on this account" → Create. Copy the Client ID; Private keys → Generate → a .pem downloads.
+#   Install App → this repository only. Then:
+gh variable set RETRACE_CHECKPOINT_APP_CLIENT_ID --body "<Client ID>"
+gh secret set RETRACE_CHECKPOINT_APP_KEY < ~/Downloads/retrace-checkpoint.*.private-key.pem   # then delete the .pem
+# ("Allow GitHub Actions to create and approve pull requests" is no longer needed and can be turned off.)
+gh workflow run retrace-checkpoint.yml    # first run on demand; the PR appears as retrace-checkpoint[bot]; merge it
 # optional but recommended — witness the checkpoint in the public Rekor transparency log:
 RETRACE_SIGNING_KEY_FILE=~/.retrace/checkpoint-key.json node packages/mcp-server/dist/export-cli.js witness <project>
 # commits .retrace/witnesses.jsonl + rekor-public.pem alongside checkpoints.jsonl; the daily workflow does this automatically

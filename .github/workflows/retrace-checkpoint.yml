@@ -8,30 +8,55 @@
 # Secrets: RETRACE_CI_TOKEN (Worker credential that can GET; same as the gate) and RETRACE_CHECKPOINT_KEY (a private
 # Ed25519 JWK used ONLY for checkpoints — never the Worker's signing key). Mint it with
 #   RETRACE_SIGNING_KEY_FILE=~/.retrace/checkpoint-key.json node packages/mcp-server/dist/export-cli.js keygen --print-private
-# and `gh secret set RETRACE_CHECKPOINT_KEY`. The repo must allow Actions to create pull requests
-# (Settings → Actions → General → "Allow GitHub Actions to create and approve pull requests").
+# and `gh secret set RETRACE_CHECKPOINT_KEY`.
+#
+# The pull request is pushed and opened as the `retrace-checkpoint` GitHub App, never with GITHUB_TOKEN: a PR created
+# by github-actions[bot] has its `pull_request` workflow runs held for manual approval (GitHub, June 2026), so the
+# required `gate` check would never run on its own. The App's bot login keeps the PR's `created` event a system actor
+# in the ledger (a personal token would record the operator as opening it by hand). Configure once:
+#   repo variable RETRACE_CHECKPOINT_APP_CLIENT_ID (the App's Client ID) and secret RETRACE_CHECKPOINT_APP_KEY (its PEM
+#   private key) — see SETUP-GUIDE §4d. The job fails closed without them. GITHUB_TOKEN itself is read-only here.
 name: retrace-checkpoint
 on:
   schedule:
     - cron: "17 6 * * *"   # daily 06:17 UTC
   workflow_dispatch:
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read   # the App token carries the write rights; GITHUB_TOKEN writes nothing
 concurrency:
   group: retrace-checkpoint
   cancel-in-progress: false
 jobs:
   checkpoint:
     runs-on: ubuntu-latest
+    timeout-minutes: 45   # the App token lives one hour; an overrun must fail clearly, not as a 401 at push time
     env:
       PROJECT: retrace
       CHECKPOINTS: .retrace/checkpoints.jsonl
     steps:
+      - name: Require the retrace-checkpoint GitHub App credentials
+        env:
+          APP_CLIENT_ID: ${{ vars.RETRACE_CHECKPOINT_APP_CLIENT_ID }}
+          APP_KEY: ${{ secrets.RETRACE_CHECKPOINT_APP_KEY }}
+        run: |
+          if [ -z "$APP_CLIENT_ID" ] || [ -z "$APP_KEY" ]; then
+            echo "::error::RETRACE_CHECKPOINT_APP_CLIENT_ID (repo variable) and RETRACE_CHECKPOINT_APP_KEY (secret) must be set; a PR opened with GITHUB_TOKEN would sit in action_required (SETUP-GUIDE 4d)" >&2
+            exit 1
+          fi
+      - name: Mint a retrace-checkpoint GitHub App token (PRs it opens trigger retrace-gate)
+        id: app
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.RETRACE_CHECKPOINT_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RETRACE_CHECKPOINT_APP_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-metadata: read
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: main
           fetch-depth: 0   # reconcile walks history since the last checkpoint commit
+          token: ${{ steps.app.outputs.token }}   # the branch push below runs as the App
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
@@ -93,7 +118,8 @@ jobs:
       - name: Open a pull request with the new checkpoint
         if: steps.cp.outputs.changed == 'true'
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          APP_SLUG: ${{ steps.app.outputs.app-slug }}
           SEQ: ${{ steps.cp.outputs.seq }}
           HEAD12: ${{ steps.cp.outputs.head }}
           TOTAL: ${{ steps.cp.outputs.total }}
@@ -102,8 +128,11 @@ jobs:
         run: |
           set -euo pipefail
           branch="checkpoint/$(date -u +%Y%m%d)-${SEQ}"
-          git config user.name "retrace-checkpoint[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # the App's own bot identity: the [bot] suffix is what classifies the commit author as a system actor, and the
+          # noreply address must use the bot USER id (not the App ID) or the commit loses its verified badge
+          bot_id=$(gh api "/users/${APP_SLUG}[bot]" --jq .id)
+          git config user.name "${APP_SLUG}[bot]"
+          git config user.email "${bot_id}+${APP_SLUG}[bot]@users.noreply.github.com"
           git checkout -b "$branch"
           git add "$CHECKPOINTS" .retrace/witnesses.jsonl .retrace/rekor-public.pem
           git commit -m "Checkpoint ${PROJECT} head #${SEQ} ${HEAD12}" \
