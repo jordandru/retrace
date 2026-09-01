@@ -157,6 +157,9 @@ export const EventInput = z.object({
   /** Client-provided idempotency key */
   idempotency_key: z.string().optional(),
   tags: z.array(z.string()).optional(),
+  /** Rung 5: the producer's Ed25519 signature over an explicit payload (producer-sig.ts) made with a key the server
+   *  never holds. A top-level field, so the v2 hash seals it — stripping it after the seal breaks the chain. */
+  producer_sig: z.object({ kid: z.string().min(8), sig: z.string().min(40) }).optional(),
 });
 export type EventInput = z.infer<typeof EventInput>;
 
