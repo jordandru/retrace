@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { Event, EventInput, EventStore, HistoryPage, HistoryQuery, Share, appendEvent, generateSigningKey, computeHash, canonicalize } from "./index.js";
+import { Event, EventInput, EventStore, Share, appendEvent, generateSigningKey, computeHash, canonicalize } from "./index.js";
 import { producerSignedPayload, signProducer, verifyProducerSig, producerSigVerdict, countProducerSigs, PRODUCER_SIG_VERDICT_PARAM } from "./producer-sig.js";
 import { SEALED_BY_PARAM } from "./store.js";
 
@@ -12,7 +12,8 @@ class MemStore implements EventStore {
   async get(id: string) { return this.events.find((e) => e.id === id) ?? null; }
   async all(p: string) { return this.events.filter((e) => e.project === p); }
   async projects() { return ["p"]; }
-  async history(_q: HistoryQuery): Promise<HistoryPage> { return { events: this.events, truncated: false }; }
+  // typed loosely on purpose: history() is changing shape in an in-flight branch, and this test never calls it
+  async history(_q?: unknown): Promise<never> { throw new Error("not used in these tests"); }
   async createShare(s: Share) { this.shares.set(s.id, s); }
   async getShare(id: string) { return this.shares.get(id) ?? null; }
 }
