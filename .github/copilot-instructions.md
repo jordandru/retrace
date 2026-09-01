@@ -14,3 +14,4 @@ This repository records verifiable provenance through the `retrace` MCP server.
 - If the model returns HTTP 402 `quota_exceeded`, stop. Do not reuse another harness's `RETRACE_TOKEN` to keep working.
 - GitHub.com Copilot coding agent cannot use this repo's local stdio MCP; dogfood is Copilot CLI (`~/.copilot/mcp-config.json`) and VS Code Copilot Chat (`.vscode/mcp.json`).
 - These instructions are authoritative for Copilot identity. Do not copy `Retrace-Actor` from `CLAUDE.md`, `GEMINI.md`, `GROK.md`, `AGENTS.md`, or `.cursor/rules/retrace-provenance.mdc`.
+- CLI dogfood 2026-08-31: verify instruct `evt_b1419fbeefc144329a25510fd5eafb89` sealed as `github-copilot` (`gpt-5.6-sol`).
