@@ -21,7 +21,7 @@ class MemStore implements EventStore {
 
 class MemLog implements CheckpointLogStore {
   rows: CheckpointLogRow[] = [];
-  async latest(p: string) { const r = [...this.rows].reverse().find((x) => x.project === p); return r ? { seq: r.seq, head_hash: r.head_hash } : null; }
+  async latest(p: string) { const r = [...this.rows].reverse().find((x) => x.project === p); return r ? { seq: r.seq, head_hash: r.head_hash, witnessed: r.witness !== null } : null; }
   async save(row: CheckpointLogRow) { this.rows.push(row); }
 }
 
@@ -110,6 +110,19 @@ test("runCheckpointCron: checkpoints moved heads only, records Rekor failures wi
   assert.equal(row3.witness, null);
   assert.match(row3.witness_error!, /Rekor 503/);
   assert.equal(JSON.parse(row3.checkpoint).seq, 2, "the checkpoint survives a witness outage");
+
+  // The head stays still and Rekor recovers: retry the unwitnessed row, then stop once that retry succeeds.
+  const recovered = fakeRekor();
+  const r4 = await runCheckpointCron(store, log, { signingKey: signer.privateKey, projects, fetchImpl: recovered.fetchImpl });
+  const a4 = r4.find((r) => r.project === "alpha")!;
+  assert.deepEqual([a4.action, a4.witness], ["retried", "ok"]);
+  assert.equal(recovered.calls(), 1);
+  assert.ok(log.rows.at(-1)!.witness, "successful retry replaces the failed state for this head");
+
+  const afterSuccess = fakeRekor();
+  const r5 = await runCheckpointCron(store, log, { signingKey: signer.privateKey, projects, fetchImpl: afterSuccess.fetchImpl });
+  assert.deepEqual(r5.map((r) => r.action), ["unchanged", "unchanged"]);
+  assert.equal(afterSuccess.calls(), 0, "a successfully witnessed unchanged head is not submitted again");
 });
 
 test("checkpoint project opt-in: parser and cron fail closed instead of enumerating every store project", async () => {

@@ -131,7 +131,7 @@ export async function witnessCheckpointRekor(
 
 /** Where scheduled checkpoints are recorded (a D1 table on the Worker; anything with these two methods in tests). */
 export interface CheckpointLogStore {
-  latest(project: string): Promise<{ seq: number; head_hash: string } | null>;
+  latest(project: string): Promise<{ seq: number; head_hash: string; witnessed: boolean } | null>;
   save(row: CheckpointLogRow): Promise<void>;
 }
 
@@ -149,7 +149,7 @@ export interface CheckpointLogRow {
 
 export interface CronResult {
   project: string;
-  action: "unchanged" | "checkpointed";
+  action: "unchanged" | "checkpointed" | "retried";
   seq?: number;
   witness?: "ok" | `failed: ${string}`;
 }
@@ -172,9 +172,9 @@ export function parseCheckpointProjectAllowlist(raw: string | undefined): string
 /**
  * One scheduled run: checkpoint every explicitly opted-in project whose head moved since its last logged checkpoint,
  * witness each in Rekor, and record the pair. The caller must supply the allowlist; an empty list publishes nothing.
- * A Rekor failure never blocks the checkpoint itself — the row is saved with
- * witness_error and the next run's new head gets a fresh chance. Store-derived checkpoints are signed by the host's
- * signing key; refuses to run unsigned (an unsigned scheduled checkpoint asserts nothing worth storing).
+ * A Rekor failure never discards the checkpoint: the row is saved with witness_error, then every later run retries
+ * that same head until a witness succeeds. Store-derived checkpoints are signed by the host's signing key; refuses
+ * to run unsigned (an unsigned scheduled checkpoint asserts nothing worth storing).
  */
 export async function runCheckpointCron(
   store: EventStore,
@@ -188,7 +188,8 @@ export async function runCheckpointCron(
     const head = await store.head(project);
     if (!head) continue;
     const last = await log.latest(project);
-    if (last && last.seq === head.seq && last.head_hash === head.hash) {
+    const sameHead = !!last && last.seq === head.seq && last.head_hash === head.hash;
+    if (sameHead && last.witnessed) {
       results.push({ project, action: "unchanged" });
       continue;
     }
@@ -205,7 +206,7 @@ export async function runCheckpointCron(
       verdict = `failed: ${witness_error}` as CronResult["witness"];
     }
     await log.save({ project, seq: cp.seq, head_hash: cp.head_hash, at: cp.at, checkpoint: JSON.stringify(cp), witness, witness_error });
-    results.push({ project, action: "checkpointed", seq: cp.seq, witness: verdict });
+    results.push({ project, action: sameHead ? "retried" : "checkpointed", seq: cp.seq, witness: verdict });
   }
   return results;
 }
