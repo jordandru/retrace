@@ -178,3 +178,12 @@ test("phase B: the GitHub push webhook is a second producer — agreement is sil
   const early = reconcile([commit("d", ["d.ts"])], [...edits, sealed(7, "d", codex, ["d.ts"])], opts);
   assert.deepEqual(early.commits[0].findings, []);
 });
+
+test("coverage honours PROV roles: an executed/other event whose artifact is generated/both covers the file; used/read refs never do", () => {
+  const withRole = (seq: number, action: Event["action"], role: "generated" | "both" | "used") => ({ ...ev(seq, codex, action, []), artifacts: [{ id: "repo:retrace#w.toml", role }] });
+  const run = (e: Event) => reconcile([commit("a", ["w.toml"])], [e, sealed(9, "a", codex, ["w.toml"])], { repoName: REPO, aliases: ["retrace"] }).commits[0];
+  assert.deepEqual(run(withRole(1, "executed", "both")).findings, []);
+  assert.deepEqual(run(withRole(1, "other", "generated")).findings, []);
+  assert.deepEqual(run(withRole(1, "executed", "used")).findings.map((f) => f.kind), ["uncovered"]);
+  assert.deepEqual(run(withRole(1, "read", "used")).findings.map((f) => f.kind), ["uncovered"]);
+});

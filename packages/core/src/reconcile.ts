@@ -181,9 +181,15 @@ export function reconcile(commits: CommitFacts[], events: Event[], opts: Reconci
         const list = acks.get(sha) ?? []; list.push({ seq: e.seq, id: e.id, actor: e.actor.id, actorType: e.actor.type }); acks.set(sha, list);
       }
     }
-    if (EDIT_ACTIONS.has(e.action) && e.actor.type === "agent") {
+    // An agent event covers a file when it is an edit verb, or when the artifact ref's PROV role says the activity
+    // generated that file's state (`generated`/`both`) — an `executed` build step or a config write counts; a `read`
+    // or a `used` ref never does. Commit events were handled above and never count as coverage.
+    if (e.actor.type === "agent") {
       const paths: { path: string; loose: boolean }[] = [];
-      for (const a of e.artifacts) { const p = artifactPath(a.id, { repoNames, repoPath: opts.repoPath }); if (p) paths.push(p); }
+      for (const a of e.artifacts) {
+        if (!EDIT_ACTIONS.has(e.action) && a.role !== "generated" && a.role !== "both") continue;
+        const p = artifactPath(a.id, { repoNames, repoPath: opts.repoPath }); if (p) paths.push(p);
+      }
       if (paths.length) edits.push({ e, paths });
     }
   }
