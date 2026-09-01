@@ -50,7 +50,7 @@ Estimate: ~400 lines including tests; one session. Files touched are all claude-
 
 ## Later phases
 
-- **B — GitHub vs hook**: with `RETRACE_GITHUB_PUSH=1` the webhook logs commits independently of the hook; two producers for one fact → any disagreement (sha present in one, actor differs) is a finding. Cheap once A exists.
+- **B — GitHub vs hook** — **BUILT 2026-09-01**, awaiting two config steps. What changed: push events get their own key `gh:push:<repo>:<sha>` (the old `git:<sha>` collapsed both producers into one event); actor resolution moved to core `commit-actor.ts` so the webhook and the hook resolve the same actor from the same message (the old mapping stamped the git author as a human, so every agent commit would have "disagreed"); reconcile adds `producer_disagreement` — fail when hook and stamped webhook name different actors, warn when only one producer sealed a commit after both were active, and a push-shaped event without the server's `webhook:github` stamp seals nothing. Also fixed on the way: the gate's shallow checkout made HEAD's diff the whole repo (now fails closed; `fetch-depth: 2`). **Jordan's steps:** add `push` to the repo webhook's events; set `RETRACE_GITHUB_PUSH = "1"` in `apps/worker/wrangler.toml` `[vars]` and `npx wrangler deploy`.
 - **C — Drive**: Drive change feed vs `google-drive` project events. Out of scope until a Drive user exists.
 
 ## Decisions for Jordan

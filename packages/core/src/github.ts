@@ -8,7 +8,10 @@
  *   pull_request_review  approved → approved · changes_requested → rejected · commented → other:reviewed
  *   issue_comment (on PR) → sent
  *   workflow_run      completed → executed (system actor = GitHub Actions)
- *   push              → skipped by default (the git adapter covers commits); enable with includePush
+ *   push              → skipped by default; enable with includePush. Then each pushed commit becomes a `committed` event
+ *                       from a SECOND producer (GitHub, HMAC-verified) with its own key `gh:push:<repo>:<sha>` — it
+ *                       never dedupes against the git hook's `git:<sha>`, so reconcile can compare the two. The actor
+ *                       is resolved from the commit message exactly as the hook does (core commit-actor.ts).
  *
  * Artifact ids line up with the git adapter: `pr:<owner/repo>#<n>`, `commit:<owner/repo>@<sha12>`, `repo:<owner/repo>#<path>`.
  * WHY: PR body / review body; `caused_by` from a `Retrace-Caused-By: evt_…` line in the PR body.
@@ -17,6 +20,7 @@
  *   closed-unmerged / ready_for_review / converted_to_draft / edited → absent (state changes, not content).
  */
 import { EventInput, Actor, ArtifactRole } from "./schema.js";
+import { resolveCommitActor } from "./commit-actor.js";
 
 const enc = new TextEncoder();
 const subtle: SubtleCrypto = (globalThis as any).crypto.subtle;
@@ -106,11 +110,18 @@ export function mapGithubWebhook(event: string, payload: any, opts: GithubMapOpt
     }];
   }
   if (event === "push" && opts.includePush) {
-    return (payload.commits ?? []).map((c: any) => ({
-      project, actor: { type: "human" as const, id: c.author?.email ?? `github:${c.author?.username}`, display_name: c.author?.name }, action: "committed" as const,
-      artifacts: [{ id: `commit:${repoFull}@${String(c.id).slice(0, 12)}`, kind: "commit", label: `${repoFull}@${String(c.id).slice(0, 7)}`, role: "generated" as const }, ...[...(c.added ?? []), ...(c.modified ?? []), ...(c.removed ?? [])].map((f: string) => ({ id: `repo:${repoFull}#${f}`, kind: "file", label: f, role: "generated" as const }))],
-      timestamp: c.timestamp, location: where(c.url), intent: c.message, method: { tool: "git", automated: false }, idempotency_key: `git:${c.id}`, tags: ["github", "push"],
-    }));
+    return (payload.commits ?? []).map((c: any) => {
+      const r = resolveCommitActor({ message: String(c.message ?? ""), authorName: c.author?.name, authorEmail: c.author?.email ?? (c.author?.username ? `github:${c.author.username}` : undefined) });
+      const files: string[] = [...(c.added ?? []), ...(c.modified ?? []), ...(c.removed ?? [])];
+      return {
+        project, actor: r.actor, action: "committed" as const,
+        artifacts: [{ id: `commit:${repoFull}@${String(c.id).slice(0, 12)}`, kind: "commit", label: `${repoFull}@${String(c.id).slice(0, 7)}`, role: "generated" as const }, ...files.map((f) => ({ id: `repo:${repoFull}#${f}`, kind: "file", label: f, role: "generated" as const }))],
+        timestamp: c.timestamp, location: where(c.url), intent: r.intent, caused_by: r.causedBy,
+        change: { after_hash: c.id, summary: `${files.length} file${files.length === 1 ? "" : "s"} (pushed to ${String(payload.ref ?? "").replace(/^refs\/heads\//, "")})` },
+        method: { tool: "git", automated: r.actor.type !== "human", params: { sha: c.id, producer: "github-push", ref: payload.ref, pusher: payload.pusher?.name } },
+        idempotency_key: `gh:push:${repoFull}:${c.id}`, tags: ["github", "push"],
+      };
+    });
   }
   return [];
 }

@@ -222,6 +222,8 @@ node packages/mcp-server/dist/github-cli.js setup <owner>/<repo> \
 
 Webhook: `POST /hooks/github?project=<name>`, secret = `RETRACE_GITHUB_SECRET`, events: PRs, reviews, issue comments, workflow runs.
 
+To make the push webhook a second producer for commits (reconciliation phase B): add `push` to the webhook's events in the repository settings, set `RETRACE_GITHUB_PUSH = "1"` under `[vars]` in `apps/worker/wrangler.toml`, and `npx wrangler deploy`. From then on every pushed commit is sealed twice — by the git hook on the committing machine and by GitHub — and `retrace-export reconcile` reports any disagreement between them.
+
 ```bash
 GITHUB_TOKEN=<repo-read> RETRACE_URL=... RETRACE_TOKEN=... \
 node packages/mcp-server/dist/github-cli.js backfill <owner>/<repo> --project <project>

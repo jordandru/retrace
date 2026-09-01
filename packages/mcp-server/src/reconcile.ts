@@ -42,8 +42,15 @@ export function parseNameStatus(text: string): CommitFile[] {
 
 export function commitFacts(repo: string, ref: string): CommitFacts {
   const [sha, parents, name, email, time] = git(repo, ["show", "-s", "--format=%H%x1f%P%x1f%an%x1f%ae%x1f%aI", ref]).split("\x1f");
+  const parentList = parents ? parents.split(" ") : [];
+  // A shallow checkout keeps the parent shas but not the parent objects; `git show` then diffs against the empty tree
+  // and every file in the repo looks changed (retrace-gate run 33474388261). Fail closed rather than report that.
+  for (const p of parentList) {
+    try { git(repo, ["cat-file", "-e", `${p}^{commit}`]); }
+    catch { throw new Error(`cannot compute the diff of ${sha.slice(0, 12)}: parent ${p.slice(0, 12)} is not in this checkout (shallow clone — fetch with depth ≥ 2, or fetch-depth: 0)`); }
+  }
   const files = parseNameStatus(git(repo, ["show", "--name-status", "-M", "--format=", sha]));
-  return { sha, parents: parents ? parents.split(" ") : [], files, author: { name, email }, time: new Date(time).toISOString() };
+  return { sha, parents: parentList, files, author: { name, email }, time: new Date(time).toISOString() };
 }
 
 /** Oldest → newest. `since` is exclusive (a ref); without it the last `limit` commits. */

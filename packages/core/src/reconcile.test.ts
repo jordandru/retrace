@@ -82,7 +82,7 @@ test("reconcile: covered, uncovered, misattributed (+acknowledged), partial swee
   assert.equal(r.summary.acknowledged, 1);
   assert.equal(r.summary.misattributed, 3);
   const text = renderReconcileReport(r);
-  assert.match(text, /11 commits, 10 sealed — 1 missing, 3 misattributed, 2 uncovered, 1 loose, 1 non-agent, 1 orphan path, 1 pending, 1 acknowledged → NOT OK/);
+  assert.match(text, /11 commits, 10 sealed — 1 missing, 3 misattributed, 0 producer-disagreement, 2 uncovered, 1 loose, 1 non-agent, 1 orphan path, 1 pending, 1 acknowledged → NOT OK/);
   assert.match(text, /ACK {2}misattributed .*corrected by #11/);
 
   // without the missing commit the report is OK; with uncovered=fail it is not
@@ -148,4 +148,33 @@ test("adversarial: one edit event naming A+B where only A was committed still re
   const r = reconcile([commit("0", ["seed.ts"]), commit("a", ["a.ts"]), commit("e", ["z.ts"])], events, { repoName: REPO, aliases: ["retrace"] });
   assert.deepEqual(r.commits[1].findings, []);
   assert.deepEqual(r.orphans.map((o) => o.path), ["b.ts"]);
+});
+
+test("phase B: the GitHub push webhook is a second producer — agreement is silent, disagreement fails, a lone producer warns, an unstamped push event is not a seal", () => {
+  const pushed = (seq: number, c: string, actor: any, files: string[], stamp?: string) => ev(seq, actor, "committed", [cid(c), ...files.map((f) => `repo:${REPO}#${f}`)], { tags: ["github", "push"], method: { tool: "git", params: { producer: "github-push", ...(stamp ? { sealed_by: stamp } : {}) } }, idempotency_key: `gh:push:${REPO}:${sha(c)}` });
+  const edits = [ev(1, codex, "edited", ["repo:retrace#a.ts", "repo:retrace#b.ts", "repo:retrace#c.ts", "repo:retrace#d.ts", "repo:retrace#e.ts"])];
+  const events: Event[] = [
+    ...edits,
+    sealed(2, "a", codex, ["a.ts"]), pushed(3, "a", codex, ["a.ts"], "webhook:github"),            // both agree
+    sealed(4, "b", codex, ["b.ts"]), pushed(5, "b", claude, ["b.ts"], "webhook:github"),           // disagree on actor
+    pushed(6, "c", codex, ["c.ts"], "webhook:github"),                                             // webhook only
+    sealed(7, "d", codex, ["d.ts"]),                                                               // hook only, after the webhook was enabled
+    pushed(8, "e", codex, ["e.ts"]),                                                               // unstamped push-shaped event: not GitHub
+  ];
+  const opts = { repoName: REPO, aliases: ["retrace"] };
+  const r = reconcile([commit("a", ["a.ts"]), commit("b", ["b.ts"]), commit("c", ["c.ts"]), commit("d", ["d.ts"]), commit("e", ["e.ts"])], events, opts);
+  const by = Object.fromEntries(r.commits.map((v) => [v.sha[0], v]));
+  const kinds = (c: string) => by[c].findings.map((f) => `${f.kind}:${f.level}`);
+  assert.deepEqual(kinds("a"), []); assert.equal(by.a.sealed?.producer, "hook"); assert.equal(by.a.webhook?.seq, 3);
+  assert.deepEqual(kinds("b"), ["producer_disagreement:fail"]);
+  assert.match(by.b.findings[0].detail, /git hook #4 sealed .* as agent codex; the GitHub push webhook #5 resolved agent claude-code/);
+  assert.deepEqual(kinds("c"), ["producer_disagreement:warn"]); assert.equal(by.c.sealed?.producer, "webhook");
+  assert.deepEqual(by.c.coverage["c.ts"].actors, ["codex"], "a webhook-only seal still gets coverage evaluated");
+  assert.deepEqual(kinds("d"), ["producer_disagreement:warn"]);
+  assert.match(by.d.findings[0].detail, /never seen by the GitHub push webhook \(enabled since #3\)/);
+  assert.deepEqual(kinds("e"), ["missing_commit:fail"], "a push-shaped event without the server's webhook stamp seals nothing");
+  assert.equal(r.summary.producer_disagreement, 3);
+  // before the webhook existed, a hook-only commit is simply normal
+  const early = reconcile([commit("d", ["d.ts"])], [...edits, sealed(7, "d", codex, ["d.ts"])], opts);
+  assert.deepEqual(early.commits[0].findings, []);
 });

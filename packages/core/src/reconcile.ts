@@ -28,7 +28,7 @@ export interface CommitFacts {
   time?: string;
 }
 
-export type ReconcileFindingKind = "missing_commit" | "misattributed" | "uncovered" | "loose_match" | "orphan_edit" | "non_agent";
+export type ReconcileFindingKind = "missing_commit" | "misattributed" | "uncovered" | "loose_match" | "orphan_edit" | "non_agent" | "producer_disagreement";
 export type ReconcileLevel = "fail" | "warn" | "info";
 export interface ReconcileFinding {
   kind: ReconcileFindingKind;
@@ -56,7 +56,9 @@ export interface FileCoverage {
 export interface CommitVerdict {
   sha: string;
   short: string;
-  sealed?: { seq: number; id: string; action: string; actor: Event["actor"] };
+  sealed?: { seq: number; id: string; action: string; actor: Event["actor"]; /** which producer's event this is */ producer: "hook" | "webhook" };
+  /** the GitHub push webhook's event for the same commit, when the server stamped it (phase B) */
+  webhook?: { seq: number; id: string; actor: Event["actor"] };
   coverage: Record<string, FileCoverage>;
   findings: ReconcileFinding[];
 }
@@ -140,8 +142,12 @@ export function reconcile(commits: CommitFacts[], events: Event[], opts: Reconci
   const evs = [...events].sort((a, b) => a.seq - b.seq);
   const headSeq = evs.length ? evs[evs.length - 1].seq : null;
 
-  // sealed commit events by sha12 (first seal wins — a replay is deduped by idempotency key anyway)
-  const sealedBySha = new Map<string, Event>();
+  // sealed commit events by sha12 and producer. hook = the git post-commit hook on the committing machine (key git:<sha>);
+  // webhook = the GitHub push webhook (key gh:push:…, tag "push"), counted ONLY when the server stamped the seal as
+  // webhook:github — a push-shaped event without that stamp is something a credentialed client sent, not GitHub.
+  const hookBySha = new Map<string, Event>();
+  const webhookBySha = new Map<string, Event>();
+  let webhookSince: number | null = null; // the push webhook is known to be enabled from this seq on
   // every commit event's touched paths, in seq order — the "previous touch" index
   const commitTouches: { seq: number; paths: Set<string> }[] = [];
   // edit events with the repo paths they touch
@@ -154,7 +160,10 @@ export function reconcile(commits: CommitFacts[], events: Event[], opts: Reconci
   for (const e of evs) {
     if (COMMIT_ACTIONS.has(e.action)) {
       const id = commitIdOf(e); const sha = id && commitSha12(id);
-      if (sha && !sealedBySha.has(sha)) sealedBySha.set(sha, e);
+      const isPush = e.tags?.includes("push") === true;
+      if (sha && isPush) {
+        if (sealedByOf(e)?.startsWith("webhook:")) { if (!webhookBySha.has(sha)) webhookBySha.set(sha, e); if (webhookSince === null) webhookSince = e.seq; }
+      } else if (sha && !hookBySha.has(sha)) hookBySha.set(sha, e);
       const paths = new Set<string>();
       for (const a of e.artifacts) { const p = artifactPath(a.id, { repoNames, repoPath: opts.repoPath }); if (p) paths.add(p.path); }
       commitTouches.push({ seq: e.seq, paths });
@@ -186,11 +195,13 @@ export function reconcile(commits: CommitFacts[], events: Event[], opts: Reconci
   };
 
   const verdicts: CommitVerdict[] = [];
-  const summary: ReconcileReport["summary"] = { commits: commits.length, sealed: 0, acknowledged: 0, missing_commit: 0, misattributed: 0, uncovered: 0, loose_match: 0, orphan_edit: 0, non_agent: 0 };
+  const summary: ReconcileReport["summary"] = { commits: commits.length, sealed: 0, acknowledged: 0, missing_commit: 0, misattributed: 0, uncovered: 0, loose_match: 0, orphan_edit: 0, non_agent: 0, producer_disagreement: 0 };
   const consumed = new Set<string>(); // "<seq>\u0000<path>" pairs covered by some commit — an event naming A+B where only A was committed still leaves B an orphan
   for (const c of commits) {
     const short = c.sha.slice(0, 12);
-    const sealedEvent = sealedBySha.get(short);
+    const hookEvent = hookBySha.get(short);
+    const webhookEvent = webhookBySha.get(short);
+    const sealedEvent = hookEvent ?? webhookEvent;
     const v: CommitVerdict = { sha: c.sha, short, coverage: {}, findings: [] };
     // Acknowledgement is resolved only for sealed commits (see ReconcileFinding.acknowledged); git author fields are
     // never consulted for anything but the description — they are whatever the pusher typed.
@@ -208,7 +219,18 @@ export function reconcile(commits: CommitFacts[], events: Event[], opts: Reconci
       verdicts.push(v); continue;
     }
     summary.sealed++;
-    v.sealed = { seq: sealedEvent.seq, id: sealedEvent.id, action: sealedEvent.action, actor: sealedEvent.actor };
+    v.sealed = { seq: sealedEvent.seq, id: sealedEvent.id, action: sealedEvent.action, actor: sealedEvent.actor, producer: hookEvent ? "hook" : "webhook" };
+    if (webhookEvent) v.webhook = { seq: webhookEvent.seq, id: webhookEvent.id, actor: webhookEvent.actor };
+    // Two producers for one fact (phase B). They resolve the actor from the same commit message with the same code, so
+    // a difference means the commit was rewritten after the hook ran, or one of the events is not what it claims.
+    const who = (a: Event["actor"]) => `${a.type} ${a.id}`;
+    if (hookEvent && webhookEvent && who(hookEvent.actor) !== who(webhookEvent.actor)) {
+      add("producer_disagreement", "fail", `git hook #${hookEvent.seq} sealed ${short} as ${who(hookEvent.actor)}; the GitHub push webhook #${webhookEvent.seq} resolved ${who(webhookEvent.actor)} from the pushed commit`);
+    } else if (!hookEvent && webhookEvent) {
+      add("producer_disagreement", "warn", `${short} was sealed only by the GitHub push webhook #${webhookEvent.seq}; the git hook did not run on the committing machine`);
+    } else if (hookEvent && !webhookEvent && webhookSince !== null && hookEvent.seq > webhookSince) {
+      add("producer_disagreement", "warn", `${short} was sealed by the git hook #${hookEvent.seq} but never seen by the GitHub push webhook (enabled since #${webhookSince}) — not pushed, or pushed outside the webhook`);
+    }
     const isMerge = sealedEvent.action === "merged" || c.parents.length > 1;
     if (isMerge) { verdicts.push(v); continue; }
     if (sealedEvent.actor.type !== "agent") {
@@ -280,7 +302,7 @@ export function reconcile(commits: CommitFacts[], events: Event[], opts: Reconci
 export function renderReconcileReport(r: ReconcileReport): string {
   const lines: string[] = [];
   const s = r.summary;
-  lines.push(`reconcile ${r.repo_name}: ${s.commits} commit${s.commits === 1 ? "" : "s"}, ${s.sealed} sealed — ${s.missing_commit} missing, ${s.misattributed} misattributed, ${s.uncovered} uncovered, ${s.loose_match} loose, ${s.non_agent} non-agent, ${s.orphan_edit} orphan path${s.orphan_edit === 1 ? "" : "s"}, ${r.pending.length} pending${s.acknowledged ? `, ${s.acknowledged} acknowledged` : ""} → ${r.ok ? "OK" : "NOT OK"}`);
+  lines.push(`reconcile ${r.repo_name}: ${s.commits} commit${s.commits === 1 ? "" : "s"}, ${s.sealed} sealed — ${s.missing_commit} missing, ${s.misattributed} misattributed, ${s.producer_disagreement} producer-disagreement, ${s.uncovered} uncovered, ${s.loose_match} loose, ${s.non_agent} non-agent, ${s.orphan_edit} orphan path${s.orphan_edit === 1 ? "" : "s"}, ${r.pending.length} pending${s.acknowledged ? `, ${s.acknowledged} acknowledged` : ""} → ${r.ok ? "OK" : "NOT OK"}`);
   for (const v of r.commits) for (const f of v.findings) {
     lines.push(`  ${f.acknowledged ? "ACK " : f.level.toUpperCase().padEnd(4)} ${f.kind.padEnd(14)} ${f.detail}${f.acknowledged ? ` (corrected by #${f.acknowledged.seq}, ${f.acknowledged.actor})` : ""}`);
   }
