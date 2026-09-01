@@ -31,6 +31,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: main
+          fetch-depth: 0   # reconcile walks history since the last checkpoint commit
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
@@ -73,6 +74,22 @@ jobs:
         run: |
           set -euo pipefail
           node packages/mcp-server/dist/export-cli.js witness "$PROJECT" --checkpoints "$CHECKPOINTS" --witnesses .retrace/witnesses.jsonl
+      - name: Reconcile git history against the ledger since the last checkpoint commit
+        # docs/reconciliation-plan.md — capture windows per file, mis-attributed and missing commits. Runs on every
+        # schedule whether or not the head moved; a failure is reported after the checkpoint PR is opened, never instead of it.
+        id: rec
+        continue-on-error: true
+        env:
+          RETRACE_URL: https://retrace-api.slcwitit.workers.dev
+          RETRACE_TOKEN: ${{ secrets.RETRACE_CI_TOKEN }}
+        run: |
+          set -euo pipefail
+          since=$(git log -1 --format=%H -- "$CHECKPOINTS")
+          set +e
+          node packages/mcp-server/dist/export-cli.js reconcile --repo . --since "$since" --gate 2>&1 | grep -v ExperimentalWarning | tee reconcile.txt
+          rc=${PIPESTATUS[0]}
+          set -e
+          exit "$rc"
       - name: Open a pull request with the new checkpoint
         if: steps.cp.outputs.changed == 'true'
         env:
@@ -94,4 +111,15 @@ jobs:
           git push -u origin "$branch"
           gh pr create --base main --head "$branch" \
             --title "Checkpoint ${PROJECT} head #${SEQ}" \
-            --body "$(printf 'Scheduled head checkpoint for project `%s`: seq **#%s**, head `%s…`, %s events, issuer kid `%s`, checkpoint signer kid `%s`.\n\nMerging records that this head existed now. Verify any later bundle with the committed `.retrace/checkpoint-public.jwk`:\n\n    retrace-export verify <bundle.json> --checkpoint .retrace/checkpoints.jsonl\n\nRetrace-Caused-By: evt_4b37cc72831a4434937b339a1873e27f' "$PROJECT" "$SEQ" "$HEAD12" "$TOTAL" "$ISSUER" "$SIGNER")"
+            --body "$(printf 'Scheduled head checkpoint for project `%s`: seq **#%s**, head `%s…`, %s events, issuer kid `%s`, checkpoint signer kid `%s`.\n\nMerging records that this head existed now. Verify any later bundle with the committed `.retrace/checkpoint-public.jwk`:\n\n    retrace-export verify <bundle.json> --checkpoint .retrace/checkpoints.jsonl\n\nRetrace-Caused-By: evt_4b37cc72831a4434937b339a1873e27f' "$PROJECT" "$SEQ" "$HEAD12" "$TOTAL" "$ISSUER" "$SIGNER")
+
+### Reconciliation since the previous checkpoint commit
+
+\`\`\`
+$(cat reconcile.txt 2>/dev/null || echo "reconcile did not run")
+\`\`\`"
+      - name: Fail the job if reconciliation found unacknowledged failures
+        if: steps.rec.outcome == 'failure'
+        run: |
+          echo "::error::reconcile reported a missing or mis-attributed commit (see the step output); acknowledge with a correction event or fix the producer" >&2
+          exit 1

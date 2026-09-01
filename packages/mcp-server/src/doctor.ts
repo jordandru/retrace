@@ -4,15 +4,16 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
-import { Actor, Credential, Event, ProjectStatus, causalRootState, renderProjectStatus, schemaSurface } from "@retrace-dev/core";
+import { Actor, Credential, Event, ExportBundle, ProjectStatus, ReconcileReport, causalRootState, reconcile, renderProjectStatus, schemaSurface } from "@retrace-dev/core";
 import { Cfg, commitToEvent, resolveHookToken } from "./git-hook.js";
+import { ReconcileCfg, commitFacts, repoNamesFor } from "./reconcile.js";
 import { retraceHeaders } from "./remote-store.js";
 import { isMainModule } from "./is-main.js";
 
 type Level = "pass" | "warn" | "fail";
 export type Finding = { level: Level; label: string; detail: string };
 export type DoctorArgs = { command: "doctor" | "status"; gate: boolean; json: boolean; repo?: string; statusProject?: string };
-type RepoConfig = Cfg & { credential?: string };
+type RepoConfig = ReconcileCfg & { credential?: string };
 
 const git = (repo: string, args: string[]) => execFileSync("git", ["-C", repo, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 const result = (level: Level, label: string, detail: string): Finding => ({ level, label, detail });
@@ -106,6 +107,25 @@ export function pinSessionFinding(gate: boolean, commit: Event, why: Event[]): F
   }
   if (!problems.length) return result("pass", "pin/session", "commit actor and session match MCP peers in the why-chain");
   return result(gate ? "fail" : "warn", "pin/session", problems.join("; "));
+}
+
+/** Capture coverage for HEAD (roadmap rung 4): were the edits behind this commit logged, and by whom? A reconcile
+ *  report for exactly one commit → one finding at its worst unacknowledged level. `info`-only reports pass. */
+export function captureCoverageFinding(report: ReconcileReport): Finding {
+  const v = report.commits[0];
+  if (!v) return result("fail", "capture coverage", "no commit in the reconcile report");
+  const live = v.findings.filter((f) => !f.acknowledged);
+  const worst: Level = live.some((f) => f.level === "fail") ? "fail" : live.some((f) => f.level === "warn") ? "warn" : "pass";
+  if (worst === "pass") {
+    const files = Object.keys(v.coverage);
+    const actors = [...new Set(files.flatMap((f) => v.coverage[f].actors))];
+    const note = v.findings.filter((f) => f.kind === "non_agent").length ? v.findings[0].detail
+      : files.length ? `${files.length} file${files.length === 1 ? "" : "s"} covered by ${actors.join(", ") || "no one"}${v.findings.some((f) => f.kind === "loose_match") ? " (some via loosely-identified refs)" : ""}${v.findings.some((f) => f.acknowledged) ? "; earlier finding acknowledged by a correction event" : ""}`
+      : "no files changed";
+    return result("pass", "capture coverage", note);
+  }
+  const top = live.filter((f) => f.level === worst);
+  return result(worst, "capture coverage", top.map((f) => `${f.kind}: ${f.detail}`).join("; "));
 }
 
 export function missingSchema(remote: Record<string, unknown>, local = schemaSurface()): string[] {
@@ -219,6 +239,16 @@ async function main() {
         const delivery = headDelivery(gate, commit, !!sealed);
         findings.push(sealed ? result("pass", "HEAD delivery", `${commit} is event #${sealed.seq}`) : delivery);
         if (sealed) findings.push(attributionFinding(gate, sealed));
+        if (gate && sealed) {
+          // capture coverage: the edits behind HEAD, from one full export (docs/reconciliation-plan.md)
+          try {
+            const exp = await fetch(`${url}/projects/${encodeURIComponent(project)}/export`, { headers });
+            if (!exp.ok) throw new Error(`HTTP ${exp.status}: ${await exp.text()}`);
+            const bundle = await exp.json() as ExportBundle;
+            const report = reconcile([commitFacts(repo, "HEAD")], bundle.events, { ...repoNamesFor(repo, cfg), repoPath: repo, uncovered: cfg.reconcile?.uncovered });
+            findings.push(captureCoverageFinding(report));
+          } catch (e: any) { findings.push(result("fail", "capture coverage", e.message)); }
+        }
         if (sealed && sealedLooksAgent(sealed)) {
           try {
             const whyRes = await fetch(`${url}/events/${encodeURIComponent(sealed.id)}/why`, { headers });

@@ -1,6 +1,8 @@
 # Reconciliation — tamper-evident roadmap rung 4
 
-*Plan for Jordan's approval, 2026-09-01. Author: claude-code. Status: PROPOSED — not built.*
+*2026-09-01. Author: claude-code. Status: **BUILT (phase A)** with the recommended defaults (A warn, B daily workflow, C since last checkpoint commit, D no ledger logging). Refinements found by the first real run: `misattributed` is a commit-level **fail** only when every file has logged edits and none are the committer's (a complete, contradicting story); when the story is partial it is a per-file **warn** alongside the `uncovered` files. A missing commit authored by a bot (`[bot]`, `noreply.github.com`) is a **warn** — CI checkpoint branches have no hook; the fix is the GitHub push webhook (phase B). `human` in the table below is named `non_agent` in code (system actors are treated the same).*
+
+*First run, last 120 commits: 119 sealed · 1 bot commit unsealed · 3 complete mis-attributions (bfe87c3 → acknowledged #258; 1bc76c1 → hand-off disclosed in its message, acknowledged 2026-09-01; 10bfcc9 → OPEN, Grok's first commit with all ten files' edits logged by claude-code) · 216 uncovered files (claude-code 117, codex 74, grok 25 — mostly README/docs edits not logged per file) · 35 loose ids. Daily range (35 commits since the last checkpoint commit): OK, 4 per-file warns.*
 
 ## The claim this rung earns
 

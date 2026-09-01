@@ -266,7 +266,7 @@ export function ttySurface(procStat = "/proc/self/stat"): "tty" | "agent" | unde
   } catch { return undefined; }
 }
 
-function remoteName(repo: string): string | undefined {
+export function remoteName(repo: string): string | undefined {
   try {
     const url = git(repo, ["remote", "get-url", "origin"]);
     const m = url.match(/[:/]([^/:]+\/[^/]+?)(\.git)?$/);

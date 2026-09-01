@@ -3,7 +3,7 @@
 This repository records verifiable provenance through the `retrace` MCP server.
 
 - At the start of a task, call `retrace_instruct` with the user's request and `human_id` set to `jordansboxing@gmail.com`. Keep the returned event id.
-- After each meaningful edit, command, or decision, call `retrace_log` with that event id as `caused_by`, a concise `intent`, and the artifact ids touched.
+- After each meaningful edit, command, or decision, call `retrace_log` with that event id as `caused_by`, a concise `intent`, and the artifact ids touched — **every file you changed**, as `repo:jordandru/retrace#<path>`. Reconciliation (`retrace-export reconcile`, the gate's `capture coverage` finding) compares each commit's files against logged edits; a file you changed but did not log is `uncovered`, and a file whose only logged edits are another agent's is `misattributed`.
 - On every `retrace_log`, report the Claude model actually running in `actor.model`. Do not invent a model value if it is unavailable.
 - Do not log `committed` actions through MCP; the Git hook records real commits with authoritative metadata.
 - Before committing, run `npm exec --package=@retrace-dev/cli -- retrace doctor` (or the local `node packages/mcp-server/dist/doctor.js doctor`) and resolve failures.

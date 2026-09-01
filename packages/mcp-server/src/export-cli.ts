@@ -12,6 +12,7 @@
  *   retrace-export checkpoint <project> [--bundle file.json] [--out .retrace/checkpoints.jsonl]   append a signed head checkpoint; commit the file
  *   retrace-export witness <project> [--checkpoints f.jsonl] [--witnesses f.jsonl] [--rekor url]   submit the newest checkpoint to the Rekor transparency log; commit both files
  *       verify --checkpoint also takes [--witnesses f.jsonl] [--rekor-pubkey pem] to require the checkpointed head be witnessed by Rekor (offline SET check).
+ *   retrace-export reconcile [--repo .] [--since <ref>] [--limit N] [--uncovered warn|fail|info] [--json] [--gate]   git history vs the ledger: capture windows, mis-attributed and missing commits (docs/reconciliation-plan.md)
  *   retrace-export share <project> [--artifact <id>] [--label ..] [--days n]      (local server must be running for the link to resolve)
  * Uses the same store config as the MCP server (RETRACE_DB / RETRACE_URL+RETRACE_TOKEN).
  */
@@ -23,6 +24,7 @@ import { RemoteStore } from "./remote-store.js";
 import { ensureSigningKey, loadSigningKey } from "./keys.js";
 import { witnessCheckpoint, verifyWitness, parseWitnessLog, witnessFor, fetchRekorPublicKey, DEFAULT_REKOR_URL } from "./witness.js";
 import { isMainModule } from "./is-main.js";
+import { reconcileMain } from "./reconcile.js";
 
 /** Load a public JWK from a file path, an https URL, or an inline JSON string. Plain http is refused: a key fetched over
  *  an interceptable channel is not a trusted key. Accepts a bare JWK or a /.well-known/retrace-pubkey document. */
@@ -196,6 +198,7 @@ async function main() {
     console.log(`witnessed checkpoint #${cp.seq} ${cp.head_hash.slice(0, 12)}… in the Rekor transparency log: index ${rec.log_index}, ${new Date(rec.integrated_time * 1000).toISOString()}\nappended to ${wPath} — commit and push it with ${cpsPath}; verify with: retrace-export verify <bundle> --checkpoint ${cpsPath} --witnesses ${wPath}`);
     return;
   }
+  if (cmd === "reconcile") { process.exitCode = await reconcileMain(flags, pos); return; } // exitCode, not exit(): let a large --json flush
   if (cmd === "share") {
     const project = pos[1]; if (!project) throw new Error("usage: retrace-export share <project>");
     const store = makeStore();
@@ -207,6 +210,6 @@ async function main() {
     console.log(`${base}/s/${id}\nreport: ${base}/s/${id}/report`);
     return;
   }
-  console.log("retrace-export <keygen|export <project>|verify <bundle.json>|checkpoint <project>|witness <project>|share <project>> [--artifact id] [--out f] [--report f.html] [--pubkey jwk|https-url] [--allow-self-attested] [--checkpoint f.jsonl] [--checkpoint-pubkey jwk|https-url] [--bundle f.json] [--label s] [--days n]");
+  console.log("retrace-export <keygen|export <project>|verify <bundle.json>|checkpoint <project>|witness <project>|reconcile|share <project>> [--artifact id] [--out f] [--report f.html] [--pubkey jwk|https-url] [--allow-self-attested] [--checkpoint f.jsonl] [--checkpoint-pubkey jwk|https-url] [--bundle f.json] [--label s] [--days n]");
 }
 if (isMainModule(import.meta.url)) main().catch((e) => { console.error("retrace-export:", e.message ?? e); process.exit(1); });

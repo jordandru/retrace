@@ -130,3 +130,22 @@ test("doctor: pin/session compares sealed commit to MCP peers, never process env
   const direct = commitEvt({ id: "evt_direct", seq: 1, actor: { type: "agent", id: "grok" }, location: { session: "sess-a", surface: "agent" }, caused_by: instruct.id });
   assert.equal(pinSessionFinding(true, direct, [direct, instruct]).level, "pass", "commit → instruct with no MCP peers");
 });
+
+import { captureCoverageFinding } from "./doctor.js";
+import type { ReconcileReport } from "@retrace-dev/core";
+
+test("captureCoverageFinding: worst unacknowledged level wins; acknowledged and info-only reports pass", () => {
+  const base = (findings: ReconcileReport["commits"][0]["findings"], coverage: ReconcileReport["commits"][0]["coverage"] = { "a.ts": { actors: ["claude-code"], events: 1, loose: false, window: { after: 1, before: 5 } } }): ReconcileReport =>
+    ({ format: "retrace-reconcile/1", repo_name: "r", range: { commits: 1, first_seq: 5, last_seq: 5, head_seq: 5 }, commits: [{ sha: "a".repeat(40), short: "a".repeat(12), coverage, findings }], orphans: [], pending: [], summary: {} as ReconcileReport["summary"], ok: true });
+  assert.equal(captureCoverageFinding(base([])).level, "pass");
+  assert.match(captureCoverageFinding(base([])).detail, /1 file covered by claude-code/);
+  assert.equal(captureCoverageFinding(base([{ kind: "uncovered", level: "warn", file: "b.ts", detail: "b.ts: no edit event" }])).level, "warn");
+  const fail = captureCoverageFinding(base([{ kind: "uncovered", level: "warn", detail: "u" }, { kind: "misattributed", level: "fail", detail: "sealed as codex, but every logged edit is by claude-code" }]));
+  assert.equal(fail.level, "fail");
+  assert.match(fail.detail, /^misattributed: sealed as codex/);
+  const acked = captureCoverageFinding(base([{ kind: "misattributed", level: "info", detail: "x", acknowledged: { seq: 9, id: "evt_9" } }]));
+  assert.equal(acked.level, "pass");
+  assert.match(acked.detail, /acknowledged by a correction event/);
+  assert.equal(captureCoverageFinding(base([{ kind: "non_agent", level: "info", detail: "sealed as human jordan; coverage is not evaluated" }], {})).detail, "sealed as human jordan; coverage is not evaluated");
+  assert.equal(captureCoverageFinding({ ...base([]), commits: [] }).level, "fail");
+});
