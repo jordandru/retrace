@@ -44,3 +44,22 @@ test("verifiedExportEvents fails closed: no trusted key, wrong key, tampered eve
   const unsigned = await buildExportBundle(store, { project: "p" }, {});
   await assert.rejects(() => verifiedExportEvents(unsigned, flag), /does not verify/);
 });
+
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { unreachableShas } from "./reconcile.js";
+
+test("unreachableShas: one git call tells which sealed shas the repository no longer has", () => {
+  const repo = mkdtempSync(join(tmpdir(), "retrace-rec-"));
+  const g = (...a: string[]) => execFileSync("git", ["-C", repo, ...a], { encoding: "utf8", env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@x", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@x" } }).trim();
+  g("init", "-q"); writeFileSync(join(repo, "a.txt"), "1"); g("add", "a.txt"); g("commit", "-q", "-m", "one");
+  const kept = g("rev-parse", "HEAD").slice(0, 12);
+  g("commit", "-q", "--amend", "-m", "one, amended");
+  const amended = g("rev-parse", "HEAD").slice(0, 12);
+  // the original still exists as an unreferenced object right after an amend; a sha that never existed does not
+  const gone = "0123456789ab";
+  assert.deepEqual(unreachableShas(repo, [kept, amended, gone]), [gone]);
+  assert.deepEqual(unreachableShas(repo, []), []);
+});

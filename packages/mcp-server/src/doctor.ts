@@ -4,9 +4,9 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
-import { Actor, Credential, Event, ExportBundle, ProjectStatus, ReconcileReport, causalRootState, reconcile, renderProjectStatus, schemaSurface } from "@retrace-dev/core";
+import { Actor, Credential, Event, ExportBundle, ProjectStatus, ReconcileReport, causalRootState, renderProjectStatus, schemaSurface } from "@retrace-dev/core";
 import { Cfg, commitToEvent, resolveHookToken } from "./git-hook.js";
-import { ReconcileCfg, commitFacts, repoNamesFor, verifiedExportEvents } from "./reconcile.js";
+import { ReconcileCfg, commitFacts, reconcileOptionsFrom, reconcileWithGit, repoNamesFor, verifiedExportEvents } from "./reconcile.js";
 import { retraceHeaders } from "./remote-store.js";
 import { isMainModule } from "./is-main.js";
 
@@ -247,7 +247,7 @@ async function main() {
             const bundle = await exp.json() as ExportBundle;
             // fail closed: the bundle must verify as a complete full export signed by the trusted issuer key
             const { events } = await verifiedExportEvents(bundle, undefined, url);
-            const report = reconcile([commitFacts(repo, "HEAD")], events, { ...repoNamesFor(repo, cfg), repoPath: repo, uncovered: cfg.reconcile?.uncovered, ackActors: cfg.reconcile?.ack_actors });
+            const report = reconcileWithGit(repo, [commitFacts(repo, "HEAD")], events, { ...repoNamesFor(repo, cfg), repoPath: repo, ...reconcileOptionsFrom(cfg) });
             findings.push(captureCoverageFinding(report));
           } catch (e: any) { findings.push(result("fail", "capture coverage", e.message)); }
         }

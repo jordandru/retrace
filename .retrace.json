@@ -1,5 +1,10 @@
 {
   "project": "retrace",
   "environment": "local",
-  "credential": "retrace-git"
+  "credential": "retrace-git",
+  "reconcile": {
+    "hook_sealed_by": [
+      "assert:git hook (assert)"
+    ]
+  }
 }

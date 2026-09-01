@@ -1,6 +1,6 @@
 /**
  * retrace-export reconcile — git history vs the ledger (roadmap rung 4; core logic in @retrace-dev/core reconcile.ts).
- *   retrace-export reconcile [--repo .] [--since <ref>] [--limit N] [--uncovered warn|fail|info] [--pubkey jwk|https-url] [--json] [--gate]
+ *   retrace-export reconcile [--repo .] [--since <ref>] [--limit N] [--uncovered warn|fail|info] [--dual-witness fail|warn] [--allow-unstamped-seals] [--hook-sealed-by "assert:<credential name>"] [--pubkey jwk|https-url] [--json] [--gate]
  * Commit facts come from git (`rev-list` + `show --name-status -M`); events from one full export of the project.
  * --gate exits 1 when any unacknowledged fail-level finding exists (missing commit, mis-attributed commit, or an
  * uncovered file when the repo's .retrace.json sets "reconcile": {"uncovered": "fail"}).
@@ -8,13 +8,13 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
-import { CommitFacts, CommitFile, CommitFileStatus, Event, ExportBundle, ReconcileLevel, ReconcileReport, exportVerdictOk, reconcile, renderReconcileReport, verifyExportBundle } from "@retrace-dev/core";
+import { CommitFacts, CommitFile, CommitFileStatus, Event, ExportBundle, ReconcileLevel, ReconcileOptions, ReconcileReport, exportVerdictOk, reconcile, renderReconcileReport, verifyExportBundle } from "@retrace-dev/core";
 import { resolveTrustedKey } from "./trusted-key.js";
 import { Cfg, remoteName } from "./git-hook.js";
 import { makeStore } from "./index.js";
 import { RemoteStore } from "./remote-store.js";
 
-export type ReconcileCfg = Cfg & { reconcile?: { uncovered?: ReconcileLevel; ack_actors?: string[] } };
+export type ReconcileCfg = Cfg & { reconcile?: { uncovered?: ReconcileLevel; ack_actors?: string[]; /** exact `assert:<credential name>` stamps of this repo's git hook credential */ hook_sealed_by?: string[]; owner_seals?: boolean; dual_witness?: "fail" | "warn" } };
 
 /**
  * Events from a remote export are used only after the bundle verifies as a complete full export signed by the TRUSTED
@@ -68,6 +68,28 @@ export function repoNamesFor(repo: string, cfg: ReconcileCfg): { repoName: strin
   return { repoName, aliases };
 }
 
+/** Which of these shas the repository no longer contains — one `git cat-file --batch-check` call. */
+export function unreachableShas(repo: string, shas: string[]): string[] {
+  if (!shas.length) return [];
+  const out = execFileSync("git", ["-C", repo, "cat-file", "--batch-check"], { input: shas.join("\n") + "\n", encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] });
+  const missing: string[] = [];
+  for (const line of out.split("\n")) { const m = /^(\S+) (missing|ambiguous)$/.exec(line.trim()); if (m) missing.push(m[1]); }
+  return missing;
+}
+
+/** Run reconcile twice at most: once to learn the sealed shas, then — if git lacks any — with those excluded from
+ *  window boundaries and reported as unreachable seals. */
+export function reconcileWithGit(repo: string, commits: CommitFacts[], events: Event[], options: Omit<ReconcileOptions, "unreachableShas">): ReconcileReport {
+  const first = reconcile(commits, events, options);
+  const gone = unreachableShas(repo, first.sealed_shas);
+  return gone.length ? reconcile(commits, events, { ...options, unreachableShas: gone }) : first;
+}
+
+/** Options from .retrace.json `reconcile` plus CLI flags; flags win. */
+export function reconcileOptionsFrom(cfg: ReconcileCfg, flags: { uncovered?: ReconcileLevel; dualWitness?: "fail" | "warn"; allowUnstampedSeals?: boolean; hookSealedBy?: string[] } = {}): Pick<ReconcileOptions, "uncovered" | "ackActors" | "hookSealedBy" | "ownerSeals" | "dualWitness" | "allowUnstampedSeals"> {
+  return { uncovered: flags.uncovered ?? cfg.reconcile?.uncovered, ackActors: cfg.reconcile?.ack_actors, hookSealedBy: flags.hookSealedBy ?? cfg.reconcile?.hook_sealed_by, ownerSeals: cfg.reconcile?.owner_seals === true, dualWitness: flags.dualWitness ?? cfg.reconcile?.dual_witness, allowUnstampedSeals: flags.allowUnstampedSeals };
+}
+
 export function readRepoConfig(repo: string): ReconcileCfg {
   const p = join(repo, ".retrace.json");
   return existsSync(p) ? (JSON.parse(readFileSync(p, "utf8")) as ReconcileCfg) : {};
@@ -80,13 +102,13 @@ async function fetchEvents(project: string, pubkeyFlag?: unknown): Promise<{ eve
   return { events, note: `${events.length} events from the local store` };
 }
 
-export async function reconcileRepo(repo: string, opts: { since?: string; limit?: number; uncovered?: ReconcileLevel; refs?: string[]; pubkey?: unknown }): Promise<{ report: ReconcileReport; note: string }> {
+export async function reconcileRepo(repo: string, opts: { since?: string; limit?: number; uncovered?: ReconcileLevel; refs?: string[]; pubkey?: unknown; dualWitness?: "fail" | "warn"; allowUnstampedSeals?: boolean; hookSealedBy?: string[] }): Promise<{ report: ReconcileReport; note: string }> {
   const cfg = readRepoConfig(repo);
   const project = process.env.RETRACE_PROJECT ?? cfg.project ?? basename(repo);
   const shas = opts.refs ?? listCommits(repo, { since: opts.since, limit: opts.since ? opts.limit : opts.limit ?? 50 });
   const commits = shas.map((s) => commitFacts(repo, s));
   const { events, note } = await fetchEvents(project, opts.pubkey);
-  const report = reconcile(commits, events, { ...repoNamesFor(repo, cfg), repoPath: repo, uncovered: opts.uncovered ?? cfg.reconcile?.uncovered, ackActors: cfg.reconcile?.ack_actors });
+  const report = reconcileWithGit(repo, commits, events, { ...repoNamesFor(repo, cfg), repoPath: repo, ...reconcileOptionsFrom(cfg, opts) });
   return { report, note };
 }
 
@@ -94,7 +116,9 @@ export async function reconcileMain(flags: Record<string, string | boolean>, _po
   const repo = resolve(git(resolve(String(flags.repo ?? process.cwd())), ["rev-parse", "--show-toplevel"]));
   const uncovered = flags.uncovered ? (String(flags.uncovered) as ReconcileLevel) : undefined;
   if (uncovered && !["warn", "fail", "info"].includes(uncovered)) throw new Error("--uncovered must be warn, fail or info");
-  const { report, note } = await reconcileRepo(repo, { since: flags.since ? String(flags.since) : undefined, limit: flags.limit ? Number(flags.limit) : undefined, uncovered, pubkey: flags.pubkey });
+  const dualWitness = flags["dual-witness"] ? (String(flags["dual-witness"]) as "fail" | "warn") : undefined;
+  if (dualWitness && !["fail", "warn"].includes(dualWitness)) throw new Error("--dual-witness must be fail or warn");
+  const { report, note } = await reconcileRepo(repo, { since: flags.since ? String(flags.since) : undefined, limit: flags.limit ? Number(flags.limit) : undefined, uncovered, pubkey: flags.pubkey, dualWitness, allowUnstampedSeals: flags["allow-unstamped-seals"] === true, hookSealedBy: flags["hook-sealed-by"] ? [String(flags["hook-sealed-by"])] : undefined });
   if (flags.json) console.log(JSON.stringify(report, null, 2));
   else { console.log(renderReconcileReport(report)); console.log(`  (${note})`); }
   return flags.gate && !report.ok ? 1 : 0;

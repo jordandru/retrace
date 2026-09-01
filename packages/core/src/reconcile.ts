@@ -28,7 +28,7 @@ export interface CommitFacts {
   time?: string;
 }
 
-export type ReconcileFindingKind = "missing_commit" | "misattributed" | "uncovered" | "loose_match" | "orphan_edit" | "non_agent" | "producer_disagreement";
+export type ReconcileFindingKind = "missing_commit" | "misattributed" | "uncovered" | "loose_match" | "orphan_edit" | "non_agent" | "producer_disagreement" | "unreachable_seal";
 export type ReconcileLevel = "fail" | "warn" | "info";
 export interface ReconcileFinding {
   kind: ReconcileFindingKind;
@@ -73,6 +73,9 @@ export interface ReconcileReport {
   orphans: OrphanEdit[];
   /** edits sealed after the last commit in range: not yet committed, not a finding */
   pending: OrphanEdit[];
+  /** every sealed sha the ledger knows in this export (hook or webhook) — the caller checks these against git and
+   *  passes the missing ones back as opts.unreachableShas */
+  sealed_shas: string[];
   summary: Record<ReconcileFindingKind | "commits" | "sealed" | "acknowledged", number>;
   /** no unacknowledged fail-level finding */
   ok: boolean;
@@ -90,6 +93,26 @@ export interface ReconcileOptions {
   /** actor ids allowed to acknowledge findings with a `correction` event. Default: any actor other than the sealed
    *  committer (humans always). Set this to a reviewer list to stop agents acknowledging each other. */
   ackActors?: string[];
+  /** The EXACT server stamps that identify this repo's git hook credential — `assert:<credential name>` as the Worker
+   *  writes it (`.retrace.json` → `reconcile.hook_sealed_by`). Nothing is trusted by class: another assert credential
+   *  (a Drive forwarder, a backfill token) can send a git-shaped payload and must not pass as the hook; a `pinned:`
+   *  agent credential likewise makes a claim, never a seal. Unset → no hook seal is trusted (fail closed; the finding
+   *  says what to configure). */
+  hookSealedBy?: string[];
+  /** Accept `sealed_by: owner` (the operator token) as a hook seal. Off by default: the owner is an operator override
+   *  and not an independent machine witness — document it when you turn it on. */
+  ownerSeals?: boolean;
+  /** Accept committed events that carry no `sealed_by` stamp (sealed before the server stamped, or by a local store)
+   *  as hook seals. Default false — fail closed; pass --allow-unstamped-seals for historical runs. */
+  allowUnstampedSeals?: boolean;
+  /** Shas (7–40 hex) the ledger sealed that the repository no longer contains — the caller checks git
+   *  (`git cat-file --batch-check`). Their seals are reported as `unreachable_seal` (amended or rebased after the hook
+   *  ran) and never bound a file's window, so the edits their replacement carried still reconcile. */
+  unreachableShas?: string[];
+  /** Once both producers are active, an AGENT commit sealed by only one of them: "fail" (default — dual witness is
+   *  the point of phase B; an amend or rebase after the hook ran shows up exactly this way) or "warn" (local runs on
+   *  unpushed work). Non-agent commits always warn. */
+  dualWitness?: "fail" | "warn";
 }
 
 const EDIT_ACTIONS = new Set(["created", "edited", "deleted", "renamed", "moved"]);
@@ -147,7 +170,19 @@ export function reconcile(commits: CommitFacts[], events: Event[], opts: Reconci
   // webhook:github — a push-shaped event without that stamp is something a credentialed client sent, not GitHub.
   const hookBySha = new Map<string, Event>();
   const webhookBySha = new Map<string, Event>();
+  // committed-shaped events that are neither: a client's claim (pinned credential, unauthenticated, unstamped) — reported
+  const claimedBySha = new Map<string, Event>();
   let webhookSince: number | null = null; // the push webhook is known to be enabled from this seq on
+  const hookStamps = new Set(opts.hookSealedBy ?? []);
+  const isHookSeal = (e: Event): boolean => {
+    const stamp = sealedByOf(e);
+    const shape = e.method?.tool === "git" && (e.idempotency_key === undefined || e.idempotency_key.startsWith("git:"));
+    if (!shape) return false;
+    if (stamp === undefined) return opts.allowUnstampedSeals === true;
+    if (stamp === "owner") return opts.ownerSeals === true;
+    return hookStamps.has(stamp);
+  };
+  const seqTouches = new Map<string, { hook?: number; webhook?: number; paths: Set<string> }>(); // per sha: one boundary
   // every commit event's touched paths, in seq order — the "previous touch" index
   const commitTouches: { seq: number; paths: Set<string> }[] = [];
   // edit events with the repo paths they touch
@@ -161,12 +196,21 @@ export function reconcile(commits: CommitFacts[], events: Event[], opts: Reconci
     if (COMMIT_ACTIONS.has(e.action)) {
       const id = commitIdOf(e); const sha = id && commitSha12(id);
       const isPush = e.tags?.includes("push") === true;
+      let producer: "hook" | "webhook" | undefined;
       if (sha && isPush) {
-        if (sealedByOf(e)?.startsWith("webhook:")) { if (!webhookBySha.has(sha)) webhookBySha.set(sha, e); if (webhookSince === null) webhookSince = e.seq; }
-      } else if (sha && !hookBySha.has(sha)) hookBySha.set(sha, e);
-      const paths = new Set<string>();
-      for (const a of e.artifacts) { const p = artifactPath(a.id, { repoNames, repoPath: opts.repoPath }); if (p) paths.add(p.path); }
-      commitTouches.push({ seq: e.seq, paths });
+        if (sealedByOf(e)?.startsWith("webhook:")) { producer = "webhook"; if (!webhookBySha.has(sha)) webhookBySha.set(sha, e); if (webhookSince === null) webhookSince = e.seq; }
+        else if (!claimedBySha.has(sha)) claimedBySha.set(sha, e); // push-shaped but not stamped by the server as GitHub's delivery
+      } else if (sha) {
+        if (isHookSeal(e)) { producer = "hook"; if (!hookBySha.has(sha)) hookBySha.set(sha, e); }
+        else if (!claimedBySha.has(sha)) claimedBySha.set(sha, e);
+      }
+      // Window boundaries: one per sha, at the hook's seq when the hook sealed it (the webhook's copy lands later and
+      // must not push a file's window past edits that preceded the real commit). Claims are not boundaries.
+      if (sha && producer) {
+        const t = seqTouches.get(sha) ?? { paths: new Set<string>() };
+        for (const a of e.artifacts) { const p = artifactPath(a.id, { repoNames, repoPath: opts.repoPath }); if (p) t.paths.add(p.path); }
+        t[producer] = e.seq; seqTouches.set(sha, t);
+      }
       if (e.action === "merged" && sealedByOf(e)?.startsWith("webhook:")) {
         const head = (e.method?.params as Record<string, unknown> | undefined)?.head_sha;
         if (typeof head === "string" && /^[0-9a-f]{7,40}$/i.test(head)) webhookMergedHeads.set(head.slice(0, 12).toLowerCase(), e.seq);
@@ -181,19 +225,28 @@ export function reconcile(commits: CommitFacts[], events: Event[], opts: Reconci
         const list = acks.get(sha) ?? []; list.push({ seq: e.seq, id: e.id, actor: e.actor.id, actorType: e.actor.type }); acks.set(sha, list);
       }
     }
-    // An agent event covers a file when it is an edit verb, or when the artifact ref's PROV role says the activity
-    // generated that file's state (`generated`/`both`) — an `executed` build step or a config write counts; a `read`
-    // or a `used` ref never does. Commit events were handled above and never count as coverage.
+    // An agent event covers a file when the artifact ref's PROV role says the activity generated that file's state
+    // (`generated`/`both`). An explicit role is authoritative — `edited` with role `used` is a declared input, not a
+    // change. Only a ref with NO role falls back to the action verb. Commit events were handled above.
     if (e.actor.type === "agent") {
       const paths: { path: string; loose: boolean }[] = [];
       for (const a of e.artifacts) {
-        if (!EDIT_ACTIONS.has(e.action) && a.role !== "generated" && a.role !== "both") continue;
+        const covers = a.role !== undefined ? a.role === "generated" || a.role === "both" : EDIT_ACTIONS.has(e.action);
+        if (!covers) continue;
         const p = artifactPath(a.id, { repoNames, repoPath: opts.repoPath }); if (p) paths.push(p);
       }
       if (paths.length) edits.push({ e, paths });
     }
   }
 
+  // Boundaries come from commits that still exist. A seal for a sha git no longer has (amended / rebased after the
+  // hook ran) must not swallow the edits its replacement carried.
+  const unreachable = new Set((opts.unreachableShas ?? []).map((x) => x.toLowerCase().slice(0, 12)));
+  for (const [sha, t] of seqTouches) {
+    if (unreachable.has(sha)) continue;
+    commitTouches.push({ seq: t.hook ?? t.webhook!, paths: t.paths });
+  }
+  commitTouches.sort((a, b) => a.seq - b.seq);
   const prevTouchSeq = (path: string, beforeSeq: number | null): number => {
     let seq = -1;
     for (const t of commitTouches) { if (beforeSeq !== null && t.seq >= beforeSeq) break; if (t.paths.has(path)) seq = t.seq; }
@@ -201,7 +254,7 @@ export function reconcile(commits: CommitFacts[], events: Event[], opts: Reconci
   };
 
   const verdicts: CommitVerdict[] = [];
-  const summary: ReconcileReport["summary"] = { commits: commits.length, sealed: 0, acknowledged: 0, missing_commit: 0, misattributed: 0, uncovered: 0, loose_match: 0, orphan_edit: 0, non_agent: 0, producer_disagreement: 0 };
+  const summary: ReconcileReport["summary"] = { commits: commits.length, sealed: 0, acknowledged: 0, missing_commit: 0, misattributed: 0, uncovered: 0, loose_match: 0, orphan_edit: 0, non_agent: 0, producer_disagreement: 0, unreachable_seal: 0 };
   const consumed = new Set<string>(); // "<seq>\u0000<path>" pairs covered by some commit — an event naming A+B where only A was committed still leaves B an orphan
   for (const c of commits) {
     const short = c.sha.slice(0, 12);
@@ -219,8 +272,14 @@ export function reconcile(commits: CommitFacts[], events: Event[], opts: Reconci
     };
     if (!sealedEvent) {
       const mergedIn = webhookMergedHeads.get(short);
+      const claim = claimedBySha.get(short);
       const who = `${c.author?.email ?? c.author?.name ?? "unknown author"}, ${c.time ?? "?"}`;
-      if (mergedIn !== undefined) add("missing_commit", "warn", `${short} (${who}) has no committed event, but it is the head of a pull request whose merge #${mergedIn} was sealed by the GitHub webhook — made where no hook runs; enable the push webhook (RETRACE_GITHUB_PUSH=1) to seal it`);
+      if (claim) {
+        const stamp = sealedByOf(claim);
+        const hint = stamp === undefined && !claim.tags?.includes("push") ? " (pass --allow-unstamped-seals for pre-stamp history)" : stamp === "owner" ? " (owner seals are an operator override: reconcile.owner_seals)" : hookStamps.size === 0 ? ` (no hook credential is configured: set reconcile.hook_sealed_by to ["${stamp}"] in .retrace.json if that IS the git hook)` : "";
+        add("missing_commit", "fail", `${short} (${who}) has a committed event #${claim.seq} sealed as ${stamp ?? "unstamped"} by ${claim.actor.type} ${claim.actor.id} — not this repo's git hook credential and not the GitHub webhook; nothing authenticated this commit${hint}`);
+      }
+      else if (mergedIn !== undefined) add("missing_commit", "warn", `${short} (${who}) has no committed event, but it is the head of a pull request whose merge #${mergedIn} was sealed by the GitHub webhook — made where no hook runs; enable the push webhook (RETRACE_GITHUB_PUSH=1) to seal it`);
       else add("missing_commit", "fail", `${short} (${who}) has no committed/merged event — the git hook or webhook missed it`);
       verdicts.push(v); continue;
     }
@@ -233,9 +292,13 @@ export function reconcile(commits: CommitFacts[], events: Event[], opts: Reconci
     if (hookEvent && webhookEvent && who(hookEvent.actor) !== who(webhookEvent.actor)) {
       add("producer_disagreement", "fail", `git hook #${hookEvent.seq} sealed ${short} as ${who(hookEvent.actor)}; the GitHub push webhook #${webhookEvent.seq} resolved ${who(webhookEvent.actor)} from the pushed commit`);
     } else if (!hookEvent && webhookEvent) {
-      add("producer_disagreement", "warn", `${short} was sealed only by the GitHub push webhook #${webhookEvent.seq}; the git hook did not run on the committing machine`);
+      // Dual witness policy: an agent commit only GitHub saw is what an amend or rebase after the hook ran looks like
+      // (the hook's seal stays behind on the old sha — see sealed_not_in_range). Fail unless the run opts into warn.
+      const lone = sealedEvent.actor.type === "agent" ? (opts.dualWitness ?? "fail") : "warn";
+      add("producer_disagreement", lone, `${short} was sealed only by the GitHub push webhook #${webhookEvent.seq}; the git hook never sealed this sha — the hook did not run on the committing machine, or the commit was amended/rebased after it ran`);
     } else if (hookEvent && !webhookEvent && webhookSince !== null && hookEvent.seq > webhookSince) {
-      add("producer_disagreement", "warn", `${short} was sealed by the git hook #${hookEvent.seq} but never seen by the GitHub push webhook (enabled since #${webhookSince}) — not pushed, or pushed outside the webhook`);
+      const lone = sealedEvent.actor.type === "agent" ? (opts.dualWitness ?? "fail") : "warn";
+      add("producer_disagreement", lone, `${short} was sealed by the git hook #${hookEvent.seq} but never seen by the GitHub push webhook (enabled since #${webhookSince}) — not pushed, or pushed outside the webhook`);
     }
     const isMerge = sealedEvent.action === "merged" || c.parents.length > 1;
     if (isMerge) { verdicts.push(v); continue; }
@@ -300,15 +363,25 @@ export function reconcile(commits: CommitFacts[], events: Event[], opts: Reconci
   }
   const orphans = [...orphanMap.values()].sort((a, b) => a.last_seq - b.last_seq);
   summary.orphan_edit = orphans.length;
+  // seals the repository no longer has: reported as their own verdicts (the replacement commit is what the
+  // dual-witness policy judges)
+  for (const sha of unreachable) {
+    const e = hookBySha.get(sha) ?? webhookBySha.get(sha);
+    if (!e) continue;
+    const producer = hookBySha.has(sha) ? "hook" : "webhook";
+    verdicts.push({ sha, short: sha, sealed: { seq: e.seq, id: e.id, action: e.action, actor: e.actor, producer }, coverage: {}, findings: [{ kind: "unreachable_seal", level: "warn", sha, detail: `${sha} was sealed by the ${producer === "hook" ? "git hook" : "GitHub push webhook"} #${e.seq} as ${e.actor.type} ${e.actor.id} but no longer exists in this repository — amended or rebased after it was sealed; its replacement must be sealed by both producers` }] });
+    summary.unreachable_seal++;
+  }
+  const sealed_shas = [...new Set([...hookBySha.keys(), ...webhookBySha.keys()])];
   const ok = !verdicts.some((v) => v.findings.some((f) => f.level === "fail"));
-  return { format: "retrace-reconcile/1", repo_name: opts.repoName, range: { commits: commits.length, first_seq: firstSeq, last_seq: lastSeq, head_seq: headSeq }, commits: verdicts, orphans, pending: [...pendingMap.values()], summary, ok };
+  return { format: "retrace-reconcile/1", repo_name: opts.repoName, range: { commits: commits.length, first_seq: firstSeq, last_seq: lastSeq, head_seq: headSeq }, commits: verdicts, orphans, pending: [...pendingMap.values()], sealed_shas, summary, ok };
 }
 
 /** One-line-per-finding text rendering shared by the CLI and the workflow PR body. */
 export function renderReconcileReport(r: ReconcileReport): string {
   const lines: string[] = [];
   const s = r.summary;
-  lines.push(`reconcile ${r.repo_name}: ${s.commits} commit${s.commits === 1 ? "" : "s"}, ${s.sealed} sealed — ${s.missing_commit} missing, ${s.misattributed} misattributed, ${s.producer_disagreement} producer-disagreement, ${s.uncovered} uncovered, ${s.loose_match} loose, ${s.non_agent} non-agent, ${s.orphan_edit} orphan path${s.orphan_edit === 1 ? "" : "s"}, ${r.pending.length} pending${s.acknowledged ? `, ${s.acknowledged} acknowledged` : ""} → ${r.ok ? "OK" : "NOT OK"}`);
+  lines.push(`reconcile ${r.repo_name}: ${s.commits} commit${s.commits === 1 ? "" : "s"}, ${s.sealed} sealed — ${s.missing_commit} missing, ${s.misattributed} misattributed, ${s.producer_disagreement} producer-disagreement, ${s.unreachable_seal} unreachable-seal, ${s.uncovered} uncovered, ${s.loose_match} loose, ${s.non_agent} non-agent, ${s.orphan_edit} orphan path${s.orphan_edit === 1 ? "" : "s"}, ${r.pending.length} pending${s.acknowledged ? `, ${s.acknowledged} acknowledged` : ""} → ${r.ok ? "OK" : "NOT OK"}`);
   for (const v of r.commits) for (const f of v.findings) {
     lines.push(`  ${f.acknowledged ? "ACK " : f.level.toUpperCase().padEnd(4)} ${f.kind.padEnd(14)} ${f.detail}${f.acknowledged ? ` (corrected by #${f.acknowledged.seq}, ${f.acknowledged.actor})` : ""}`);
   }

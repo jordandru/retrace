@@ -136,7 +136,7 @@ import type { ReconcileReport } from "@retrace-dev/core";
 
 test("captureCoverageFinding: worst unacknowledged level wins; acknowledged and info-only reports pass", () => {
   const base = (findings: ReconcileReport["commits"][0]["findings"], coverage: ReconcileReport["commits"][0]["coverage"] = { "a.ts": { actors: ["claude-code"], events: 1, loose: false, window: { after: 1, before: 5 } } }): ReconcileReport =>
-    ({ format: "retrace-reconcile/1", repo_name: "r", range: { commits: 1, first_seq: 5, last_seq: 5, head_seq: 5 }, commits: [{ sha: "a".repeat(40), short: "a".repeat(12), coverage, findings }], orphans: [], pending: [], summary: {} as ReconcileReport["summary"], ok: true });
+    ({ format: "retrace-reconcile/1", repo_name: "r", range: { commits: 1, first_seq: 5, last_seq: 5, head_seq: 5 }, commits: [{ sha: "a".repeat(40), short: "a".repeat(12), coverage, findings }], orphans: [], pending: [], sealed_shas: [], summary: {} as ReconcileReport["summary"], ok: true });
   assert.equal(captureCoverageFinding(base([])).level, "pass");
   assert.match(captureCoverageFinding(base([])).detail, /1 file covered by claude-code/);
   assert.equal(captureCoverageFinding(base([{ kind: "uncovered", level: "warn", file: "b.ts", detail: "b.ts: no edit event" }])).level, "warn");

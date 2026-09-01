@@ -1,7 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Event } from "./schema.js";
-import { reconcile, artifactPath, renderReconcileReport, CommitFacts } from "./reconcile.js";
+import { reconcile as reconcileCore, artifactPath, renderReconcileReport, CommitFacts } from "./reconcile.js";
+/** every test names this repo's hook credential explicitly, as .retrace.json would */
+const HOOK = "assert:retrace-git";
+const reconcile: typeof reconcileCore = (c, e, o) => reconcileCore(c, e, { hookSealedBy: [HOOK], ...o });
 
 const REPO = "jordandru/retrace";
 const sha = (c: string) => c.repeat(40);
@@ -15,7 +18,9 @@ const jordan = { type: "human" as const, id: "jordan@example.com" };
 const commit = (c: string, files: (string | { path: string; status: "R"; from: string })[], parents = ["p"]): CommitFacts => ({
   sha: sha(c), parents, files: files.map((f) => typeof f === "string" ? { path: f, status: "M" as const } : f), author: { email: "who@example.com" }, time: "2026-09-01T00:00:00Z",
 });
-const sealed = (seq: number, c: string, actor: any, files: string[], action: Event["action"] = "committed") => ev(seq, actor, action, [cid(c), ...files.map((f) => `repo:${REPO}#${f}`)]);
+/** stamp: the server's sealed_by; "" = unstamped (an explicit `undefined` would select the default) */
+const sealed = (seq: number, c: string, actor: any, files: string[], action: Event["action"] = "committed", stamp: string = HOOK) =>
+  ev(seq, actor, action, [cid(c), ...files.map((f) => `repo:${REPO}#${f}`)], { method: { tool: "git", automated: true, params: stamp ? { sealed_by: stamp } : {} }, idempotency_key: `git:${sha(c)}` });
 
 test("artifactPath maps hook, alias, file: and bare ids; ignores foreign schemes", () => {
   const o = { repoNames: new Set([REPO, "retrace"]), repoPath: "/home/u/retrace" };
@@ -82,7 +87,7 @@ test("reconcile: covered, uncovered, misattributed (+acknowledged), partial swee
   assert.equal(r.summary.acknowledged, 1);
   assert.equal(r.summary.misattributed, 3);
   const text = renderReconcileReport(r);
-  assert.match(text, /11 commits, 10 sealed — 1 missing, 3 misattributed, 0 producer-disagreement, 2 uncovered, 1 loose, 1 non-agent, 1 orphan path, 1 pending, 1 acknowledged → NOT OK/);
+  assert.match(text, /11 commits, 10 sealed — 1 missing, 3 misattributed, 0 producer-disagreement, 0 unreachable-seal, 2 uncovered, 1 loose, 1 non-agent, 1 orphan path, 1 pending, 1 acknowledged → NOT OK/);
   assert.match(text, /ACK {2}misattributed .*corrected by #11/);
 
   // without the missing commit the report is OK; with uncovered=fail it is not
@@ -168,11 +173,15 @@ test("phase B: the GitHub push webhook is a second producer — agreement is sil
   assert.deepEqual(kinds("a"), []); assert.equal(by.a.sealed?.producer, "hook"); assert.equal(by.a.webhook?.seq, 3);
   assert.deepEqual(kinds("b"), ["producer_disagreement:fail"]);
   assert.match(by.b.findings[0].detail, /git hook #4 sealed .* as agent codex; the GitHub push webhook #5 resolved agent claude-code/);
-  assert.deepEqual(kinds("c"), ["producer_disagreement:warn"]); assert.equal(by.c.sealed?.producer, "webhook");
+  assert.deepEqual(kinds("c"), ["producer_disagreement:fail"], "an agent commit only GitHub saw fails under the default dual-witness policy"); assert.equal(by.c.sealed?.producer, "webhook");
   assert.deepEqual(by.c.coverage["c.ts"].actors, ["codex"], "a webhook-only seal still gets coverage evaluated");
-  assert.deepEqual(kinds("d"), ["producer_disagreement:warn"]);
+  assert.deepEqual(kinds("d"), ["producer_disagreement:fail"]);
   assert.match(by.d.findings[0].detail, /never seen by the GitHub push webhook \(enabled since #3\)/);
+  const lenient = reconcile([commit("c", ["c.ts"]), commit("d", ["d.ts"])], events, { ...opts, dualWitness: "warn" });
+  assert.deepEqual(lenient.commits.map((v) => v.findings[0].level), ["warn", "warn"], "--dual-witness warn for local, unpushed work");
+  assert.equal(lenient.ok, true);
   assert.deepEqual(kinds("e"), ["missing_commit:fail"], "a push-shaped event without the server's webhook stamp seals nothing");
+  assert.match(by.e.findings[0].detail, /sealed as unstamped by agent codex — not this repo's git hook credential and not the GitHub webhook/);
   assert.equal(r.summary.producer_disagreement, 3);
   // before the webhook existed, a hook-only commit is simply normal
   const early = reconcile([commit("d", ["d.ts"])], [...edits, sealed(7, "d", codex, ["d.ts"])], opts);
@@ -186,4 +195,79 @@ test("coverage honours PROV roles: an executed/other event whose artifact is gen
   assert.deepEqual(run(withRole(1, "other", "generated")).findings, []);
   assert.deepEqual(run(withRole(1, "executed", "used")).findings.map((f) => f.kind), ["uncovered"]);
   assert.deepEqual(run(withRole(1, "read", "used")).findings.map((f) => f.kind), ["uncovered"]);
+});
+
+test("adversarial (Codex review of 1491c67): a committed-shaped event from a pinned agent credential is a claim, not a hook seal", () => {
+  // shape is perfect: action committed, tool git, git: key — only the server stamp says who really sealed it
+  const claim = sealed(5, "a", codex, ["a.ts"], "committed", "pinned:agent/codex");
+  const edits = [ev(1, codex, "edited", ["repo:retrace#a.ts"])];
+  const r = reconcile([commit("a", ["a.ts"])], [...edits, claim], { repoName: REPO, aliases: ["retrace"] });
+  assert.equal(r.commits[0].sealed, undefined);
+  assert.deepEqual([r.commits[0].findings[0].kind, r.commits[0].findings[0].level], ["missing_commit", "fail"]);
+  assert.match(r.commits[0].findings[0].detail, /sealed as pinned:agent\/codex by agent codex — not this repo's git hook credential/);
+  // …and it cannot "agree" with the real webhook to look dual-witnessed: the webhook alone is a lone producer
+  const push = ev(6, codex, "committed", [cid("a"), `repo:${REPO}#a.ts`], { tags: ["github", "push"], method: { tool: "git", params: { producer: "github-push", sealed_by: "webhook:github" } }, idempotency_key: `gh:push:${REPO}:${sha("a")}` });
+  const r2 = reconcile([commit("a", ["a.ts"])], [...edits, claim, push], { repoName: REPO, aliases: ["retrace"] });
+  assert.equal(r2.commits[0].sealed?.producer, "webhook");
+  assert.deepEqual(r2.commits[0].findings.map((f) => `${f.kind}:${f.level}`), ["producer_disagreement:fail"]);
+  for (const stamp of ["", "unauthenticated", "webhook:github"]) {
+    const r3 = reconcile([commit("a", ["a.ts"])], [...edits, sealed(5, "a", codex, ["a.ts"], "committed", stamp)], { repoName: REPO, aliases: ["retrace"] });
+    assert.equal(r3.commits[0].sealed, undefined, `stamp ${stamp} is not a hook seal`);
+  }
+  // pre-stamp history is only accepted when the run says so
+  const legacy = reconcile([commit("a", ["a.ts"])], [...edits, sealed(5, "a", codex, ["a.ts"], "committed", "")], { repoName: REPO, aliases: ["retrace"], allowUnstampedSeals: true });
+  assert.equal(legacy.commits[0].sealed?.producer, "hook");
+  assert.deepEqual(legacy.commits[0].findings, []);
+  // NEGATIVE (Jordan/Codex refinement): a DIFFERENT assert credential — the Drive forwarder — with a perfect git key,
+  // tool and action is not the hook. Trust is the exact configured stamp, never the credential class.
+  const drive = reconcile([commit("a", ["a.ts"])], [...edits, sealed(5, "a", codex, ["a.ts"], "committed", "assert:Drive forwarder (assert)")], { repoName: REPO, aliases: ["retrace"] });
+  assert.equal(drive.commits[0].sealed, undefined);
+  assert.match(drive.commits[0].findings[0].detail, /sealed as assert:Drive forwarder \(assert\) .* not this repo's git hook credential/);
+  // no configured hook credential at all → nothing is a hook seal, and the finding says what to set
+  const unconfigured = reconcileCore([commit("a", ["a.ts"])], [...edits, sealed(5, "a", codex, ["a.ts"])], { repoName: REPO, aliases: ["retrace"] });
+  assert.equal(unconfigured.commits[0].sealed, undefined);
+  assert.match(unconfigured.commits[0].findings[0].detail, /set reconcile.hook_sealed_by to \["assert:retrace-git"\]/);
+  // owner seals: an explicit, documented operator override — off by default
+  assert.equal(reconcile([commit("a", ["a.ts"])], [...edits, sealed(5, "a", codex, ["a.ts"], "committed", "owner")], { repoName: REPO, aliases: ["retrace"] }).commits[0].sealed, undefined);
+  assert.equal(reconcile([commit("a", ["a.ts"])], [...edits, sealed(5, "a", codex, ["a.ts"], "committed", "owner")], { repoName: REPO, aliases: ["retrace"], ownerSeals: true }).commits[0].sealed?.producer, "hook");
+  // the stamp must match exactly: a prefix or a look-alike name is not it
+  for (const near of ["assert:retrace-git-2", "assert:retrace-gi", "pinned:retrace-git", "assert:", "assert:retrace-git (assert)"]) {
+    assert.equal(reconcile([commit("a", ["a.ts"])], [...edits, sealed(5, "a", codex, ["a.ts"], "committed", near)], { repoName: REPO, aliases: ["retrace"] }).commits[0].sealed, undefined, near);
+  }
+});
+
+test("adversarial: an amend after the hook ran leaves the old seal behind and makes the new sha webhook-only — both are reported", () => {
+  const edits = [ev(1, codex, "edited", ["repo:retrace#a.ts"])];
+  const oldSeal = sealed(2, "a", codex, ["a.ts"]);                                                      // hook sealed the original sha
+  const pushNew = ev(3, codex, "committed", [cid("b"), `repo:${REPO}#a.ts`], { tags: ["github", "push"], method: { tool: "git", params: { producer: "github-push", sealed_by: "webhook:github" } }, idempotency_key: `gh:push:${REPO}:${sha("b")}` });
+  const r0 = reconcile([commit("b", ["a.ts"])], [...edits, oldSeal, pushNew], { repoName: REPO, aliases: ["retrace"] }); // caller has not checked git yet
+  assert.deepEqual(r0.sealed_shas.sort(), [sha("a").slice(0, 12), sha("b").slice(0, 12)].sort(), "core hands back every sealed sha for the caller to check against git");
+  // the caller found sha a is gone from the repository
+  const r = reconcile([commit("b", ["a.ts"])], [...edits, oldSeal, pushNew], { repoName: REPO, aliases: ["retrace"], unreachableShas: [sha("a")] });
+  assert.deepEqual(r.commits[0].findings.map((f) => `${f.kind}:${f.level}`), ["producer_disagreement:fail"], "the abandoned seal must not swallow the edit the amended commit carried");
+  assert.deepEqual(r.commits[0].coverage["a.ts"].actors, ["codex"]);
+  assert.match(r.commits[0].findings[0].detail, /amended\/rebased after it ran/);
+  assert.equal(r.ok, false);
+  assert.deepEqual(r.commits[1].findings.map((f) => `${f.kind}:${f.level}`), ["unreachable_seal:warn"]);
+  assert.match(r.commits[1].findings[0].detail, new RegExp(`${sha("a").slice(0, 12)} was sealed by the git hook #2 as agent codex but no longer exists`));
+  assert.equal(r.summary.unreachable_seal, 1);
+});
+
+test("adversarial: window boundaries are one per sha at the hook's seq — the webhook's later copy must not swallow an edit", () => {
+  const push = (seq: number, c: string) => ev(seq, codex, "committed", [cid(c), `repo:${REPO}#a.ts`, `repo:${REPO}#b.ts`], { tags: ["github", "push"], method: { tool: "git", params: { producer: "github-push", sealed_by: "webhook:github" } }, idempotency_key: `gh:push:${REPO}:${sha(c)}` });
+  // hook A #1 (touches b.ts), edit b.ts #2, webhook A #3, hook B #4
+  const events = [sealed(1, "a", codex, ["a.ts", "b.ts"]), ev(2, codex, "edited", ["repo:retrace#b.ts"]), push(3, "a"), sealed(4, "b", codex, ["b.ts"]), push(5, "b")];
+  const r = reconcile([commit("a", ["a.ts", "b.ts"]), commit("b", ["b.ts"])], events, { repoName: REPO, aliases: ["retrace"] });
+  const b = r.commits[1];
+  assert.deepEqual(b.coverage["b.ts"].window, { after: 1, before: 4 }, "boundary is the hook seal #1, not the webhook copy #3");
+  assert.deepEqual(b.coverage["b.ts"].actors, ["codex"]);
+  assert.deepEqual(b.findings, []);
+});
+
+test("adversarial: an explicit artifact role is authoritative — `edited` with role `used` does not cover; a role-less ref falls back to the verb", () => {
+  const withRole = (role?: "generated" | "both" | "used") => ({ ...ev(1, codex, "edited", []), artifacts: [{ id: "repo:retrace#w.toml", ...(role ? { role } : {}) }] });
+  const run = (e: Event) => reconcile([commit("a", ["w.toml"])], [e, sealed(9, "a", codex, ["w.toml"])], { repoName: REPO, aliases: ["retrace"] }).commits[0];
+  assert.deepEqual(run(withRole("used")).findings.map((f) => f.kind), ["uncovered"], "edited + used is a declared input, not a change");
+  assert.deepEqual(run(withRole("both")).findings, []);
+  assert.deepEqual(run(withRole(undefined)).findings, [], "no role: the verb decides");
 });
