@@ -2,9 +2,10 @@
   "mcpServers": {
     "retrace": {
       "type": "stdio",
-      "command": "node",
+      "command": "bash",
       "args": [
-        "${workspaceFolder}/packages/mcp-server/dist/index.js"
+        "-c",
+        "set -a && . \"$HOME/.retrace/cursor.env\" && set +a && exec node packages/mcp-server/dist/index.js"
       ],
       "envFile": "${userHome}/.retrace/cursor.env",
       "env": {
