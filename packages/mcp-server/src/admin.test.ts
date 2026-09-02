@@ -1,10 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseCredentials } from "@retrace-dev/core";
-import { DEFAULT_HARNESSES, planAgentCredential, renderAgentOnboarding, planTeam, planCredentials, validateSpec, teamsIn, appendCredentials, readCredentialsFile, gitHookActorId, ciActorId, main, TeamSpec } from "./admin.js";
+import { DEFAULT_HARNESSES, planAgentCredential, renderAgentOnboarding, planTeam, planCredentials, validateSpec, teamsIn, appendCredentials, writeSecretFile, readCredentialsFile, gitHookActorId, ciActorId, main, TeamSpec } from "./admin.js";
 
 /** deterministic "randomness": counter-filled buffers, distinct per call */
 const fakeRand = () => { let n = 0; return (len: number) => Buffer.alloc(len, ++n); };
@@ -71,6 +71,18 @@ test("appendCredentials writes atomically with mode 0600 and keeps existing entr
   const teams = teamsIn(back);
   assert.deepEqual(Object.keys(teams).sort(), ["*", "acme-app"]);
   assert.equal(teams["acme-app"].length, added.length);
+});
+
+test("writeSecretFile atomically replaces an existing file and enforces mode 0600", () => {
+  const dir = mkdtempSync(join(tmpdir(), "retrace-admin-secret-"));
+  const file = join(dir, "onboarding.md");
+  writeFileSync(file, "old contents");
+  chmodSync(file, 0o644);
+
+  writeSecretFile(file, "new secret contents");
+
+  assert.equal(readFileSync(file, "utf8"), "new secret contents");
+  assert.equal(statSync(file).mode & 0o777, 0o600);
 });
 
 test("main new-team: dry run touches nothing; real run appends, writes onboarding 0600, and refuses a second set for the same project", async () => {

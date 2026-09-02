@@ -21,7 +21,7 @@
  *
  * The project itself needs no creation step: a Retrace project exists from its first event.
  */
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -271,6 +271,18 @@ export function appendCredentials(path: string, existing: Credential[], added: C
   renameSync(tmp, path);
 }
 
+/** Atomically replace a secret-bearing file with a freshly created 0600 inode, even when the destination exists. */
+export function writeSecretFile(path: string, contents: string): void {
+  const tmp = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
+  writeFileSync(tmp, contents, { mode: 0o600, flag: "wx" });
+  try {
+    renameSync(tmp, path);
+  } catch (error) {
+    try { unlinkSync(tmp); } catch {}
+    throw error;
+  }
+}
+
 function parseArgs(argv: string[]) {
   const flags: Record<string, string | boolean> = {}; const pos: string[] = [];
   for (let i = 0; i < argv.length; i++) { const a = argv[i]; if (a.startsWith("--")) { const n = argv[i + 1]; if (n && !n.startsWith("--")) { flags[a.slice(2)] = n; i++; } else flags[a.slice(2)] = true; } else pos.push(a); }
@@ -310,7 +322,7 @@ export async function main(argv = process.argv.slice(2), env = process.env, out:
       return 0;
     }
     appendCredentials(credentialsFile, existing, plan.credentials);
-    writeFileSync(onboardingPath, plan.onboarding, { mode: 0o600 });
+    writeSecretFile(onboardingPath, plan.onboarding);
     out(`added ${plan.credentials.length} credentials for ${project} to ${credentialsFile} (mode 0600)`);
     out(`wrote ${onboardingPath} (mode 0600) — it contains the team's tokens; send it over a channel you'd send a password over, then delete it`);
     out("");
@@ -344,7 +356,7 @@ export async function main(argv = process.argv.slice(2), env = process.env, out:
       return 0;
     }
     appendCredentials(credentialsFile, existing, [credential]);
-    writeFileSync(onboardingPath, renderAgentOnboarding(spec, credential), { mode: 0o600 });
+    writeSecretFile(onboardingPath, renderAgentOnboarding(spec, credential));
     out(`added pinned agent/${spec.harness} for ${spec.member} in ${project} to ${credentialsFile} (mode 0600)`);
     out(`wrote ${onboardingPath} (mode 0600) — it contains one token; send it securely, then delete it`);
     out(`upload the updated secret: npx wrangler secret put RETRACE_CREDENTIALS < ${credentialsFile}`);
