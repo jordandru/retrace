@@ -13,8 +13,10 @@
  * annotation surface (Codex review of 34e4871: leaving those out let a compromised server rewrite WHERE/HOW and inject
  * semantic tags like `correction` while the event stayed "producer_signed"). The reserved, unsigned remainder is:
  * tags starting `caused_by:` (markCausedByUnverified), method.params sealed_by / producer_sig_verdict / relayed_by /
- * caused_by_problem (server stamps), and location.client (the router drops or keeps it). Producers may not set any of
- * those themselves — signProducer refuses, so signed bytes and stored bytes can only differ by server annotations.
+ * caused_by_problem (server stamps), and location.client. The first two are REFUSED on input (signProducer throws —
+ * a producer has no business writing server stamps); location.client is different: producers legitimately send it
+ * (the MCP server sets it from the handshake) and the router then drops or keeps it, so it is allowed on input but
+ * simply unsigned — like the rest of the reserved surface it remains server-writable, and the never-claim list says so.
  * Deliberately NOT signed: actor.model (the model stays asserted — never claim it), display_name/version.
  *
  * A signing producer MUST set `timestamp` (the server fills a missing one — the signature could never be re-verified)
@@ -78,7 +80,8 @@ export function producerSignedPayload(e: Signable): Record<string, unknown> {
 }
 
 /** Attach a signature to an input about to be submitted. Throws without `timestamp` or `idempotency_key`, and when
- *  the input trespasses on the server's annotation surface — see the module doc. */
+ *  the input carries server stamps (reserved tags / method params). `location.client` is fine to send — it is merely
+ *  unsigned. See the module doc. */
 export async function signProducer<T extends EventInput>(input: T, privateJwk: JsonWebKey): Promise<T & { producer_sig: ProducerSig }> {
   if (!input.timestamp) throw new Error("a signing producer must set timestamp itself; the server would fill it and the signature could never be re-verified");
   if (!input.idempotency_key) throw new Error("a signing producer must set idempotency_key: it makes the signed bytes unique, which is what lets offline verification catch a store sealing one signed event twice");
