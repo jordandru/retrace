@@ -15,6 +15,16 @@ export interface HistoryQuery {
   until?: string;
   text?: string; // matches intent / action_detail / change.summary / tags
   limit?: number;
+  /** Exclusive upper bound: only events with `seq < before_seq`. Walks older pages of a newest-first window. */
+  before_seq?: number;
+}
+
+/** One page of history. `events` are ascending by seq; they are the *newest* `limit` matches, not genesis. */
+export interface HistoryPage {
+  events: Event[];
+  truncated: boolean;
+  /** Oldest seq in this page — pass as `before_seq` to fetch the previous (older) page. Absent when `truncated` is false. */
+  next_before_seq?: number;
 }
 
 /** Max rows a history() query may return. Bound as a parameter, never interpolated (audit 2026-08-30). */
@@ -22,6 +32,66 @@ export const HISTORY_LIMIT_MAX = 100_000;
 export function clampHistoryLimit(limit?: number): number {
   if (typeof limit !== "number" || !Number.isFinite(limit) || limit < 1) return 100;
   return Math.min(Math.floor(limit), HISTORY_LIMIT_MAX);
+}
+
+/** Turn newest-first rows (length `limit` or `limit+1`) into an ascending page with a truncation cursor. */
+export function historyPageFromNewestFirst(newestFirst: Event[], limit: number): HistoryPage {
+  const truncated = newestFirst.length > limit;
+  const kept = truncated ? newestFirst.slice(0, limit) : newestFirst;
+  const events = kept.slice().reverse();
+  return { events, truncated, next_before_seq: truncated && events.length ? events[0].seq : undefined };
+}
+
+/** In-memory history: newest `limit` matches, ascending. Used by tests and as the spec SQL stores must match. */
+export function pageHistoryNewest(events: Event[], q: HistoryQuery): HistoryPage {
+  let rows = events.filter((e) => e.project === q.project);
+  if (q.artifact_id) rows = rows.filter((e) => e.artifacts.some((a) => a.id === q.artifact_id));
+  if (q.actor_id) rows = rows.filter((e) => e.actor.id === q.actor_id);
+  if (q.actor_type) rows = rows.filter((e) => e.actor.type === q.actor_type);
+  if (q.action) rows = rows.filter((e) => e.action === q.action);
+  if (q.since) rows = rows.filter((e) => e.timestamp >= q.since!);
+  if (q.until) rows = rows.filter((e) => e.timestamp <= q.until!);
+  if (q.text) {
+    const needle = q.text.toLowerCase();
+    rows = rows.filter((e) => JSON.stringify(e).toLowerCase().includes(needle));
+  }
+  if (typeof q.before_seq === "number" && Number.isFinite(q.before_seq)) rows = rows.filter((e) => e.seq < q.before_seq!);
+  rows.sort((a, b) => b.seq - a.seq);
+  return historyPageFromNewestFirst(rows, clampHistoryLimit(q.limit));
+}
+
+/** Walk newest-window pages until complete. Scoped export uses this so a cap cannot omit matching events. */
+export async function collectHistory(store: Pick<EventStore, "history">, q: HistoryQuery): Promise<Event[]> {
+  const out: Event[] = [];
+  const seen = new Set<string>();
+  let before_seq = q.before_seq;
+  for (let pages = 0; pages < 10_000; pages++) {
+    const page = await store.history({ ...q, before_seq, limit: HISTORY_LIMIT_MAX });
+    for (const e of page.events) {
+      if (seen.has(e.id)) continue;
+      seen.add(e.id);
+      out.push(e);
+    }
+    if (!page.truncated || page.next_before_seq === undefined) break;
+    if (before_seq !== undefined && page.next_before_seq >= before_seq) break;
+    before_seq = page.next_before_seq;
+  }
+  out.sort((a, b) => a.seq - b.seq);
+  return out;
+}
+
+/** Accept a HistoryPage or a legacy Event[] (pre-pagination Worker). An array is treated as complete (truncated: false). */
+export function asHistoryPage(body: unknown): HistoryPage {
+  if (Array.isArray(body)) return { events: body as Event[], truncated: false };
+  if (body && typeof body === "object" && Array.isArray((body as HistoryPage).events)) {
+    const p = body as HistoryPage;
+    return {
+      events: p.events,
+      truncated: p.truncated === true,
+      next_before_seq: typeof p.next_before_seq === "number" ? p.next_before_seq : undefined,
+    };
+  }
+  throw new Error("history response was neither an event list nor a history page");
 }
 
 /** LIKE pattern for a substring search that treats % and _ as literals (audit 2026-08-30). */
@@ -49,7 +119,7 @@ export interface EventStore {
   insert(e: Event): Promise<void>;
   byIdempotencyKey(project: string, key: string): Promise<Event | null>;
   get(id: string): Promise<Event | null>;
-  history(q: HistoryQuery): Promise<Event[]>;
+  history(q: HistoryQuery): Promise<HistoryPage>;
   all(project: string): Promise<Event[]>;
   projects(): Promise<string[]>;
   /** Delete every row belonging to a project AND insert `audit` (already sealed onto its own project's chain) in the

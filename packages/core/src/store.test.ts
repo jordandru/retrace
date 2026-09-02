@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   adapterIdempotencyError, AdapterIdempotencyError, CAUSED_BY_UNVERIFIED_TAG, appendEvent,
   EventInput, Event, EventStore, Share, likeContains, clampHistoryLimit, HISTORY_LIMIT_MAX,
+  pageHistoryNewest, collectHistory, asHistoryPage,
 } from "./index.js";
 
 class MemStore implements EventStore {
@@ -13,7 +14,7 @@ class MemStore implements EventStore {
   async get(id: string) { return this.events.find((e) => e.id === id) ?? null; }
   async all(p: string) { return this.events.filter((e) => e.project === p); }
   async projects() { return [...new Set(this.events.map((e) => e.project))]; }
-  async history(q: { project: string }) { return this.all(q.project); }
+  async history(q: { project: string }) { return pageHistoryNewest(this.events, q); }
   async createShare(_s: Share) {}
   async getShare() { return null; }
 }
@@ -32,6 +33,48 @@ test("likeContains treats % and _ as literals; clampHistoryLimit binds a finite 
   assert.equal(clampHistoryLimit(-4), 100);
   assert.equal(clampHistoryLimit(3.9), 3);
   assert.equal(clampHistoryLimit(HISTORY_LIMIT_MAX + 1), HISTORY_LIMIT_MAX);
+});
+
+test("pageHistoryNewest: default limit is the newest 100, not genesis; cursor walks older pages", () => {
+  const events = Array.from({ length: 130 }, (_, seq) => ({
+    id: `evt_${seq}`, project: "p", seq, timestamp: "2026-09-01T00:00:00.000Z", received_at: "2026-09-01T00:00:00.000Z",
+    actor: { type: "agent" as const, id: "claude-code" }, action: "edited" as const, artifacts: [{ id: "a" }],
+    prev_hash: "0", hash: `h${seq}`,
+  }));
+  const def = pageHistoryNewest(events, { project: "p" });
+  assert.equal(def.events.length, 100);
+  assert.equal(def.events[0].seq, 30);
+  assert.equal(def.events.at(-1)?.seq, 129);
+  assert.equal(def.truncated, true);
+  assert.equal(def.next_before_seq, 30);
+  const older = pageHistoryNewest(events, { project: "p", before_seq: def.next_before_seq, limit: 100 });
+  assert.equal(older.events[0].seq, 0);
+  assert.equal(older.events.at(-1)?.seq, 29);
+  assert.equal(older.truncated, false);
+  assert.equal(older.next_before_seq, undefined);
+  const small = pageHistoryNewest(events, { project: "p", limit: 3 });
+  assert.deepEqual(small.events.map((e) => e.seq), [127, 128, 129]);
+  assert.equal(small.next_before_seq, 127);
+});
+
+test("asHistoryPage: a legacy Event[] is a complete page; a wrapper keeps truncated", () => {
+  const ev0 = { id: "e", project: "p", seq: 0, timestamp: "2026-09-01T00:00:00.000Z", received_at: "2026-09-01T00:00:00.000Z", actor: { type: "agent" as const, id: "x" }, action: "edited" as const, artifacts: [] as { id: string }[], prev_hash: "0", hash: "h" };
+  assert.deepEqual(asHistoryPage([ev0]), { events: [ev0], truncated: false });
+  assert.equal(asHistoryPage({ events: [ev0], truncated: true, next_before_seq: 4 }).truncated, true);
+  assert.throws(() => asHistoryPage({}), /neither/);
+});
+
+test("collectHistory: pages until the window is complete and returns ascending seq", async () => {
+  const events = Array.from({ length: 250 }, (_, seq) => ({
+    id: `evt_${seq}`, project: "p", seq, timestamp: "2026-09-01T00:00:00.000Z", received_at: "2026-09-01T00:00:00.000Z",
+    actor: { type: "agent" as const, id: "claude-code" }, action: "edited" as const, artifacts: [{ id: "a" }],
+    prev_hash: "0", hash: `h${seq}`,
+  }));
+  const store = { history: async (q: { project: string; limit?: number; before_seq?: number }) => pageHistoryNewest(events, { ...q, limit: 80 }) };
+  const all = await collectHistory(store, { project: "p" });
+  assert.equal(all.length, 250);
+  assert.equal(all[0].seq, 0);
+  assert.equal(all.at(-1)?.seq, 249);
 });
 
 test("adapter idempotency: git:/gd:/gh: are reserved unless the event is adapter-shaped", () => {

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash, createSign, generateKeyPairSync } from "node:crypto";
-import { generateSigningKey, checkpointFromStore, EventStore, Event, Share, appendEvent, EventInput } from "@retrace-dev/core";
+import { generateSigningKey, checkpointFromStore, EventStore, Event, Share, appendEvent, EventInput, pageHistoryNewest } from "@retrace-dev/core";
 import { witnessCheckpoint, verifyWitness, parseWitnessLog, witnessFor, checkpointArtifact, sha256HexSync, WITNESS_FORMAT, FetchLike } from "./witness.js";
 
 class MemStore implements EventStore {
@@ -12,7 +12,7 @@ class MemStore implements EventStore {
   async get(id: string) { return this.events.find((e) => e.id === id) ?? null; }
   async all(p: string) { return this.events.filter((e) => e.project === p); }
   async projects() { return ["p"]; }
-  async history() { return this.events; }
+  async history(q: any) { return pageHistoryNewest(this.events, q); }
   async createShare(s: Share) { this.shares.set(s.id, s); }
   async getShare(id: string) { return this.shares.get(id) ?? null; }
 }

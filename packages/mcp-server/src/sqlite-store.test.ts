@@ -9,7 +9,7 @@ const audit = (store: SqliteStore) => store.head("ops").then((h) => sealEvent(ev
 test("SqliteStore: artifact role is body-only — survives insert → get/all/history, no index column involved", async () => {
   const store = new SqliteStore(":memory:");
   const { event } = await appendEvent(store, ev({ artifacts: [{ id: "in", role: "used" }, { id: "out", role: "generated" }, { id: "legacy" }] }));
-  for (const got of [await store.get(event.id), (await store.all("junk"))[0], (await store.history({ project: "junk", artifact_id: "out" }))[0]]) {
+  for (const got of [await store.get(event.id), (await store.all("junk"))[0], (await store.history({ project: "junk", artifact_id: "out" })).events[0]]) {
     assert.deepEqual(got?.artifacts, [{ id: "in", role: "used" }, { id: "out", role: "generated" }, { id: "legacy" }]);
     assert.equal(got?.hash, event.hash);
   }
@@ -24,14 +24,22 @@ test("SqliteStore.history: % and _ in text are literals; LIMIT is bound and clam
   await appendEvent(store, ev({ intent: "100% coverage", artifacts: [{ id: "pct" }] }));
   await appendEvent(store, ev({ intent: "plain edit", artifacts: [{ id: "plain" }] }));
   const pct = await store.history({ project: "junk", text: "100%" });
-  assert.equal(pct.length, 1);
-  assert.equal(pct[0].intent, "100% coverage");
+  assert.equal(pct.events.length, 1);
+  assert.equal(pct.events[0].intent, "100% coverage");
+  assert.equal(pct.truncated, false);
   const underscore = await store.history({ project: "junk", text: "plain_edit" });
-  assert.equal(underscore.length, 0, "unescaped _ would have matched 'plain edit'");
+  assert.equal(underscore.events.length, 0, "unescaped _ would have matched 'plain edit'");
   const one = await store.history({ project: "junk", limit: 1 });
-  assert.equal(one.length, 1);
+  assert.equal(one.events.length, 1);
+  assert.equal(one.events[0].seq, 1, "limit 1 is the newest event, not genesis");
+  assert.equal(one.truncated, true);
+  assert.equal(one.next_before_seq, 1);
+  const older = await store.history({ project: "junk", limit: 1, before_seq: one.next_before_seq });
+  assert.equal(older.events[0].seq, 0);
+  assert.equal(older.truncated, false);
   const huge = await store.history({ project: "junk", limit: 9e9 });
-  assert.equal(huge.length, 2, "oversize limit is clamped, not interpolated");
+  assert.equal(huge.events.length, 2, "oversize limit is clamped, not interpolated");
+  assert.equal(huge.truncated, false);
 });
 
 test("SqliteStore.deleteProject: deletes + audit insert commit together", async () => {

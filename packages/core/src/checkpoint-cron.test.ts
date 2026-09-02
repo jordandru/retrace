@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createPublicKey, createSign, generateKeyPairSync } from "node:crypto";
 import {
   generateSigningKey, appendEvent, EventStore, Event, EventInput, Share,
-  ed25519SpkiPem, witnessCheckpointRekor, runCheckpointCron, parseCheckpointProjectAllowlist, CheckpointLogStore, CheckpointLogRow, PortableFetch, checkpointFromStore,
+  ed25519SpkiPem, witnessCheckpointRekor, runCheckpointCron, parseCheckpointProjectAllowlist, CheckpointLogStore, CheckpointLogRow, PortableFetch, checkpointFromStore, pageHistoryNewest,
 } from "./index.js";
 
 class MemStore implements EventStore {
@@ -14,7 +14,7 @@ class MemStore implements EventStore {
   async get(id: string) { return this.events.find((e) => e.id === id) ?? null; }
   async all(p: string) { return this.events.filter((e) => e.project === p); }
   async projects() { return [...new Set(this.events.map((e) => e.project))]; }
-  async history() { return this.events; }
+  async history(q: any) { return pageHistoryNewest(this.events, q); }
   async createShare(s: Share) { this.shares.set(s.id, s); }
   async getShare(id: string) { return this.shares.get(id) ?? null; }
 }

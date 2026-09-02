@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { appendEvent } from "./store.js";
-import { Event, EventStore, Share } from "./index.js";
+import { Event, EventStore, Share, pageHistoryNewest } from "./index.js";
 import { buildProjectStatus, causalRootState, renderProjectStatus } from "./status.js";
 
 class MemStore implements EventStore {
@@ -12,7 +12,7 @@ class MemStore implements EventStore {
   async get(id: string) { return this.events.find((e) => e.id === id) ?? null; }
   async all(project: string) { return this.events.filter((e) => e.project === project); }
   async projects() { return [...new Set(this.events.map((e) => e.project))]; }
-  async history(q: any) { return this.events.filter((e) => e.project === q.project); }
+  async history(q: any) { return pageHistoryNewest(this.events, q); }
   async createShare(_s: Share) {} async getShare() { return null; }
 }
 

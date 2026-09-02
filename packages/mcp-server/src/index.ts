@@ -364,7 +364,7 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
     "retrace_history",
     {
       title: "Retrace history",
-      description: "Timeline of events for a project, optionally filtered by artifact, actor, action, time range or text.",
+      description: "Newest matching events for a project (default 100). Truncation is explicit: pass before_seq to walk older pages. Optionally filter by artifact, actor, action, time range or text.",
       inputSchema: {
         project: z.string().optional(),
         artifact_id: z.string().optional(),
@@ -374,12 +374,16 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
         since: z.string().optional(),
         until: z.string().optional(),
         text: z.string().optional().describe("substring match across the event"),
-        limit: z.number().int().positive().max(1000).optional(),
+        limit: z.number().int().positive().max(1000).optional().describe("Newest matching events to return (default 100). Oldest-first truncation is never used."),
+        before_seq: z.number().int().nonnegative().optional().describe("Exclusive upper bound: only events with seq < before_seq. Walk older pages of a newest-first window."),
       },
     },
     async (args) => {
-      const events = await store.history({ ...args, project: args.project ?? DEFAULT_PROJECT });
-      return { content: [{ type: "text", text: renderTimeline(events) }], structuredContent: { count: events.length, events } };
+      const page = await store.history({ ...args, project: args.project ?? DEFAULT_PROJECT });
+      const note = page.truncated
+        ? `\n\ntruncated — ${page.events.length} newest matching events; pass before_seq ${page.next_before_seq} for the previous page`
+        : "";
+      return { content: [{ type: "text", text: renderTimeline(page.events) + note }], structuredContent: { count: page.events.length, events: page.events, truncated: page.truncated, next_before_seq: page.next_before_seq } };
     },
   );
 

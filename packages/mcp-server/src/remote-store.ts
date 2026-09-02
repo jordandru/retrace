@@ -1,5 +1,5 @@
 /** Remote store: talks to the Retrace Cloudflare Worker over HTTP. Set RETRACE_URL (+ RETRACE_TOKEN). */
-import { Event, EventStore, HistoryQuery, VerifyResult, EventInput, Share, ExportBundle, ProjectStatus } from "@retrace-dev/core";
+import { Event, EventStore, HistoryQuery, HistoryPage, VerifyResult, EventInput, Share, ExportBundle, ProjectStatus, asHistoryPage, collectHistory } from "@retrace-dev/core";
 
 /** Consistent headers for CLI-originated requests, including runtimes that require an explicit user agent. */
 export function retraceHeaders(token?: string): Record<string, string> {
@@ -63,14 +63,14 @@ export class RemoteStore implements EventStore {
     return (await res.json()) as Event;
   }
   async all(project: string) {
-    return this.req<Event[]>("GET", `/projects/${encodeURIComponent(project)}/events?limit=100000`);
+    return collectHistory(this, { project });
   }
   async projects() {
     return this.req<string[]>("GET", `/projects`);
   }
-  async history(q: HistoryQuery) {
+  async history(q: HistoryQuery): Promise<HistoryPage> {
     const p = new URLSearchParams();
     for (const [k, v] of Object.entries(q)) if (v !== undefined && k !== "project") p.set(k, String(v));
-    return this.req<Event[]>("GET", `/projects/${encodeURIComponent(q.project)}/events?${p}`);
+    return asHistoryPage(await this.req<unknown>("GET", `/projects/${encodeURIComponent(q.project)}/events?${p}`));
   }
 }

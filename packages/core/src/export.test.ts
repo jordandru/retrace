@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { generateSigningKey, signCanonical, verifyCanonical, buildExportBundle, verifyExportBundle, exportVerdictOk, EventStore, Event, Share, appendEvent, EventInput, publicFromPrivate, renderReportHtml } from "./index.js";
+import { generateSigningKey, signCanonical, verifyCanonical, buildExportBundle, verifyExportBundle, exportVerdictOk, EventStore, Event, Share, appendEvent, EventInput, publicFromPrivate, renderReportHtml, pageHistoryNewest } from "./index.js";
 
 /** minimal in-memory store for tests */
 class MemStore implements EventStore {
@@ -11,7 +11,7 @@ class MemStore implements EventStore {
   async get(id: string) { return this.events.find((e) => e.id === id) ?? null; }
   async all(p: string) { return this.events.filter((e) => e.project === p).sort((a, b) => a.seq - b.seq); }
   async projects() { return [...new Set(this.events.map((e) => e.project))]; }
-  async history(q: any) { return (await this.all(q.project)).filter((e) => !q.artifact_id || e.artifacts.some((a) => a.id === q.artifact_id)); }
+  async history(q: any) { return pageHistoryNewest(this.events, q); }
   async createShare(s: Share) { this.shares.set(s.id, s); }
   async getShare(id: string) { return this.shares.get(id) ?? null; }
 }

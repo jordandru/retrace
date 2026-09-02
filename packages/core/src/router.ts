@@ -11,7 +11,8 @@
  *   GET  /.well-known/retrace-pubkey     issuer public key (JWK) — public
  *   POST /events                         append (EventInput)
  *   GET  /events/:id · /events/:id/why
- *   GET  /projects · /projects/:p/events?… · /projects/:p/head · /projects/:p/verify · /projects/:p/status
+ *   GET  /projects · /projects/:p/events?limit=&before_seq=&artifact_id=&actor_id=&since=&text=
+ *   GET  /projects/:p/head · /projects/:p/verify · /projects/:p/status
  *   GET  /projects/:p/export?artifact_id=…      signed JSON bundle
  *   GET  /projects/:p/report?artifact_id=…      printable HTML report
  *   GET  /projects/:p/lineage?artifact_id=&format=json|dot|mermaid&actors=1   artifact lineage graph
@@ -485,7 +486,27 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
           if (sub === "head") return json(await store.head(project));
           if (sub === "verify") return json(await verifyProject(store, project));
           if (sub === "status") return json(await buildProjectStatus(store, project));
-          if (sub === "events") return json(await store.history({ ...q, project, limit: q.limit ? Number(q.limit) : undefined }));
+          if (sub === "events") {
+            const beforeRaw = q.before_seq;
+            const before_seq = beforeRaw !== undefined && beforeRaw !== "" ? Number(beforeRaw) : undefined;
+            if (before_seq !== undefined && (!Number.isInteger(before_seq) || before_seq < 0)) {
+              return json({ error: "before_seq must be a non-negative integer" }, 400);
+            }
+            const limit = q.limit ? Number(q.limit) : undefined;
+            if (q.limit && (!Number.isFinite(limit) || (limit as number) < 1)) return json({ error: "limit must be a positive number" }, 400);
+            return json(await store.history({
+              project,
+              artifact_id: q.artifact_id,
+              actor_id: q.actor_id,
+              actor_type: q.actor_type,
+              action: q.action,
+              since: q.since,
+              until: q.until,
+              text: q.text,
+              limit,
+              before_seq,
+            }));
+          }
           if (sub === "export") return json(await exportFor({ project, artifact_id: q.artifact_id }));
           if (sub === "lineage") {
             const evs = q.artifact_id ? (await buildExportBundle(store, { project, artifact_id: q.artifact_id })).events : await store.all(project);

@@ -12,13 +12,20 @@ class PreparedStatement {
     this.params = params;
     return this;
   }
+
+  async all() {
+    return { results: [] as { body: string }[] };
+  }
 }
 
 class FakeD1 {
   batched: PreparedStatement[] = [];
+  last?: PreparedStatement;
 
   prepare(sql: string) {
-    return new PreparedStatement(sql);
+    const stmt = new PreparedStatement(sql);
+    this.last = stmt;
+    return stmt;
   }
 
   async batch(statements: PreparedStatement[]) {
@@ -56,4 +63,15 @@ test("deleteProject deletes checkpoint rows in the guarded atomic batch", async 
     assert.deepEqual(statement.params, [project, audit.id]);
   }
   assert.deepEqual(deleted, { events: 1, event_artifacts: 1, shares: 1, checkpoints: 1 });
+});
+
+test("history SQL is newest-first with an exclusive before_seq bound and a limit+1 probe", async () => {
+  const db = new FakeD1();
+  const store = new D1Store(db as unknown as D1Database);
+  await store.history({ project: "retrace", limit: 10, before_seq: 50 });
+  const stmt = db.last!;
+  assert.match(stmt.sql, /ORDER BY e\.seq DESC LIMIT \?/);
+  assert.match(stmt.sql, /e\.seq < \?/);
+  assert.equal(stmt.params.at(-1), 11, "fetches limit+1 so truncated is detectable");
+  assert.equal(stmt.params.includes(50), true);
 });

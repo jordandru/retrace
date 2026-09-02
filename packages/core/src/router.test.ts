@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createHandler, parseCredentials, Credential, EventStore, Event, Share, appendEvent, EventInput, verifyProject, ChainHead, HeadMovedError, schemaSurface, Location, Action, tokenEquals, parseGithubRepoProjects, resolveGithubProject } from "./index.js";
+import { createHandler, parseCredentials, Credential, EventStore, Event, Share, appendEvent, EventInput, verifyProject, ChainHead, HeadMovedError, schemaSurface, Location, Action, tokenEquals, parseGithubRepoProjects, resolveGithubProject, pageHistoryNewest } from "./index.js";
 
 /** minimal in-memory store for tests */
 class MemStore implements EventStore {
@@ -11,7 +11,7 @@ class MemStore implements EventStore {
   async get(id: string) { return this.events.find((e) => e.id === id) ?? null; }
   async all(p: string) { return this.events.filter((e) => e.project === p).sort((a, b) => a.seq - b.seq); }
   async projects() { return [...new Set(this.events.map((e) => e.project))]; }
-  async history(q: any) { return this.all(q.project); }
+  async history(q: any) { return pageHistoryNewest(this.events, q); }
   async createShare(s: Share) { this.shares.set(s.id, s); }
   async getShare(id: string) { return this.shares.get(id) ?? null; }
   async deleteShare(id: string) { return this.shares.delete(id); }
@@ -762,4 +762,21 @@ test("500 handler does not echo the internal error text", async () => {
   assert.match(body.error, /^internal error \(ref [0-9a-f]{8}\)$/);
   assert.equal(body.error.includes("SQL"), false);
   assert.equal(body.error.includes("/secret/path"), false);
+});
+
+test("GET /projects/:p/events returns a newest-window page, not a genesis prefix", async () => {
+  const store = new MemStore();
+  const h = createHandler(store, { token: "tok" });
+  for (let i = 0; i < 5; i++) await appendEvent(store, ev({ project: "p", artifacts: [{ id: `a${i}` }] }));
+  const page = await (await get(h, "/projects/p/events?limit=2", "tok")).json();
+  assert.equal(page.truncated, true);
+  assert.deepEqual(page.events.map((e: { seq: number }) => e.seq), [3, 4]);
+  assert.equal(page.next_before_seq, 3);
+  const older = await (await get(h, "/projects/p/events?limit=2&before_seq=3", "tok")).json();
+  assert.deepEqual(older.events.map((e: { seq: number }) => e.seq), [1, 2]);
+  assert.equal(older.truncated, true);
+  const rest = await (await get(h, "/projects/p/events?limit=2&before_seq=1", "tok")).json();
+  assert.deepEqual(rest.events.map((e: { seq: number }) => e.seq), [0]);
+  assert.equal(rest.truncated, false);
+  assert.equal((await get(h, "/projects/p/events?before_seq=-1", "tok")).status, 400);
 });

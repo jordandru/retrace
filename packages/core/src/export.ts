@@ -4,7 +4,7 @@
  * over the canonical bundle. Anyone can verify offline with verifyExportBundle() — no server needed.
  */
 import { Event } from "./schema.js";
-import { EventStore, verifyProject } from "./store.js";
+import { EventStore, collectHistory, verifyProject } from "./store.js";
 import { verifyChain, VerifyResult, computeHash, hashRule } from "./chain.js";
 import { GENESIS_HASH } from "./schema.js";
 import { keyId, publicFromPrivate, signCanonical, verifyCanonical } from "./signing.js";
@@ -32,7 +32,7 @@ export async function buildExportBundle(store: EventStore, scope: ExportScope, o
   const all = await store.all(scope.project);
   const chain = await verifyChain(all);
   const events = scope.artifact_id || scope.actor_id || scope.since || scope.until
-    ? await store.history({ project: scope.project, artifact_id: scope.artifact_id, actor_id: scope.actor_id, since: scope.since, until: scope.until, limit: 100000 })
+    ? await collectHistory(store, { project: scope.project, artifact_id: scope.artifact_id, actor_id: scope.actor_id, since: scope.since, until: scope.until })
     : all;
   // Scoped exports pull in causal ancestors (the instructions/actions that led to in-scope events) so WHY is answerable offline.
   let context_events = 0;

@@ -493,6 +493,27 @@ test("location: server-only fields are dropped from caller input — an agent ca
     { session: "s", path: "p" });
 }));
 
+test("retrace_history: newest window with a before_seq cursor, never a genesis prefix", async () => withActorEnv({}, async () => {
+  const store = new SqliteStore(":memory:");
+  const input = { project: "rpg", actor: { type: "agent" as const, id: "claude-code" }, action: "edited" as const, artifacts: [{ id: "a" }] };
+  for (let i = 0; i < 5; i++) await appendEvent(store, input);
+  const server = buildServer(store);
+  const [ct, st] = InMemoryTransport.createLinkedPair();
+  await server.connect(st);
+  const client = new Client({ name: "t", version: "0" });
+  await client.connect(ct);
+  const hist = (await client.callTool({ name: "retrace_history", arguments: { project: "rpg", limit: 2 } })) as any;
+  assert.equal(hist.structuredContent.truncated, true);
+  assert.deepEqual(hist.structuredContent.events.map((e: { seq: number }) => e.seq), [3, 4]);
+  assert.equal(hist.structuredContent.next_before_seq, 3);
+  assert.match(hist.content[0].text, /truncated/);
+  const older = (await client.callTool({ name: "retrace_history", arguments: { project: "rpg", limit: 2, before_seq: 3 } })) as any;
+  assert.deepEqual(older.structuredContent.events.map((e: { seq: number }) => e.seq), [1, 2]);
+  const rest = (await client.callTool({ name: "retrace_history", arguments: { project: "rpg", limit: 2, before_seq: 1 } })) as any;
+  assert.deepEqual(rest.structuredContent.events.map((e: { seq: number }) => e.seq), [0]);
+  assert.equal(rest.structuredContent.truncated, false);
+}));
+
 test("confinedWritePath refuses absolute paths outside cwd", () => {
   const cwd = "/home/jordandrumiler/provenance/retrace";
   assert.equal(confinedWritePath("out/bundle.json", cwd), resolve(cwd, "out/bundle.json"));

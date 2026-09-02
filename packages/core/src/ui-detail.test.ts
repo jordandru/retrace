@@ -11,7 +11,7 @@ import { join, dirname } from "node:path";
 const html = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../ui/retrace.html"), "utf8");
 const script = html.match(/<script>([\s\S]*)<\/script>/)![1];
 
-function runUI(events: any[], opts: { status?: any; search?: string; apiTokens?: Record<string, string> } = {}) {
+function runUI(events: any[], opts: { status?: any; search?: string; apiTokens?: Record<string, string>; historyPage?: { truncated?: boolean; next_before_seq?: number } } = {}) {
   const clicks: ((ev: any) => void)[] = [];
   const els = new Map<string, any>();
   const makeEl = (): any => {
@@ -49,7 +49,7 @@ function runUI(events: any[], opts: { status?: any; search?: string; apiTokens?:
     const path = String(url);
     const body = path.includes("/verify") ? { ok: true, checked: events.length }
       : path.includes("/status") ? (opts.status ?? null)
-      : path.includes("/events") ? events
+      : path.includes("/events") ? (opts.historyPage ? { events, truncated: !!opts.historyPage.truncated, next_before_seq: opts.historyPage.next_before_seq } : events)
       : ["p"];
     return { ok: true, status: 200, json: async () => body, text: async () => "" };
   };
@@ -368,4 +368,13 @@ test("status pane without a /status answer says why, instead of showing nothing"
   await ui.clickChip({ pane: "status" });
   assert.match(ui.detail(), /intact<\/span> · 1 events re-hashed/);
   assert.match(ui.detail(), /\/status<\/span> endpoint, which did not answer/);
+});
+
+test("timeline: a truncated history page shows load-older instead of silently dropping the head", async () => {
+  const events = [ev(10, {}), ev(11, {}), ev(12, {})];
+  const ui = runUI(events, { historyPage: { truncated: true, next_before_seq: 10 } });
+  await ui.select("evt_12");
+  assert.match(ui.timeline(), /load older/);
+  assert.match(ui.timeline(), /#10[–-]#12/);
+  assert.match(ui.timeline(), /data-older="1"/);
 });

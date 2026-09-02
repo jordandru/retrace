@@ -1,6 +1,6 @@
 /** Local SQLite store using Node's built-in node:sqlite (Node >= 22.13). No native deps. */
 import { DatabaseSync } from "node:sqlite";
-import { ChainHead, Event, EventStore, HeadMovedError, HistoryQuery, SCHEMA_SQL, Share, clampHistoryLimit, likeContains } from "@retrace-dev/core";
+import { ChainHead, Event, EventStore, HeadMovedError, HistoryQuery, HistoryPage, SCHEMA_SQL, Share, clampHistoryLimit, historyPageFromNewestFirst, likeContains } from "@retrace-dev/core";
 
 export class SqliteStore implements EventStore {
   private db: DatabaseSync;
@@ -93,7 +93,7 @@ export class SqliteStore implements EventStore {
     return rows.map((r) => r.project);
   }
 
-  async history(q: HistoryQuery) {
+  async history(q: HistoryQuery): Promise<HistoryPage> {
     const where: string[] = ["e.project = ?"];
     const params: (string | number)[] = [q.project];
     let join = "";
@@ -108,9 +108,10 @@ export class SqliteStore implements EventStore {
     if (q.since) { where.push("e.timestamp >= ?"); params.push(q.since); }
     if (q.until) { where.push("e.timestamp <= ?"); params.push(q.until); }
     if (q.text) { const like = likeContains(q.text); where.push(like.sql); params.push(like.pattern); }
+    if (typeof q.before_seq === "number" && Number.isFinite(q.before_seq)) { where.push("e.seq < ?"); params.push(q.before_seq); }
     const limit = clampHistoryLimit(q.limit);
-    const sql = `SELECT DISTINCT e.body, e.seq FROM events e ${join} WHERE ${where.join(" AND ")} ORDER BY e.seq ASC LIMIT ?`;
-    const rows = this.db.prepare(sql).all(...params, limit) as { body: string }[];
-    return rows.map((r) => JSON.parse(r.body) as Event);
+    const sql = `SELECT DISTINCT e.body, e.seq FROM events e ${join} WHERE ${where.join(" AND ")} ORDER BY e.seq DESC LIMIT ?`;
+    const rows = this.db.prepare(sql).all(...params, limit + 1) as { body: string }[];
+    return historyPageFromNewestFirst(rows.map((r) => JSON.parse(r.body) as Event), limit);
   }
 }

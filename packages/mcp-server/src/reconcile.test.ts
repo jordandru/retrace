@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { generateSigningKey, appendEvent, buildExportBundle, EventStore, Event, Share, EventInput } from "@retrace-dev/core";
+import { generateSigningKey, appendEvent, buildExportBundle, EventStore, Event, Share, EventInput, pageHistoryNewest } from "@retrace-dev/core";
 import { parseNameStatus, verifiedExportEvents } from "./reconcile.js";
 
 class MemStore implements EventStore {
@@ -11,7 +11,7 @@ class MemStore implements EventStore {
   async get(id: string) { return this.events.find((e) => e.id === id) ?? null; }
   async all(p: string) { return this.events.filter((e) => e.project === p); }
   async projects() { return ["p"]; }
-  async history() { return this.events; }
+  async history(q: any) { return pageHistoryNewest(this.events, q); }
   async createShare(s: Share) { this.shares.set(s.id, s); }
   async getShare(id: string) { return this.shares.get(id) ?? null; }
 }

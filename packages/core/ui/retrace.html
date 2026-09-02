@@ -79,6 +79,7 @@
   .empty { color: var(--muted); padding: 40px 0; text-align: center; }
   .stat { display: flex; gap: 16px; color: var(--muted); font-size: 12px; margin-bottom: 8px; flex-wrap: wrap; }
   .stat b { color: var(--text); font-weight: 600; }
+  .omitted { color: var(--muted); font-size: 12px; margin: 0 0 12px; padding: 8px 10px; border: 1px dashed var(--line); border-radius: 8px; background: var(--panel-2); }
   #conn { display: none; gap: 8px; align-items: center; }
   #conn.open { display: flex; }
   .hash { font-family: var(--mono); font-size: 11px; color: var(--muted); }
@@ -155,7 +156,7 @@
 (() => {
   const $ = (s) => document.querySelector(s);
   // pane: what the right-hand pane shows when no event is selected — "status" (chain + capture detail) or "mermaid" (copy fallback).
-  const state = { events: [], project: null, projects: [], sel: null, pane: null, filterArtifact: null, filterActor: null, verify: null, status: null, offline: false, expanded: new Set(), newestFirst: true, fp: null };
+  const state = { events: [], project: null, projects: [], sel: null, pane: null, filterArtifact: null, filterActor: null, verify: null, status: null, offline: false, expanded: new Set(), newestFirst: true, fp: null, loadedProject: null, historyTruncated: false };
   const params = new URLSearchParams(location.search);
   if (params.get("order") === "asc") state.newestFirst = false;
   let apiBase = params.get("api") ?? "";
@@ -186,9 +187,23 @@
     $("#sharedBadge").style.display = "";
     ["#share", "#toggleConn", "#project"].forEach((s) => ($(s).style.display = "none"));
   }
+  const PAGE = 5000;
+  const asPage = (data) => Array.isArray(data)
+    ? { events: data, truncated: false }
+    : { events: Array.isArray(data?.events) ? data.events : [], truncated: !!data?.truncated, next_before_seq: data?.next_before_seq };
+  const mergeBySeq = (a, b) => {
+    const m = new Map();
+    for (const e of a) m.set(e.id, e);
+    for (const e of b) m.set(e.id, e);
+    return [...m.values()].sort((x, y) => x.seq - y.seq);
+  };
   const P = {
     projects: () => shareId ? api(`/s/${shareId}/meta`).then((m) => [m.project]) : api("/projects"),
-    events: (p) => shareId ? api(`/s/${shareId}/events?limit=5000`) : api(`/projects/${encodeURIComponent(p)}/events?limit=5000`),
+    events: (p, before) => {
+      const q = new URLSearchParams({ limit: String(PAGE) });
+      if (before != null) q.set("before_seq", String(before));
+      return shareId ? api(`/s/${shareId}/events?${q}`) : api(`/projects/${encodeURIComponent(p)}/events?${q}`);
+    },
     verify: (p) => shareId ? api(`/s/${shareId}/verify`) : api(`/projects/${encodeURIComponent(p)}/verify`),
     status: (p) => shareId ? Promise.resolve(null) : api(`/projects/${encodeURIComponent(p)}/status`),
     exportUrl: (p, art) => shareId ? `${apiBase}/s/${shareId}/export` : `${apiBase}/projects/${encodeURIComponent(p)}/export?${new URLSearchParams(art ? { artifact_id: art } : {})}`,
@@ -245,13 +260,28 @@
   async function loadEvents() {
     if (state.offline) return render();
     if (!state.project) { state.events = []; return render(); }
-    const [events, verify, status] = await Promise.all([P.events(state.project), P.verify(state.project).catch(() => null), P.status(state.project).catch(() => null)]);
+    const [raw, verify, status] = await Promise.all([P.events(state.project), P.verify(state.project).catch(() => null), P.status(state.project).catch(() => null)]);
+    const page = asPage(raw);
+    const events = state.loadedProject === state.project ? mergeBySeq(state.events, page.events) : page.events;
     // The 15 s poll must not rebuild the panes when nothing changed: that closed an open "raw JSON", reset the
     // timeline scroll and blanked a half-read detail. Same length + same head hash + same verify result = same view.
-    const fp = `${state.project}:${events.length}:${events.at(-1)?.hash ?? ""}:${verify?.ok}:${verify?.checked}`;
+    const fp = `${state.project}:${events.length}:${events[0]?.seq ?? ""}:${events.at(-1)?.hash ?? ""}:${verify?.ok}:${verify?.checked}`;
     const same = fp === state.fp;
     state.events = events; state.verify = verify; state.status = status; state.fp = fp;
+    state.loadedProject = state.project;
+    state.historyTruncated = page.truncated === true || (typeof page.next_before_seq === "number");
+    if (events.length && events[0].seq === 0) state.historyTruncated = false;
     if (same) { localVerifyBadge(); statusBadge(); if (state.pane === "status") renderDetail(); return; }
+    render();
+  }
+
+  async function loadOlder() {
+    if (shareId || !state.project || !state.events.length) return;
+    const page = asPage(await P.events(state.project, state.events[0].seq));
+    state.events = mergeBySeq(state.events, page.events);
+    state.historyTruncated = page.truncated === true;
+    if (state.events.length && state.events[0].seq === 0) state.historyTruncated = false;
+    state.fp = null;
     render();
   }
 
@@ -313,6 +343,15 @@
     // Legend entries filter by actor type (and show which one is active); the same select in the header stays in sync.
     const leg = (t, extra) => `<span data-ftype="${t}" class="${ft === t ? "on" : ""}" title="${ft === t ? `showing only ${t} — click to show all` : `show only ${t}`}"><i class="dot ${t}" style="display:inline-block${extra}"></i> ${t}</span>`;
     html += `<div class="legend">${leg("human", "")}${leg("agent", ";border-radius:2px")}${leg("system", "")}<span style="margin-left:auto"><span class="chip" data-order="1" title="flip order">${state.newestFirst ? "newest first ▾" : "oldest first ▴"}</span></span></div>`;
+    const total = state.verify?.checked;
+    const omitted = typeof total === "number" ? Math.max(0, total - state.events.length) : (state.historyTruncated ? null : 0);
+    const canOlder = !state.offline && !shareId && state.events.length && (state.historyTruncated || (state.events[0] && state.events[0].seq > 0));
+    if (canOlder || omitted) {
+      const range = state.events.length ? `#${state.events[0].seq}–#${state.events.at(-1).seq}` : "none";
+      html += `<div class="omitted">Showing ${esc(range)}${typeof total === "number" ? ` of ${total}` : ""} events.`
+        + (canOlder ? ` <span class="chip" data-older="1" title="fetch the previous (older) page">load older</span>` : "")
+        + `</div>`;
+    }
     if (!list.length) html += `<div class="empty">${state.events.length ? `No events match these filters. <span class="chip" data-clear="all" title="clear search, actor, action and artifact filters">clear all filters</span>` : "No events yet — log one with the MCP tool <code>retrace_log</code> or POST /events."}</div>`;
     let lastDay = "";
     for (const e of list) {
@@ -533,9 +572,10 @@
   // One delegated handler. Every data-* attribute the markup uses MUST be in this selector, or the element renders
   // as clickable and does nothing (ui-detail.test.ts drives real clicks through it for that reason).
   document.addEventListener("click", (ev) => {
-    const t = ev.target.closest("[data-order],[data-expand],[data-art],[data-actor],[data-goto],[data-clear],[data-q],[data-ftype],[data-pane],.ev");
+    const t = ev.target.closest("[data-order],[data-expand],[data-art],[data-actor],[data-goto],[data-clear],[data-q],[data-ftype],[data-pane],[data-older],.ev");
     if (!t) return;
     const d = t.dataset;
+    if (d.older) { ev.stopPropagation(); return loadOlder().catch(showErr); }
     if (d.order) { ev.stopPropagation(); state.newestFirst = !state.newestFirst; return render(); }
     if (d.expand) { ev.stopPropagation(); state.expanded.has(d.expand) ? state.expanded.delete(d.expand) : state.expanded.add(d.expand); return render(); }
     // Filters toggle: clicking the artifact / actor / actor-type you are already filtering on clears that filter.
@@ -567,7 +607,7 @@
   }
   // Below the 900px breakpoint the detail pane sits under the timeline, where an update is off-screen and a click looks inert.
   function revealDetail() { if (window.matchMedia?.("(max-width: 900px)")?.matches) $("#detail").scrollIntoView?.({ block: "start", behavior: "smooth" }); }
-  $("#project").addEventListener("change", (e) => { state.project = e.target.value; state.sel = null; state.filterArtifact = null; state.filterActor = null; loadEvents().catch(showErr); });
+  $("#project").addEventListener("change", (e) => { state.project = e.target.value; state.events = []; state.loadedProject = null; state.sel = null; state.filterArtifact = null; state.filterActor = null; loadEvents().catch(showErr); });
   ["#q", "#ftype", "#faction"].forEach((s) => $(s).addEventListener("input", render));
   $("#refresh").addEventListener("click", () => boot());
   $("#report").addEventListener("click", async () => {
@@ -605,13 +645,14 @@
     } catch (e) { $("#shResult").textContent = "Failed: " + e.message; }
   });
   $("#toggleConn").addEventListener("click", () => $("#conn").classList.toggle("open"));
-  $("#connect").addEventListener("click", () => { apiBase = $("#apiUrl").value.trim().replace(/\/$/, ""); token = $("#apiTok").value.trim(); persistToken(token); state.offline = false; boot(); });
+  $("#connect").addEventListener("click", () => { apiBase = $("#apiUrl").value.trim().replace(/\/$/, ""); token = $("#apiTok").value.trim(); persistToken(token); state.offline = false; state.events = []; state.loadedProject = null; boot(); });
   $("#loadJson").addEventListener("click", () => $("#file").click());
   $("#file").addEventListener("change", async (e) => {
     const f = e.target.files[0]; if (!f) return;
     const data = JSON.parse(await f.text());
     const events = Array.isArray(data) ? data : data.events ?? [];
     state.offline = true; state.events = events.sort((a, b) => a.seq - b.seq); state.verify = null; state.status = null;
+    state.historyTruncated = false; state.loadedProject = null;
     state.projects = [...new Set(events.map((x) => x.project))]; state.project = state.projects[0] ?? null;
     $("#project").innerHTML = state.projects.map((p) => `<option>${esc(p)}</option>`).join("");
     render();

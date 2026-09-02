@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {
   generateSigningKey, signCanonical, buildExportBundle, verifyExportBundle, exportVerdictOk, appendEvent,
   checkpointFromBundle, checkpointFromStore, verifyCheckpoint, compareBundleToCheckpoint, parseCheckpointLog, latestCheckpoint,
-  EventStore, Event, EventInput, Share, Checkpoint,
+  EventStore, Event, EventInput, Share, Checkpoint, pageHistoryNewest,
 } from "./index.js";
 
 class MemStore implements EventStore {
@@ -14,7 +14,7 @@ class MemStore implements EventStore {
   async get(id: string) { return this.events.find((e) => e.id === id) ?? null; }
   async all(p: string) { return this.events.filter((e) => e.project === p).sort((a, b) => a.seq - b.seq); }
   async projects() { return [...new Set(this.events.map((e) => e.project))]; }
-  async history(q: any) { return (await this.all(q.project)).filter((e) => !q.artifact_id || e.artifacts.some((a) => a.id === q.artifact_id)); }
+  async history(q: any) { return pageHistoryNewest(this.events, q); }
   async createShare(s: Share) { this.shares.set(s.id, s); }
   async getShare(id: string) { return this.shares.get(id) ?? null; }
 }

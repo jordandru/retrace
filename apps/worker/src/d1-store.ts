@@ -1,4 +1,4 @@
-import { ChainHead, Event, EventStore, HeadMovedError, HistoryQuery, Share, clampHistoryLimit, likeContains } from "@retrace-dev/core";
+import { ChainHead, Event, EventStore, HeadMovedError, HistoryQuery, HistoryPage, Share, clampHistoryLimit, historyPageFromNewestFirst, likeContains } from "@retrace-dev/core";
 
 export class D1Store implements EventStore {
   constructor(private db: D1Database) {}
@@ -86,7 +86,7 @@ export class D1Store implements EventStore {
     return results.map((r) => r.project);
   }
 
-  async history(q: HistoryQuery) {
+  async history(q: HistoryQuery): Promise<HistoryPage> {
     const where: string[] = ["e.project = ?"];
     const params: (string | number)[] = [q.project];
     let join = "";
@@ -97,9 +97,10 @@ export class D1Store implements EventStore {
     if (q.since) { where.push("e.timestamp >= ?"); params.push(q.since); }
     if (q.until) { where.push("e.timestamp <= ?"); params.push(q.until); }
     if (q.text) { const like = likeContains(q.text); where.push(like.sql); params.push(like.pattern); }
+    if (typeof q.before_seq === "number" && Number.isFinite(q.before_seq)) { where.push("e.seq < ?"); params.push(q.before_seq); }
     const limit = clampHistoryLimit(q.limit);
-    const sql = `SELECT DISTINCT e.body, e.seq FROM events e ${join} WHERE ${where.join(" AND ")} ORDER BY e.seq ASC LIMIT ?`;
-    const { results } = await this.db.prepare(sql).bind(...params, limit).all<{ body: string }>();
-    return results.map((r) => JSON.parse(r.body) as Event);
+    const sql = `SELECT DISTINCT e.body, e.seq FROM events e ${join} WHERE ${where.join(" AND ")} ORDER BY e.seq DESC LIMIT ?`;
+    const { results } = await this.db.prepare(sql).bind(...params, limit + 1).all<{ body: string }>();
+    return historyPageFromNewestFirst(results.map((r) => JSON.parse(r.body) as Event), limit);
   }
 }
