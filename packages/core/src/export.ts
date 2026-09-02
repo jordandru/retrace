@@ -6,6 +6,7 @@
 import { Event } from "./schema.js";
 import { EventStore, collectHistory, verifyProject } from "./store.js";
 import { verifyChain, VerifyResult, computeHash, hashRule } from "./chain.js";
+import { ProducerKey, countProducerSigs } from "./producer-sig.js";
 import { GENESIS_HASH } from "./schema.js";
 import { keyId, publicFromPrivate, signCanonical, verifyCanonical } from "./signing.js";
 
@@ -22,11 +23,15 @@ export interface ExportBundle {
   events: Event[];
   /** number of events included only as causal context (ancestors of in-scope events) */
   context_events?: number;
+  /** Registered producer public keys (rung 5) — the public halves of credential keys, so offline verification can
+   *  re-check producer signatures. Set BEFORE signing, so a swapped list invalidates the bundle signature. Bundle-
+   *  carried keys are self-attested like the issuer key; the trusted path is a --producers file you hold. */
+  producers?: ProducerKey[];
   issuer?: { kid: string; alg: "Ed25519"; public_key: JsonWebKey; name?: string };
   signature?: string; // base64url Ed25519 over canonical(bundle without signature)
 }
 
-export interface ExportOptions { signingKey?: JsonWebKey | null; issuerName?: string; now?: Date }
+export interface ExportOptions { signingKey?: JsonWebKey | null; issuerName?: string; now?: Date; producers?: ProducerKey[] }
 
 export async function buildExportBundle(store: EventStore, scope: ExportScope, opts: ExportOptions = {}): Promise<ExportBundle> {
   const all = await store.all(scope.project);
@@ -58,6 +63,7 @@ export async function buildExportBundle(store: EventStore, scope: ExportScope, o
     events,
     context_events,
   };
+  if (opts.producers?.length) bundle.producers = opts.producers;
   if (opts.signingKey) {
     const pub = publicFromPrivate(opts.signingKey);
     bundle.issuer = { kid: await keyId(pub), alg: "Ed25519", public_key: pub, name: opts.issuerName };
@@ -93,6 +99,11 @@ export interface ExportVerdict {
   coverage: ExportCoverage;      // omission check (see ExportCoverage)
   /** events sealed under the legacy hash rule (no hash_v): their received_at is not provably covered */
   legacy_hash_events: number;
+  /** producer-signature re-check (rung 5), mirroring legacy_hash_events: signed-and-verified, wrong/replayed, and
+   *  agent events with no signature at all (pre-rollout producers) */
+  producer_signed: number;
+  producer_invalid: number;
+  producer_unsigned_agent_events: number;
   kid?: string;
   problems: string[];
 }
@@ -154,7 +165,7 @@ function checkCoverage(bundle: ExportBundle, sorted: Event[], problems: string[]
 }
 
 /** Offline verification: signature + per-event content hashes + adjacency links + omission (coverage). */
-export async function verifyExportBundle(bundle: ExportBundle, trustedPublicKey?: JsonWebKey): Promise<ExportVerdict> {
+export async function verifyExportBundle(bundle: ExportBundle, trustedPublicKey?: JsonWebKey, vopts?: { producers?: ProducerKey[] }): Promise<ExportVerdict> {
   const problems: string[] = [];
   let signature: ExportVerdict["signature"] = "unsigned";
   if (bundle.signature && bundle.issuer) {
@@ -185,7 +196,12 @@ export async function verifyExportBundle(bundle: ExportBundle, trustedPublicKey?
   }
   if (sorted[0]?.seq === 0 && sorted[0].prev_hash !== GENESIS_HASH) { links_consistent = false; problems.push("event #0 is not anchored to genesis"); }
   const coverage = checkCoverage(bundle, sorted, problems);
-  return { signature, events_intact, links_consistent, chain_ok_at_export: !!bundle.chain?.ok, coverage, legacy_hash_events, kid: bundle.issuer?.kid, problems };
+  // Producer signatures (rung 5): a supplied trusted list REPLACES the bundle's own (which is self-attested, like the
+  // issuer key); with neither, signed events are uncheckable and only the unsigned-agent count is meaningful.
+  const producerKeys = vopts?.producers ?? bundle.producers ?? [];
+  const ps = await countProducerSigs(sorted, producerKeys);
+  problems.push(...ps.problems);
+  return { signature, events_intact, links_consistent, chain_ok_at_export: !!bundle.chain?.ok, coverage, legacy_hash_events, producer_signed: ps.producer_signed, producer_invalid: ps.producer_invalid, producer_unsigned_agent_events: ps.producer_unsigned_agent_events, kid: bundle.issuer?.kid, problems };
 }
 
 /**

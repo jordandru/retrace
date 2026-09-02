@@ -37,6 +37,7 @@ import { Actor, ActorType, EventInput, schemaSurface } from "./schema.js";
 import { EventStore, appendEvent, AdapterIdempotencyError, CausedByError, verifyProject, explainEvent, newShareId, shareIsLive, Share, isHeadMovedError, SEALED_BY_PARAM, SEALED_BY_OWNER, SEALED_BY_UNAUTHENTICATED, SEALED_BY_GITHUB_WEBHOOK } from "./store.js";
 import { sealEvent } from "./chain.js";
 import { buildExportBundle, verifyExportBundle } from "./export.js";
+import { PRODUCER_SIG_VERDICT_PARAM, ProducerKey, ProducerSigVerdict, producerSigVerdict } from "./producer-sig.js";
 import { renderReportHtml } from "./report.js";
 import { buildLineage, renderLineageDot, renderLineageMermaid } from "./lineage.js";
 import { mapGithubWebhook, verifyGithubSignature } from "./github.js";
@@ -115,6 +116,11 @@ export const Credential = z.object({
   allowed_actors: z.array(z.object({ type: ActorType, id: z.string().min(1) })).optional(),
   /** Optional project allow-list (audit 2026-08-30). Unset = every project; set = POST/hooks/reads only those names. */
   projects: z.array(z.string().min(1)).optional(),
+  /** Rung 5: the producer's registered Ed25519 public JWK. The private half NEVER appears here — it lives with the
+   *  producer (producer-sig.ts). Present ⇒ POST /events verifies producer_sig against it and stamps the verdict. */
+  public_key: z.custom<JsonWebKey>((v) => !!v && typeof v === "object" && (v as JsonWebKey).kty === "OKP" && (v as JsonWebKey).crv === "Ed25519" && typeof (v as JsonWebKey).x === "string", "must be an Ed25519 public JWK").optional(),
+  /** Rung 5 enforcement: anything but a `verified` producer signature on POST /events is a 401. */
+  require_signature: z.boolean().optional(),
 });
 export type Credential = z.infer<typeof Credential>;
 /** Parse the RETRACE_CREDENTIALS secret (JSON array). Throws on malformed config so a bad deploy fails loudly. */
@@ -202,8 +208,10 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
     const c = principal.credential;
     return `${c.trust === "assert" ? "assert" : "pinned"}:${c.name ?? `${c.actor.type}/${c.actor.id}`}`;
   };
-  const stampSealedBy = <T extends { method?: EventInput["method"] }>(input: T, by: string): T =>
-    ({ ...input, method: { ...input.method, params: { ...input.method?.params, [SEALED_BY_PARAM]: by } } });
+  // Every server-sealed write also carries the producer-signature verdict ("none" wherever no credential key could be
+  // checked: owner, webhooks, the delete audit) — the sealed_by precedent: server wins, hash-covered.
+  const stampSealedBy = <T extends { method?: EventInput["method"] }>(input: T, by: string, producerVerdict: ProducerSigVerdict = "none"): T =>
+    ({ ...input, method: { ...input.method, params: { ...input.method?.params, [SEALED_BY_PARAM]: by, [PRODUCER_SIG_VERDICT_PARAM]: producerVerdict } } });
   const projectAllowed = (principal: Principal, project: string): boolean => {
     if (principal?.kind !== "credential") return true;
     const allowed = principal.credential.projects;
@@ -288,7 +296,12 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
     if (fmt === "mermaid") return new Response(renderLineageMermaid(l), { headers: { "content-type": "text/plain; charset=utf-8", ...CORS } });
     return json(l);
   };
-  const exportFor = (scope: { project: string; artifact_id?: string }) => buildExportBundle(store, scope, { signingKey: opts.signingKey, issuerName: opts.issuerName });
+  // Rung 5: exports carry the registered producer public keys (computed once; keyId is a cheap sha256).
+  let producersCache: Promise<ProducerKey[]> | undefined;
+  const bundleProducers = () => (producersCache ??= Promise.all(
+    (opts.credentials ?? []).filter((c) => c.public_key).map(async (c) => ({ kid: await keyId(c.public_key as JsonWebKey), public_key: c.public_key as JsonWebKey, actor_id: c.actor.id, name: c.name })),
+  ));
+  const exportFor = async (scope: { project: string; artifact_id?: string }) => buildExportBundle(store, scope, { signingKey: opts.signingKey, issuerName: opts.issuerName, producers: await bundleProducers() });
 
   return async function handle(req: Request): Promise<Response> {
     if (opts.requireAuth && !authConfigured)
@@ -439,6 +452,14 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
         const params = { ...parsed.data.method?.params };
         delete params.relayed_by;
         delete params[SEALED_BY_PARAM];
+        delete params[PRODUCER_SIG_VERDICT_PARAM];
+        // Rung 5: verify over the POST-RESOLVE shape — byte-identical to the offline recompute, which also collapses
+        // sign-as-yourself-submit-on-another's-credential into a plain signature failure (producer-sig.ts).
+        const credential = principal?.kind === "credential" ? principal.credential : undefined;
+        const producerVerdict = await producerSigVerdict({ ...parsed.data, actor: resolved.actor }, credential?.public_key ?? null);
+        if (credential?.require_signature && producerVerdict !== "verified")
+          // the verdict word only — never echo the signature or any kid
+          return json({ error: `producer signature required by this credential (verdict: ${producerVerdict})` }, 401);
         const location = parsed.data.location ? { ...parsed.data.location } : undefined;
         if (location && !resolved.relayed) delete location.client;
         let input = stampSealedBy({
@@ -446,7 +467,7 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
           actor: resolved.actor,
           method: parsed.data.method ? { ...parsed.data.method, params } : undefined,
           location,
-        }, sealedBy(principal));
+        }, sealedBy(principal), producerVerdict);
         // A relayed instruction root is stamped with the credential's agent id, so the chain records that the human
         // did not write this event themselves — their agent did, on their behalf. Keyed on the carve-out's own flag:
         // assert-trust human events (git hook, forwarders) and other human paths must NOT get a relayed_by stamp.

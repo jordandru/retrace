@@ -3,7 +3,7 @@
  * retrace-export — signing keys, signed exports, offline verification.
  *   retrace-export keygen [--print-private]           create ~/.retrace/signing-key.json if missing; print kid + public JWK
  *   retrace-export export <project> [--artifact <id>] [--out file.json] [--report file.html]
- *   retrace-export verify <bundle.json> [--pubkey <jwk.json|https-url>] [--checkpoint <checkpoints.jsonl> --checkpoint-pubkey <jwk.json|https-url>] [--allow-self-attested]
+ *   retrace-export verify <bundle.json> [--pubkey <jwk.json|https-url>] [--producers <keys.json>] [--checkpoint <checkpoints.jsonl> --checkpoint-pubkey <jwk.json|https-url>] [--allow-self-attested]
  *       Trusted key: --pubkey, else RETRACE_PUBKEY (JWK/file/https url), else RETRACE_URL/.well-known/retrace-pubkey (https only).
  *       Without one the bundle is only self-attested and verify exits 2 unless --allow-self-attested.
  *       Checkpoints require their own trusted key from --checkpoint-pubkey or RETRACE_CHECKPOINT_PUBKEY; the production
@@ -18,7 +18,7 @@
  */
 import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import { buildExportBundle, verifyExportBundle, exportVerdictOk, renderReportHtml, parseSigningKey, ExportBundle, newShareId, checkpointFromBundle, verifyCheckpoint, compareBundleToCheckpoint, parseCheckpointLog, latestCheckpoint } from "@retrace-dev/core";
+import { ProducerKey, keyId, buildExportBundle, verifyExportBundle, exportVerdictOk, renderReportHtml, parseSigningKey, ExportBundle, newShareId, checkpointFromBundle, verifyCheckpoint, compareBundleToCheckpoint, parseCheckpointLog, latestCheckpoint } from "@retrace-dev/core";
 import { makeStore } from "./index.js";
 import { RemoteStore } from "./remote-store.js";
 import { ensureSigningKey, loadSigningKey } from "./keys.js";
@@ -72,11 +72,22 @@ async function main() {
     const file = pos[1]; if (!file) throw new Error("usage: retrace-export verify <bundle.json> [--pubkey jwk.json|url]");
     const bundle = JSON.parse(readFileSync(file, "utf8")) as ExportBundle;
     const trusted = await resolveTrustedKey(flags.pubkey);
-    const v = await verifyExportBundle(bundle, trusted?.key);
+    // --producers: a TRUSTED producer-key list that replaces the bundle's own (which is self-attested, like the
+    // issuer key). Each entry's kid is recomputed from its public_key; a mismatch is a corrupt or tampered file.
+    let producers: ProducerKey[] | undefined;
+    if (flags.producers) {
+      const raw = JSON.parse(readFileSync(String(flags.producers), "utf8")) as ProducerKey[];
+      producers = await Promise.all(raw.map(async (e) => {
+        const kid = await keyId(e.public_key);
+        if (e.kid && e.kid !== kid) throw new Error(`--producers: entry for actor ${e.actor_id ?? "?"} declares kid ${e.kid} but its public_key derives ${kid}`);
+        return { ...e, kid };
+      }));
+    }
+    const v = await verifyExportBundle(bundle, trusted?.key, producers ? { producers } : undefined);
     let ok = exportVerdictOk(v);
     // Self-attested = the bundle verified against the key it carries. Anyone can produce that. Fail closed unless asked.
     if (v.signature === "self_attested" && flags["allow-self-attested"] && v.events_intact && v.links_consistent && v.chain_ok_at_export && v.coverage.complete !== false) ok = true;
-    console.log(`${ok ? "VALID" : "NOT VALID"} — signature: ${v.signature}${v.kid ? " (kid " + v.kid + (trusted ? ", trusted key from " + trusted.from : ", key embedded in bundle — NOT a trusted key") + ")" : ""}; events intact: ${v.events_intact}; links: ${v.links_consistent}; chain ok at export: ${v.chain_ok_at_export}; coverage: ${v.coverage.scope === "full" ? (v.coverage.complete ? "complete" : "INCOMPLETE") : "scoped (omission not checkable offline)"} — ${v.coverage.events} of ${v.coverage.total_events} events${v.legacy_hash_events ? `; ${v.legacy_hash_events} legacy-hash event${v.legacy_hash_events === 1 ? "" : "s"} (received_at not provably covered)` : ""}`);
+    console.log(`${ok ? "VALID" : "NOT VALID"} — signature: ${v.signature}${v.kid ? " (kid " + v.kid + (trusted ? ", trusted key from " + trusted.from : ", key embedded in bundle — NOT a trusted key") + ")" : ""}; events intact: ${v.events_intact}; links: ${v.links_consistent}; chain ok at export: ${v.chain_ok_at_export}; coverage: ${v.coverage.scope === "full" ? (v.coverage.complete ? "complete" : "INCOMPLETE") : "scoped (omission not checkable offline)"} — ${v.coverage.events} of ${v.coverage.total_events} events${v.legacy_hash_events ? `; ${v.legacy_hash_events} legacy-hash event${v.legacy_hash_events === 1 ? "" : "s"} (received_at not provably covered)` : ""}${v.producer_signed || v.producer_invalid || v.producer_unsigned_agent_events ? `; producer sigs: ${v.producer_signed} verified · ${v.producer_invalid} INVALID · ${v.producer_unsigned_agent_events} unsigned agent event${v.producer_unsigned_agent_events === 1 ? "" : "s"}` : ""}`);
     console.log("  coverage: " + v.coverage.note);
     if (v.signature === "self_attested" && !flags["allow-self-attested"]) console.log("  pass the issuer's public key (--pubkey, RETRACE_PUBKEY, or RETRACE_URL for its /.well-known/retrace-pubkey), or --allow-self-attested to accept an unattributed bundle");
     for (const p of v.problems) console.log("  - " + p);

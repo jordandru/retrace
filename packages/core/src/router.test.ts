@@ -168,7 +168,7 @@ test("DELETE /projects/:p: audit event is attributed to ownerActor, records the 
   const audit = store.events.find((e) => e.id === opsEvent)!;
   assert.deepEqual(audit.actor, { type: "human", id: "jordan@example.com", display_name: "Jordan" });
   assert.equal(audit.caused_by, ins.event.id);
-  assert.deepEqual(audit.method, { tool: "http", automated: false, params: { route: "DELETE /projects/:p", principal: "owner", sealed_by: "owner" } });
+  assert.deepEqual(audit.method, { tool: "http", automated: false, params: { route: "DELETE /projects/:p", principal: "owner", sealed_by: "owner", producer_sig_verdict: "none" } });
   assert.equal(audit.location?.system, "retrace-api");
   assert.match(audit.location?.url ?? "", /\/projects\/junk$/);
   const why = await (await handle(new Request(`http://test/events/${audit.id}/why`, { headers: AUTH }))).json();
