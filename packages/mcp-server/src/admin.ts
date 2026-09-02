@@ -4,8 +4,8 @@
  *
  *   retrace-admin new-team <project> --member a@x.com[,b@y.com] [--harness claude-code,codex,gemini,grok,github-copilot]
  *                          [--url https://retrace-api.<you>.workers.dev] [--credentials-file ~/.retrace/worker-credentials.json]
- *                          [--out onboarding-<project>.md] [--dry-run]
- *   retrace-admin add-agent <project> --member a@x.com --harness openclaw [--url https://…] [--out onboarding-…md]
+ *                          [--out ~/.retrace/onboarding-<project>.md] [--dry-run]
+ *   retrace-admin add-agent <project> --member a@x.com --harness openclaw [--url https://…] [--out ~/.retrace/onboarding-…md]
  *   retrace-admin list-teams [--credentials-file …]
  *
  * What new-team does (nothing touches the Worker by itself — secrets are pushed by the operator, see the printed step):
@@ -65,6 +65,11 @@ export interface AgentSpec {
 
 export function defaultCredentialsFile(env: NodeJS.ProcessEnv = process.env): string {
   return env.RETRACE_CREDENTIALS_FILE ?? join(homedir(), ".retrace", "worker-credentials.json");
+}
+
+/** Secret-bearing onboarding files default outside the current checkout. */
+export function defaultOnboardingFile(name: string): string {
+  return join(homedir(), ".retrace", name);
 }
 
 const PROJECT_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
@@ -273,6 +278,7 @@ export function appendCredentials(path: string, existing: Credential[], added: C
 
 /** Atomically replace a secret-bearing file with a freshly created 0600 inode, even when the destination exists. */
 export function writeSecretFile(path: string, contents: string): void {
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const tmp = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
   writeFileSync(tmp, contents, { mode: 0o600, flag: "wx" });
   try {
@@ -281,6 +287,23 @@ export function writeSecretFile(path: string, contents: string): void {
     try { unlinkSync(tmp); } catch {}
     throw error;
   }
+}
+
+/** Return the containing Git worktree, including linked worktrees whose `.git` is a file. */
+export function containingGitTree(path: string): string | undefined {
+  let dir = dirname(resolve(path));
+  for (;;) {
+    if (existsSync(join(dir, ".git"))) return dir;
+    const parent = dirname(dir);
+    if (parent === dir) return undefined;
+    dir = parent;
+  }
+}
+
+function warnIfOnboardingInGitTree(path: string, out: (s: string) => void): void {
+  const root = containingGitTree(path);
+  if (!root) return;
+  out(`WARNING: ${path} is inside Git worktree ${root}. This onboarding file contains live tokens; keep it untracked, move it to ~/.retrace, and delete it after setup.`);
 }
 
 function parseArgs(argv: string[]) {
@@ -315,7 +338,8 @@ export async function main(argv = process.argv.slice(2), env = process.env, out:
     const existing = readCredentialsFile(credentialsFile);
     if (existing.some((c) => c.projects?.includes(project))) throw new Error(`${credentialsFile} already holds credentials scoped to "${project}" — refusing to mint a second set (remove them first, or pick another project name)`);
     const plan = planTeam(spec);
-    const onboardingPath = resolve(String(flags.out ?? `onboarding-${project}.md`));
+    const onboardingPath = resolve(String(flags.out ?? defaultOnboardingFile(`onboarding-${project}.md`)));
+    warnIfOnboardingInGitTree(onboardingPath, out);
     if (flags["dry-run"]) {
       out(`dry run — would add ${plan.credentials.length} credentials for ${project} to ${credentialsFile} and write ${onboardingPath}`);
       for (const c of plan.credentials) out(`  ${c.trust.padEnd(7)} ${c.actor.type}/${c.actor.id}${c.actor.on_behalf_of ? " for " + c.actor.on_behalf_of : ""}`);
@@ -350,7 +374,8 @@ export async function main(argv = process.argv.slice(2), env = process.env, out:
       throw new Error(`${credentialsFile} has no credentials scoped to "${project}" — use new-team first`);
     if (existing.some((c) => c.projects?.includes(project) && c.actor.type === "agent" && c.actor.id === spec.harness && c.actor.on_behalf_of === spec.member))
       throw new Error(`${credentialsFile} already holds an agent/${spec.harness} credential for ${spec.member} in "${project}"`);
-    const onboardingPath = resolve(String(flags.out ?? `onboarding-${project}-${spec.harness}.md`));
+    const onboardingPath = resolve(String(flags.out ?? defaultOnboardingFile(`onboarding-${project}-${spec.harness}.md`)));
+    warnIfOnboardingInGitTree(onboardingPath, out);
     if (flags["dry-run"]) {
       out(`dry run — would add pinned agent/${spec.harness} for ${spec.member} to ${credentialsFile} and write ${onboardingPath}`);
       return 0;
@@ -362,7 +387,7 @@ export async function main(argv = process.argv.slice(2), env = process.env, out:
     out(`upload the updated secret: npx wrangler secret put RETRACE_CREDENTIALS < ${credentialsFile}`);
     return 0;
   }
-  out("retrace-admin <new-team <project> --member a@x.com[,…] [--harness …] | add-agent <project> --member a@x.com --harness openclaw | list-teams> [--url https://…] [--credentials-file …] [--out file.md] [--dry-run]");
+  out("retrace-admin <new-team <project> --member a@x.com[,…] [--harness …] | add-agent <project> --member a@x.com --harness openclaw | list-teams> [--url https://…] [--credentials-file …] [--out file.md (default: ~/.retrace/onboarding-*.md)] [--dry-run]");
   return cmd ? 1 : 0;
 }
 

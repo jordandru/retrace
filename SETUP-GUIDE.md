@@ -156,8 +156,7 @@ This path uses the Worker's remote `/mcp` endpoint, not the local stdio process.
 # The project must already exist in the operator credential mirror.
 npm exec --package=@retrace-dev/cli -- retrace-admin add-agent <project> \
   --member <your-email> --harness openclaw \
-  --url https://retrace-api.<you>.workers.dev \
-  --out onboarding-<project>-openclaw.md
+  --url https://retrace-api.<you>.workers.dev
 
 cd apps/worker
 npx wrangler secret put RETRACE_CREDENTIALS < ~/.retrace/worker-credentials.json
@@ -165,7 +164,7 @@ npx wrangler secret put RETRACE_CREDENTIALS < ~/.retrace/worker-credentials.json
 npx wrangler deploy
 ```
 
-Follow the generated onboarding file on the NemoClaw host. It uses the managed Streamable HTTP form:
+Follow the generated `~/.retrace/onboarding-<project>-openclaw.md` file on the NemoClaw host. It uses the managed Streamable HTTP form. If you override its location with `--out`, the CLI warns when the destination is inside a Git worktree.
 
 ```bash
 export RETRACE_MCP_TOKEN='<the new OpenClaw token>'

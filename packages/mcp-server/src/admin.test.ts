@@ -1,10 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseCredentials } from "@retrace-dev/core";
-import { DEFAULT_HARNESSES, planAgentCredential, renderAgentOnboarding, planTeam, planCredentials, validateSpec, teamsIn, appendCredentials, writeSecretFile, readCredentialsFile, gitHookActorId, ciActorId, main, TeamSpec } from "./admin.js";
+import { DEFAULT_HARNESSES, planAgentCredential, renderAgentOnboarding, planTeam, planCredentials, validateSpec, teamsIn, appendCredentials, writeSecretFile, readCredentialsFile, gitHookActorId, ciActorId, containingGitTree, defaultOnboardingFile, main, TeamSpec } from "./admin.js";
 
 /** deterministic "randomness": counter-filled buffers, distinct per call */
 const fakeRand = () => { let n = 0; return (len: number) => Buffer.alloc(len, ++n); };
@@ -85,6 +85,25 @@ test("writeSecretFile atomically replaces an existing file and enforces mode 060
   assert.equal(statSync(file).mode & 0o777, 0o600);
 });
 
+test("writeSecretFile creates a missing private parent directory", () => {
+  const dir = mkdtempSync(join(tmpdir(), "retrace-admin-secret-parent-"));
+  const parent = join(dir, "private");
+  const file = join(parent, "onboarding.md");
+
+  writeSecretFile(file, "secret contents");
+
+  assert.equal(readFileSync(file, "utf8"), "secret contents");
+  assert.equal(statSync(parent).mode & 0o777, 0o700);
+  assert.equal(statSync(file).mode & 0o777, 0o600);
+});
+
+test("secret onboarding paths default to ~/.retrace and explicit Git-tree destinations are detectable", () => {
+  assert.equal(defaultOnboardingFile("onboarding-acme.md"), join(homedir(), ".retrace", "onboarding-acme.md"));
+  const dir = mkdtempSync(join(tmpdir(), "retrace-admin-git-tree-"));
+  mkdirSync(join(dir, ".git"));
+  assert.equal(containingGitTree(join(dir, "nested", "onboarding.md")), dir);
+});
+
 test("main new-team: dry run touches nothing; real run appends, writes onboarding 0600, and refuses a second set for the same project", async () => {
   const dir = mkdtempSync(join(tmpdir(), "retrace-admin-"));
   const file = join(dir, "creds.json");
@@ -116,7 +135,20 @@ test("new-team defaults stay stable while OpenClaw is opt-in", async () => {
   const output: string[] = [];
   await main(["new-team", "default-team", "--member", "alice@acme.dev", "--url", "https://retrace.example", "--credentials-file", file, "--dry-run"], {}, (line) => output.push(line));
   assert.match(output.join("\n"), /would add 7 credentials/);
+  assert.match(output.join("\n"), new RegExp(defaultOnboardingFile("onboarding-default-team.md").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   assert.doesNotMatch(output.join("\n"), /openclaw/);
+});
+
+test("an explicit --out inside a Git worktree emits a live-token warning", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "retrace-admin-out-warning-"));
+  mkdirSync(join(dir, ".git"));
+  const output: string[] = [];
+  await main([
+    "new-team", "warn-team", "--member", "alice@acme.dev", "--harness", "codex",
+    "--url", "https://retrace.example", "--credentials-file", join(dir, "creds.json"),
+    "--out", join(dir, "private", "onboarding.md"), "--dry-run",
+  ], {}, (line) => output.push(line));
+  assert.match(output.join("\n"), /WARNING: .* is inside Git worktree .* contains live tokens/);
 });
 
 test("add-agent appends one pinned OpenClaw credential and emits NemoClaw managed HTTP setup", async () => {
@@ -127,7 +159,11 @@ test("add-agent appends one pinned OpenClaw credential and emits NemoClaw manage
   appendCredentials(file, [], base);
 
   const lines: string[] = [];
-  const argv = ["add-agent", "acme-app", "--member", "alice@acme.dev", "--harness", "openclaw", "--url", "https://retrace.example", "--credentials-file", file, "--out", onboarding];
+  const baseArgv = ["add-agent", "acme-app", "--member", "alice@acme.dev", "--harness", "openclaw", "--url", "https://retrace.example", "--credentials-file", file];
+  const argv = [...baseArgv, "--out", onboarding];
+  const defaultLines: string[] = [];
+  assert.equal(await main([...baseArgv, "--dry-run"], {}, (line) => defaultLines.push(line)), 0);
+  assert.match(defaultLines.join("\n"), new RegExp(defaultOnboardingFile("onboarding-acme-app-openclaw.md").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   assert.equal(await main(argv, {}, (line) => lines.push(line)), 0);
   const credentials = readCredentialsFile(file);
   const added = credentials.at(-1)!;

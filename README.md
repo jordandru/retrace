@@ -170,7 +170,7 @@ The Worker refuses every request with `503` when neither `RETRACE_TOKEN` nor a n
 
 ### Hosting teams on one Worker
 
-`retrace-admin new-team <project> --member a@x.com,b@y.com [--harness claude-code,codex,gemini,grok,github-copilot]` provisions a paying team without touching their code: it mints **project-scoped** credentials (`Credential.projects = [<project>]`, so a leaked team token can read or write nothing else) — one pinned agent credential per member × harness (`on_behalf_of` = that member, so only their own instructions can be recorded as theirs), one assert credential for the team's git hook (`retrace-git-<project>`, `allowed_actors` = the team's agents and members) and one read-only CI credential — appends them to `~/.retrace/worker-credentials.json` (atomic, `0600`, refuses if the project already has a set), and writes `onboarding-<project>.md` (`0600`; it contains the tokens — send it like a password, then delete it). Nothing changes on the Worker until you run the printed `npx wrangler secret put RETRACE_CREDENTIALS < ~/.retrace/worker-credentials.json`. `retrace-admin list-teams` shows what the mirror holds. A project needs no creation step: it exists from its first event. Ceiling to know about: a Worker secret is limited to a few KB, i.e. tens of credentials — moving credentials into D1 is the next rung when that bites.
+`retrace-admin new-team <project> --member a@x.com,b@y.com [--harness claude-code,codex,gemini,grok,github-copilot]` provisions a paying team without touching their code: it mints **project-scoped** credentials (`Credential.projects = [<project>]`, so a leaked team token can read or write nothing else) — one pinned agent credential per member × harness (`on_behalf_of` = that member, so only their own instructions can be recorded as theirs), one assert credential for the team's git hook (`retrace-git-<project>`, `allowed_actors` = the team's agents and members) and one read-only CI credential — appends them to `~/.retrace/worker-credentials.json` (atomic, `0600`, refuses if the project already has a set), and writes `~/.retrace/onboarding-<project>.md` (`0600`; it contains the tokens — send it like a password, then delete it). An explicit `--out` is respected, but the CLI warns if that destination is inside a Git worktree. Nothing changes on the Worker until you run the printed `npx wrangler secret put RETRACE_CREDENTIALS < ~/.retrace/worker-credentials.json`. `retrace-admin list-teams` shows what the mirror holds. A project needs no creation step: it exists from its first event. Ceiling to know about: a Worker secret is limited to a few KB, i.e. tens of credentials — moving credentials into D1 is the next rung when that bites.
 
 ### Experimental OpenClaw / NemoClaw audit pilot
 
@@ -182,13 +182,12 @@ Add OpenClaw to an existing team without changing `new-team`'s original five-har
 
 ```bash
 npm exec --package=@retrace-dev/cli -- retrace-admin add-agent <project> \
-  --member <email> --harness openclaw --url https://retrace-api.<you>.workers.dev \
-  --out onboarding-<project>-openclaw.md
+  --member <email> --harness openclaw --url https://retrace-api.<you>.workers.dev
 npx wrangler secret put RETRACE_CREDENTIALS < ~/.retrace/worker-credentials.json
 # Set RETRACE_MCP_ENABLED = "1" in apps/worker/wrangler.toml only for the pilot deployment, then deploy.
 ```
 
-The generated `0600` onboarding file contains one token and the host-side managed command `nemoclaw <sandbox> mcp add retrace --url <worker>/mcp --env RETRACE_MCP_TOKEN`. Delete it after setup. Roll back immediately by setting `RETRACE_MCP_ENABLED=0` (or removing it) and deploying; the REST API and stdio MCP remain unchanged.
+The generated `~/.retrace/onboarding-<project>-openclaw.md` file is `0600`; it contains one token and the host-side managed command `nemoclaw <sandbox> mcp add retrace --url <worker>/mcp --env RETRACE_MCP_TOKEN`. Delete it after setup. Roll back immediately by setting `RETRACE_MCP_ENABLED=0` (or removing it) and deploying; the REST API and stdio MCP remain unchanged.
 
 Then point the MCP server at it by adding to its `env`:
 
