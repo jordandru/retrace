@@ -19,3 +19,5 @@ worker-credentials.json
 .cursor/cli.json
 # Copilot Chat MCP belongs in VS Code user config, not a workspace file Cursor can Start
 .vscode/mcp.json
+# retrace-admin onboarding docs carry one live token each — never in the tree (write them with --out outside the repo)
+onboarding-*.md
