@@ -7,13 +7,16 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "migrate": "wrangler d1 execute retrace-db --remote --file=./schema.sql",
-    "test": "esbuild src/d1-store.test.ts --bundle --platform=node --format=esm --outfile=.test-dist/d1-store.test.mjs && node --test .test-dist/d1-store.test.mjs",
+    "test": "esbuild src/d1-store.test.ts src/mcp.test.ts --bundle --platform=node --format=esm --outdir=.test-dist --out-extension:.js=.mjs && node --test .test-dist/*.test.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@modelcontextprotocol/server": "^2.0.0",
+    "@retrace-dev/cli": "*",
     "@retrace-dev/core": "*"
   },
   "devDependencies": {
+    "@modelcontextprotocol/client": "^2.0.0",
     "@cloudflare/workers-types": "^4.20250101.0",
     "esbuild": "^0.28.1",
     "wrangler": "^4.0.0"

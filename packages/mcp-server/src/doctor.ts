@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
-import { Actor, Credential, Event, ExportBundle, ProjectStatus, ReconcileReport, causalRootState, renderProjectStatus, schemaSurface } from "@retrace-dev/core";
+import { Actor, Credential, Event, ExportBundle, ProjectStatus, ReconcileReport, asHistoryPage, causalRootState, renderProjectStatus, schemaSurface } from "@retrace-dev/core";
 import { Cfg, commitToEvent, resolveHookToken } from "./git-hook.js";
 import { ReconcileCfg, commitFacts, reconcileOptionsFrom, reconcileWithGit, repoNamesFor, verifiedExportEvents } from "./reconcile.js";
 import { retraceHeaders } from "./remote-store.js";
@@ -72,6 +72,11 @@ export function instructRootFinding(actorType: string, why: Event[]): Finding {
  */
 export function sealedCommitEvent(events: Event[]): Event | undefined {
   return events.filter((e) => e.action === "committed" || e.action === "merged").sort((a, b) => a.seq - b.seq)[0];
+}
+
+/** Normalize both legacy array history and the current newest-window page before doctor filters HEAD seals. */
+export function doctorHistoryEvents(body: unknown): Event[] {
+  return asHistoryPage(body).events;
 }
 
 export function sealedLooksAgent(event: { actor: { type: string }; location?: { surface?: string } }): boolean {
@@ -248,7 +253,7 @@ async function main() {
         const action = headEvent.action === "merged" ? "merged" : "committed";
         const res = await fetch(`${url}/projects/${encodeURIComponent(project)}/events?artifact_id=${encodeURIComponent(commit ?? "")}&action=${action}`, { headers });
         if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
-        const events: Event[] = await res.json();
+        const events = doctorHistoryEvents(await res.json());
         const sealed = sealedCommitEvent(events);
         const delivery = headDelivery(gate, commit, !!sealed);
         findings.push(sealed ? result("pass", "HEAD delivery", `${commit} is event #${sealed.seq}`) : delivery);

@@ -14,6 +14,7 @@
 import { createHandler, parseCheckpointProjectAllowlist, parseCredentials, parseGithubRepoProjects, parseSigningKey, runCheckpointCron } from "@retrace-dev/core";
 import { D1Store } from "./d1-store.js";
 import { D1CheckpointLog } from "./checkpoint-log.js";
+import { handleRemoteMcp } from "./mcp.js";
 
 export interface Env {
   DB: D1Database;
@@ -24,6 +25,8 @@ export interface Env {
   RETRACE_SIGNING_KEY?: string;
   RETRACE_ISSUER?: string;
   RETRACE_PUBLIC_URL?: string;
+  /** Explicit kill switch for the experimental Streamable HTTP audit endpoint at /mcp. */
+  RETRACE_MCP_ENABLED?: string;
   /** `wrangler secret put RETRACE_GITHUB_SECRET` — same value as the webhook secret in GitHub repo settings */
   RETRACE_GITHUB_SECRET?: string;
   /** JSON object of "owner/repo" → Retrace project. The HMAC covers the repo, not ?project=. */
@@ -39,7 +42,8 @@ export interface Env {
 
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
-    return createHandler(new D1Store(env.DB), {
+    const store = new D1Store(env.DB);
+    const api = createHandler(store, {
       // Cloud deployments have no safe implicit-open mode: missing secrets must make the service unavailable rather
       // than granting anonymous read, append, share, and delete access. Local RETRACE_OPEN remains explicit in serve.ts.
       requireAuth: true,
@@ -53,7 +57,9 @@ export default {
       githubIncludePush: env.RETRACE_GITHUB_PUSH === "1",
       opsProject: env.RETRACE_OPS_PROJECT,
       ownerActor: env.RETRACE_OWNER ? { type: "human", id: env.RETRACE_OWNER } : undefined,
-    })(req);
+    });
+    if (new URL(req.url).pathname === "/mcp") return handleRemoteMcp(req, env, store, api);
+    return api(req);
   },
 
   /** Hourly cron (wrangler.toml [triggers]): checkpoint explicitly opted-in moved heads and witness them in Rekor.

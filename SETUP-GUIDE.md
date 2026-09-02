@@ -148,6 +148,34 @@ Per-harness notes: `CLAUDE.md`, `GEMINI.md`, `GROK.md`, `AGENTS.md` (Codex), `.g
 
 This repo’s project name is `retrace` (see `.retrace.json`). Boxing-RPG is a separate project.
 
+#### Experimental: OpenClaw in a NemoClaw sandbox
+
+This path uses the Worker's remote `/mcp` endpoint, not the local stdio process. Keep the pilot opt-in: `retrace-admin new-team` still defaults to Claude Code, Codex, Gemini, Grok, and GitHub Copilot only.
+
+```bash
+# The project must already exist in the operator credential mirror.
+npm exec --package=@retrace-dev/cli -- retrace-admin add-agent <project> \
+  --member <your-email> --harness openclaw \
+  --url https://retrace-api.<you>.workers.dev \
+  --out onboarding-<project>-openclaw.md
+
+cd apps/worker
+npx wrangler secret put RETRACE_CREDENTIALS < ~/.retrace/worker-credentials.json
+# Add RETRACE_MCP_ENABLED = "1" under [vars] in wrangler.toml, then:
+npx wrangler deploy
+```
+
+Follow the generated onboarding file on the NemoClaw host. It uses the managed Streamable HTTP form:
+
+```bash
+export RETRACE_MCP_TOKEN='<the new OpenClaw token>'
+nemoclaw <sandbox-name> mcp add retrace --url https://retrace-api.<you>.workers.dev/mcp --env RETRACE_MCP_TOKEN
+unset RETRACE_MCP_TOKEN
+nemoclaw <sandbox-name> mcp list
+```
+
+The ledger actor is `openclaw`; NemoClaw only supplies the sandbox and credential isolation. Expect **9 audit tools**, not the stdio server's 11: amend/share and export file paths are deliberately unavailable. The token must be a pinned agent credential scoped to exactly one project; the owner token and git-hook assert token will return 401. The pilot is server-stamped and unsigned at the producer layer. To stop it without affecting REST or stdio, remove/set `RETRACE_MCP_ENABLED=0` and deploy.
+
 ### 4c. CI gate
 
 `retrace doctor` is a local preflight (hook installed, credential file). CI has neither. Use:

@@ -22,15 +22,15 @@
  *   RETRACE_IDE / RETRACE_WORKSPACE  override location.ide / location.workspace (default: detected from the IDE's own
  *                    environment — Orca's ORCA_PANE_KEY / ORCA_WORKTREE_ID; nothing is guessed)
  */
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { McpServer } from "@modelcontextprotocol/server";
+import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
 import { z } from "zod";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import {
-  Actor, Action, ArtifactRef, Change, Location, Method, EventInput, applyDefaultRoles,
+  Actor as CoreActor, Location, EventInput, applyDefaultRoles,
   appendEvent, CausedByError, causedByProblem, causedByErrorMessage,
   verifyProject, explainEvent, renderTimeline, renderWhyChain, describeEvent,
   buildExportBundle, verifyExportBundle, renderReportHtml, parseSigningKey, publicFromPrivate, newShareId,
@@ -42,6 +42,7 @@ import { ensureSigningKey } from "./keys.js";
 import { SqliteStore } from "./sqlite-store.js";
 import { RemoteStore } from "./remote-store.js";
 import { isMainModule } from "./is-main.js";
+import { AuditActor, registerAuditMcpTools, type AuditMcpHandlers } from "./audit-mcp.js";
 
 const env = process.env;
 const DEFAULT_PROJECT = env.RETRACE_PROJECT ?? "default";
@@ -187,9 +188,9 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
    *  env — the caller may only decorate with display_name/version. Known limitation: cross-actor assertion (e.g. a
    *  "claude-cowork" event from a server configured as "claude-code") now needs the escape hatch; the credentialed
    *  per-actor version is backlog #6. */
-  const resolveActor = (callerActor?: Partial<Actor>): Actor => {
+  const resolveActor = (callerActor?: Partial<CoreActor>): CoreActor => {
     if (!actorLock) {
-      return (callerActor?.type && callerActor.type !== "agent" ? callerActor : { ...defaultActor, ...(callerActor ?? {}) }) as Actor;
+      return (callerActor?.type && callerActor.type !== "agent" ? callerActor : { ...defaultActor, ...(callerActor ?? {}) }) as CoreActor;
     }
     if (callerActor?.type === "human" || callerActor?.type === "system")
       throw new Error(`actor.type "${callerActor.type}" is not allowed: this Retrace MCP server logs as its configured agent ("${defaultActor.id}"). Human instructions go through retrace_instruct; other human/system actors need the git hook or a credentialed context. ${ACTOR_LOCK_HINT}`);
@@ -204,7 +205,7 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
     };
   };
   /** Human actor for retrace_instruct. With the lock on, this server may only speak for its configured human. */
-  const resolveHuman = (humanId: string): Actor => {
+  const resolveHuman = (humanId: string): CoreActor => {
     if (actorLock) {
       const configured = env.RETRACE_ON_BEHALF_OF;
       if (!configured)
@@ -215,36 +216,8 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
     return { type: "human", id: humanId };
   };
 
-  server.registerTool(
-    "retrace_log",
-    {
-      title: "Log a provenance event",
-      description:
-        "Record WHO did WHAT to WHICH artifact(s), WHEN, WHERE, WHY and HOW. Call this after every meaningful action " +
-        "(create/edit/delete/execute/approve/send). Returns the event id — pass it as caused_by on follow-up actions " +
-        "so Retrace can reconstruct the causal chain back to the human instruction.",
-      inputSchema: {
-        project: z.string().optional().describe(`Project name (default: ${DEFAULT_PROJECT}). Omit it — the server pins writes to RETRACE_PROJECT and rejects other names.`),
-        action: Action.describe("Verb from the controlled vocabulary"),
-        action_detail: z.string().optional().describe("Required when action=other; free-text verb"),
-        artifacts: z.array(ArtifactRef).min(1).describe(
-          "Artifacts touched, e.g. {id:'repo:my-app#src/main.ts', kind:'file', role:'both'}. role (PROV) = 'used' (input), " +
-          "'generated' (output) or 'both'. Omit it and the verb decides: read → used; created → generated; edited/moved/renamed → both; " +
-          "executed/sent/received/approved/rejected → used; deleted/other → unspecified. Always set role explicitly for OUTPUTS of an " +
-          "executed/sent action (a deployment, a report, a message) — the default treats those refs as inputs.",
-        ),
-        intent: z.string().optional().describe("WHY: the reason for this action, in one sentence"),
-        caused_by: z.string().optional().describe("Event id of the instruction/action that caused this one. Must name an existing same-project event; a dangling or cross-project id is rejected so the agent can fix and retry. Adapters (git hook, Drive) keep the link and mark it unverified instead."),
-        actor: Actor.partial().optional().describe("Override the default actor (defaults from env)"),
-        change: Change.optional().describe("WHAT changed: summary, diff, before/after hashes"),
-        location: Location.optional().describe("WHERE: path/url/environment/system. session/device/client/ide/workspace/surface are stamped by the server and ignored if you send them."),
-        method: Method.optional().describe("HOW: tool, instruction ref, params, tokens/cost"),
-        timestamp: z.string().optional().describe("ISO 8601; defaults to now"),
-        idempotency_key: z.string().optional(),
-        tags: z.array(z.string()).optional(),
-      },
-    },
-    async (args) => {
+  const auditHandlers = {} as AuditMcpHandlers;
+  auditHandlers.log = async (args) => {
       guardAction(args.action);
       const actor = resolveActor(args.actor); // actor lock first — a rejected write must not get this far
       // WHERE enrichment (backlog #15) and PROV role fill-absent: after the actor lock, before sealing (local appendEvent
@@ -266,23 +239,22 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
         content: [{ type: "text", text: `${deduped ? "(deduped) " : ""}logged ${event.id} seq=${event.seq}\n${describeEvent(event)}` }],
         structuredContent: { id: event.id, seq: event.seq, hash: event.hash, deduped },
       };
-    },
-  );
+    };
 
   server.registerTool(
     "retrace_amend",
     {
       title: "Append a provenance amendment",
       description: "Correct missing metadata without modifying a sealed event. The amendment must be rooted in a human instruction; status then reports the original gap as amended while chain history remains intact.",
-      inputSchema: {
+      inputSchema: z.object({
         project: z.string().optional(),
         target_event_id: z.string().describe("Existing sealed event being qualified"),
         artifact_roles: z.array(z.object({ index: z.number().int().nonnegative(), role: z.enum(["used", "generated", "both"]) })).optional().describe("Roles for zero-based artifact indexes whose original role is absent"),
         attest_causal_root: z.boolean().optional().describe("Attest that an otherwise unlinked historical event was performed under human direction"),
         reason: z.string().min(1).describe("Evidence-based explanation for the correction"),
         caused_by: z.string().describe("Human instruction (or rooted follow-up) authorizing this amendment"),
-        actor: Actor.partial().optional().describe("Runtime model may be supplied when the configured actor has no pinned model"),
-      },
+        actor: AuditActor.optional().describe("Runtime model may be supplied when the configured actor has no pinned model"),
+      }),
     },
     async (args) => {
       const project = writeProject(args.project);
@@ -325,22 +297,7 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
     },
   );
 
-  server.registerTool(
-    "retrace_instruct",
-    {
-      title: "Log a human instruction",
-      description:
-        "Shortcut to record that a human gave an instruction (the root of a causal chain). Use at the start of a task " +
-        "with the user's request. Returns an event id to use as caused_by for the work that follows.",
-      inputSchema: {
-        project: z.string().optional(),
-        human_id: z.string().describe("Who gave the instruction (email or name)"),
-        instruction: z.string().describe("The instruction text (or a faithful summary)"),
-        artifacts: z.array(ArtifactRef).optional().describe("What the instruction is about; defaults to a task artifact (role generated). Supplied refs keep whatever role you give them — an instruction is about a file, it does not generate it."),
-        timestamp: z.string().optional().describe("ISO 8601; defaults to now"),
-      },
-    },
-    async (args) => {
+  auditHandlers.instruct = async (args) => {
       const actor = resolveHuman(args.human_id); // actor lock first
       const input = EventInput.parse({
         project: writeProject(args.project),
@@ -357,96 +314,38 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
       });
       const { event } = remote ? await remote.append(input) : await appendEvent(store, input);
       return { content: [{ type: "text", text: `instruction logged ${event.id}` }], structuredContent: { id: event.id } };
-    },
-  );
+    };
 
-  server.registerTool(
-    "retrace_history",
-    {
-      title: "Retrace history",
-      description: "Newest matching events for a project (default 100). Truncation is explicit: pass before_seq to walk older pages. Optionally filter by artifact, actor, action, time range or text.",
-      inputSchema: {
-        project: z.string().optional(),
-        artifact_id: z.string().optional(),
-        actor_id: z.string().optional(),
-        actor_type: z.enum(["human", "agent", "system"]).optional(),
-        action: Action.optional(),
-        since: z.string().optional(),
-        until: z.string().optional(),
-        text: z.string().optional().describe("substring match across the event"),
-        limit: z.number().int().positive().max(1000).optional().describe("Newest matching events to return (default 100). Oldest-first truncation is never used."),
-        before_seq: z.number().int().nonnegative().optional().describe("Exclusive upper bound: only events with seq < before_seq. Walk older pages of a newest-first window."),
-      },
-    },
-    async (args) => {
+  auditHandlers.history = async (args) => {
       const page = await store.history({ ...args, project: args.project ?? DEFAULT_PROJECT });
       const note = page.truncated
         ? `\n\ntruncated — ${page.events.length} newest matching events; pass before_seq ${page.next_before_seq} for the previous page`
         : "";
       return { content: [{ type: "text", text: renderTimeline(page.events) + note }], structuredContent: { count: page.events.length, events: page.events, truncated: page.truncated, next_before_seq: page.next_before_seq } };
-    },
-  );
+    };
 
-  server.registerTool(
-    "retrace_why",
-    {
-      title: "Explain why an event happened",
-      description: "Follow caused_by links from an event back to the originating human instruction.",
-      inputSchema: { event_id: z.string() },
-    },
-    async ({ event_id }) => {
+  auditHandlers.why = async ({ event_id }) => {
       const chain = await explainEvent(store, event_id);
       if (!chain.length) return { content: [{ type: "text", text: `no event ${event_id}` }], isError: true };
       return { content: [{ type: "text", text: renderWhyChain(chain) }], structuredContent: { chain } };
-    },
-  );
+    };
 
-  server.registerTool(
-    "retrace_status",
-    {
-      title: "Project transparency status",
-      description: "One canonical view of chain integrity, causal coverage, capture gaps, actors, and integration freshness for humans and agents.",
-      inputSchema: { project: z.string().optional() },
-    },
-    async ({ project }) => {
+  auditHandlers.status = async ({ project }) => {
       const p = project ?? DEFAULT_PROJECT;
       const status = remote ? await remote.status(p) : await buildProjectStatus(store, p);
       return { content: [{ type: "text", text: renderProjectStatus(status) }], structuredContent: { status } };
-    },
-  );
+    };
 
-  server.registerTool(
-    "retrace_verify",
-    {
-      title: "Verify chain integrity",
-      description: "Recompute the hash chain for a project and report whether history is intact.",
-      inputSchema: { project: z.string().optional() },
-    },
-    async ({ project }) => {
+  auditHandlers.verify = async ({ project }) => {
       const p = project ?? DEFAULT_PROJECT;
       const r = remote ? await remote.verify(p) : await verifyProject(store, p);
       return {
         content: [{ type: "text", text: r.ok ? `OK — ${r.checked} events verified for '${p}'` : `BROKEN at seq ${r.first_bad_seq}: ${r.reason}` }],
         structuredContent: { ...r },
       };
-    },
-  );
+    };
 
-  server.registerTool(
-    "retrace_export",
-    {
-      title: "Signed provenance export",
-      description:
-        "Build a signed (Ed25519) provenance bundle for a project or one artifact — the 'Prove' step. Optionally writes the JSON " +
-        "and a printable HTML report to disk. Anyone can verify the bundle offline with `retrace-export verify`.",
-      inputSchema: {
-        project: z.string().optional(),
-        artifact_id: z.string().optional().describe("Limit to one artifact (e.g. repo:rpg#src/fight.ts)"),
-        out_json: z.string().optional().describe("Path to write the signed JSON bundle"),
-        out_html: z.string().optional().describe("Path to write the printable HTML report (open → Print → Save as PDF)"),
-      },
-    },
-    async (args) => {
+  auditHandlers.export = async (args) => {
       const project = args.project ?? DEFAULT_PROJECT;
       const bundle = remote
         ? await remote.export({ project, artifact_id: args.artifact_id })
@@ -466,20 +365,19 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
       const summary = `${bundle.events.length} events · chain ${bundle.chain.ok ? "intact" : "BROKEN"} · signature ${verdict.signature}${bundle.issuer ? " (kid " + bundle.issuer.kid + ")" : ""} · coverage ${verdict.coverage.scope === "full" ? (verdict.coverage.complete ? "complete" : "INCOMPLETE") : "scoped"} (${verdict.coverage.events}/${verdict.coverage.total_events})` +
         (outJson ? `\njson → ${outJson}` : "") + (outHtml ? `\nreport → ${outHtml}` : "");
       return { content: [{ type: "text", text: summary }], structuredContent: { events: bundle.events.length, chain_ok: bundle.chain.ok, signature: verdict.signature, coverage: verdict.coverage, kid: bundle.issuer?.kid, ...(args.out_json || args.out_html ? {} : { bundle }) } };
-    },
-  );
+    };
 
   server.registerTool(
     "retrace_share",
     {
       title: "Create read-only share link",
       description: "Create a public, read-only share link (timeline + verify + signed export + printable report) scoped to a project or one artifact.",
-      inputSchema: {
+      inputSchema: z.object({
         project: z.string().optional(),
         artifact_id: z.string().optional(),
         label: z.string().optional().describe("Shown as the report title, e.g. 'Jab counter — client review'"),
         expires_in_days: z.number().int().positive().optional(),
-      },
+      }),
     },
     async (args) => {
       const project = args.project ?? DEFAULT_PROJECT;
@@ -496,21 +394,7 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
     },
   );
 
-  server.registerTool(
-    "retrace_lineage",
-    {
-      title: "Artifact lineage graph",
-      description:
-        "Which artifacts came from which: explicit derived_from links plus causal flow (instruction → files touched → PR …). " +
-        "Returns text by default; format=dot (Graphviz) or mermaid for diagrams; format=json for nodes/edges.",
-      inputSchema: {
-        project: z.string().optional(),
-        artifact_id: z.string().optional().describe("Focus on one artifact (its events + causal ancestors)"),
-        format: z.enum(["text", "dot", "mermaid", "json"]).optional(),
-        include_actors: z.boolean().optional().describe("Add human/agent nodes with 'touched' edges"),
-      },
-    },
-    async (args) => {
+  auditHandlers.lineage = async (args) => {
       const project = args.project ?? DEFAULT_PROJECT;
       const events = args.artifact_id
         ? (remote ? await remote.export({ project, artifact_id: args.artifact_id }) : await buildExportBundle(store, { project, artifact_id: args.artifact_id })).events
@@ -519,17 +403,14 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
       const fmt = args.format ?? "text";
       const text = fmt === "dot" ? renderLineageDot(l) : fmt === "mermaid" ? renderLineageMermaid(l) : fmt === "json" ? JSON.stringify(l, null, 2) : renderLineageText(l);
       return { content: [{ type: "text", text }], structuredContent: { nodes: l.nodes.length, edges: l.edges.length, ...(fmt === "json" ? { lineage: l } : {}) } };
-    },
-  );
+    };
 
-  server.registerTool(
-    "retrace_projects",
-    { title: "List projects", description: "List projects that have events.", inputSchema: {} },
-    async () => {
+  auditHandlers.projects = async () => {
       const ps = await store.projects();
       return { content: [{ type: "text", text: ps.join("\n") || "(none)" }], structuredContent: { projects: ps } };
-    },
-  );
+    };
+
+  registerAuditMcpTools(server, auditHandlers, { defaultProject: DEFAULT_PROJECT, allowFileOutputs: true });
 
   return server;
 }

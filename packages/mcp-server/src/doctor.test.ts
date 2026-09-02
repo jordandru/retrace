@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Credential, Event, schemaSurface } from "@retrace-dev/core";
-import { attributionFinding, credentialAuthorization, headDelivery, instructRootFinding, missingSchema, parseDoctorArgs, pinSessionFinding, sealedCommitEvent, sealedLooksAgent } from "./doctor.js";
+import { attributionFinding, credentialAuthorization, doctorHistoryEvents, headDelivery, instructRootFinding, missingSchema, parseDoctorArgs, pinSessionFinding, sealedCommitEvent, sealedLooksAgent } from "./doctor.js";
 
 const why = (rows: Array<{ id: string; action: Event["action"]; type: Event["actor"]["type"]; caused_by?: string }>): Event[] =>
   rows.map((r, seq) => ({
@@ -50,6 +50,12 @@ test("doctor: missing HEAD delivery is warn locally and fail in --gate", () => {
   assert.equal(headDelivery(false, "commit:retrace@abc123def456", false).level, "warn");
   assert.equal(headDelivery(true, "commit:retrace@abc123def456", false).level, "fail");
   assert.equal(headDelivery(true, undefined, false).level, "fail");
+});
+
+test("doctor: HEAD history accepts current paginated responses and legacy arrays", () => {
+  const event = why([{ id: "evt_commit", action: "committed", type: "agent" }])[0];
+  assert.deepEqual(doctorHistoryEvents({ events: [event], truncated: false }), [event]);
+  assert.deepEqual(doctorHistoryEvents([event]), [event]);
 });
 
 test("doctor: instruct root is required for agent commits only", () => {

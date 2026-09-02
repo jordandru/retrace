@@ -1,7 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { buildServer, enrichLocation, clientSystem, detectIde, harnessSession, confinedWritePath } from "./index.js";
 import { appendEvent } from "@retrace-dev/core";
 import { mkdtempSync } from "node:fs";

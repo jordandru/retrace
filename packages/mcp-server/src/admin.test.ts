@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseCredentials } from "@retrace-dev/core";
-import { planTeam, planCredentials, validateSpec, teamsIn, appendCredentials, readCredentialsFile, gitHookActorId, ciActorId, main, TeamSpec } from "./admin.js";
+import { DEFAULT_HARNESSES, planAgentCredential, renderAgentOnboarding, planTeam, planCredentials, validateSpec, teamsIn, appendCredentials, readCredentialsFile, gitHookActorId, ciActorId, main, TeamSpec } from "./admin.js";
 
 /** deterministic "randomness": counter-filled buffers, distinct per call */
 const fakeRand = () => { let n = 0; return (len: number) => Buffer.alloc(len, ++n); };
@@ -95,4 +95,49 @@ test("main new-team: dry run touches nothing; real run appends, writes onboardin
   // a malformed credentials file fails before anything is written
   writeFileSync(file, "[{\"token\":\"short\"}]");
   await assert.rejects(() => main(argv, {}, () => {}));
+});
+
+test("new-team defaults stay stable while OpenClaw is opt-in", async () => {
+  assert.deepEqual(DEFAULT_HARNESSES, ["claude-code", "codex", "gemini", "grok", "github-copilot"]);
+  const dir = mkdtempSync(join(tmpdir(), "retrace-admin-default-"));
+  const file = join(dir, "creds.json");
+  const output: string[] = [];
+  await main(["new-team", "default-team", "--member", "alice@acme.dev", "--url", "https://retrace.example", "--credentials-file", file, "--dry-run"], {}, (line) => output.push(line));
+  assert.match(output.join("\n"), /would add 7 credentials/);
+  assert.doesNotMatch(output.join("\n"), /openclaw/);
+});
+
+test("add-agent appends one pinned OpenClaw credential and emits NemoClaw managed HTTP setup", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "retrace-admin-agent-"));
+  const file = join(dir, "creds.json");
+  const onboarding = join(dir, "openclaw.md");
+  const base = planCredentials(spec, fakeRand());
+  appendCredentials(file, [], base);
+
+  const lines: string[] = [];
+  const argv = ["add-agent", "acme-app", "--member", "alice@acme.dev", "--harness", "openclaw", "--url", "https://retrace.example", "--credentials-file", file, "--out", onboarding];
+  assert.equal(await main(argv, {}, (line) => lines.push(line)), 0);
+  const credentials = readCredentialsFile(file);
+  const added = credentials.at(-1)!;
+  assert.equal(credentials.length, base.length + 1);
+  assert.deepEqual(added.actor, { type: "agent", id: "openclaw", on_behalf_of: "alice@acme.dev" });
+  assert.deepEqual([added.trust, added.projects], ["pinned", ["acme-app"]]);
+  const doc = readFileSync(onboarding, "utf8");
+  assert.equal(doc.split(added.token).length - 1, 1);
+  assert.match(doc, /nemoclaw <sandbox-name> mcp add retrace --url https:\/\/retrace\.example\/mcp --env RETRACE_MCP_TOKEN/);
+  assert.match(doc, /runtime or sandbox is not a separate actor/);
+  assert.match(doc, /does not claim producer signatures/);
+  assert.equal(statSync(onboarding).mode & 0o777, 0o600);
+  assert.match(lines.join("\n"), /wrangler secret put RETRACE_CREDENTIALS/);
+  await assert.rejects(() => main(argv, {}, () => {}), /already holds an agent\/openclaw credential/);
+});
+
+test("add-agent validates a single member/harness and requires an existing project", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "retrace-admin-agent-invalid-"));
+  const file = join(dir, "creds.json");
+  await assert.rejects(() => main(["add-agent", "missing", "--member", "alice@acme.dev", "--harness", "openclaw", "--url", "https://retrace.example", "--credentials-file", file], {}, () => {}), /use new-team first/);
+  await assert.rejects(() => main(["add-agent", "missing", "--member", "alice@acme.dev,bob@acme.dev", "--harness", "openclaw", "--url", "https://retrace.example", "--credentials-file", file], {}, () => {}), /usage/);
+  assert.throws(() => planAgentCredential({ project: "acme-app", member: "alice@acme.dev", harness: "unknown" as any, url: "https://retrace.example" }), /unknown harness/);
+  const cred = planAgentCredential({ project: "acme-app", member: "alice@acme.dev", harness: "openclaw", url: "https://retrace.example" }, fakeRand());
+  assert.match(renderAgentOnboarding({ project: "acme-app", member: "alice@acme.dev", harness: "openclaw", url: "https://retrace.example" }, cred), /RETRACE_MCP_ENABLED=1/);
 });

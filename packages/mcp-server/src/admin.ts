@@ -5,6 +5,7 @@
  *   retrace-admin new-team <project> --member a@x.com[,b@y.com] [--harness claude-code,codex,gemini,grok,github-copilot]
  *                          [--url https://retrace-api.<you>.workers.dev] [--credentials-file ~/.retrace/worker-credentials.json]
  *                          [--out onboarding-<project>.md] [--dry-run]
+ *   retrace-admin add-agent <project> --member a@x.com --harness openclaw [--url https://…] [--out onboarding-…md]
  *   retrace-admin list-teams [--credentials-file …]
  *
  * What new-team does (nothing touches the Worker by itself — secrets are pushed by the operator, see the printed step):
@@ -27,7 +28,9 @@ import { dirname, join, resolve } from "node:path";
 import { Credential, parseCredentials } from "@retrace-dev/core";
 import { isMainModule } from "./is-main.js";
 
-export const HARNESSES = ["claude-code", "codex", "gemini", "grok", "github-copilot"] as const;
+/** Kept stable so `new-team` does not silently provision an experimental integration. */
+export const DEFAULT_HARNESSES = ["claude-code", "codex", "gemini", "grok", "github-copilot"] as const;
+export const HARNESSES = [...DEFAULT_HARNESSES, "openclaw"] as const;
 export type Harness = (typeof HARNESSES)[number];
 
 /** Where each harness keeps its MCP server config, for the onboarding text. */
@@ -37,6 +40,7 @@ const HARNESS_CONFIG: Record<Harness, { label: string; file: string; instruction
   gemini: { label: "Gemini CLI", file: ".gemini/settings.json", instructions: "GEMINI.md" },
   grok: { label: "Grok", file: "~/.grok/config.toml", instructions: "GROK.md" },
   "github-copilot": { label: "GitHub Copilot CLI", file: "~/.copilot/mcp-config.json", instructions: ".github/copilot-instructions.md" },
+  openclaw: { label: "OpenClaw in NemoClaw", file: "NemoClaw's managed MCP provider store", instructions: "OpenClaw workspace instructions" },
 };
 
 export interface TeamSpec {
@@ -50,6 +54,13 @@ export interface TeamPlan {
   spec: TeamSpec;
   credentials: Credential[];
   onboarding: string;
+}
+
+export interface AgentSpec {
+  project: string;
+  member: string;
+  harness: Harness;
+  url: string;
 }
 
 export function defaultCredentialsFile(env: NodeJS.ProcessEnv = process.env): string {
@@ -132,6 +143,16 @@ export function renderOnboarding(spec: TeamSpec, credentials: Credential[]): str
       const cred = credentials.find((c) => c.actor.type === "agent" && c.actor.id === h && c.actor.on_behalf_of === member)!;
       const cfg = HARNESS_CONFIG[h];
       lines.push(`**${cfg.label}** — MCP server entry in \`${cfg.file}\`; repo instructions in \`${cfg.instructions}\`.`, "");
+      if (h === "openclaw") {
+        lines.push("NemoClaw is the sandbox runtime, not the ledger actor. Configure the managed Streamable HTTP provider from the host; the secret stays in NemoClaw's provider store:", "");
+        lines.push(fence("bash", [
+          `export RETRACE_MCP_TOKEN='${cred.token}'`,
+          `nemoclaw <sandbox-name> mcp add retrace --url ${spec.url}/mcp --env RETRACE_MCP_TOKEN`,
+          "unset RETRACE_MCP_TOKEN",
+          "nemoclaw <sandbox-name> mcp list",
+        ].join("\n")), "");
+        continue;
+      }
       lines.push(fence("json", JSON.stringify({
         retrace: {
           command: "npx",
@@ -186,6 +207,50 @@ export function planTeam(spec: TeamSpec, rand: (n: number) => Buffer = randomByt
   return { spec, credentials, onboarding: renderOnboarding(spec, credentials) };
 }
 
+export function planAgentCredential(spec: AgentSpec, rand: (n: number) => Buffer = randomBytes): Credential {
+  validateSpec({ project: spec.project, members: [spec.member], harnesses: [spec.harness], url: spec.url });
+  return {
+    token: mintToken(rand),
+    name: `${spec.project} · ${spec.harness} for ${spec.member}`,
+    actor: { type: "agent", id: spec.harness, on_behalf_of: spec.member },
+    trust: "pinned",
+    projects: [spec.project],
+  };
+}
+
+/** Single-token onboarding for adding one agent without redistributing an existing team's secrets. */
+export function renderAgentOnboarding(spec: AgentSpec, credential: Credential): string {
+  const cfg = HARNESS_CONFIG[spec.harness];
+  const lines = [
+    `# Retrace agent onboarding — \`${spec.harness}\` for \`${spec.project}\``, "",
+    "**This document contains one secret.** Send it like a password and delete it after setup.", "",
+    `Ledger actor: \`${spec.harness}\` on behalf of \`${spec.member}\`. The runtime or sandbox is not a separate actor.`, "",
+  ];
+  if (spec.harness === "openclaw") {
+    lines.push(
+      "## OpenClaw via NemoClaw", "",
+      "Run this on the NemoClaw host. `--env` places the bearer credential in the managed provider store rather than OpenClaw's sandbox:", "",
+      fence("bash", [
+        `export RETRACE_MCP_TOKEN='${credential.token}'`,
+        `nemoclaw <sandbox-name> mcp add retrace --url ${spec.url}/mcp --env RETRACE_MCP_TOKEN`,
+        "unset RETRACE_MCP_TOKEN",
+        "nemoclaw <sandbox-name> mcp list",
+      ].join("\n")), "",
+      "The Worker must have `RETRACE_MCP_ENABLED=1`. This compatibility pilot uses server-stamped pinned identity and does not claim producer signatures.", "",
+    );
+  } else {
+    lines.push(
+      `## ${cfg.label}`, "",
+      `Add this entry in \`${cfg.file}\` and keep the provenance instructions in \`${cfg.instructions}\`:`, "",
+      fence("json", JSON.stringify({ retrace: { command: "npx", args: ["-y", "--package=@retrace-dev/cli", "retrace-mcp"], env: {
+        RETRACE_URL: spec.url, RETRACE_TOKEN: credential.token, RETRACE_PROJECT: spec.project,
+        RETRACE_ACTOR: spec.harness, RETRACE_ON_BEHALF_OF: spec.member,
+      } } }, null, 2)), "",
+    );
+  }
+  return lines.join("\n");
+}
+
 /** Read the operator's credential mirror (parsed with the Worker's own schema so a bad file fails here, not at deploy). */
 export function readCredentialsFile(path: string): Credential[] {
   if (!existsSync(path)) return [];
@@ -231,7 +296,7 @@ export async function main(argv = process.argv.slice(2), env = process.env, out:
     const spec: TeamSpec = {
       project,
       members: list(flags.member),
-      harnesses: (flags.harness ? list(flags.harness) : [...HARNESSES]) as Harness[],
+      harnesses: (flags.harness ? list(flags.harness) : [...DEFAULT_HARNESSES]) as Harness[],
       url: String(flags.url ?? env.RETRACE_URL ?? "").replace(/\/+$/, ""),
     };
     validateSpec(spec);
@@ -255,7 +320,37 @@ export async function main(argv = process.argv.slice(2), env = process.env, out:
     out(`Then confirm: curl -s -o /dev/null -w '%{http_code}\\n' ${spec.url}/projects/${encodeURIComponent(project)}/head -H 'authorization: Bearer <the CI token from the onboarding doc>'   # 200 (empty project) — 401 means the secret is not live yet`);
     return 0;
   }
-  out("retrace-admin <new-team <project> --member a@x.com[,…] [--harness …] [--url https://…] [--out file.md] [--dry-run] | list-teams> [--credentials-file ~/.retrace/worker-credentials.json]");
+  if (cmd === "add-agent") {
+    const project = pos[1];
+    const members = list(flags.member);
+    const harnesses = list(flags.harness);
+    if (!project || members.length !== 1 || harnesses.length !== 1)
+      throw new Error("usage: retrace-admin add-agent <project> --member a@x.com --harness openclaw [--url https://…] [--out onboarding.md]");
+    const spec: AgentSpec = {
+      project,
+      member: members[0],
+      harness: harnesses[0] as Harness,
+      url: String(flags.url ?? env.RETRACE_URL ?? "").replace(/\/+$/, ""),
+    };
+    const credential = planAgentCredential(spec);
+    const existing = readCredentialsFile(credentialsFile);
+    if (!existing.some((c) => c.projects?.includes(project)))
+      throw new Error(`${credentialsFile} has no credentials scoped to "${project}" — use new-team first`);
+    if (existing.some((c) => c.projects?.includes(project) && c.actor.type === "agent" && c.actor.id === spec.harness && c.actor.on_behalf_of === spec.member))
+      throw new Error(`${credentialsFile} already holds an agent/${spec.harness} credential for ${spec.member} in "${project}"`);
+    const onboardingPath = resolve(String(flags.out ?? `onboarding-${project}-${spec.harness}.md`));
+    if (flags["dry-run"]) {
+      out(`dry run — would add pinned agent/${spec.harness} for ${spec.member} to ${credentialsFile} and write ${onboardingPath}`);
+      return 0;
+    }
+    appendCredentials(credentialsFile, existing, [credential]);
+    writeFileSync(onboardingPath, renderAgentOnboarding(spec, credential), { mode: 0o600 });
+    out(`added pinned agent/${spec.harness} for ${spec.member} in ${project} to ${credentialsFile} (mode 0600)`);
+    out(`wrote ${onboardingPath} (mode 0600) — it contains one token; send it securely, then delete it`);
+    out(`upload the updated secret: npx wrangler secret put RETRACE_CREDENTIALS < ${credentialsFile}`);
+    return 0;
+  }
+  out("retrace-admin <new-team <project> --member a@x.com[,…] [--harness …] | add-agent <project> --member a@x.com --harness openclaw | list-teams> [--url https://…] [--credentials-file …] [--out file.md] [--dry-run]");
   return cmd ? 1 : 0;
 }
 
