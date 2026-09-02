@@ -22,25 +22,47 @@ const base = (): EventInput => ({
   project: "p", actor: { type: "agent", id: "claude-code", on_behalf_of: "j@example.com" }, action: "edited",
   artifacts: [{ id: "repo:o/r#a.ts", kind: "file", role: "both" }], timestamp: "2026-09-01T12:00:00.000Z",
   intent: "edit a.ts", caused_by: "evt_" + "a".repeat(32), idempotency_key: "k1",
+  tags: ["dogfood"], method: { tool: "mcp", automated: true, params: { branch: "main" } },
+  location: { system: "claude-code", session: "sess-1", client: "claude-code@2.1" },
 });
 
-test("round-trip parity: the payload from the submitted input equals the payload from the sealed event, through every legitimate server mutation", async () => {
+test("round-trip parity: every mutation the server is ALLOWED to make leaves the signature valid — and nothing else does", async () => {
   const key = await generateSigningKey();
   const signed = await signProducer(base(), key.privateKey);
-  // server-side mutations that must NOT affect the signature: caused_by verification tag + params note (the parent
-  // does not exist in this store), sealed_by stamp, verdict stamp, location.client drop, actor.model backfill
+  // the server's whole legitimate annotation surface at once: sealed_by + verdict stamped into the producer's own
+  // params, location.client dropped, actor.model/display_name backfilled, and appendEvent's caused_by:unverified tag
+  // + caused_by_problem param (the parent does not exist in this store)
+  const { client: _c, ...loc } = signed.location!;
   const mutated = {
     ...signed,
     actor: { ...signed.actor, model: "claude-fable-5", display_name: "Claude" },
-    location: { system: "claude-code" },
-    method: { tool: "mcp", params: { [SEALED_BY_PARAM]: "pinned:x", [PRODUCER_SIG_VERDICT_PARAM]: "verified" } },
+    location: loc,
+    method: { ...signed.method, params: { ...signed.method!.params, [SEALED_BY_PARAM]: "pinned:x", [PRODUCER_SIG_VERDICT_PARAM]: "verified" } },
   };
   const store = new MemStore();
   const { event } = await appendEvent(store, mutated);
   assert.ok(event.tags?.includes("caused_by:unverified"), "precondition: the server annotated the event");
+  assert.ok((event.method?.params as Record<string, unknown>)?.caused_by_problem, "precondition: the server stamped the problem");
   assert.equal(canonicalize(producerSignedPayload(signed)), canonicalize(producerSignedPayload(event)));
   assert.equal(await verifyProducerSig(event, key.publicKey), true);
   assert.equal(await producerSigVerdict(event, key.publicKey), "verified");
+});
+
+test("Codex review of 34e4871: rewriting WHERE/HOW or injecting semantic tags after signing now breaks the signature", async () => {
+  const key = await generateSigningKey();
+  const signed = await signProducer(base(), key.privateKey);
+  assert.equal(await verifyProducerSig({ ...signed, method: { ...signed.method, tool: "forged-tool" } }, key.publicKey), false, "HOW is signed");
+  assert.equal(await verifyProducerSig({ ...signed, location: { ...signed.location, session: "forged-session" } }, key.publicKey), false, "WHERE is signed");
+  assert.equal(await verifyProducerSig({ ...signed, tags: [...(signed.tags ?? []), "correction"] }, key.publicKey), false, "a server cannot inject `correction` into a signed event");
+  assert.equal(await verifyProducerSig({ ...signed, tags: [] }, key.publicKey), false, "nor strip the producer's tags");
+  assert.equal(await verifyProducerSig({ ...signed, method: { ...signed.method, params: { branch: "other" } } }, key.publicKey), false, "producer params are signed");
+});
+
+test("signProducer refuses to trespass on the server's annotation surface", async () => {
+  const key = await generateSigningKey();
+  await assert.rejects(() => signProducer({ ...base(), idempotency_key: undefined } as EventInput, key.privateKey), /must set idempotency_key/);
+  await assert.rejects(() => signProducer({ ...base(), tags: ["caused_by:unverified"] }, key.privateKey), /server's annotation surface/);
+  await assert.rejects(() => signProducer({ ...base(), method: { tool: "mcp", params: { [SEALED_BY_PARAM]: "owner" } } }, key.privateKey), /server stamps/);
 });
 
 test("signProducer refuses an input without timestamp; absent optional fields and undefined are the same payload", async () => {
@@ -75,6 +97,19 @@ test("verdicts: forged sig, kid swap, unregistered key, actor rewrite, cross-pro
   assert.equal(await producerSigVerdict({ ...signed, timestamp: undefined } as EventInput, mine.publicKey), "invalid");
 });
 
+test("replay: a hostile store sealing one signed event twice is caught offline — the second seal is a replayed seal, not a second act", async () => {
+  const key = await generateSigningKey();
+  const signed = await signProducer(base(), key.privateKey);
+  // a store whose byIdempotencyKey lies (the honest appendEvent path dedupes; the threat model is a store that does not)
+  const hostile = new MemStore();
+  hostile.byIdempotencyKey = async () => null;
+  const a = (await appendEvent(hostile, signed)).event;
+  const b = (await appendEvent(hostile, signed)).event;
+  const c = await countProducerSigs([a, b], [{ kid: signed.producer_sig.kid, public_key: key.publicKey, actor_id: "claude-code" }]);
+  assert.deepEqual([c.producer_signed, c.producer_invalid], [1, 1]);
+  assert.ok(c.problems.some((p) => /replayed seal/.test(p)), c.problems.join(" | "));
+});
+
 test("dedupe: an idempotent resubmission with a different signature returns the ORIGINAL sealed event; the first signature wins", async () => {
   const key = await generateSigningKey();
   const store = new MemStore();
@@ -98,7 +133,8 @@ test("stripping producer_sig after the seal breaks the chain", async () => {
 test("countProducerSigs: actor binding, invalid counting, unsigned agents, and the empty-list (uncheckable) rule", async () => {
   const a = await generateSigningKey(); const b = await generateSigningKey();
   const store = new MemStore();
-  const mk = (over: Partial<EventInput>) => ({ ...base(), idempotency_key: undefined, ...over });
+  let n = 0;
+  const mk = (over: Partial<EventInput>) => ({ ...base(), idempotency_key: `count-${n++}`, ...over });
   const e1 = (await appendEvent(store, await signProducer(mk({}), a.privateKey))).event;                          // verified
   const badSig = await signProducer(mk({ intent: "x" }), a.privateKey);
   const e2 = (await appendEvent(store, { ...badSig, intent: "tampered after signing" })).event;                    // invalid

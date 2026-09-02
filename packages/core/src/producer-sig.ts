@@ -8,12 +8,18 @@
  * write time against the public key registered on the credential and stamps a verdict; offline verify re-checks.
  *
  * The signature covers an EXPLICIT payload, never "the whole body": the server legitimately annotates events before
- * sealing (tags via markCausedByUnverified, method.params stamps like sealed_by, location.client, and on pinned
- * credentials parts of actor). Signed: project, actor {type, id, on_behalf_of}, action, action_detail, artifacts,
- * change, timestamp, duration_ms, intent, caused_by, idempotency_key. Deliberately NOT signed: actor.model (the model
- * stays asserted — never claim it), display_name/version, tags, method, location. A signing producer MUST set
- * `timestamp` itself: the server fills a missing one, and a signature over an absent timestamp could never be
- * re-verified from the stored event. And because verification recomputes the payload from the STORED event, a
+ * sealing. Signed: project, actor {type, id, on_behalf_of}, action, action_detail, artifacts, change, timestamp,
+ * duration_ms, intent, caused_by, idempotency_key — AND tags, method and location minus exactly the server's
+ * annotation surface (Codex review of 34e4871: leaving those out let a compromised server rewrite WHERE/HOW and inject
+ * semantic tags like `correction` while the event stayed "producer_signed"). The reserved, unsigned remainder is:
+ * tags starting `caused_by:` (markCausedByUnverified), method.params sealed_by / producer_sig_verdict / relayed_by /
+ * caused_by_problem (server stamps), and location.client (the router drops or keeps it). Producers may not set any of
+ * those themselves — signProducer refuses, so signed bytes and stored bytes can only differ by server annotations.
+ * Deliberately NOT signed: actor.model (the model stays asserted — never claim it), display_name/version.
+ *
+ * A signing producer MUST set `timestamp` (the server fills a missing one — the signature could never be re-verified)
+ * and `idempotency_key`: Ed25519 is deterministic, so the key is what makes every signed event's bytes unique, which
+ * is what lets offline verification flag a hostile store sealing one signed event twice (replay detection). And because verification recomputes the payload from the STORED event, a
  * producer must sign `actor.{type, id, on_behalf_of}` exactly as its credential resolves them — same on_behalf_of, or
  * omitted when the credential omits it. Divergence lands `invalid`, by design: that IS the actor-mismatch defense
  * (signing as yourself and submitting on someone else's credential changes the recomputed payload).
@@ -30,7 +36,28 @@ export type ProducerSigVerdict = "verified" | "invalid" | "unknown_kid" | "none"
 /** A registered producer public key — lives on the credential (server) and in export bundles (offline verify). */
 export interface ProducerKey { kid: string; public_key: JsonWebKey; actor_id?: string; name?: string }
 
+/** The server's annotation surface — everything a seal may add that the signature therefore cannot cover. */
+export const RESERVED_TAG_PREFIX = "caused_by:";
+export const RESERVED_METHOD_PARAMS = ["sealed_by", "producer_sig_verdict", "relayed_by", "caused_by_problem"] as const;
+
 type Signable = EventInput | Event;
+
+function signableTags(tags: string[] | undefined): string[] | undefined {
+  const t = tags?.filter((x) => !x.startsWith(RESERVED_TAG_PREFIX));
+  return t && t.length ? t : undefined;
+}
+function signableMethod(m: EventInput["method"]): EventInput["method"] {
+  if (!m) return undefined;
+  const params = m.params ? Object.fromEntries(Object.entries(m.params).filter(([k]) => !(RESERVED_METHOD_PARAMS as readonly string[]).includes(k))) : undefined;
+  const out: NonNullable<EventInput["method"]> = { ...m, ...(params && Object.keys(params).length ? { params } : {}) };
+  if (params !== undefined && Object.keys(params).length === 0) delete (out as { params?: unknown }).params;
+  return Object.keys(out).length ? out : undefined;
+}
+function signableLocation(l: EventInput["location"]): EventInput["location"] {
+  if (!l) return undefined;
+  const { client: _c, ...rest } = l;
+  return Object.keys(rest).length ? rest : undefined;
+}
 
 /** The exact bytes-source both sides sign/verify: built the same way from a submitted input or a stored event. */
 export function producerSignedPayload(e: Signable): Record<string, unknown> {
@@ -44,12 +71,20 @@ export function producerSignedPayload(e: Signable): Record<string, unknown> {
     const v = e[k];
     if (v !== undefined) p[k] = v;
   }
+  const tags = signableTags(e.tags); if (tags) p.tags = tags;
+  const method = signableMethod(e.method); if (method) p.method = method;
+  const location = signableLocation(e.location); if (location) p.location = location;
   return p;
 }
 
-/** Attach a signature to an input about to be submitted. Throws without `timestamp` — see the module doc. */
+/** Attach a signature to an input about to be submitted. Throws without `timestamp` or `idempotency_key`, and when
+ *  the input trespasses on the server's annotation surface — see the module doc. */
 export async function signProducer<T extends EventInput>(input: T, privateJwk: JsonWebKey): Promise<T & { producer_sig: ProducerSig }> {
   if (!input.timestamp) throw new Error("a signing producer must set timestamp itself; the server would fill it and the signature could never be re-verified");
+  if (!input.idempotency_key) throw new Error("a signing producer must set idempotency_key: it makes the signed bytes unique, which is what lets offline verification catch a store sealing one signed event twice");
+  if (input.tags?.some((t) => t.startsWith(RESERVED_TAG_PREFIX))) throw new Error(`tags starting "${RESERVED_TAG_PREFIX}" are the server's annotation surface; a producer must not set them`);
+  const trespass = input.method?.params ? (RESERVED_METHOD_PARAMS as readonly string[]).filter((k) => input.method!.params![k] !== undefined) : [];
+  if (trespass.length) throw new Error(`method.params ${trespass.join(", ")} are server stamps; a producer must not set them`);
   const pub = publicFromPrivate(privateJwk);
   return { ...input, producer_sig: { kid: await keyId(pub), sig: await signCanonical(privateJwk, producerSignedPayload(input)) } };
 }
@@ -97,6 +132,7 @@ export interface ProducerSigCounts {
  */
 export async function countProducerSigs(events: Event[], keys: ProducerKey[]): Promise<ProducerSigCounts> {
   const byKid = new Map(keys.map((k) => [k.kid, k]));
+  const seenSigs = new Map<string, number>();
   const c: ProducerSigCounts = { producer_signed: 0, producer_invalid: 0, producer_unsigned_agent_events: 0, problems: [] };
   for (const e of events) {
     if (!e.producer_sig) {
@@ -110,8 +146,20 @@ export async function countProducerSigs(events: Event[], keys: ProducerKey[]): P
       c.problems.push(`event #${e.seq}: producer_sig kid ${e.producer_sig.kid.slice(0, 12)} is not a registered key for actor ${e.actor.id}`);
       continue;
     }
-    if (await verifyProducerSig(e, key.public_key)) c.producer_signed++;
-    else { c.producer_invalid++; c.problems.push(`event #${e.seq}: producer signature does not verify — signed fields altered, or the wrong key`); }
+    if (!(await verifyProducerSig(e, key.public_key))) {
+      c.producer_invalid++; c.problems.push(`event #${e.seq}: producer signature does not verify — signed fields altered, or the wrong key`);
+      continue;
+    }
+    // Replay detection: Ed25519 is deterministic and every signed event carries a unique idempotency_key, so one
+    // signature can only legitimately seal once. A hostile store replaying a captured signed event at a second seq
+    // (an honest appendEvent dedupes; the threat model is precisely a store that does not) is named here.
+    const prior = seenSigs.get(e.producer_sig.sig);
+    if (prior !== undefined) {
+      c.producer_invalid++; c.problems.push(`event #${e.seq}: the same producer signature already sealed event #${prior} — a replayed seal, not a second act`);
+      continue;
+    }
+    seenSigs.set(e.producer_sig.sig, e.seq);
+    c.producer_signed++;
   }
   return c;
 }
