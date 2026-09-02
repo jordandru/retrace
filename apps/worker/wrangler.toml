@@ -22,6 +22,11 @@ RETRACE_GITHUB_PROJECTS = "{\"jordandru/retrace\":\"retrace\"}"
 RETRACE_CHECKPOINT_PROJECTS = "[\"retrace\"]"
 # Reconciliation phase B: seal every pushed commit a second time from GitHub's HMAC-verified push delivery (key gh:push:…).
 RETRACE_GITHUB_PUSH = "1"
+# OpenClaw/NemoClaw pilot (docs plan #1362): the experimental Streamable HTTP audit endpoint at /mcp. Kill switch —
+# remove or set 0 and deploy to go dark. Default after the pilot verification is DARK unless Jordan decides otherwise.
+RETRACE_MCP_ENABLED = "1"
+# Makes the /mcp host/origin checks bite (they are no-ops without an expected origin).
+RETRACE_PUBLIC_URL = "https://retrace-api.slcwitit.workers.dev"
 
 # Hourly head checkpoints witnessed in Rekor (roadmap rung 2); handler = `scheduled` in src/index.ts
 [triggers]
