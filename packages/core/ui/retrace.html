@@ -54,6 +54,9 @@
   .chip:hover { border-color: var(--accent); }
   .chip.more { color: var(--accent); border-style: dashed; }
   .chip .role { font-style: normal; font-size: 9px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin-right: 4px; }
+  .stamp { display: inline-block; font-family: var(--mono); font-size: 10px; line-height: 1.45; color: var(--muted); border: 1px solid var(--line); border-radius: 3px; padding: 0 5px; margin-left: 4px; vertical-align: 1px; cursor: default; }
+  .stamp.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, transparent); }
+  .stamp.warn { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 40%, transparent); }
   /* Everything that LOOKS clickable must do something: these are the affordances the click handler honours. */
   .badge.click { cursor: pointer; } .badge.click:hover { border-color: var(--accent); }
   .who[data-actor] { cursor: pointer; } .who[data-actor]:hover { text-decoration: underline; }
@@ -238,6 +241,27 @@
   // Latest known label per artifact id: the label on the last event (by seq) that carries one.
   // Used wherever the UI names an artifact; the event detail pane keeps each event's as-at label.
   const latestLabels = (events) => { const m = new Map(); for (const e of [...events].sort((a, b) => a.seq - b.seq)) for (const a of e.artifacts) if (a.label) m.set(a.id, a.label); return m; };
+  // Same classifier as sealedByKind() in store.ts — keep the branches in lockstep.
+  const sealedByKind = (v) => {
+    if (typeof v !== "string" || !v) return "unstamped";
+    if (v === "owner") return "owner";
+    if (v === "unauthenticated") return "unauthenticated";
+    if (v.startsWith("pinned:")) return "pinned";
+    if (v.startsWith("assert:")) return "assert";
+    if (v.startsWith("webhook:")) return "webhook";
+    return "unstamped";
+  };
+  const provenanceBadges = (e) => {
+    const raw = e.method?.params?.sealed_by;
+    const kind = sealedByKind(raw);
+    const tip = typeof raw === "string" && raw ? raw : "unstamped";
+    let html = `<span class="stamp" title="${esc(tip)}">${esc(kind)}</span>`;
+    const verdict = e.method?.params?.producer_sig_verdict;
+    if (verdict == null || verdict === "") return html;
+    const cls = verdict === "verified" ? " ok" : (verdict === "invalid" || verdict === "unknown_kid") ? " warn" : "";
+    const label = verdict === "verified" ? "sig ✓" : verdict === "none" ? "unsigned" : String(verdict);
+    return html + `<span class="stamp${cls}" title="${esc(String(verdict))}">${esc(label)}</span>`;
+  };
 
   async function api(path) {
     const url = (apiBase || "") + path;
@@ -366,7 +390,7 @@
         <div class="t">${fmtTime(e.timestamp)}<br><span class="link">#${e.seq}</span></div>
         <div class="rail"><div class="node"></div></div>
         <div>
-          <div><span class="who" data-actor="${esc(e.actor.id)}">${esc(actorName(e.actor))}</span><span class="link">${esc(actorTag(e.actor))}${e.actor.on_behalf_of ? " · for " + esc(e.actor.on_behalf_of) : ""}</span> <span class="verb">${esc(verbOf(e))}</span> <span class="art">${arts}</span> <span class="link">${where ? "@ " + esc(where) + " " : ""}${how}</span></div>
+          <div><span class="who" data-actor="${esc(e.actor.id)}">${esc(actorName(e.actor))}</span><span class="link">${esc(actorTag(e.actor))}${e.actor.on_behalf_of ? " · for " + esc(e.actor.on_behalf_of) : ""}</span> <span class="verb">${esc(verbOf(e))}</span> <span class="art">${arts}</span> <span class="link">${where ? "@ " + esc(where) + " " : ""}${how}</span>${provenanceBadges(e)}</div>
           ${e.intent ? `<div class="why">${esc(e.intent)}</div>` : ""}
           ${e.caused_by ? `<div class="link">↳ caused by ${inView.has(e.caused_by) ? `<a href="#" data-goto="${esc(e.caused_by)}" title="jump to this event">${esc(e.caused_by.slice(0, 16))}…</a>` : `<span class="mono" title="${esc(e.caused_by)} — not among the loaded events (outside this view's scope)">${esc(e.caused_by.slice(0, 16))}… <i>(not in view)</i></span>`}</div>` : ""}
         </div></div>`;
@@ -410,6 +434,7 @@
     let raw; try { raw = JSON.stringify(e, null, 2); } catch { raw = "(not serializable)"; }
     d.innerHTML = `
       <h2>Event #${e.seq}</h2>
+      <div class="link" style="margin-bottom:10px">${provenanceBadges(e)}</div>
       <div class="kv">
         ${sect("Who", () => `<span class="who" data-actor="${esc(e.actor.id)}" style="color:var(--${esc(e.actor.type)});font-weight:600" title="${esc(e.actor.id)} — filter the timeline by this actor">${esc(actorName(e.actor))}</span> <span class="link">${esc(e.actor.type)}${e.actor.model ? " · " + esc(e.actor.model) : ""}${e.actor.version ? " " + esc(e.actor.version) : ""}${e.actor.on_behalf_of ? "<br>on behalf of " + esc(e.actor.on_behalf_of) : ""}</span>`)}
         ${sect("What", () => `<b>${esc(verbOf(e))}</b> ${e.artifacts.map((a) => `<span class="chip" data-art="${esc(a.id)}" title="${esc(a.id + roleTitle(a.role))}">${roleTag(a)}${esc(artLabel(a))}</span>${a.kind && a.kind !== "file" ? `<span class="link">${esc(a.kind)}</span>` : ""}${a.derived_from?.length ? `<div class="link">derived from ${a.derived_from.map((s) => `<span class="chip" data-art="${esc(s)}" title="${esc(s)} — filter by this artifact">${esc(labels.get(s) || s)}</span>`).join("")}</div>` : ""}`).join(" ")}${e.change?.summary ? `<div>${esc(e.change.summary)}</div>` : ""}${e.change?.diff ? `<pre>${esc(e.change.diff)}</pre>` : ""}${e.change?.after_hash ? `<div class="hash">after ${esc(e.change.after_hash)}</div>` : ""}`)}

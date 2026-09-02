@@ -370,6 +370,40 @@ test("status pane without a /status answer says why, instead of showing nothing"
   assert.match(ui.detail(), /\/status<\/span> endpoint, which did not answer/);
 });
 
+test("timeline and detail show quiet seal chips and signature badges from method.params", async () => {
+  const ui = runUI([
+    ev(0, { method: { tool: "mcp", params: { sealed_by: "pinned:claude-code MCP (pinned)", producer_sig_verdict: "verified" } } }),
+    ev(1, { method: { tool: "git", params: { sealed_by: "webhook:github", producer_sig_verdict: "invalid" } } }),
+    ev(2, { method: { tool: "http", params: { sealed_by: "owner", producer_sig_verdict: "none" } } }),
+    ev(3, { method: { tool: "mcp", params: { sealed_by: "assert:system/retrace-git" } } }),
+    ev(4, {}),
+    ev(5, { method: { params: { sealed_by: "unauthenticated", producer_sig_verdict: "unknown_kid" } } }),
+  ]);
+  await ui.select("evt_0");
+  const t = ui.timeline();
+  assert.match(t, /class="stamp" title="pinned:claude-code MCP \(pinned\)">pinned</);
+  assert.match(t, /class="stamp ok" title="verified">sig ✓</);
+  assert.match(t, /class="stamp" title="webhook:github">webhook</);
+  assert.match(t, /class="stamp warn" title="invalid">invalid</);
+  assert.match(t, /class="stamp" title="owner">owner</);
+  assert.match(t, /class="stamp" title="none">unsigned</);
+  assert.match(t, /class="stamp" title="assert:system\/retrace-git">assert</);
+  assert.match(t, /class="stamp" title="unstamped">unstamped</);
+  assert.match(t, /class="stamp" title="unauthenticated">unauthenticated</);
+  assert.match(t, /class="stamp warn" title="unknown_kid">unknown_kid</);
+  const d = ui.detail();
+  assert.match(d, /class="stamp" title="pinned:claude-code MCP \(pinned\)">pinned</);
+  assert.match(d, /class="stamp ok" title="verified">sig ✓</);
+  // Isolated: no signature badge when the verdict field is absent (newest-first would otherwise
+  // put later rows — which do have verdicts — after an unstamped event in the same timeline).
+  const alone = runUI([ev(4, {})]);
+  const lonely = await alone.select("evt_4");
+  assert.match(alone.timeline(), /title="unstamped">unstamped</);
+  assert.doesNotMatch(alone.timeline(), /sig ✓|unsigned|unknown_kid|class="stamp (ok|warn)"/);
+  assert.match(section(lonely, "How")!, /\(not recorded\)/);
+  assert.match(lonely, /title="unstamped">unstamped</);
+});
+
 test("timeline: a truncated history page shows load-older instead of silently dropping the head", async () => {
   const events = [ev(10, {}), ev(11, {}), ev(12, {})];
   const ui = runUI(events, { historyPage: { truncated: true, next_before_seq: 10 } });
