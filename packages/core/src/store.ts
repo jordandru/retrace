@@ -322,11 +322,14 @@ export async function verifyProject(store: EventStore, project: string): Promise
 export async function explainEvent(store: EventStore, id: string, maxDepth = 25): Promise<Event[]> {
   const chain: Event[] = [];
   let cur = await store.get(id);
+  const project = cur?.project;
   const seen = new Set<string>();
   while (cur && chain.length < maxDepth && !seen.has(cur.id)) {
     seen.add(cur.id);
     chain.push(cur);
-    cur = cur.caused_by ? await store.get(cur.caused_by) : null;
+    const parent = cur.caused_by ? await store.get(cur.caused_by) : null;
+    // A caused_by id is untrusted input. Never let a same-project query cross a project boundary.
+    cur = parent?.project === project ? parent : null;
   }
   return chain;
 }

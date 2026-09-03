@@ -5,6 +5,9 @@ import {
   buildExportBundle,
   buildLineage,
   buildProjectStatus,
+  CausedByError,
+  causedByErrorMessage,
+  causedByProblem,
   describeEvent,
   explainEvent,
   parseCredentials,
@@ -121,6 +124,14 @@ export function buildRemoteMcpServer(
         artifacts: applyDefaultRoles(args.action, args.artifacts),
         location: remoteLocation(args.location, credential, opts.requestUrl),
       };
+      if (input.caused_by) {
+        const parent = await store.get(input.caused_by);
+        const problem = causedByProblem(parent, input);
+        if (problem) throw new CausedByError(causedByErrorMessage(input.caused_by, problem, {
+          parentProject: parent?.project,
+          project: input.project,
+        }));
+      }
       const { event, deduped } = await appendThroughApi(input);
       return textResult(`${deduped ? "(deduped) " : ""}logged ${event.id} seq=${event.seq}\n${describeEvent(event)}`, {
         id: event.id, seq: event.seq, hash: event.hash, deduped,

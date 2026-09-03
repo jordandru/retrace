@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {
   adapterIdempotencyError, AdapterIdempotencyError, CAUSED_BY_UNVERIFIED_TAG, appendEvent,
   EventInput, Event, EventStore, Share, likeContains, clampHistoryLimit, HISTORY_LIMIT_MAX,
-  pageHistoryNewest, collectHistory, asHistoryPage,
+  pageHistoryNewest, collectHistory, asHistoryPage, explainEvent,
 } from "./index.js";
 
 class MemStore implements EventStore {
@@ -144,4 +144,18 @@ test("appendEvent: caused_by is optional; dangling/cross-project/newer is sealed
 
   const none = await appendEvent(store, ev({}));
   assert.equal(none.event.caused_by, undefined);
+});
+
+test("explainEvent never follows an unverified caused_by link into another project", async () => {
+  const store = new MemStore();
+  const foreign = (await appendEvent(store, ev({
+    project: "foreign",
+    action: "instructed",
+    actor: { type: "human", id: "private@example.com" },
+    intent: "foreign project secret",
+  }))).event;
+  const local = (await appendEvent(store, ev({ project: "p", caused_by: foreign.id }))).event;
+
+  assert.ok(local.tags?.includes(CAUSED_BY_UNVERIFIED_TAG), "fixture retains the rejected cross-project claim");
+  assert.deepEqual((await explainEvent(store, local.id)).map((event) => event.id), [local.id]);
 });

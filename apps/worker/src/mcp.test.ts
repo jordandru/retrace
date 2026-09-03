@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Client, InMemoryTransport, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
-import { createHandler, pageHistoryNewest, parseCredentials, type ChainHead, type Event, type EventStore, type Share } from "@retrace-dev/core";
+import { appendEvent, createHandler, pageHistoryNewest, parseCredentials, type ChainHead, type Event, type EventStore, type Share } from "@retrace-dev/core";
 import { authenticateRemoteMcp, buildRemoteMcpServer, handleRemoteMcp, RETRACE_MCP_MAX_BODY_BYTES } from "./mcp.js";
 
 class MemStore implements EventStore {
@@ -97,6 +97,59 @@ test("remote MCP exposes exactly the audit tools and stamps OpenClaw identity an
   assert.match(wrongProject.content[0].text, /pinned to project "retrace"/);
   const committed = await client.callTool({ name: "retrace_log", arguments: { action: "committed", artifacts: [{ id: "commit:x" }] } }) as any;
   assert.equal(committed.isError, true);
+  await client.close();
+});
+
+test("remote MCP rejects cross-project caused_by and never discloses a historical foreign ancestor", async () => {
+  const store = new MemStore();
+  const foreign = (await appendEvent(store, {
+    project: "foreign",
+    actor: { type: "human", id: "private@example.com" },
+    action: "instructed",
+    artifacts: [{ id: "private-task" }],
+    intent: "foreign project secret",
+  })).event;
+  const parsed = await authenticateRemoteMcp(request(), raw());
+  assert.ok(parsed);
+  const apiHandler = createHandler(store, { requireAuth: true, credentials: parseCredentials(raw()) });
+  const server = buildRemoteMcpServer(store, parsed, { requestUrl: "https://retrace.example/mcp", apiHandler });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverTransport);
+  const client = new Client({ name: "nemoclaw-boundary-test", version: "0.1" });
+  await client.connect(clientTransport);
+
+  const rejected = await client.callTool({ name: "retrace_log", arguments: {
+    action: "edited",
+    artifacts: [{ id: "target" }],
+    caused_by: foreign.id,
+  } }) as any;
+  assert.equal(rejected.isError, true);
+  assert.match(rejected.content[0].text, /another project|project/i);
+  assert.equal(store.events.length, 1, "rejected remote log does not append");
+
+  // Simulate a historical adapter event: adapters retain invalid claims but mark them unverified.
+  const local = (await appendEvent(store, {
+    project: "retrace",
+    actor: { type: "agent", id: "adapter" },
+    action: "edited",
+    artifacts: [{ id: "target" }],
+    caused_by: foreign.id,
+  })).event;
+  await appendEvent(store, {
+    project: "retrace",
+    actor: { type: "agent", id: "adapter" },
+    action: "edited",
+    artifacts: [{ id: "unrelated" }],
+  });
+  assert.ok(local.tags?.includes("caused_by:unverified"));
+
+  const why = await client.callTool({ name: "retrace_why", arguments: { event_id: local.id } }) as any;
+  assert.deepEqual(why.structuredContent.chain.map((event: Event) => event.id), [local.id]);
+  const exported = await client.callTool({ name: "retrace_export", arguments: { artifact_id: "target" } }) as any;
+  assert.deepEqual(exported.structuredContent.bundle.events.map((event: Event) => event.project), ["retrace"]);
+  assert.equal(exported.structuredContent.bundle.context_events, 0);
+  const lineage = await client.callTool({ name: "retrace_lineage", arguments: { artifact_id: "target", format: "json", include_actors: true } }) as any;
+  assert.doesNotMatch(JSON.stringify(lineage.structuredContent), /foreign project secret|private@example\.com|private-task/);
   await client.close();
 });
 

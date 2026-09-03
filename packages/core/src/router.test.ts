@@ -702,6 +702,11 @@ test("credentials.projects scopes POST and reads; unset still sees every project
   assert.equal((await get(h, `/events/${keepEvt.id}`, scoped.token)).status, 200);
   const junkEvt = store.events.find((e) => e.project === "junk")!;
   assert.equal((await get(h, `/events/${junkEvt.id}`, scoped.token)).status, 404);
+
+  const local = (await appendEvent(store, ev({ project: "keep", caused_by: junkEvt.id }))).event;
+  const why = await get(h, `/events/${local.id}/why`, scoped.token);
+  assert.equal(why.status, 200);
+  assert.deepEqual((await why.json()).map((event: Event) => event.id), [local.id], "why cannot traverse into a forbidden project");
 });
 
 test("POST /events strips caller relayed_by and location.client on non-relayed paths", async () => {

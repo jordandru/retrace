@@ -139,6 +139,23 @@ test("coverage: a full export must carry every claimed event — tail truncation
   assert.match(renderReportHtml(bundle, full), /Coverage/);
 });
 
+test("scoped export excludes cross-project causal ancestors and reports honest context count", async () => {
+  const store = new MemStore();
+  const foreign = (await appendEvent(store, ev({
+    project: "foreign",
+    action: "instructed",
+    actor: { type: "human", id: "private@example.com" },
+    intent: "foreign project secret",
+  }))).event;
+  const local = (await appendEvent(store, ev({ project: "p", caused_by: foreign.id, artifacts: [{ id: "target" }] }))).event;
+  await appendEvent(store, ev({ project: "p", artifacts: [{ id: "unrelated" }] }));
+
+  const bundle = await buildExportBundle(store, { project: "p", artifact_id: "target" });
+  assert.deepEqual(bundle.events.map((event) => event.id), [local.id]);
+  assert.deepEqual(bundle.events.map((event) => event.project), ["p"]);
+  assert.equal(bundle.context_events, 0);
+});
+
 test("signing: JWKs carrying alg Ed25519 or EdDSA both sign and verify (alg is stripped before import)", async () => {
   const key = await generateSigningKey();
   for (const alg of ["Ed25519", "EdDSA", undefined]) {

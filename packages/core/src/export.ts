@@ -49,7 +49,8 @@ export async function buildExportBundle(store: EventStore, scope: ExportScope, o
       const id = queue.shift()!;
       if (have.has(id)) continue;
       const anc = byId.get(id) ?? (await store.get(id));
-      if (!anc) continue;
+      // caused_by is untrusted; scoped exports must never pull context from another project.
+      if (!anc || anc.project !== scope.project) continue;
       have.add(id); events.push(anc); context_events++;
       if (anc.caused_by) queue.push(anc.caused_by);
     }
