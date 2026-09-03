@@ -34,7 +34,7 @@ class FakeD1 {
   }
 }
 
-test("deleteProject deletes checkpoint rows in the guarded atomic batch", async () => {
+test("deleteProject deletes checkpoint and export-cache rows in the guarded atomic batch", async () => {
   const db = new FakeD1();
   const store = new D1Store(db as unknown as D1Database);
   const project = "project-being-deleted";
@@ -56,13 +56,13 @@ test("deleteProject deletes checkpoint rows in the guarded atomic batch", async 
 
   assert.deepEqual(
     deletes.map((statement) => statement.sql.match(/^DELETE FROM (\w+)/)?.[1]),
-    ["events", "event_artifacts", "shares", "checkpoints"],
+    ["events", "event_artifacts", "shares", "checkpoints", "export_cache"],
   );
   for (const statement of deletes) {
     assert.match(statement.sql, /EXISTS \(SELECT 1 FROM events WHERE id = \?\)$/);
     assert.deepEqual(statement.params, [project, audit.id]);
   }
-  assert.deepEqual(deleted, { events: 1, event_artifacts: 1, shares: 1, checkpoints: 1 });
+  assert.deepEqual(deleted, { events: 1, event_artifacts: 1, shares: 1, checkpoints: 1, export_cache: 1 });
 });
 
 test("history SQL is newest-first with an exclusive before_seq bound and a limit+1 probe", async () => {
