@@ -11,9 +11,10 @@
  *   GET /projects/:p/export|report|lineage · POST /projects/:p/share · GET /.well-known/retrace-pubkey
  *   POST /hooks/github  (GitHub webhook; HMAC-verified with RETRACE_GITHUB_SECRET; project from repo via RETRACE_GITHUB_PROJECTS)
  */
-import { createHandler, parseCheckpointProjectAllowlist, parseCredentials, parseGithubRepoProjects, parseSigningKey, runCheckpointCron } from "@retrace-dev/core";
+import { createHandler, parseCheckpointProjectAllowlist, parseCredentials, parseGithubRepoProjects, parseSigningKey, runCheckpointCron, refreshExportCache, exportBuilder, keyId } from "@retrace-dev/core";
 import { D1Store } from "./d1-store.js";
 import { D1CheckpointLog } from "./checkpoint-log.js";
+import { D1ExportCache } from "./export-cache-d1.js";
 import { handleRemoteMcp } from "./mcp.js";
 
 export interface Env {
@@ -57,6 +58,7 @@ export default {
       githubIncludePush: env.RETRACE_GITHUB_PUSH === "1",
       opsProject: env.RETRACE_OPS_PROJECT,
       ownerActor: env.RETRACE_OWNER ? { type: "human", id: env.RETRACE_OWNER } : undefined,
+      exportCache: new D1ExportCache(env.DB),
     });
     if (new URL(req.url).pathname === "/mcp") return handleRemoteMcp(req, env, store, api);
     return api(req);
@@ -73,11 +75,25 @@ export default {
     }
     const signingKey = parseSigningKey(env.RETRACE_SIGNING_KEY);
     if (!signingKey) return;
+    const store = new D1Store(env.DB);
+    // Producers list matches what the fetch path embeds in live exports, so cached and live bundles verify alike.
+    const producers = await Promise.all(
+      parseCredentials(env.RETRACE_CREDENTIALS)
+        .filter((c) => c.public_key)
+        .map(async (c) => ({ kid: await keyId(c.public_key as JsonWebKey), public_key: c.public_key as JsonWebKey, actor_id: c.actor.id, name: c.name })),
+    );
     ctx.waitUntil(
-      runCheckpointCron(new D1Store(env.DB), new D1CheckpointLog(env.DB), { signingKey, projects, signerName: env.RETRACE_ISSUER }).then(
-        (results) => console.log("checkpoint cron:", JSON.stringify(results)),
-        (e) => console.error("checkpoint cron failed:", String((e as Error)?.message ?? e)),
-      ),
+      runCheckpointCron(store, new D1CheckpointLog(env.DB), { signingKey, projects, signerName: env.RETRACE_ISSUER })
+        .then(
+          (results) => console.log("checkpoint cron:", JSON.stringify(results)),
+          (e) => console.error("checkpoint cron failed:", String((e as Error)?.message ?? e)),
+        )
+        // Export cache refresh runs after checkpoints so one project's bundle build cannot starve the witnesses.
+        .then(() => refreshExportCache(store, new D1ExportCache(env.DB), projects, exportBuilder(store, { signingKey, issuerName: env.RETRACE_ISSUER, producers })))
+        .then(
+          (results) => console.log("export cache:", JSON.stringify(results)),
+          (e) => console.error("export cache refresh failed:", String((e as Error)?.message ?? e)),
+        ),
     );
   },
 };

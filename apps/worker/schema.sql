@@ -46,3 +46,16 @@ CREATE TABLE IF NOT EXISTS checkpoints (
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   PRIMARY KEY (project, seq)
 );
+
+-- Cron-precomputed signed full exports (503 CPU-limit fix, option a): the hourly cron stores the exact bundle JSON
+-- in ordered chunks (D1 caps a single value ~2MB); the request path serves stored bytes instead of rebuilding.
+CREATE TABLE IF NOT EXISTS export_cache (
+  project TEXT NOT NULL,
+  chunk INTEGER NOT NULL,
+  head_seq INTEGER NOT NULL,
+  head_hash TEXT NOT NULL,
+  generated_at TEXT NOT NULL,
+  total_chunks INTEGER NOT NULL,
+  data TEXT NOT NULL,
+  PRIMARY KEY (project, chunk)
+);

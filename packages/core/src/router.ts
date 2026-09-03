@@ -37,6 +37,7 @@ import { Actor, ActorType, EventInput, schemaSurface } from "./schema.js";
 import { EventStore, appendEvent, AdapterIdempotencyError, CausedByError, verifyProject, explainEvent, newShareId, shareIsLive, Share, isHeadMovedError, SEALED_BY_PARAM, SEALED_BY_OWNER, SEALED_BY_UNAUTHENTICATED, SEALED_BY_GITHUB_WEBHOOK } from "./store.js";
 import { sealEvent } from "./chain.js";
 import { buildExportBundle, verifyExportBundle } from "./export.js";
+import { ExportCacheStore } from "./export-cache.js";
 import { PRODUCER_SIG_VERDICT_PARAM, ProducerKey, ProducerSigVerdict, producerSigVerdict } from "./producer-sig.js";
 import { renderReportHtml } from "./report.js";
 import { buildLineage, renderLineageDot, renderLineageMermaid } from "./lineage.js";
@@ -153,6 +154,11 @@ export interface RouterOptions {
    *  e.g. {type:"human", id:"jordan@example.com"} from RETRACE_OWNER. Unset → {type:"system", id:"worker"}, which says
    *  only that *the server* did it (security review 2026-08-21, audit-event actor). */
   ownerActor?: Actor;
+  /** Cron-precomputed signed full exports (503 CPU fix, option a). When set, GET …/export with no scope serves the
+   *  stored bundle instead of rebuilding: exact bytes on a head match, labeled-stale bytes when the head has moved
+   *  since the last cron pass (the cached bundle is still a complete signed export as of its own generated_at).
+   *  `?fresh=1` forces the live build. Scoped exports (artifact_id) always build live. */
+  exportCache?: ExportCacheStore;
 }
 
 const CORS = { "access-control-allow-origin": "*", "access-control-allow-headers": "authorization,content-type", "access-control-allow-methods": "GET,POST,DELETE,OPTIONS" };
@@ -302,6 +308,27 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
     (opts.credentials ?? []).filter((c) => c.public_key).map(async (c) => ({ kid: await keyId(c.public_key as JsonWebKey), public_key: c.public_key as JsonWebKey, actor_id: c.actor.id, name: c.name })),
   ));
   const exportFor = async (scope: { project: string; artifact_id?: string }) => buildExportBundle(store, scope, { signingKey: opts.signingKey, issuerName: opts.issuerName, producers: await bundleProducers() });
+  /** Fast path for full exports: serve the cron-precomputed signed JSON (see RouterOptions.exportCache). Returns
+   *  null when there is no usable cache entry, and the caller falls through to the live build. */
+  const cachedExportResponse = async (project: string, fresh: boolean, extra?: Record<string, string>): Promise<Response | null> => {
+    if (fresh || !opts.exportCache) return null;
+    const cached = await opts.exportCache.get(project).catch(() => null);
+    if (!cached) return null;
+    const head = await store.head(project);
+    if (!head) return null;
+    const hit = head.seq === cached.head_seq && head.hash === cached.head_hash;
+    return new Response(cached.bundle_json, {
+      status: 200,
+      headers: {
+        "content-type": "application/json",
+        ...CORS,
+        ...extra,
+        "x-retrace-export-cache": hit ? "hit" : "stale",
+        "x-retrace-export-generated-at": cached.generated_at,
+        ...(hit ? {} : { "x-retrace-export-cached-head": String(cached.head_seq), "x-retrace-export-live-head": String(head.seq) }),
+      },
+    });
+  };
 
   return async function handle(req: Request): Promise<Response> {
     if (opts.requireAuth && !authConfigured)
@@ -420,7 +447,13 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
             return json(b.events, 200, SHARE_CACHE);
           });
         }
-        if (sub === "export") return cachedShare(cacheKey, async () => json(await exportFor({ project: share.project, artifact_id: share.artifact_id }), 200, SHARE_CACHE));
+        if (sub === "export") {
+          if (!share.artifact_id) {
+            const c = await cachedExportResponse(share.project, false, SHARE_CACHE);
+            if (c) return c;
+          }
+          return cachedShare(cacheKey, async () => json(await exportFor({ project: share.project, artifact_id: share.artifact_id }), 200, SHARE_CACHE));
+        }
         if (sub === "lineage") {
           return cachedShare(cacheKey, async () => {
             const b = await buildExportBundle(store, { project: share.project, artifact_id: share.artifact_id });
@@ -528,7 +561,13 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
               before_seq,
             }));
           }
-          if (sub === "export") return json(await exportFor({ project, artifact_id: q.artifact_id }));
+          if (sub === "export") {
+            if (!q.artifact_id) {
+              const c = await cachedExportResponse(project, url.searchParams.get("fresh") === "1");
+              if (c) return c;
+            }
+            return json(await exportFor({ project, artifact_id: q.artifact_id }));
+          }
           if (sub === "lineage") {
             const evs = q.artifact_id ? (await buildExportBundle(store, { project, artifact_id: q.artifact_id })).events : await store.all(project);
             return lineageResponse(evs, q.format ?? null, q.actors === "1");
