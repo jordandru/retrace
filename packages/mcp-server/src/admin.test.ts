@@ -228,6 +228,31 @@ test("add-agent appends one pinned OpenClaw credential and emits NemoClaw manage
   await assert.rejects(() => main(argv, {}, () => {}), /already holds an agent\/openclaw credential/);
 });
 
+test("add-agent nooa: unlike openclaw, gets a producer key and a stdio retrace-mcp entry that signs", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "retrace-admin-nooa-"));
+  const file = join(dir, "creds.json");
+  const onboarding = join(dir, "nooa.md");
+  const keysDir = join(dir, "producer-keys");
+  appendCredentials(file, [], planCredentials(spec, fakeRand()));
+
+  const lines: string[] = [];
+  const argv = ["add-agent", "acme-app", "--member", "alice@acme.dev", "--harness", "nooa", "--url", "https://retrace.example", "--credentials-file", file, "--producer-keys-dir", keysDir, "--out", onboarding];
+  assert.equal(await main(argv, {}, (line) => lines.push(line)), 0);
+  const added = readCredentialsFile(file).at(-1)!;
+  assert.deepEqual(added.actor, { type: "agent", id: "nooa", on_behalf_of: "alice@acme.dev" });
+  assert.deepEqual([added.trust, added.projects], ["pinned", ["acme-app"]]);
+  // nooa is a real producer: it signs, so it carries a public key + require_signature + a local private-key path
+  assert.equal(added.require_signature, true);
+  assert.ok(added.public_key?.x);
+  assert.equal("d" in (added.public_key ?? {}), false, "private half must not sit on the credential");
+  assert.ok(added.producer_key_file && existsSync(added.producer_key_file));
+  const doc = readFileSync(onboarding, "utf8");
+  assert.match(doc, /NVIDIA-NeMo Object-Oriented Agents/);
+  assert.match(doc, /RETRACE_PRODUCER_KEY_FILE/);
+  assert.match(doc, /retrace-mcp/);
+  assert.doesNotMatch(doc, /does not claim producer signatures/);
+});
+
 test("add-agent validates a single member/harness and requires an existing project", async () => {
   const dir = mkdtempSync(join(tmpdir(), "retrace-admin-agent-invalid-"));
   const file = join(dir, "creds.json");

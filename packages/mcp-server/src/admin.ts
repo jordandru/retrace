@@ -35,7 +35,7 @@ import { defaultProducerKeysDir, producerKeySlug, writeProducerPrivateKey } from
 
 /** Kept stable so `new-team` does not silently provision an experimental integration. */
 export const DEFAULT_HARNESSES = ["claude-code", "codex", "gemini", "grok", "github-copilot"] as const;
-export const HARNESSES = [...DEFAULT_HARNESSES, "openclaw"] as const;
+export const HARNESSES = [...DEFAULT_HARNESSES, "openclaw", "nooa"] as const;
 export type Harness = (typeof HARNESSES)[number];
 
 /** Where each harness keeps its MCP server config, for the onboarding text. */
@@ -46,6 +46,7 @@ const HARNESS_CONFIG: Record<Harness, { label: string; file: string; instruction
   grok: { label: "Grok", file: "~/.grok/config.toml", instructions: "GROK.md" },
   "github-copilot": { label: "GitHub Copilot CLI", file: "~/.copilot/mcp-config.json", instructions: ".github/copilot-instructions.md" },
   openclaw: { label: "OpenClaw in NemoClaw", file: "NemoClaw's managed MCP provider store", instructions: "OpenClaw workspace instructions" },
+  nooa: { label: "NOOA (NVIDIA-NeMo Object-Oriented Agents)", file: "the agent's .mcp.json (loaded via MCPManager.create_from_server)", instructions: "the agent's method docstrings / system prompt" },
 };
 
 export interface TeamSpec {
