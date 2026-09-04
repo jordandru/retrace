@@ -21,6 +21,9 @@
  *                    hash-covered bodies that share links serve pre-auth and no later redaction is possible)
  *   RETRACE_IDE / RETRACE_WORKSPACE  override location.ide / location.workspace (default: detected from the IDE's own
  *                    environment — Orca's ORCA_PANE_KEY / ORCA_WORKTREE_ID; nothing is guessed)
+ *   RETRACE_PRODUCER_KEY_FILE / RETRACE_PRODUCER_KEY  Ed25519 private JWK that signs retrace_log / instruct / amend
+ *                    (the Worker never holds this; register the public half on the credential). Distinct from
+ *                    RETRACE_SIGNING_KEY (export issuer). Remote: refuses to sign if GET /api lacks event.producer_sig.
  */
 import { McpServer } from "@modelcontextprotocol/server";
 import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
@@ -39,6 +42,7 @@ import {
   AMENDMENT_ACTION_DETAIL, causalRootState, collectProvenanceAmendments,
 } from "@retrace-dev/core";
 import { ensureSigningKey } from "./keys.js";
+import { loadProducerPrivateKey, sealForAppend } from "./producer-key.js";
 import { SqliteStore } from "./sqlite-store.js";
 import { RemoteStore } from "./remote-store.js";
 import { isMainModule } from "./is-main.js";
@@ -216,6 +220,11 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
     return { type: "human", id: humanId };
   };
 
+  const producerKey = loadProducerPrivateKey();
+  const remoteUrl = remote && env.RETRACE_URL ? env.RETRACE_URL : undefined;
+  /** Sign after actor lock / EventInput.parse, before append. No key → unsigned (Phase A Worker still accepts). */
+  const prepareWrite = (input: EventInput) => sealForAppend(input, { privateKey: producerKey, remoteUrl });
+
   const auditHandlers = {} as AuditMcpHandlers;
   auditHandlers.log = async (args) => {
       guardAction(args.action);
@@ -234,7 +243,8 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
         const problem = causedByProblem(parent, input);
         if (problem) throw new CausedByError(causedByErrorMessage(input.caused_by, problem, { parentProject: parent?.project, project: input.project }));
       }
-      const { event, deduped } = remote ? await remote.append(input) : await appendEvent(store, input);
+      const signed = await prepareWrite(input);
+      const { event, deduped } = remote ? await remote.append(signed) : await appendEvent(store, signed);
       return {
         content: [{ type: "text", text: `${deduped ? "(deduped) " : ""}logged ${event.id} seq=${event.seq}\n${describeEvent(event)}` }],
         structuredContent: { id: event.id, seq: event.seq, hash: event.hash, deduped },
@@ -292,7 +302,8 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
         idempotency_key: `amend:${target.id}:${JSON.stringify(roles)}:${args.attest_causal_root === true}`,
         tags: ["amendment"],
       });
-      const { event, deduped } = remote ? await remote.append(input) : await appendEvent(store, input);
+      const signed = await prepareWrite(input);
+      const { event, deduped } = remote ? await remote.append(signed) : await appendEvent(store, signed);
       return { content: [{ type: "text", text: `${deduped ? "(deduped) " : ""}amended ${target.id} with ${event.id}` }], structuredContent: { id: event.id, target_event_id: target.id, deduped } };
     },
   );
@@ -312,7 +323,8 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
         // WHERE enrichment (backlog #15): env-only — retrace_instruct deliberately has no caller-facing location param.
         location: enrichLocation(undefined, locationDefaults()),
       });
-      const { event } = remote ? await remote.append(input) : await appendEvent(store, input);
+      const signed = await prepareWrite(input);
+      const { event } = remote ? await remote.append(signed) : await appendEvent(store, signed);
       return { content: [{ type: "text", text: `instruction logged ${event.id}` }], structuredContent: { id: event.id } };
     };
 

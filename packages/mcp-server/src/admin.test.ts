@@ -4,7 +4,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, 
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseCredentials } from "@retrace-dev/core";
-import { DEFAULT_HARNESSES, planAgentCredential, renderAgentOnboarding, planTeam, planCredentials, validateSpec, teamsIn, appendCredentials, writeSecretFile, readCredentialsFile, gitHookActorId, ciActorId, containingGitTree, defaultOnboardingFile, main, mintProducerKeys, shouldMintProducerKey, TeamSpec } from "./admin.js";
+import { DEFAULT_HARNESSES, planAgentCredential, renderAgentOnboarding, planTeam, planCredentials, validateSpec, teamsIn, appendCredentials, writeSecretFile, readCredentialsFile, gitHookActorId, ciActorId, containingGitTree, defaultOnboardingFile, main, mintProducerKeys, producerKeyFileName, shouldMintProducerKey, TeamSpec } from "./admin.js";
 
 /** deterministic "randomness": counter-filled buffers, distinct per call */
 const fakeRand = () => { let n = 0; return (len: number) => Buffer.alloc(len, ++n); };
@@ -38,6 +38,21 @@ test("mintProducerKeys: agents + hook get public_key and require_signature; CI a
   const claw = minted.find((c) => c.actor.id === "openclaw")!;
   assert.equal(ci.require_signature, undefined);
   assert.equal(claw.require_signature, undefined);
+});
+
+test("producer keys are project-scoped and an existing private key is never overwritten", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "retrace-admin-project-keys-"));
+  const first = planAgentCredential({ project: "project-a", member: "alice@example.com", harness: "nooa", url: "https://retrace.example" }, fakeRand());
+  const second = planAgentCredential({ project: "project-b", member: "alice@example.com", harness: "nooa", url: "https://retrace.example" }, fakeRand());
+  assert.notEqual(producerKeyFileName(first), producerKeyFileName(second));
+  assert.match(producerKeyFileName(first), /^project-a--nooa-alice-example\.com\.jwk$/);
+
+  const [mintedFirst] = await mintProducerKeys([first], dir);
+  const originalBytes = readFileSync(mintedFirst.producer_key_file!);
+  const [mintedSecond] = await mintProducerKeys([second], dir);
+  assert.notEqual(mintedFirst.producer_key_file, mintedSecond.producer_key_file);
+  assert.deepEqual(readFileSync(mintedFirst.producer_key_file!), originalBytes);
+  await assert.rejects(() => mintProducerKeys([first], dir), /refusing to overwrite existing producer key/);
 });
 
 test("planCredentials: one pinned credential per member×harness, scoped to the project; assert hook bounded to the team; CI reader", () => {

@@ -80,8 +80,11 @@ export function shouldMintProducerKey(c: Credential): boolean {
 }
 
 export function producerKeyFileName(c: Credential): string {
+  const scope = c.projects?.length
+    ? [...c.projects].sort().map((project) => project === "*" ? "all-projects" : project).join("+")
+    : "all-projects";
   const who = c.actor.on_behalf_of ? `${c.actor.id}-${c.actor.on_behalf_of}` : (c.actor.id || c.name || "producer");
-  return `${producerKeySlug(who)}.jwk`;
+  return `${producerKeySlug(scope)}--${producerKeySlug(who)}.jwk`;
 }
 
 export async function mintProducerKeys(

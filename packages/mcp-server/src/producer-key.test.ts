@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EventInput, generateSigningKey, publicFromPrivate, verifyProducerSig } from "@retrace-dev/core";
@@ -37,6 +37,17 @@ test("ensureProducerKey writes 0600 under 0700 and never the export issuer file"
   assert.equal(again.kid, k.kid);
   assert.equal(isExportIssuerKeyPath(keyPath()), true);
   await assert.rejects(() => ensureProducerKey(keyPath()), /export issuer key/);
+});
+
+test("writeProducerPrivateKey refuses to overwrite an existing private key", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "retrace-producer-no-overwrite-"));
+  const path = join(dir, "agent.jwk");
+  const first = await generateSigningKey();
+  const second = await generateSigningKey();
+  writeProducerPrivateKey(path, first.privateKey);
+  const original = readFileSync(path, "utf8");
+  assert.throws(() => writeProducerPrivateKey(path, second.privateKey), /refusing to overwrite existing producer key/);
+  assert.equal(readFileSync(path, "utf8"), original);
 });
 
 test("loadProducerPrivateKey prefers FILE over inline KEY; missing both is unsigned", async () => {

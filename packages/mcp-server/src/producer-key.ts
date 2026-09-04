@@ -39,7 +39,14 @@ export function writeProducerPrivateKey(path: string, privateJwk: JsonWebKey): v
   const dir = dirname(path);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   try { chmodSync(dir, 0o700); } catch {}
-  writeFileSync(path, JSON.stringify(privateJwk, null, 2) + "\n", { mode: 0o600 });
+  try {
+    writeFileSync(path, JSON.stringify(privateJwk, null, 2) + "\n", { mode: 0o600, flag: "wx" });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+      throw new Error(`refusing to overwrite existing producer key: ${path}`);
+    }
+    throw error;
+  }
   try { chmodSync(path, 0o600); } catch (e: any) { console.error(`warning: could not restrict permissions on ${path}: ${e?.message ?? e}`); }
 }
 

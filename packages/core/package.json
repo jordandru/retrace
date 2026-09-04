@@ -1,6 +1,6 @@
 {
   "name": "@retrace-dev/core",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Schemas, hash chains, causal status, exports, and renderers for Retrace provenance",
   "type": "module",
   "main": "dist/index.js",
