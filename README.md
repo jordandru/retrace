@@ -2,6 +2,8 @@
 
 Provenance ledger for mixed human + AI work. Every event records **who** (person or agent) did **what**, **when**, **where**, **why**, and **how** — sealed in a tamper-evident hash chain, with causal links from each agent action back to the human instruction that triggered it.
 
+> **New here?** Start with **[Retrace by example](docs/examples.md)** — six real problems from this repo's own ledger and what Retrace shows for each, in about three minutes. This README is the full reference.
+
 ```
 packages/core        schema (zod), hash chain, verify, "why" chain, renderers   — runs in Node, Workers, browsers
 packages/mcp-server  MCP server (stdio) + `retrace-serve` local UI/API server
