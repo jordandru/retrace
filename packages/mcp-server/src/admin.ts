@@ -239,7 +239,7 @@ export function renderOnboarding(spec: TeamSpec, credentials: LocalCredential[])
   ].join("\n")), "");
   lines.push("Share links (`retrace_share` from any agent, or the UI) serve a read-only timeline, signed export and printable report without a token.", "");
   lines.push("## What Retrace does and does not prove", "");
-  lines.push("Tamper-**evident**, not tamper-proof: edits to sealed events and removal after a checkpoint are detectable; history before a checkpoint could still be rewritten by whoever operates the database. Agent model names are what the agent reported. Line-level attribution is not a feature. The ledger holds what producers log — the CI gate makes commits complete; keystrokes are never captured. Producer signatures (when `RETRACE_PRODUCER_KEY_FILE` / `RETRACE_HOOK_KEY_FILE` is set) attest the producer process; the Worker never holds the private key.", "");
+  lines.push("Tamper-**evident**, not tamper-proof: edits to sealed events and removal after a checkpoint are detectable; history before a checkpoint could still be rewritten by whoever operates the database. Agent model names are what the agent reported. Line-level attribution is not a feature. The ledger holds what producers log — the CI gate makes commits complete; keystrokes are never captured. Producer signatures (when `RETRACE_PRODUCER_KEY_FILE` / `RETRACE_HOOK_KEY_FILE` is set) attest the producer process; the Worker never holds the private key. The ledger records the human instruction (`retrace_instruct`) and the agent's logged actions — not the harness's system prompt or the model's reasoning; what a vendor told the agent is out of scope by design.", "");
   return lines.join("\n");
 }
 
