@@ -2,14 +2,14 @@
   "$schema": "https://raw.githubusercontent.com/google-gemini/gemini-cli/main/schemas/settings.schema.json",
   "mcpServers": {
     "retrace": {
-      "command": "node",
+      "command": "bash",
       "args": [
-        "packages/mcp-server/dist/index.js"
+        "-c",
+        "set -a && . \"$HOME/.retrace/gemini.env\" && set +a && exec node packages/mcp-server/dist/index.js"
       ],
       "cwd": ".",
       "env": {
         "RETRACE_URL": "https://retrace-api.slcwitit.workers.dev",
-        "RETRACE_TOKEN": "$RETRACE_GEMINI_TOKEN",
         "RETRACE_PROJECT": "retrace",
         "RETRACE_ACTOR": "gemini",
         "RETRACE_ON_BEHALF_OF": "jordansboxing@gmail.com",
