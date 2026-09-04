@@ -22,6 +22,9 @@ export interface Env {
   RETRACE_TOKEN?: string;
   /** `wrangler secret put RETRACE_CREDENTIALS` — JSON array of per-actor credentials (see @retrace-dev/core Credential) */
   RETRACE_CREDENTIALS?: string;
+  /** Optional overflow credentials, same JSON-array shape, merged after RETRACE_CREDENTIALS. Lets a new or experimental
+   *  credential be added without rewriting (and risking) the vetted main secret. Unset = no effect. */
+  RETRACE_CREDENTIALS_EXTRA?: string;
   /** Ed25519 private JWK (JSON) — `wrangler secret put RETRACE_SIGNING_KEY` (generate with `retrace-export keygen`) */
   RETRACE_SIGNING_KEY?: string;
   RETRACE_ISSUER?: string;
@@ -41,6 +44,21 @@ export interface Env {
   RETRACE_OWNER?: string;
 }
 
+/** All per-actor credentials the Worker honours: the main secret plus the optional overflow secret. The main secret
+ *  stays fail-loud (a malformed RETRACE_CREDENTIALS still throws — a bad primary deploy must fail). The overflow is
+ *  isolated: if it is malformed it is logged and ignored, so a bad experimental credential can never take down the
+ *  vetted main set — the whole reason the overflow slot exists. */
+export function allCredentials(env: Env) {
+  const main = parseCredentials(env.RETRACE_CREDENTIALS);
+  if (!env.RETRACE_CREDENTIALS_EXTRA) return main;
+  try {
+    return [...main, ...parseCredentials(env.RETRACE_CREDENTIALS_EXTRA)];
+  } catch (e) {
+    console.error("RETRACE_CREDENTIALS_EXTRA ignored (malformed):", String((e as Error)?.message ?? e));
+    return main;
+  }
+}
+
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     const store = new D1Store(env.DB);
@@ -49,7 +67,7 @@ export default {
       // than granting anonymous read, append, share, and delete access. Local RETRACE_OPEN remains explicit in serve.ts.
       requireAuth: true,
       token: env.RETRACE_TOKEN,
-      credentials: parseCredentials(env.RETRACE_CREDENTIALS),
+      credentials: allCredentials(env),
       signingKey: parseSigningKey(env.RETRACE_SIGNING_KEY),
       issuerName: env.RETRACE_ISSUER,
       publicUrl: env.RETRACE_PUBLIC_URL,
@@ -78,7 +96,7 @@ export default {
     const store = new D1Store(env.DB);
     // Producers list matches what the fetch path embeds in live exports, so cached and live bundles verify alike.
     const producers = await Promise.all(
-      parseCredentials(env.RETRACE_CREDENTIALS)
+      allCredentials(env)
         .filter((c) => c.public_key)
         .map(async (c) => ({ kid: await keyId(c.public_key as JsonWebKey), public_key: c.public_key as JsonWebKey, actor_id: c.actor.id, name: c.name })),
     );
