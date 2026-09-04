@@ -32,14 +32,15 @@ Add the MCP server to Claude Code (`~/.claude.json` or project `.mcp.json`):
       "env": {
         "RETRACE_PROJECT": "retrace",
         "RETRACE_ACTOR": "claude-code",
-        "RETRACE_ON_BEHALF_OF": "<your email>"
+        "RETRACE_ON_BEHALF_OF": "<your email>",
+        "RETRACE_PRODUCER_KEY_FILE": "/home/<you>/.retrace/producer-keys/claude-code.jwk"
       }
     }
   }
 }
 ```
 
-Leave `RETRACE_ACTOR_MODEL` unset so the agent reports the model it actually ran. This repo’s project is `retrace` (see `.retrace.json`); Boxing-RPG is a separate demo project.
+Leave `RETRACE_ACTOR_MODEL` unset so the agent reports the model it actually ran. This repo’s project is `retrace` (see `.retrace.json`); Boxing-RPG is a separate demo project. `RETRACE_PRODUCER_KEY_FILE` is the agent's Ed25519 private JWK (mode 0600, minted by `retrace-export producer-keygen` or `retrace-admin new-team`); it is optional until the credential has `require_signature: true`. Never put that private file in the Worker secret — only the public half belongs on the credential.
 
 Same block works in Claude Desktop's `claude_desktop_config.json`. Other harnesses keep the same `command` / `args` / `env` with their own actor and config file: Gemini CLI (`RETRACE_ACTOR=gemini`, `.gemini/settings.json`), Grok Build TUI (`grok`, `~/.grok/config.toml`), Codex (`codex`, plus `AGENTS.md`), GitHub Copilot CLI (`github-copilot`, `~/.copilot/mcp-config.json`), VS Code Copilot Chat (`github-copilot`, VS Code **user** MCP — `MCP: Open User Configuration`; do not commit `.vscode/mcp.json`), Cursor Agent (`cursor-agent`, `.cursor/mcp.json` with the token in `~/.retrace/cursor.env` via `envFile`). Each client needs its own pinned `RETRACE_TOKEN` — never Claude’s — or the Worker will seal events as the wrong actor. For the live Worker, add `RETRACE_URL` and that scoped token; locally, events go to `~/.retrace/retrace.db` (override with `RETRACE_DB`). `retrace-admin` still mints the original five harnesses only. GitHub.com Copilot coding agent cannot reach this checkout's stdio MCP.
 
