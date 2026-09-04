@@ -130,7 +130,7 @@ test("stripping producer_sig after the seal breaks the chain", async () => {
   assert.notEqual(await computeHash(stripped as Event), event.hash, "the server cannot shed a signature post-seal without a detectable hash mismatch");
 });
 
-test("countProducerSigs: actor binding, invalid counting, unsigned agents, and the empty-list (uncheckable) rule", async () => {
+test("countProducerSigs: producer-key binding, relayed actors, invalid counting, unsigned agents, and the empty-list (uncheckable) rule", async () => {
   const a = await generateSigningKey(); const b = await generateSigningKey();
   const store = new MemStore();
   let n = 0;
@@ -141,15 +141,15 @@ test("countProducerSigs: actor binding, invalid counting, unsigned agents, and t
   const e3 = (await appendEvent(store, mk({ actor: { type: "agent", id: "gemini" } }))).event;                     // unsigned agent
   const e4 = (await appendEvent(store, mk({ actor: { type: "human", id: "j@example.com" } }))).event;              // unsigned human
   const crossActor = await signProducer(mk({ actor: { type: "agent", id: "codex", on_behalf_of: "j@example.com" } }), b.privateKey);
-  const e5 = (await appendEvent(store, crossActor)).event;                                                          // sig by b, but b's key is registered to grok
+  const e5 = (await appendEvent(store, crossActor)).event;                                                          // sig by b, event actor differs from credential metadata: valid relay shape
   const keys = [
     { kid: e1.producer_sig!.kid, public_key: a.publicKey, actor_id: "claude-code" },
     { kid: e5.producer_sig!.kid, public_key: b.publicKey, actor_id: "grok" },
   ];
   const c = await countProducerSigs([e1, e2, e3, e4, e5], keys);
-  assert.equal(c.producer_signed, 1);
-  assert.equal(c.producer_invalid, 2);
-  assert.ok(c.problems.some((p) => /not a registered key for actor codex/.test(p)), "key material reuse across actors is named");
+  assert.equal(c.producer_signed, 2);
+  assert.equal(c.producer_invalid, 1);
+  assert.ok(c.problems.some((p) => /does not verify/.test(p)), "tampered signed fields are named");
   assert.equal(c.producer_unsigned_agent_events, 1, "the human event is not counted");
   const un = await countProducerSigs([e1, e2, e5], []);
   assert.deepEqual([un.producer_signed, un.producer_invalid, un.problems.length], [0, 0, 0], "no keys = uncheckable, never invalid");

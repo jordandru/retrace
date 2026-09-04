@@ -9,8 +9,9 @@ import { fileURLToPath } from "node:url";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { SqliteStore } from "./sqlite-store.js";
-import { appendEvent, verifyProject } from "@retrace-dev/core";
-import { parseTrailers, resolveHookToken, ttySurface, guardRemoteWrite, validCausedById, validActorId } from "./git-hook.js";
+import { appendEvent, generateSigningKey, publicFromPrivate, verifyProducerSig, verifyProject } from "@retrace-dev/core";
+import { parseTrailers, resolveHookToken, resolveHookProducerKeyFile, ttySurface, guardRemoteWrite, validCausedById, validActorId } from "./git-hook.js";
+import { writeProducerPrivateKey } from "./producer-key.js";
 
 async function seedInstruct(db: string, project = "rpg"): Promise<string> {
   const { event } = await appendEvent(new SqliteStore(db), {
@@ -121,6 +122,38 @@ test("hook token: .retrace.json \"credential\" resolves from the credentials fil
   assert.equal(resolveHookToken({ token: "file-token" }, {}, credFile), "file-token");
   assert.equal(resolveHookToken({}, {}, credFile), undefined);
   assert.equal(resolveHookToken({}, {}, join(dir, "missing.json")), undefined, "no credential named → the file is never required");
+});
+
+test("hook producer key: RETRACE_HOOK_KEY_FILE beats producer_key_file; missing both means unsigned", () => {
+  const dir = mkdtempSync(join(tmpdir(), "retrace-hook-key-"));
+  const credFile = join(dir, "creds.json");
+  const pathOnCred = join(dir, "from-cred.jwk");
+  const pathOnEnv = join(dir, "from-env.jwk");
+  writeFileSync(credFile, JSON.stringify([{ ...CREDS[1], producer_key_file: pathOnCred }]));
+  assert.equal(resolveHookProducerKeyFile({ credential: "retrace-git" }, {}, credFile), pathOnCred);
+  assert.equal(resolveHookProducerKeyFile({ credential: "retrace-git" }, { RETRACE_HOOK_KEY_FILE: pathOnEnv }, credFile), pathOnEnv);
+  assert.equal(resolveHookProducerKeyFile({}, {}, credFile), undefined);
+  assert.equal(resolveHookProducerKeyFile({ credential: "retrace-git" }, {}, join(dir, "missing.json")), undefined);
+});
+
+test("hook signs committed events when RETRACE_HOOK_KEY_FILE is set", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "retrace-git-sign-"));
+  const db = join(dir, "ledger.db");
+  const kp = await generateSigningKey();
+  const keyFile = join(dir, "hook.jwk");
+  writeProducerPrivateKey(keyFile, kp.privateKey);
+  sh(dir, "git", ["init", "-q", "-b", "main"]);
+  writeFileSync(join(dir, "a.ts"), "export const a = 1;\n");
+  sh(dir, "git", ["add", "."]);
+  sh(dir, "git", ["commit", "-qm", "initial"]);
+  const env = { RETRACE_DB: db, RETRACE_PROJECT: "rpg", RETRACE_HOOK_KEY_FILE: keyFile };
+  sh(dir, "node", [bin, "install", "--repo", dir], env);
+  writeFileSync(join(dir, "a.ts"), "export const a = 2;\n");
+  sh(dir, "git", ["commit", "-qam", "signed bump"], env);
+  const events = await new SqliteStore(db).all("rpg");
+  const commit = events.find((e) => e.action === "committed");
+  assert.ok(commit?.producer_sig, "hook write should be producer-signed");
+  assert.equal(await verifyProducerSig(commit!, publicFromPrivate(kp.privateKey)), true);
 });
 
 test("hook end to end: the named credential is the bearer the server sees; a rejection is appended to .git/retrace-hook.log", async () => {

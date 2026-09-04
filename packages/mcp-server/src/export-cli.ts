@@ -2,6 +2,8 @@
 /**
  * retrace-export — signing keys, signed exports, offline verification.
  *   retrace-export keygen [--print-private]           create ~/.retrace/signing-key.json if missing; print kid + public JWK
+ *   retrace-export producer-keygen [--out path] [--actor id]   mint a producer Ed25519 key (NOT the export issuer);
+ *       default ~/.retrace/producer-keys/<actor>.jwk (0600). Prints public JWK + kid only.
  *   retrace-export export <project> [--artifact <id>] [--out file.json] [--report file.html]
  *   retrace-export verify <bundle.json> [--pubkey <jwk.json|https-url>] [--producers <keys.json>] [--checkpoint <checkpoints.jsonl> --checkpoint-pubkey <jwk.json|https-url>] [--allow-self-attested]
  *       Trusted key: --pubkey, else RETRACE_PUBKEY (JWK/file/https url), else RETRACE_URL/.well-known/retrace-pubkey (https only).
@@ -22,6 +24,7 @@ import { ProducerKey, keyId, buildExportBundle, verifyExportBundle, exportVerdic
 import { makeStore } from "./index.js";
 import { RemoteStore } from "./remote-store.js";
 import { ensureSigningKey, loadSigningKey } from "./keys.js";
+import { defaultProducerKeyPath, ensureProducerKey } from "./producer-key.js";
 import { witnessCheckpoint, verifyWitness, parseWitnessLog, witnessFor, fetchRekorPublicKey, DEFAULT_REKOR_URL } from "./witness.js";
 import { isMainModule } from "./is-main.js";
 import { reconcileMain } from "./reconcile.js";
@@ -51,6 +54,13 @@ async function main() {
     console.log(`${k.created ? "created" : "existing"} signing key at ${k.path}\nkid: ${k.kid}\npublic JWK: ${JSON.stringify(k.publicKey)}`);
     if (flags["print-private"]) console.log(`\nRETRACE_SIGNING_KEY='${JSON.stringify(k.privateKey)}'`);
     else console.log(`\nFor the Cloudflare Worker: wrangler secret put RETRACE_SIGNING_KEY   (paste the private JWK; print it with --print-private)`);
+    return;
+  }
+  if (cmd === "producer-keygen") {
+    const out = (flags.out as string) ?? defaultProducerKeyPath(String(flags.actor ?? "producer"));
+    const k = await ensureProducerKey(out);
+    console.log(`${k.created ? "created" : "existing"} producer key at ${k.path}\nkid: ${k.kid}\npublic JWK: ${JSON.stringify(k.publicKey)}`);
+    console.log("\nPaste the public JWK into the credential's public_key. Keep the private file off the Worker (RETRACE_PRODUCER_KEY_FILE / RETRACE_HOOK_KEY_FILE).");
     return;
   }
   if (cmd === "export") {
@@ -195,6 +205,6 @@ async function main() {
     console.log(`${base}/s/${id}\nreport: ${base}/s/${id}/report`);
     return;
   }
-  console.log("retrace-export <keygen|export <project>|verify <bundle.json>|checkpoint <project>|witness <project>|reconcile|share <project>> [--artifact id] [--out f] [--report f.html] [--pubkey jwk|https-url] [--allow-self-attested] [--checkpoint f.jsonl] [--checkpoint-pubkey jwk|https-url] [--bundle f.json] [--label s] [--days n]");
+  console.log("retrace-export <keygen|producer-keygen|export <project>|verify <bundle.json>|checkpoint <project>|witness <project>|reconcile|share <project>> [--artifact id] [--out f] [--report f.html] [--pubkey jwk|https-url] [--allow-self-attested] [--checkpoint f.jsonl] [--checkpoint-pubkey jwk|https-url] [--bundle f.json] [--label s] [--days n] [--actor id]");
 }
 if (isMainModule(import.meta.url)) main().catch((e) => { console.error("retrace-export:", e.message ?? e); process.exit(1); });

@@ -4,7 +4,7 @@
  *
  *   retrace-admin new-team <project> --member a@x.com[,b@y.com] [--harness claude-code,codex,gemini,grok,github-copilot]
  *                          [--url https://retrace-api.<you>.workers.dev] [--credentials-file ~/.retrace/worker-credentials.json]
- *                          [--out ~/.retrace/onboarding-<project>.md] [--dry-run]
+ *                          [--out ~/.retrace/onboarding-<project>.md] [--producer-keys-dir ~/.retrace/producer-keys] [--dry-run]
  *   retrace-admin add-agent <project> --member a@x.com --harness openclaw [--url https://…] [--out ~/.retrace/onboarding-…md]
  *   retrace-admin list-teams [--credentials-file …]
  *
@@ -13,11 +13,15 @@
  *      any other team's ledger): one PINNED agent credential per member × harness (actor.on_behalf_of = the member, so
  *      retrace_instruct can record that member's instructions and nobody else's), one ASSERT credential for the team's
  *      git hook (actor.id retrace-git-<project>, allowed_actors = the team's agents + members), and one pinned CI reader.
- *   2. Appends them to the operator's local mirror of RETRACE_CREDENTIALS (the file the git hook and doctor read),
+ *   2. Mints an Ed25519 producer keypair per pinned agent (except OpenClaw) and the git hook: `public_key` +
+ *      `require_signature: true` go on the credential (Worker-uploadable); the private JWK is a separate 0600 file
+ *      under producer-keys/. The CI reader and OpenClaw get neither — OpenClaw is remote HTTP MCP and the Worker must
+ *      not hold the private key. `producer_key_file` is a local path on the mirror only (zod strips it on the Worker).
+ *   3. Appends them to the operator's local mirror of RETRACE_CREDENTIALS (the file the git hook and doctor read),
  *      written atomically with mode 0600. Refuses if the project already has credentials there.
- *   3. Writes an onboarding document for the team (mode 0600 — it contains their tokens; send it over a channel you
- *      would send a password over, then delete it).
- *   4. Prints the one command that makes the Worker honour the new credentials.
+ *   4. Writes an onboarding document for the team (mode 0600 — it contains their tokens; send it over a channel you
+ *      would send a password over, then delete it). Never prints a private JWK.
+ *   5. Prints the one command that makes the Worker honour the new credentials.
  *
  * The project itself needs no creation step: a Retrace project exists from its first event.
  */
@@ -25,8 +29,9 @@ import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileS
 import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { Credential, parseCredentials } from "@retrace-dev/core";
+import { Credential, generateSigningKey, parseCredentials, publicFromPrivate } from "@retrace-dev/core";
 import { isMainModule } from "./is-main.js";
+import { defaultProducerKeysDir, producerKeySlug, writeProducerPrivateKey } from "./producer-key.js";
 
 /** Kept stable so `new-team` does not silently provision an experimental integration. */
 export const DEFAULT_HARNESSES = ["claude-code", "codex", "gemini", "grok", "github-copilot"] as const;
@@ -61,6 +66,42 @@ export interface AgentSpec {
   member: string;
   harness: Harness;
   url: string;
+}
+
+/** Local mirror may carry `producer_key_file` (a path). The Worker Credential schema must not grow this field. */
+export type LocalCredential = Credential & { producer_key_file?: string };
+
+/** OpenClaw is remote HTTP MCP (Worker must not hold the private key). CI is a reader. Everyone else who writes, signs. */
+export function shouldMintProducerKey(c: Credential): boolean {
+  if (c.actor.id === "openclaw") return false;
+  if (c.trust === "assert") return true;
+  return c.trust === "pinned" && c.actor.type === "agent";
+}
+
+export function producerKeyFileName(c: Credential): string {
+  const who = c.actor.on_behalf_of ? `${c.actor.id}-${c.actor.on_behalf_of}` : (c.actor.id || c.name || "producer");
+  return `${producerKeySlug(who)}.jwk`;
+}
+
+export async function mintProducerKeys(
+  credentials: Credential[],
+  keysDir: string,
+  generate: () => Promise<{ privateKey: JsonWebKey; publicKey: JsonWebKey }> = generateSigningKey,
+): Promise<LocalCredential[]> {
+  const out: LocalCredential[] = [];
+  for (const c of credentials) {
+    if (!shouldMintProducerKey(c)) { out.push(c); continue; }
+    const kp = await generate();
+    const path = join(keysDir, producerKeyFileName(c));
+    writeProducerPrivateKey(path, kp.privateKey);
+    out.push({
+      ...c,
+      public_key: publicFromPrivate(kp.privateKey),
+      require_signature: true,
+      producer_key_file: path,
+    });
+  }
+  return out;
 }
 
 export function defaultCredentialsFile(env: NodeJS.ProcessEnv = process.env): string {
@@ -131,8 +172,8 @@ export function planCredentials(spec: TeamSpec, rand: (n: number) => Buffer = ra
 
 const fence = (lang: string, body: string) => "```" + lang + "\n" + body + "\n```";
 
-/** Pure: the onboarding document. Contains the tokens — the caller decides where it may go. */
-export function renderOnboarding(spec: TeamSpec, credentials: Credential[]): string {
+/** Pure: the onboarding document. Contains the tokens — the caller decides where it may go. Never a private JWK. */
+export function renderOnboarding(spec: TeamSpec, credentials: LocalCredential[]): string {
   const hook = credentials.find((c) => c.actor.id === gitHookActorId(spec.project))!;
   const ci = credentials.find((c) => c.actor.id === ciActorId(spec.project))!;
   const lines: string[] = [];
@@ -162,20 +203,14 @@ export function renderOnboarding(spec: TeamSpec, credentials: Credential[]): str
         retrace: {
           command: "npx",
           args: ["-y", "--package=@retrace-dev/cli", "retrace-mcp"],
-          env: {
-            RETRACE_URL: spec.url,
-            RETRACE_TOKEN: cred.token,
-            RETRACE_PROJECT: spec.project,
-            RETRACE_ACTOR: h,
-            RETRACE_ON_BEHALF_OF: member,
-          },
+          env: mcpEnv(spec, h, member, cred),
         },
       }, null, 2)), "");
     }
   }
   lines.push("## 2. Once per repo: commits → ledger", "");
-  lines.push("On the machine that commits (each developer, or a shared runner), keep the hook credential in `~/.retrace/worker-credentials.json` — the hook looks it up by name and the repo never carries a token:", "");
-  lines.push(fence("json", JSON.stringify([{ token: hook.token, actor: hook.actor, trust: hook.trust, projects: hook.projects, allowed_actors: hook.allowed_actors }], null, 2)), "");
+  lines.push("On the machine that commits (each developer, or a shared runner), keep the hook credential in `~/.retrace/worker-credentials.json` — the hook looks it up by name and the repo never carries a token. `producer_key_file` is a local path (not uploaded as the Worker secret); or set `RETRACE_HOOK_KEY_FILE`:", "");
+  lines.push(fence("json", JSON.stringify([hookDump(hook)], null, 2)), "");
   lines.push("Then in the repo — `.retrace.json` names the project, the ledger URL and the credential's *name* (no token), so it is safe to commit:", "");
   lines.push(fence("bash", [
     `cat > .retrace.json <<'EOF'`,
@@ -195,7 +230,7 @@ export function renderOnboarding(spec: TeamSpec, credentials: Credential[]): str
     "    RETRACE_TOKEN: ${{ secrets.RETRACE_CI_TOKEN }}",
     "  run: npx -y --package=@retrace-dev/cli retrace doctor --gate",
   ].join("\n")), "");
-  lines.push("A commit with no provenance behind it fails the check. Make `gate` a required status check on your default branch.", "");
+  lines.push("A commit with no provenance behind it fails the check. Make `gate` a required status check on your default branch. The CI reader has no producer key.", "");
   lines.push("## 4. Prove it to someone else", "");
   lines.push(fence("bash", [
     `npx -y --package=@retrace-dev/cli retrace-export export ${spec.project} --out ${spec.project}.json`,
@@ -203,8 +238,31 @@ export function renderOnboarding(spec: TeamSpec, credentials: Credential[]): str
   ].join("\n")), "");
   lines.push("Share links (`retrace_share` from any agent, or the UI) serve a read-only timeline, signed export and printable report without a token.", "");
   lines.push("## What Retrace does and does not prove", "");
-  lines.push("Tamper-**evident**, not tamper-proof: edits to sealed events and removal after a checkpoint are detectable; history before a checkpoint could still be rewritten by whoever operates the database. Agent model names are what the agent reported. Line-level attribution is not a feature. The ledger holds what producers log — the CI gate makes commits complete; keystrokes are never captured.", "");
+  lines.push("Tamper-**evident**, not tamper-proof: edits to sealed events and removal after a checkpoint are detectable; history before a checkpoint could still be rewritten by whoever operates the database. Agent model names are what the agent reported. Line-level attribution is not a feature. The ledger holds what producers log — the CI gate makes commits complete; keystrokes are never captured. Producer signatures (when `RETRACE_PRODUCER_KEY_FILE` / `RETRACE_HOOK_KEY_FILE` is set) attest the producer process; the Worker never holds the private key.", "");
   return lines.join("\n");
+}
+
+function mcpEnv(spec: TeamSpec | AgentSpec, actor: string, member: string, cred: LocalCredential): Record<string, string> {
+  return {
+    RETRACE_URL: spec.url,
+    RETRACE_TOKEN: cred.token,
+    RETRACE_PROJECT: spec.project,
+    RETRACE_ACTOR: actor,
+    RETRACE_ON_BEHALF_OF: member,
+    ...(cred.producer_key_file ? { RETRACE_PRODUCER_KEY_FILE: cred.producer_key_file } : {}),
+  };
+}
+
+function hookDump(hook: LocalCredential): Record<string, unknown> {
+  return {
+    token: hook.token,
+    actor: hook.actor,
+    trust: hook.trust,
+    projects: hook.projects,
+    allowed_actors: hook.allowed_actors,
+    ...(hook.public_key ? { public_key: hook.public_key, require_signature: hook.require_signature } : {}),
+    ...(hook.producer_key_file ? { producer_key_file: hook.producer_key_file } : {}),
+  };
 }
 
 export function planTeam(spec: TeamSpec, rand: (n: number) => Buffer = randomBytes): TeamPlan {
@@ -224,7 +282,7 @@ export function planAgentCredential(spec: AgentSpec, rand: (n: number) => Buffer
 }
 
 /** Single-token onboarding for adding one agent without redistributing an existing team's secrets. */
-export function renderAgentOnboarding(spec: AgentSpec, credential: Credential): string {
+export function renderAgentOnboarding(spec: AgentSpec, credential: LocalCredential): string {
   const cfg = HARNESS_CONFIG[spec.harness];
   const lines = [
     `# Retrace agent onboarding — \`${spec.harness}\` for \`${spec.project}\``, "",
@@ -247,19 +305,18 @@ export function renderAgentOnboarding(spec: AgentSpec, credential: Credential): 
     lines.push(
       `## ${cfg.label}`, "",
       `Add this entry in \`${cfg.file}\` and keep the provenance instructions in \`${cfg.instructions}\`:`, "",
-      fence("json", JSON.stringify({ retrace: { command: "npx", args: ["-y", "--package=@retrace-dev/cli", "retrace-mcp"], env: {
-        RETRACE_URL: spec.url, RETRACE_TOKEN: credential.token, RETRACE_PROJECT: spec.project,
-        RETRACE_ACTOR: spec.harness, RETRACE_ON_BEHALF_OF: spec.member,
-      } } }, null, 2)), "",
+      fence("json", JSON.stringify({ retrace: { command: "npx", args: ["-y", "--package=@retrace-dev/cli", "retrace-mcp"], env: mcpEnv(spec, spec.harness, spec.member, credential) } }, null, 2)), "",
     );
   }
   return lines.join("\n");
 }
 
-/** Read the operator's credential mirror (parsed with the Worker's own schema so a bad file fails here, not at deploy). */
-export function readCredentialsFile(path: string): Credential[] {
+/** Read the operator's credential mirror (Worker schema must accept it; extra `producer_key_file` paths are kept locally). */
+export function readCredentialsFile(path: string): LocalCredential[] {
   if (!existsSync(path)) return [];
-  return parseCredentials(readFileSync(path, "utf8"));
+  const raw = JSON.parse(readFileSync(path, "utf8"));
+  parseCredentials(JSON.stringify(raw));
+  return raw as LocalCredential[];
 }
 
 export function teamsIn(credentials: Credential[]): Record<string, Credential[]> {
@@ -268,8 +325,8 @@ export function teamsIn(credentials: Credential[]): Record<string, Credential[]>
   return out;
 }
 
-/** Append atomically, mode 0600, without ever leaving a partially written credentials file behind. */
-export function appendCredentials(path: string, existing: Credential[], added: Credential[]): void {
+/** Append atomically, mode 0600, without ever leaving a partially written credentials file behind. Extra local fields such as `producer_key_file` are preserved; the Worker schema strips unknown keys on upload. */
+export function appendCredentials(path: string, existing: LocalCredential[], added: LocalCredential[]): void {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const tmp = `${path}.${process.pid}.tmp`;
   writeFileSync(tmp, JSON.stringify([...existing, ...added], null, 2) + "\n", { mode: 0o600 });
@@ -339,16 +396,19 @@ export async function main(argv = process.argv.slice(2), env = process.env, out:
     if (existing.some((c) => c.projects?.includes(project))) throw new Error(`${credentialsFile} already holds credentials scoped to "${project}" — refusing to mint a second set (remove them first, or pick another project name)`);
     const plan = planTeam(spec);
     const onboardingPath = resolve(String(flags.out ?? defaultOnboardingFile(`onboarding-${project}.md`)));
+    const keysDir = resolve(String(flags["producer-keys-dir"] ?? env.RETRACE_PRODUCER_KEYS_DIR ?? defaultProducerKeysDir(env)));
     warnIfOnboardingInGitTree(onboardingPath, out);
     if (flags["dry-run"]) {
       out(`dry run — would add ${plan.credentials.length} credentials for ${project} to ${credentialsFile} and write ${onboardingPath}`);
       for (const c of plan.credentials) out(`  ${c.trust.padEnd(7)} ${c.actor.type}/${c.actor.id}${c.actor.on_behalf_of ? " for " + c.actor.on_behalf_of : ""}`);
       return 0;
     }
-    appendCredentials(credentialsFile, existing, plan.credentials);
-    writeSecretFile(onboardingPath, plan.onboarding);
-    out(`added ${plan.credentials.length} credentials for ${project} to ${credentialsFile} (mode 0600)`);
+    const credentials = await mintProducerKeys(plan.credentials, keysDir);
+    appendCredentials(credentialsFile, existing, credentials);
+    writeSecretFile(onboardingPath, renderOnboarding(spec, credentials));
+    out(`added ${credentials.length} credentials for ${project} to ${credentialsFile} (mode 0600)`);
     out(`wrote ${onboardingPath} (mode 0600) — it contains the team's tokens; send it over a channel you'd send a password over, then delete it`);
+    out(`producer private keys (mode 0600) under ${keysDir} — never upload those files as RETRACE_CREDENTIALS`);
     out("");
     out("Make the Worker honour them (run from apps/worker; wrangler asks for confirmation):");
     out(`  npx wrangler secret put RETRACE_CREDENTIALS < ${credentialsFile}`);
@@ -375,19 +435,21 @@ export async function main(argv = process.argv.slice(2), env = process.env, out:
     if (existing.some((c) => c.projects?.includes(project) && c.actor.type === "agent" && c.actor.id === spec.harness && c.actor.on_behalf_of === spec.member))
       throw new Error(`${credentialsFile} already holds an agent/${spec.harness} credential for ${spec.member} in "${project}"`);
     const onboardingPath = resolve(String(flags.out ?? defaultOnboardingFile(`onboarding-${project}-${spec.harness}.md`)));
+    const keysDir = resolve(String(flags["producer-keys-dir"] ?? env.RETRACE_PRODUCER_KEYS_DIR ?? defaultProducerKeysDir(env)));
     warnIfOnboardingInGitTree(onboardingPath, out);
     if (flags["dry-run"]) {
       out(`dry run — would add pinned agent/${spec.harness} for ${spec.member} to ${credentialsFile} and write ${onboardingPath}`);
       return 0;
     }
-    appendCredentials(credentialsFile, existing, [credential]);
-    writeSecretFile(onboardingPath, renderAgentOnboarding(spec, credential));
+    const [minted] = await mintProducerKeys([credential], keysDir);
+    appendCredentials(credentialsFile, existing, [minted]);
+    writeSecretFile(onboardingPath, renderAgentOnboarding(spec, minted));
     out(`added pinned agent/${spec.harness} for ${spec.member} in ${project} to ${credentialsFile} (mode 0600)`);
     out(`wrote ${onboardingPath} (mode 0600) — it contains one token; send it securely, then delete it`);
     out(`upload the updated secret: npx wrangler secret put RETRACE_CREDENTIALS < ${credentialsFile}`);
     return 0;
   }
-  out("retrace-admin <new-team <project> --member a@x.com[,…] [--harness …] | add-agent <project> --member a@x.com --harness openclaw | list-teams> [--url https://…] [--credentials-file …] [--out file.md (default: ~/.retrace/onboarding-*.md)] [--dry-run]");
+  out("retrace-admin <new-team <project> --member a@x.com[,…] [--harness …] | add-agent <project> --member a@x.com --harness openclaw | list-teams> [--url https://…] [--credentials-file …] [--out file.md (default: ~/.retrace/onboarding-*.md)] [--producer-keys-dir ~/.retrace/producer-keys] [--dry-run]");
   return cmd ? 1 : 0;
 }
 

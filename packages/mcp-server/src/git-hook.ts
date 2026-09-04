@@ -13,6 +13,8 @@
  *   (looked up by actor.id in RETRACE_CREDENTIALS_FILE, default ~/.retrace/worker-credentials.json — a scoped assert
  *   credential, so the hook need not carry the owner token) > env RETRACE_TOKEN > .retrace.json "token". No "credential"
  *   field = the owner-token behaviour, unchanged. A named-but-missing credential is an error, never a silent fallback.
+ * Producer key (resolveHookProducerKeyFile): env RETRACE_HOOK_KEY_FILE > `producer_key_file` path on that same
+ *   credentials-file entry (a path, never key material — the mirror stays Worker-uploadable). Missing both → unsigned.
  * Failures of `commit` (the hook path) are appended to <git-dir>/retrace-hook.log: the post-commit script discards
  *   stdout/stderr, and with a fail-closed assert credential a 401/403 would otherwise be an invisible drop (owner-token
  *   migration 2026-08-23). Re-log a dropped commit with `retrace-git commit <sha>` or `backfill`.
@@ -40,6 +42,7 @@ import { basename, join, resolve } from "node:path";
 import { EventInput, appendEvent, describeEvent, Event, resolveCommitActor } from "@retrace-dev/core";
 import { makeStore, detectIde, harnessSession } from "./index.js";
 import { RemoteStore } from "./remote-store.js";
+import { loadProducerPrivateKeyFromFile, sealForAppend } from "./producer-key.js";
 import { isMainModule } from "./is-main.js";
 
 export type Cfg = { project?: string; db?: string; url?: string; token?: string; credential?: string; environment?: string; repoName?: string;
@@ -72,6 +75,23 @@ export function resolveHookToken(
     return hit.token;
   }
   return env.RETRACE_TOKEN ?? file.token;
+}
+
+/**
+ * Path to the hook's producer private JWK. Precedence: RETRACE_HOOK_KEY_FILE > `producer_key_file` on the named
+ * credentials-file entry. A missing path means do not sign — never fall back to the export issuer key.
+ */
+export function resolveHookProducerKeyFile(
+  file: Pick<Cfg, "credential">,
+  env: NodeJS.ProcessEnv = process.env,
+  credentialsFile: string = env.RETRACE_CREDENTIALS_FILE ?? DEFAULT_CREDENTIALS_FILE,
+): string | undefined {
+  if (env.RETRACE_HOOK_KEY_FILE) return env.RETRACE_HOOK_KEY_FILE;
+  if (!file.credential) return undefined;
+  if (!existsSync(credentialsFile)) return undefined;
+  const entries: unknown = JSON.parse(readFileSync(credentialsFile, "utf8"));
+  const hit = Array.isArray(entries) ? entries.find((c) => c?.actor?.id === file.credential) : undefined;
+  return typeof hit?.producer_key_file === "string" && hit.producer_key_file ? hit.producer_key_file : undefined;
 }
 
 /** One line per failed hook run, appended to <git-dir>/retrace-hook.log. Never throws (the hook is non-fatal by design); the
@@ -228,7 +248,9 @@ export function guardRemoteWrite(repo: string, cfg: Cfg): void {
 async function logCommit(repo: string, sha: string, cfg: Cfg, live = false): Promise<{ event: Event; deduped: boolean }> {
   // The single choke point for every write path (hook, `commit <sha>`, backfill) — so a new caller cannot forget it.
   guardRemoteWrite(repo, cfg);
-  const input = commitToEvent(repo, sha, cfg, live);
+  let input = commitToEvent(repo, sha, cfg, live);
+  const keyFile = resolveHookProducerKeyFile({ credential: cfg.credential });
+  if (keyFile) input = await sealForAppend(input, { privateKey: loadProducerPrivateKeyFromFile(keyFile) });
   const store = cfg.url ? new RemoteStore(cfg.url, cfg.token) : makeStore();
   return store instanceof RemoteStore ? store.append(input) : appendEvent(store, input);
 }

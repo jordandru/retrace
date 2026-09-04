@@ -22,9 +22,9 @@
  * A signing producer MUST set `timestamp` (the server fills a missing one — the signature could never be re-verified)
  * and `idempotency_key`: Ed25519 is deterministic, so the key is what makes every signed event's bytes unique, which
  * is what lets offline verification flag a hostile store sealing one signed event twice (replay detection). And because verification recomputes the payload from the STORED event, a
- * producer must sign `actor.{type, id, on_behalf_of}` exactly as its credential resolves them — same on_behalf_of, or
- * omitted when the credential omits it. Divergence lands `invalid`, by design: that IS the actor-mismatch defense
- * (signing as yourself and submitting on someone else's credential changes the recomputed payload).
+ * producer must sign `actor.{type, id, on_behalf_of}` exactly as the event records it. The signature identifies the
+ * producer process/key, while the event actor may be a relayed or on-behalf-of principal resolved by the adapter.
+ * The Worker verifies the signed, post-resolution event against the credential that presented the key.
  */
 import { Event, EventInput } from "./schema.js";
 import { keyId, publicFromPrivate, signCanonical, verifyCanonical } from "./signing.js";
@@ -127,9 +127,9 @@ export interface ProducerSigCounts {
 }
 
 /**
- * Offline re-check for export verification: recompute each signed event's payload against the supplied keys.
- * A key validates only events sealed as ITS actor (`actor_id` binding — reused key material registered to actor A must
- * not validate an event sealed as actor B, mirroring the server's per-credential check). An EMPTY key list means the
+ * Offline re-check for export verification: recompute each signed event's payload against the supplied producer keys.
+ * The kid identifies the registered producer credential/key; `actor_id` is descriptive credential metadata, not an
+ * event-actor binding, because adapters may legitimately record a relayed or on-behalf-of principal. An EMPTY key list means the
  * signatures are uncheckable (an old bundle with no producers and no --producers file): signed events are neither
  * counted nor flagged; only the unsigned-agent count is meaningful then.
  */
@@ -144,9 +144,9 @@ export async function countProducerSigs(events: Event[], keys: ProducerKey[]): P
     }
     if (keys.length === 0) continue; // uncheckable, not invalid
     const key = byKid.get(e.producer_sig.kid);
-    if (!key || (key.actor_id !== undefined && key.actor_id !== e.actor.id)) {
+    if (!key) {
       c.producer_invalid++;
-      c.problems.push(`event #${e.seq}: producer_sig kid ${e.producer_sig.kid.slice(0, 12)} is not a registered key for actor ${e.actor.id}`);
+      c.problems.push(`event #${e.seq}: producer_sig kid ${e.producer_sig.kid.slice(0, 12)} is not a registered producer key`);
       continue;
     }
     if (!(await verifyProducerSig(e, key.public_key))) {
