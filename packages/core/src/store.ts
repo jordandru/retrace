@@ -4,6 +4,7 @@
  */
 import { Event, EventInput } from "./schema.js";
 import { sealEvent, verifyChain, VerifyResult } from "./chain.js";
+import { markUntrustedText } from "./explain.js";
 
 export interface HistoryQuery {
   project: string;
@@ -252,10 +253,10 @@ export function causedByErrorMessage(
   problem: CausedByProblem,
   opts?: { parentProject?: string; project?: string },
 ): string {
-  if (problem === "missing") return `caused_by "${causedBy}" does not name an event in this ledger`;
+  if (problem === "missing") return `caused_by ${markUntrustedText(causedBy)} does not name an event in this ledger`;
   if (problem === "wrong_project")
-    return `caused_by "${causedBy}" is in project "${opts?.parentProject}", not "${opts?.project}"`;
-  return `caused_by "${causedBy}" is newer than this event`;
+    return `caused_by ${markUntrustedText(causedBy)} is in project ${markUntrustedText(opts?.parentProject ?? "")}, not ${markUntrustedText(opts?.project ?? "")}`;
+  return `caused_by ${markUntrustedText(causedBy)} is newer than this event`;
 }
 
 export function markCausedByUnverified(input: EventInput, problem: CausedByProblem): EventInput {

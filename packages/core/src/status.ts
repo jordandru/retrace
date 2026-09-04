@@ -3,6 +3,7 @@ import { VerifyResult } from "./chain.js";
 import { EventStore, verifyProject } from "./store.js";
 import { collectProvenanceAmendments, collectRejectedAmendments } from "./amendment.js";
 import { CAUSED_BY_UNVERIFIED_TAG, SEALED_BY_PARAM, sealedByKind } from "./store.js";
+import { markUntrustedText } from "./explain.js";
 
 export type StatusActor = { type: Event["actor"]["type"]; id: string; events: number; last_seen: string; models: string[] };
 export type StatusIntegration = { system: string; events: number; last_seen: string };
@@ -121,13 +122,29 @@ export async function buildProjectStatus(store: EventStore, project: string, now
   };
 }
 
+export function projectStatusForModel(status: ProjectStatus): ProjectStatus {
+  return {
+    ...status,
+    project: markUntrustedText(status.project),
+    actors: status.actors.map((actor) => ({
+      ...actor,
+      id: markUntrustedText(actor.id),
+      models: actor.models.map(markUntrustedText),
+    })),
+    integrations: status.integrations.map((integration) => ({
+      ...integration,
+      system: markUntrustedText(integration.system),
+    })),
+  };
+}
+
 export function renderProjectStatus(s: ProjectStatus): string {
   const health = s.integrity.ok ? "VERIFIED" : "BROKEN";
-  return `${s.project} — ${health}\n` +
+  return `${markUntrustedText(s.project)} — ${health}\n` +
     `${s.events.total} events · ${s.causality.coverage_pct}% causal coverage · ${s.capture.unlinked_commits}/${s.capture.commits} unlinked commits · ${s.capture.unverified_links} unverified links\n` +
     `${s.capture.agent_events_without_model}/${s.capture.agent_events} agent events missing model · ${s.capture.instructions_without_followup}/${s.capture.instructions} instructions without follow-up · ${s.capture.artifact_refs_without_role}/${s.capture.artifact_refs} artifact refs missing role\n` +
     `append-only amendments: ${s.capture.amended_unlinked_commits} commits attested · ${s.capture.amended_artifact_refs} artifact roles supplied · ${s.capture.ineffective_amendments} rejected links\n` +
     `sealed by: ${s.capture.sealed_by.pinned} pinned · ${s.capture.sealed_by.assert} assert · ${s.capture.sealed_by.webhook} webhook · ${s.capture.sealed_by.owner} owner-asserted · ${s.capture.sealed_by.unauthenticated} unauthenticated · ${s.capture.sealed_by.unstamped} unstamped; ${s.capture.agent_events_not_pinned}/${s.capture.agent_events} agent events not pinned\n` +
-    `actors: ${s.actors.map((a) => `${a.type}/${a.id} (${a.events})`).join(", ") || "none"}\n` +
-    `integrations: ${s.integrations.map((i) => `${i.system} (${i.events}, last ${i.last_seen})`).join(", ") || "none"}`;
+    `actors: ${s.actors.map((a) => `${a.type}/${markUntrustedText(a.id)} (${a.events})`).join(", ") || "none"}\n` +
+    `integrations: ${s.integrations.map((i) => `${markUntrustedText(i.system)} (${i.events}, last ${i.last_seen})`).join(", ") || "none"}`;
 }

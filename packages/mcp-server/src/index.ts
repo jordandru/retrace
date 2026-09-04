@@ -35,10 +35,10 @@ import { randomUUID } from "node:crypto";
 import {
   Actor as CoreActor, Location, EventInput, applyDefaultRoles,
   appendEvent, CausedByError, causedByProblem, causedByErrorMessage,
-  verifyProject, explainEvent, renderTimeline, renderWhyChain, describeEvent,
+  verifyProject, explainEvent, renderTimeline, renderWhyChain, describeEvent, eventForModel, markUntrustedText,
   buildExportBundle, verifyExportBundle, renderReportHtml, parseSigningKey, publicFromPrivate, newShareId,
-  buildLineage, renderLineageDot, renderLineageMermaid, renderLineageText,
-  buildProjectStatus, renderProjectStatus,
+  buildLineage, lineageForModel, renderLineageDot, renderLineageMermaid, renderLineageText,
+  buildProjectStatus, projectStatusForModel, renderProjectStatus,
   AMENDMENT_ACTION_DETAIL, causalRootState, collectProvenanceAmendments,
 } from "@retrace-dev/core";
 import { ensureSigningKey } from "./keys.js";
@@ -333,26 +333,26 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
       const note = page.truncated
         ? `\n\ntruncated — ${page.events.length} newest matching events; pass before_seq ${page.next_before_seq} for the previous page`
         : "";
-      return { content: [{ type: "text", text: renderTimeline(page.events) + note }], structuredContent: { count: page.events.length, events: page.events, truncated: page.truncated, next_before_seq: page.next_before_seq } };
+      return { content: [{ type: "text", text: renderTimeline(page.events) + note }], structuredContent: { count: page.events.length, events: page.events.map(eventForModel), truncated: page.truncated, next_before_seq: page.next_before_seq } };
     };
 
   auditHandlers.why = async ({ event_id }) => {
       const chain = await explainEvent(store, event_id);
       if (!chain.length) return { content: [{ type: "text", text: `no event ${event_id}` }], isError: true };
-      return { content: [{ type: "text", text: renderWhyChain(chain) }], structuredContent: { chain } };
+      return { content: [{ type: "text", text: renderWhyChain(chain) }], structuredContent: { chain: chain.map(eventForModel) } };
     };
 
   auditHandlers.status = async ({ project }) => {
       const p = project ?? DEFAULT_PROJECT;
       const status = remote ? await remote.status(p) : await buildProjectStatus(store, p);
-      return { content: [{ type: "text", text: renderProjectStatus(status) }], structuredContent: { status } };
+      return { content: [{ type: "text", text: renderProjectStatus(status) }], structuredContent: { status: projectStatusForModel(status) } };
     };
 
   auditHandlers.verify = async ({ project }) => {
       const p = project ?? DEFAULT_PROJECT;
       const r = remote ? await remote.verify(p) : await verifyProject(store, p);
       return {
-        content: [{ type: "text", text: r.ok ? `OK — ${r.checked} events verified for '${p}'` : `BROKEN at seq ${r.first_bad_seq}: ${r.reason}` }],
+        content: [{ type: "text", text: r.ok ? `OK — ${r.checked} events verified for ${markUntrustedText(p)}` : `BROKEN at seq ${r.first_bad_seq}: ${r.reason}` }],
         structuredContent: { ...r },
       };
     };
@@ -376,7 +376,7 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
       if (outHtml) writeFileSync(outHtml, renderReportHtml(bundle, verdict));
       const summary = `${bundle.events.length} events · chain ${bundle.chain.ok ? "intact" : "BROKEN"} · signature ${verdict.signature}${bundle.issuer ? " (kid " + bundle.issuer.kid + ")" : ""} · coverage ${verdict.coverage.scope === "full" ? (verdict.coverage.complete ? "complete" : "INCOMPLETE") : "scoped"} (${verdict.coverage.events}/${verdict.coverage.total_events})` +
         (outJson ? `\njson → ${outJson}` : "") + (outHtml ? `\nreport → ${outHtml}` : "");
-      return { content: [{ type: "text", text: summary }], structuredContent: { events: bundle.events.length, chain_ok: bundle.chain.ok, signature: verdict.signature, coverage: verdict.coverage, kid: bundle.issuer?.kid, ...(args.out_json || args.out_html ? {} : { bundle }) } };
+      return { content: [{ type: "text", text: summary }], structuredContent: { events: bundle.events.length, chain_ok: bundle.chain.ok, signature: verdict.signature, coverage: verdict.coverage, kid: bundle.issuer?.kid } };
     };
 
   server.registerTool(
@@ -413,16 +413,17 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
         : await store.all(project);
       const l = buildLineage(events, { includeActors: !!args.include_actors });
       const fmt = args.format ?? "text";
-      const text = fmt === "dot" ? renderLineageDot(l) : fmt === "mermaid" ? renderLineageMermaid(l) : fmt === "json" ? JSON.stringify(l, null, 2) : renderLineageText(l);
-      return { content: [{ type: "text", text }], structuredContent: { nodes: l.nodes.length, edges: l.edges.length, ...(fmt === "json" ? { lineage: l } : {}) } };
+      const marked = lineageForModel(l);
+      const text = fmt === "dot" ? renderLineageDot(l) : fmt === "mermaid" ? renderLineageMermaid(l) : fmt === "json" ? JSON.stringify(marked, null, 2) : renderLineageText(l);
+      return { content: [{ type: "text", text }], structuredContent: { nodes: l.nodes.length, edges: l.edges.length, ...(fmt === "json" ? { lineage: marked } : {}) } };
     };
 
   auditHandlers.projects = async () => {
       const ps = await store.projects();
-      return { content: [{ type: "text", text: ps.join("\n") || "(none)" }], structuredContent: { projects: ps } };
+      return { content: [{ type: "text", text: ps.map(markUntrustedText).join("\n") || "(none)" }], structuredContent: { project_displays: ps.map(markUntrustedText) } };
     };
 
-  registerAuditMcpTools(server, auditHandlers, { defaultProject: DEFAULT_PROJECT, allowFileOutputs: true });
+  registerAuditMcpTools(server, auditHandlers, { defaultProject: DEFAULT_PROJECT });
 
   return server;
 }

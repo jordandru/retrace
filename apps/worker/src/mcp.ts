@@ -9,7 +9,9 @@ import {
   causedByErrorMessage,
   causedByProblem,
   describeEvent,
+  eventForModel,
   explainEvent,
+  markUntrustedText,
   parseCredentials,
   parseSigningKey,
   publicFromPrivate,
@@ -22,6 +24,8 @@ import {
   tokenEquals,
   verifyExportBundle,
   verifyProject,
+  projectStatusForModel,
+  lineageForModel,
   type Actor,
   type Credential,
   type Event,
@@ -161,26 +165,26 @@ export function buildRemoteMcpServer(
       const p = requirePinnedProject(args.project, credential);
       const page = await store.history({ ...args, project: p });
       const note = page.truncated ? `\n\ntruncated — ${page.events.length} newest matching events; pass before_seq ${page.next_before_seq} for the previous page` : "";
-      return textResult(renderTimeline(page.events) + note, { count: page.events.length, events: page.events, truncated: page.truncated, next_before_seq: page.next_before_seq });
+      return textResult(renderTimeline(page.events) + note, { count: page.events.length, events: page.events.map(eventForModel), truncated: page.truncated, next_before_seq: page.next_before_seq });
     },
 
     async why({ event_id }) {
       const first = await store.get(event_id);
       if (!first || first.project !== project) return { ...textResult(`no event ${event_id}`), isError: true };
       const chain = await explainEvent(store, event_id);
-      return textResult(renderWhyChain(chain), { chain });
+      return textResult(renderWhyChain(chain), { chain: chain.map(eventForModel) });
     },
 
     async status(args) {
       const p = requirePinnedProject(args.project, credential);
       const status = await buildProjectStatus(store, p);
-      return textResult(renderProjectStatus(status), { status });
+      return textResult(renderProjectStatus(status), { status: projectStatusForModel(status) });
     },
 
     async verify(args) {
       const p = requirePinnedProject(args.project, credential);
       const result = await verifyProject(store, p);
-      return textResult(result.ok ? `OK — ${result.checked} events verified for '${p}'` : `BROKEN at seq ${result.first_bad_seq}: ${result.reason}`, { ...result });
+      return textResult(result.ok ? `OK — ${result.checked} events verified for ${markUntrustedText(p)}` : `BROKEN at seq ${result.first_bad_seq}: ${result.reason}`, { ...result });
     },
 
     async export(args) {
@@ -189,7 +193,7 @@ export function buildRemoteMcpServer(
       const bundle = await apiJson(`/projects/${encodeURIComponent(p)}/export${query}`);
       const verdict = await verifyExportBundle(bundle, opts.signingKey ? publicFromPrivate(opts.signingKey) : undefined);
       const summary = `${bundle.events.length} events · chain ${bundle.chain.ok ? "intact" : "BROKEN"} · signature ${verdict.signature} · coverage ${verdict.coverage.scope === "full" ? (verdict.coverage.complete ? "complete" : "INCOMPLETE") : "scoped"} (${verdict.coverage.events}/${verdict.coverage.total_events})`;
-      return textResult(summary, { events: bundle.events.length, chain_ok: bundle.chain.ok, signature: verdict.signature, coverage: verdict.coverage, kid: bundle.issuer?.kid, bundle });
+      return textResult(summary, { events: bundle.events.length, chain_ok: bundle.chain.ok, signature: verdict.signature, coverage: verdict.coverage, kid: bundle.issuer?.kid });
     },
 
     async lineage(args) {
@@ -199,18 +203,19 @@ export function buildRemoteMcpServer(
         : await store.all(p);
       const lineage = buildLineage(events, { includeActors: !!args.include_actors });
       const format = args.format ?? "text";
-      const text = format === "dot" ? renderLineageDot(lineage) : format === "mermaid" ? renderLineageMermaid(lineage) : format === "json" ? JSON.stringify(lineage, null, 2) : renderLineageText(lineage);
-      return textResult(text, { nodes: lineage.nodes.length, edges: lineage.edges.length, ...(format === "json" ? { lineage } : {}) });
+      const marked = lineageForModel(lineage);
+      const text = format === "dot" ? renderLineageDot(lineage) : format === "mermaid" ? renderLineageMermaid(lineage) : format === "json" ? JSON.stringify(marked, null, 2) : renderLineageText(lineage);
+      return textResult(text, { nodes: lineage.nodes.length, edges: lineage.edges.length, ...(format === "json" ? { lineage: marked } : {}) });
     },
 
     async projects() {
       const visible = (await store.projects()).includes(project) ? [project] : [];
-      return textResult(visible.join("\n") || "(none)", { projects: visible });
+      return textResult(visible.map(markUntrustedText).join("\n") || "(none)", { project_displays: visible.map(markUntrustedText) });
     },
   };
 
   const server = new McpServer({ name: "retrace-audit", version: "0.1.0" });
-  registerAuditMcpTools(server, handlers, { defaultProject: project, allowFileOutputs: false });
+  registerAuditMcpTools(server, handlers, { defaultProject: project });
   return server;
 }
 
