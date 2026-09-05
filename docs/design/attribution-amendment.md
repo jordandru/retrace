@@ -1,8 +1,8 @@
 # Attribution amendment — design
 
-**Status:** draft v3, 2026-09-05. Author: claude-code, at Jordan's request (ledger evt_243a9442).
-v2 folded in Grok's review (six findings); v3 folds in NOOA's (two findings, ledger #1852) — see §11.
-Awaiting Codex. Nothing here is built yet.
+**Status:** draft v4, 2026-09-05. Author: claude-code, at Jordan's request (ledger evt_243a9442).
+v2 folded in Grok's review (six findings); v3 NOOA on Sonnet 5 (two, #1852); v4 NOOA on NVIDIA
+Nemotron 3 Ultra (six, #1873) — see §11. Awaiting Codex. Nothing here is built yet.
 
 **Decisions so far:** v1 ships **Tier 1 (human-sealed) only**; evidence is the **capture-window** rule;
 export stays render-time; no model-only amendments. Tier 2 stays designed, not built.
@@ -45,7 +45,10 @@ Non-goals
 
 - Editing or hiding the sealed event. The recorded actor stays visible forever.
 - Re-attributing the **human** principal of an `instructed` root, or changing `on_behalf_of`.
-  Human identity is the credential's business, not an amendment's.
+  Human identity is the credential's business, not an amendment's. In v1 this extends to the
+  beneficiary: `to.type` must be `agent` or `system`. Crediting a human (a commit the hook sealed
+  as an agent but the operator made by hand) is a real case, but it needs a beneficiary rule that
+  compares credentials rather than models (NOOA/Nemotron, finding 3); it waits for v2.
 - Line-level attribution, bulk amendment, or amending events in another project.
 
 ## 3. Shape on the ledger
@@ -167,6 +170,11 @@ effective attribution amendment already exists for the target, the new one must 
 
 **No-ops.** `to` equal to `from` is `no_op`.
 
+**Targets.** The target must be an ordinary event. An attribution amendment may not target another
+amendment (`action_detail: amended`) — otherwise a chain could be laundered by re-attributing the
+amendment that fixed it (`target_is_amendment`). Corrections to an amendment are made by
+superseding it, never by amending it.
+
 Every rejection reason above is a new value in the existing rejected-amendment vocabulary
 (`unrooted | missing_target | wrong_project | not_older` today).
 
@@ -191,6 +199,11 @@ export function effectiveActor(e: Event, amendments: Map<string, AttributionAmen
 
 `collectProvenanceAmendments` stays as is; `status.ts` calls both.
 
+The rules in §4 live in **one** pure function, `checkAttributionAmendment(candidate, events)`,
+returning `{ ok: true, tier, flags } | { ok: false, reason }`. `collectAttributionAmendments` calls
+it over sealed events; the MCP handler and the CLI call it over the candidate before sealing. Two
+copies of the rules would drift (NOOA/Nemotron, finding 5).
+
 ## 6. Every consumer, and what it shows
 
 | Surface | Today | With attribution amendments |
@@ -200,7 +213,7 @@ export function effectiveActor(e: Event, amendments: Map<string, AttributionAmen
 | reconcile `misattributed` | fail unless acknowledged | commit-level fail downgrades to `info` with `amended: {seq,id}` (distinct from `acknowledged`) **only if `to.id` is in the covering set of every file that produced the fail** — the same bar the fail was computed with; the union `coveringActors` is not enough (Grok, finding 1: amend to whoever covered README and the whole commit goes green while `src/` is still someone else's). Files `to` did not cover stay per-file `misattributed: warn`. `producer_disagreement` keeps comparing **recorded** actors |
 | lineage | actor node per recorded actor | node for the effective actor; dashed edge `recorded-as` to the recorded one |
 | report / timeline UI | actor badge | badge `attribution amended`, hover shows recorded→effective and the amendment |
-| export bundle | sealed events verbatim | unchanged bytes (the amendment events are already in the bundle); `retrace-export verify` prints `attribution amendments: N effective · M ineffective`; the **default** render prints the same count as a banner and marks each amended event `attribution amended → <to>` next to its recorded actor; `--effective` swaps the display to the effective actor with the recorded one in parentheses. A default render that hid the existence of amendments would break goal 2 (NOOA, finding 2) |
+| export bundle | sealed events verbatim | unchanged bytes (the amendment events are already in the bundle); `retrace-export verify` prints `attribution amendments: N effective · M ineffective`; the **default** render prints the same count as a banner and marks each amended event `attribution amended → <to>` next to its recorded actor; `--effective` swaps the display to the effective actor with the recorded one in parentheses and prints an unsuppressable first line `effective view — recorded actors in parentheses; N amendments applied` (so a piped consumer cannot strip the pairing without stripping the header). A default render that hid the existence of amendments would break goal 2 (NOOA, finding 2) |
 | git hook / Worker stamping | fixes WHO at seal time | unchanged — amendments never touch sealing |
 
 The rule for every surface: **never show the effective actor without the recorded one within
@@ -238,6 +251,10 @@ context, not a replacement.
 6. `to.id` never server-stamped in the project → `unknown_actor`.
 7. Second amendment without `supersedes` → `no_supersede`; with it → latest wins, `why` shows the
    chain.
+7b. Two amendments to the same target sealed back-to-back, neither naming the other → the first is
+    effective, the second `no_supersede`; seq order is the tiebreak, there is no "pending" state.
+7c. An amendment whose target is itself an amendment → `target_is_amendment`.
+7d. `to.type === "human"` in v1 → `human_beneficiary_unsupported`.
 8. Amendment sealed before target (pre-planted) → `not_older`.
 9. Reconcile: misattributed commit + effective amendment to the actor that covered **every**
    failing file → `info` with `amended`; an amendment to an actor that covered only some files
@@ -245,6 +262,8 @@ context, not a replacement.
 9b. Two-step laundering: amend the covering edit events to B, then check the later commit — the
    covering set must still use recorded actors, so the commit is **not** covered by B.
 9c. Amend only the git-hook seal of a dual-sealed commit → no `producer_disagreement`.
+9d. Amend only the webhook seal of a dual-sealed commit so the two *effective* actors agree while
+    the recorded ones differ → `producer_disagreement` is still reported (it reads recorded actors).
 10. Export round-trip: bundle verifies; the default render shows the amendment banner and per-event
     markers; `--effective` differs only in which actor leads the display.
 
@@ -295,4 +314,12 @@ Codex.
   (2) Medium — goal 2 promised "both actors everywhere" while the export default hid that
   amendments existed; default render now prints the count banner and per-event markers, goal 2
   reworded. NOOA also confirmed Q1–Q4 leans and listed five rules it verified sound.
+- **NOOA on NVIDIA Nemotron 3 Ultra (550B, via NVIDIA's inference API), 2026-09-05, sealed #1873,
+  producer-signed; six findings, all accepted, folded into v4:** (M1) test 9d — amend the other
+  seal of a dual-sealed commit, disagreement must persist; (M2) amendments may not target
+  amendments (`target_is_amendment`, test 7c); (M3) Tier 2's beneficiary rule is vacuous for human
+  beneficiaries → v1 restricts `to.type` to agent/system (test 7d); (L4) `--effective` carries an
+  unsuppressable header; (L5) one shared `checkAttributionAmendment` for handler and core; (L6)
+  back-to-back amendments resolve by seq (test 7b). First review of this design by a model from a
+  vendor other than the one that wrote it.
 - **Codex:** pending (returns 2026-09-07).
