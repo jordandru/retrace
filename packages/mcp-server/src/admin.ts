@@ -46,7 +46,7 @@ const HARNESS_CONFIG: Record<Harness, { label: string; file: string; instruction
   grok: { label: "Grok", file: "~/.grok/config.toml", instructions: "GROK.md" },
   "github-copilot": { label: "GitHub Copilot CLI", file: "~/.copilot/mcp-config.json", instructions: ".github/copilot-instructions.md" },
   openclaw: { label: "OpenClaw in NemoClaw", file: "NemoClaw's managed MCP provider store", instructions: "OpenClaw workspace instructions" },
-  nooa: { label: "NOOA (NVIDIA-NeMo Object-Oriented Agents)", file: "the agent's .mcp.json (loaded via MCPManager.create_from_server)", instructions: "the agent's method docstrings / system prompt" },
+  nooa: { label: "NOOA (NVIDIA Labs Object-Oriented Agents, research preview)", file: "the agent's .mcp.json (loaded via MCPManager.create_from_server)", instructions: "the agent's method docstrings / system prompt" },
 };
 
 export interface TeamSpec {

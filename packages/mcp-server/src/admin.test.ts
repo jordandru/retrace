@@ -262,7 +262,7 @@ test("add-agent nooa: unlike openclaw, gets a producer key and a stdio retrace-m
   assert.equal("d" in (added.public_key ?? {}), false, "private half must not sit on the credential");
   assert.ok(added.producer_key_file && existsSync(added.producer_key_file));
   const doc = readFileSync(onboarding, "utf8");
-  assert.match(doc, /NVIDIA-NeMo Object-Oriented Agents/);
+  assert.match(doc, /NVIDIA Labs Object-Oriented Agents, research preview/);
   assert.match(doc, /RETRACE_PRODUCER_KEY_FILE/);
   assert.match(doc, /retrace-mcp/);
   assert.doesNotMatch(doc, /does not claim producer signatures/);

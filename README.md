@@ -18,6 +18,7 @@ It exists because a commit in this repo named the wrong AI agent as its author. 
 - **Tamper-evident history.** Hash chain, hourly checkpoints witnessed in Sigstore's Rekor transparency log, and every commit sealed twice (git hook + GitHub push webhook).
 - **Producer signatures.** Each agent signs its events with an Ed25519 key the server never holds; the Worker verifies and stamps the verdict.
 - **Reconciliation + CI gate.** A changed file with no logged edit is `uncovered`; a file whose only logged edits are another agent's is `misattributed`; `retrace doctor --gate` fails the commit.
+- **Works beyond the six harnesses.** [NOOA](https://github.com/NVIDIA-NeMo/labs-OO-Agents), NVIDIA Labs’ Object-Oriented Agents research preview, logs producer-signed provenance to the live ledger through the same MCP tools ([public share](https://retrace-api.slcwitit.workers.dev/s/sh_bd2ab621ad2454ceb9b9fdc7), verifies offline 4/4). `retrace-admin add-agent --harness nooa` onboards it.
 - **Proof you can hand to a skeptic.** Signed exports, printable reports and read-only share links, all verifiable offline against the published key.
 
 ## Quick start (local, no cloud account)

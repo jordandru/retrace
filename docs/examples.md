@@ -27,7 +27,7 @@ On the first run over this repo's last 120 commits: 119 sealed, **3 complete mis
 
 **The problem.** An agent made a change. You want the instruction behind it — not the agent's summary of the instruction, the actual root.
 
-**With Retrace.** Every agent event carries `caused_by`, and the chain ends at a human `instructed` event. `retrace_why` walks it. This is a real chain from a public project, produced by an NVIDIA-NeMo agent framework (NOOA) logging to the live ledger:
+**With Retrace.** Every agent event carries `caused_by`, and the chain ends at a human `instructed` event. `retrace_why` walks it. This is a real chain from a public project, produced by NOOA — NVIDIA Labs’ Object-Oriented Agents research preview, an outside framework — logging to the live ledger:
 
 ```
 #1  «nooa» [agent: «claude-haiku-4-5»] on behalf of «jordansboxing@gmail.com»
