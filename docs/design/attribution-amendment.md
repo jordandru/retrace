@@ -1,7 +1,10 @@
 # Attribution amendment — design
 
-**Status:** draft for review (Codex, Grok), 2026-09-05. Author: claude-code, at Jordan's request
-(ledger evt_243a9442). Nothing here is built yet.
+**Status:** draft v2, 2026-09-05. Author: claude-code, at Jordan's request (ledger evt_243a9442).
+v2 folds in Grok's review (six findings, all accepted — see §11). Awaiting Codex. Nothing here is built yet.
+
+**Decisions so far:** v1 ships **Tier 1 (human-sealed) only**; evidence is the **capture-window** rule;
+export stays render-time; no model-only amendments. Tier 2 stays designed, not built.
 
 ## 1. The problem, in the ledger's own words
 
@@ -93,29 +96,56 @@ non-`instructed` action (router.ts:254-284), so this is literally "the operator 
 credential that can speak as the operator". Path: a new CLI `retrace-export amend-attribution`
 (owner token) and, later, a button in the UI. Status labels it `attribution amended (human)`.
 
-**Tier 2 — agent-relayed.** Sealed by a pinned agent through `retrace_amend`. Allowed only when the
-relaying agent is a disinterested third party:
+**Tier 2 — agent-relayed. Designed, NOT in v1.** Sealed by a pinned agent through `retrace_amend`,
+only when a project has opted in (`attribution_relay: true` on the credential set — the switch must
+exist before the code path does) and only when the relaying agent is a disinterested third party on
+**both** sides:
 
-- its `actor.id` is neither `from.id` nor `to.id`;
-- its `actor.model` differs from the target seal's model **and** from `to.model` when known;
-- its `location.session` differs from the target seal's session;
-- it is not listed as the covering actor being credited (that would be `to`).
+- accused side: relayer `actor.id ≠ from.id`; relayer `model ≠` the target seal's model; relayer
+  `location.session ≠` the target seal's session (the #1227 rule as it exists today);
+- beneficiary side: relayer `actor.id ≠ to.id`; relayer `model ≠` **every** model `to.id` has ever
+  used in this project (not just `to.model`, which may be omitted); relayer `session ≠` any
+  session on `to`'s evidence events;
+- a relayed amendment can never supersede a human-sealed one.
 
-This is the #1227 rule extended to both sides of the correction: neither the accused nor the
-beneficiary, nor the same model wearing another badge, can seal it. Status labels it
-`attribution amended (relayed by <agent>)`. Reviewers: see open question 1 on whether Tier 2
-should ship at all in the first cut.
+Without the beneficiary-side rules, cursor-agent on grok-4.6 could credit `grok` from grok's own
+session by simply omitting `to.model` — #1227 worn on the credit-receiving side (Grok, finding 3).
+Status labels a relayed amendment `attribution amended (relayed by <agent>)`. v1 refuses any
+attribution amendment whose sealing actor is not human, with reason `relay_disabled`.
 
 **Evidence rule (both tiers).** `evidence` must contain at least one ledger-native reference that
-corroborates `to`, and core must be able to check it:
+corroborates `to`, and core must be able to check it against sealed data. Two arms are sufficient
+on their own; a third is a flag only:
 
-- an event in the same project whose actor is `to` and whose artifacts intersect the target's
-  artifacts, sealed **before** the target (this is reconcile's covering-edit test, reused); or
-- a `correction`-tagged event by a human that names the target's commit sha and `to.id`; or
-- for a git seal, a commit whose trailers name `to.id` (`Retrace-Actor`) — weakest, flagged.
+- **Covering-window edit** (primary). An event in the same project whose **recorded** actor is
+  `to`, that edits a file the target commit touched, and whose `seq` lies **strictly inside that
+  file's capture window** — after the previous sealed touch of that path and before the target
+  seal — exactly reconcile's `prevTouchSeq` loop, reused, not re-implemented. "Sealed before the
+  target" is not enough: a year-old edit by `to` on the same path would corroborate a commit `to`
+  did not write (Grok, finding 2).
+- **Structured human correction.** A `correction`-tagged event whose actor is human, that names
+  the target's commit sha as an artifact (as #1219/#1220 do) **and** carries `to.id` in a
+  structured field — `method.params.attributed_to` or an artifact `actor:<id>` — never in prose.
+  Core does not scrape `intent`; it is untrusted text (finding 6). Existing prose-only
+  corrections therefore do not qualify by themselves.
+- **Trailer flag** (never sufficient alone). A **sealed** `committed` event (not a bare git
+  object) whose trailers name `to.id`. Trailers are written by whoever commits, so anyone with
+  push access can mint one after the fact; this arm only adds a `trailer_corroborated` flag on top
+  of one of the two arms above (finding 4).
 
-An amendment whose evidence refs do not exist, are not by `to`, or do not touch the target's
-artifacts is sealed but ineffective with reason `uncorroborated`.
+For a non-git target (an MCP-logged event), the covering-window arm degrades to: an event by `to`
+on the same artifact within the window between the previous sealed touch of that artifact and
+the target's seq.
+
+An amendment whose evidence refs do not exist, are not by `to`, fall outside the window, or rest
+on the trailer arm alone is sealed but ineffective with reason `uncorroborated`.
+
+**Recorded, not effective, everywhere the rules look.** Covering-edit sets, evidence checks and
+the dual-seal comparison (`producer_disagreement`) always use the **recorded** actor of the events
+they examine. Otherwise two amendments launder in two steps — amend the edit events to B, then the
+commit "looks covered" by B — and a single amendment of only the hook seal would manufacture a
+producer disagreement on a correctly dual-sealed commit (finding 5). Effective actors are for
+display and for the one downgrade in §6, nothing else.
 
 **Actor existence.** `to.id` must already appear in the project as a server-stamped actor
 (`sealed_by` pinned/assert/webhook) at least once before the amendment. You cannot invent an actor
@@ -158,7 +188,7 @@ export function effectiveActor(e: Event, amendments: Map<string, AttributionAmen
 |---|---|---|
 | `retrace_why` / explain.ts `describeActor` | recorded actor | `«claude-code» [agent] (recorded as «claude-fable-5»; attribution amended by #N, human: <reason>)` |
 | `retrace_status` actors + capture | counts by recorded actor | counts by **effective** actor; new fields `attribution_amendments`, `attribution_amended_events`, `ineffective_amendments` reasons broken out; per-actor `amended_from` |
-| reconcile `misattributed` | fail unless acknowledged | if the sealed commit's effective actor is in `coveringActors` → level `info`, new field `amended: {seq,id}` (distinct from `acknowledged`); `producer_disagreement` compares effective actors |
+| reconcile `misattributed` | fail unless acknowledged | commit-level fail downgrades to `info` with `amended: {seq,id}` (distinct from `acknowledged`) **only if `to.id` is in the covering set of every file that produced the fail** — the same bar the fail was computed with; the union `coveringActors` is not enough (Grok, finding 1: amend to whoever covered README and the whole commit goes green while `src/` is still someone else's). Files `to` did not cover stay per-file `misattributed: warn`. `producer_disagreement` keeps comparing **recorded** actors |
 | lineage | actor node per recorded actor | node for the effective actor; dashed edge `recorded-as` to the recorded one |
 | report / timeline UI | actor badge | badge `attribution amended`, hover shows recorded→effective and the amendment |
 | export bundle | sealed events verbatim | unchanged bytes (the amendment events are already in the bundle); `retrace-export verify` prints `attribution amendments: N effective · M ineffective`; renderers take `--effective` |
@@ -185,15 +215,25 @@ context, not a replacement.
 1. Accused amends itself away (Tier 2, relayer = `from`) → ineffective `self_interested`.
 2. Beneficiary amends to itself (relayer = `to`) → `self_interested`.
 3. Relayer shares model with target seal (#1227 shape) → `self_interested`.
-4. Human-sealed, evidence is a covering edit by `to` → effective; status counters move; the target
-   event's bytes unchanged (assert like status.test.ts:38).
-5. Evidence event by someone else / touching other artifacts → `uncorroborated`.
+4. Human-sealed, evidence is a covering-window edit by `to` → effective; status counters move; the
+   target event's bytes unchanged (assert like status.test.ts:38).
+5. Evidence event by someone else / touching other artifacts / **outside the capture window
+   (older edit on the same path)** → `uncorroborated`. Trailer-only evidence → `uncorroborated`
+   even when the trailer names `to`.
+5b. Human correction with `to.id` only in `intent` → `uncorroborated`; with
+   `method.params.attributed_to` → accepted.
+5c. Non-human sealing actor in v1 → `relay_disabled` (and, once Tier 2 exists: relayer sharing
+   any model `to` has used, or a session on `to`'s evidence, → `self_interested`).
 6. `to.id` never server-stamped in the project → `unknown_actor`.
 7. Second amendment without `supersedes` → `no_supersede`; with it → latest wins, `why` shows the
    chain.
 8. Amendment sealed before target (pre-planted) → `not_older`.
-9. Reconcile: misattributed commit + effective amendment to a covering actor → `info` with
-   `amended`; an amendment to a **non**-covering actor does not downgrade the finding.
+9. Reconcile: misattributed commit + effective amendment to the actor that covered **every**
+   failing file → `info` with `amended`; an amendment to an actor that covered only some files
+   leaves the commit failing on the rest (per-file warns), and the gate stays red.
+9b. Two-step laundering: amend the covering edit events to B, then check the later commit — the
+   covering set must still use recorded actors, so the commit is **not** covered by B.
+9c. Amend only the git-hook seal of a dual-sealed commit → no `producer_disagreement`.
 10. Export round-trip: bundle verifies; `--effective` render differs only in actor display.
 
 ## 9. Rollout on our own ledger
@@ -205,7 +245,13 @@ context, not a replacement.
    events. Both become `docs/examples.md` material.
 3. Flip the README, examples, reference and battle-card lines from "not built yet" to earned.
 
-## 10. Open questions for review
+## 10. Open questions — Grok's leans recorded, Codex to confirm
+
+Grok (2026-09-05): Q1 no Tier 2 in v1 and never let a relay supersede a human amendment; Q2 strict
+capture window; Q3 render-time only ("a derived table that is not inside the event hash will get
+treated as sealed"); Q4 out of v1 ("a successful amendment would look like a stronger claim than
+the original seal"). All four match the author's leans and are adopted as v2 decisions pending
+Codex.
 
 1. **Ship Tier 2 at all?** Human-sealed only is simpler and closes the door on relay games
    entirely; the cost is that agents cannot fix attribution mid-session without the operator.
@@ -220,3 +266,14 @@ context, not a replacement.
 4. **Model re-attribution.** Should an amendment be allowed to correct only `actor.model`
    (Codex's `gpt-5` vs `gpt-5.6-sol`)? It fits the same rails; keep it out of v1 to keep the
    evidence rule crisp, revisit with the model self-report work.
+
+## 11. Review log
+
+- **Grok, 2026-09-05 (six findings, all accepted, all folded into v2):** (1) High — §6 downgrade
+  used the union covering set; now per-file. (2) High — §4 evidence said "sealed before the
+  target"; now strictly inside the capture window. (3) Medium — Tier 2 beneficiary side leaked
+  when `to.model` was omitted; Tier 2 moved out of v1 and hardened on paper. (4) Medium — trailer
+  evidence could stand alone; now a flag only, and the commit must be a sealed event. (5) Medium —
+  covering sets and `producer_disagreement` must use recorded actors; now stated and tested.
+  (6) Low — human-correction evidence must not parse `intent`; now a structured field.
+- **Codex:** pending (returns 2026-09-07).
