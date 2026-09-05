@@ -1,7 +1,8 @@
 # Attribution amendment — design
 
-**Status:** draft v2, 2026-09-05. Author: claude-code, at Jordan's request (ledger evt_243a9442).
-v2 folds in Grok's review (six findings, all accepted — see §11). Awaiting Codex. Nothing here is built yet.
+**Status:** draft v3, 2026-09-05. Author: claude-code, at Jordan's request (ledger evt_243a9442).
+v2 folded in Grok's review (six findings); v3 folds in NOOA's (two findings, ledger #1852) — see §11.
+Awaiting Codex. Nothing here is built yet.
 
 **Decisions so far:** v1 ships **Tier 1 (human-sealed) only**; evidence is the **capture-window** rule;
 export stays render-time; no model-only amendments. Tier 2 stays designed, not built.
@@ -33,7 +34,8 @@ Goals
 1. A human-authorized, evidence-carrying statement: *event T recorded actor A; the actor was B;
    here is why* — appended, never edited, hash-covered like every other event.
 2. Every place that displays or decides on an actor shows **both**: the recorded actor and the
-   effective actor, with the amendment that links them.
+   effective actor, with the amendment that links them. Where a surface cannot show the pair
+   (a bundle rendered without the effective view), it must at least say that amendments exist.
 3. Fail closed. An amendment that does not meet the rules is sealed (it is history) but
    **ineffective**, and status says why — exactly how `ineffective_amendments` works today.
 4. An agent cannot launder its own record. The rules below are written against the attacks we
@@ -114,8 +116,9 @@ Status labels a relayed amendment `attribution amended (relayed by <agent>)`. v1
 attribution amendment whose sealing actor is not human, with reason `relay_disabled`.
 
 **Evidence rule (both tiers).** `evidence` must contain at least one ledger-native reference that
-corroborates `to`, and core must be able to check it against sealed data. Two arms are sufficient
-on their own; a third is a flag only:
+corroborates `to`, and core must be able to check it against sealed data. **Exactly one arm is
+sufficient on its own** — the covering-window edit, because it is the only one anchored to a fact
+that existed before anyone wanted the correction. The other two are corroborating flags:
 
 - **Covering-window edit** (primary). An event in the same project whose **recorded** actor is
   `to`, that edits a file the target commit touched, and whose `seq` lies **strictly inside that
@@ -123,11 +126,14 @@ on their own; a third is a flag only:
   seal — exactly reconcile's `prevTouchSeq` loop, reused, not re-implemented. "Sealed before the
   target" is not enough: a year-old edit by `to` on the same path would corroborate a commit `to`
   did not write (Grok, finding 2).
-- **Structured human correction.** A `correction`-tagged event whose actor is human, that names
-  the target's commit sha as an artifact (as #1219/#1220 do) **and** carries `to.id` in a
-  structured field — `method.params.attributed_to` or an artifact `actor:<id>` — never in prose.
-  Core does not scrape `intent`; it is untrusted text (finding 6). Existing prose-only
-  corrections therefore do not qualify by themselves.
+- **Structured human correction (flag only).** A `correction`-tagged event whose actor is human,
+  that names the target's commit sha as an artifact (as #1219/#1220 do) **and** carries `to.id`
+  in a structured field — `method.params.attributed_to` or an artifact `actor:<id>` — never in
+  prose. Core does not scrape `intent`; it is untrusted text (Grok, finding 6). It adds a
+  `human_corroborated` flag and is **never sufficient alone**: it is the human's own claim
+  restated, and a human-sealed amendment already carries that claim in `intent`. Letting it stand
+  as evidence would let one person be witness and notary in the same breath — seal the
+  "correction" at N and cite it at N+1 (NOOA, finding 1).
 - **Trailer flag** (never sufficient alone). A **sealed** `committed` event (not a bare git
   object) whose trailers name `to.id`. Trailers are written by whoever commits, so anyone with
   push access can mint one after the fact; this arm only adds a `trailer_corroborated` flag on top
@@ -138,7 +144,10 @@ on the same artifact within the window between the previous sealed touch of that
 the target's seq.
 
 An amendment whose evidence refs do not exist, are not by `to`, fall outside the window, or rest
-on the trailer arm alone is sealed but ineffective with reason `uncorroborated`.
+on the flag arms alone is sealed but ineffective with reason `uncorroborated`. Consequence,
+accepted: an event whose true author never logged an edit in the window (a silent producer)
+cannot be re-attributed effectively. That gap stays visible as `uncovered`, which is the honest
+finding; the design does not trade it for a rule an attacker can satisfy with two events.
 
 **Recorded, not effective, everywhere the rules look.** Covering-edit sets, evidence checks and
 the dual-seal comparison (`producer_disagreement`) always use the **recorded** actor of the events
@@ -191,7 +200,7 @@ export function effectiveActor(e: Event, amendments: Map<string, AttributionAmen
 | reconcile `misattributed` | fail unless acknowledged | commit-level fail downgrades to `info` with `amended: {seq,id}` (distinct from `acknowledged`) **only if `to.id` is in the covering set of every file that produced the fail** — the same bar the fail was computed with; the union `coveringActors` is not enough (Grok, finding 1: amend to whoever covered README and the whole commit goes green while `src/` is still someone else's). Files `to` did not cover stay per-file `misattributed: warn`. `producer_disagreement` keeps comparing **recorded** actors |
 | lineage | actor node per recorded actor | node for the effective actor; dashed edge `recorded-as` to the recorded one |
 | report / timeline UI | actor badge | badge `attribution amended`, hover shows recorded→effective and the amendment |
-| export bundle | sealed events verbatim | unchanged bytes (the amendment events are already in the bundle); `retrace-export verify` prints `attribution amendments: N effective · M ineffective`; renderers take `--effective` |
+| export bundle | sealed events verbatim | unchanged bytes (the amendment events are already in the bundle); `retrace-export verify` prints `attribution amendments: N effective · M ineffective`; the **default** render prints the same count as a banner and marks each amended event `attribution amended → <to>` next to its recorded actor; `--effective` swaps the display to the effective actor with the recorded one in parentheses. A default render that hid the existence of amendments would break goal 2 (NOOA, finding 2) |
 | git hook / Worker stamping | fixes WHO at seal time | unchanged — amendments never touch sealing |
 
 The rule for every surface: **never show the effective actor without the recorded one within
@@ -220,8 +229,10 @@ context, not a replacement.
 5. Evidence event by someone else / touching other artifacts / **outside the capture window
    (older edit on the same path)** → `uncorroborated`. Trailer-only evidence → `uncorroborated`
    even when the trailer names `to`.
-5b. Human correction with `to.id` only in `intent` → `uncorroborated`; with
-   `method.params.attributed_to` → accepted.
+5b. Human correction with `to.id` only in `intent` → no flag; with `method.params.attributed_to`
+   → `human_corroborated` flag — and, with no covering-window edit, still `uncorroborated`.
+5d. Same actor and session seal a structured correction at N and the amendment at N+1 with no
+   other evidence → `uncorroborated` (witness-and-notary test).
 5c. Non-human sealing actor in v1 → `relay_disabled` (and, once Tier 2 exists: relayer sharing
    any model `to` has used, or a session on `to`'s evidence, → `self_interested`).
 6. `to.id` never server-stamped in the project → `unknown_actor`.
@@ -234,7 +245,8 @@ context, not a replacement.
 9b. Two-step laundering: amend the covering edit events to B, then check the later commit — the
    covering set must still use recorded actors, so the commit is **not** covered by B.
 9c. Amend only the git-hook seal of a dual-sealed commit → no `producer_disagreement`.
-10. Export round-trip: bundle verifies; `--effective` render differs only in actor display.
+10. Export round-trip: bundle verifies; the default render shows the amendment banner and per-event
+    markers; `--effective` differs only in which actor leads the display.
 
 ## 9. Rollout on our own ledger
 
@@ -276,4 +288,11 @@ Codex.
   evidence could stand alone; now a flag only, and the commit must be a sealed event. (5) Medium —
   covering sets and `producer_disagreement` must use recorded actors; now stated and tested.
   (6) Low — human-correction evidence must not parse `intent`; now a structured field.
+- **NOOA, 2026-09-05 (peer review sealed under its own identity, #1852, producer-signed; model
+  claude-sonnet-5; two findings, both accepted, folded into v3):** (1) High — the structured
+  human-correction arm was sufficient alone with no independence constraint (witness and notary in
+  the same breath); now a flag only, covering-window is the sole sufficient arm, test 5d added.
+  (2) Medium — goal 2 promised "both actors everywhere" while the export default hid that
+  amendments existed; default render now prints the count banner and per-event markers, goal 2
+  reworded. NOOA also confirmed Q1–Q4 leans and listed five rules it verified sound.
 - **Codex:** pending (returns 2026-09-07).
