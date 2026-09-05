@@ -1,8 +1,9 @@
 # Attribution amendment — design
 
-**Status:** draft v4, 2026-09-05. Author: claude-code, at Jordan's request (ledger evt_243a9442).
+**Status:** draft v5, 2026-09-05. Author: claude-code, at Jordan's request (ledger evt_243a9442).
 v2 folded in Grok's review (six findings); v3 NOOA on Sonnet 5 (two, #1852); v4 NOOA on NVIDIA
-Nemotron 3 Ultra (six, #1873) — see §11. Awaiting Codex. Nothing here is built yet.
+Nemotron 3 Ultra (six, #1873); v5 the same reviewer re-run by Grok against v4 (seven, #1890) — see
+§11. Awaiting Codex. Nothing here is built yet.
 
 **Decisions so far:** v1 ships **Tier 1 (human-sealed) only**; evidence is the **capture-window** rule;
 export stays render-time; no model-only amendments. Tier 2 stays designed, not built.
@@ -74,7 +75,7 @@ Same event shape as today's amendments, one new params block:
       "target_event_id": "evt_<target>",
       "attribution": {
         "from": { "type": "agent", "id": "claude-fable-5" },          // must equal target.actor (type,id)
-        "to":   { "type": "agent", "id": "claude-code", "model": "claude-fable-5" },
+        "to":   { "type": "agent", "id": "claude-code" },                    // v1: type+id only; model is derived, never asserted here
         "evidence": ["evt_…", "evt_…"],                                  // ledger-native refs, ≥1
         "supersedes": "evt_<previous attribution amendment>"             // required if one exists
       }
@@ -100,6 +101,12 @@ Two tiers, both computed from sealed data only, both requiring the existing root
 non-`instructed` action (router.ts:254-284), so this is literally "the operator said so, under a
 credential that can speak as the operator". Path: a new CLI `retrace-export amend-attribution`
 (owner token) and, later, a button in the UI. Status labels it `attribution amended (human)`.
+The operator's authority **selects** a corroborated correction; it does not manufacture one: a
+human-sealed amendment with no qualifying covering-window evidence is sealed but `uncorroborated`,
+exactly like any other. Honest limit, stated: when one person operates every agent (this repo),
+Tier 1 independence is between the human and the ledger's evidence, not between two humans
+(#1890, finding 2). `operator.id ≠ to.id` holds trivially for agent beneficiaries and is asserted
+anyway.
 
 **Tier 2 — agent-relayed. Designed, NOT in v1.** Sealed by a pinned agent through `retrace_amend`,
 only when a project has opted in (`attribution_relay: true` on the credential set — the switch must
@@ -128,7 +135,11 @@ that existed before anyone wanted the correction. The other two are corroboratin
   file's capture window** — after the previous sealed touch of that path and before the target
   seal — exactly reconcile's `prevTouchSeq` loop, reused, not re-implemented. "Sealed before the
   target" is not enough: a year-old edit by `to` on the same path would corroborate a commit `to`
-  did not write (Grok, finding 2).
+  did not write (Grok, finding 2). The evidence event must itself be **server-stamped**
+  (`sealed_by` pinned or assert — an unstamped edit is not evidence) and must carry **no effective
+  attribution amendment of its own**: an edit already amended away from `to` cannot corroborate
+  `to`, and an edit's recorded actor is trusted exactly as far as the credential that stamped it —
+  the same assumption the original seal made, no further (#1890, finding 1).
 - **Structured human correction (flag only).** A `correction`-tagged event whose actor is human,
   that names the target's commit sha as an artifact (as #1219/#1220 do) **and** carries `to.id`
   in a structured field — `method.params.attributed_to` or an artifact `actor:<id>` — never in
@@ -165,15 +176,19 @@ by amendment (`unknown_actor`).
 
 **Ordering and supersession.** `target.seq < amendment.seq` (`not_older`), same project
 (`wrong_project`), `from` equals the target's current effective actor (`stale_from`), and if an
-effective attribution amendment already exists for the target, the new one must name it in
-`supersedes` (`no_supersede`). Latest effective amendment wins; the chain stays readable.
+effective attribution amendment already exists for the target, the new one must name **the latest
+effective one** in `supersedes` (`no_supersede`). Ineffective amendments are not links in the
+chain: naming one as `supersedes` is `no_supersede` too, so a rejected amendment cannot be used as
+a stepping stone (#1890, finding 4). Latest effective amendment wins; the chain stays readable.
 
 **No-ops.** `to` equal to `from` is `no_op`.
 
 **Targets.** The target must be an ordinary event. An attribution amendment may not target another
 amendment (`action_detail: amended`) — otherwise a chain could be laundered by re-attributing the
 amendment that fixed it (`target_is_amendment`). Corrections to an amendment are made by
-superseding it, never by amending it.
+superseding it, never by amending it. Nor may it target an `instructed` event
+(`target_is_instruction`): the actor of an instruction is the human principal, which §2 puts out
+of scope (#1890, finding 7).
 
 Every rejection reason above is a new value in the existing rejected-amendment vocabulary
 (`unrooted | missing_target | wrong_project | not_older` today).
@@ -210,10 +225,10 @@ copies of the rules would drift (NOOA/Nemotron, finding 5).
 |---|---|---|
 | `retrace_why` / explain.ts `describeActor` | recorded actor | `«claude-code» [agent] (recorded as «claude-fable-5»; attribution amended by #N, human: <reason>)` |
 | `retrace_status` actors + capture | counts by recorded actor | counts by **effective** actor; new fields `attribution_amendments`, `attribution_amended_events`, `ineffective_amendments` reasons broken out; per-actor `amended_from` |
-| reconcile `misattributed` | fail unless acknowledged | commit-level fail downgrades to `info` with `amended: {seq,id}` (distinct from `acknowledged`) **only if `to.id` is in the covering set of every file that produced the fail** — the same bar the fail was computed with; the union `coveringActors` is not enough (Grok, finding 1: amend to whoever covered README and the whole commit goes green while `src/` is still someone else's). Files `to` did not cover stay per-file `misattributed: warn`. `producer_disagreement` keeps comparing **recorded** actors |
+| reconcile `misattributed` | fail unless acknowledged | commit-level fail downgrades to `info` with `amended: {seq,id}` (distinct from `acknowledged`) **only if `to.id` is in the covering set of every file that produced the fail** — the same bar the fail was computed with; the union `coveringActors` is not enough (Grok, finding 1: amend to whoever covered README and the whole commit goes green while `src/` is still someone else's). Files `to` did not cover stay per-file `misattributed: warn`. The covering set used for this test is built from **recorded** actors (§4). A commit with an open `producer_disagreement` is **never** downgraded: if the two seals disagree about who committed, amending one of them settles nothing (#1890, finding 3). `producer_disagreement` itself keeps comparing recorded actors |
 | lineage | actor node per recorded actor | node for the effective actor; dashed edge `recorded-as` to the recorded one |
 | report / timeline UI | actor badge | badge `attribution amended`, hover shows recorded→effective and the amendment |
-| export bundle | sealed events verbatim | unchanged bytes (the amendment events are already in the bundle); `retrace-export verify` prints `attribution amendments: N effective · M ineffective`; the **default** render prints the same count as a banner and marks each amended event `attribution amended → <to>` next to its recorded actor; `--effective` swaps the display to the effective actor with the recorded one in parentheses and prints an unsuppressable first line `effective view — recorded actors in parentheses; N amendments applied` (so a piped consumer cannot strip the pairing without stripping the header). A default render that hid the existence of amendments would break goal 2 (NOOA, finding 2) |
+| export bundle | sealed events verbatim | unchanged bytes (the amendment events are already in the bundle); `retrace-export verify` prints `attribution amendments: N effective · M ineffective`; the **default** render prints the same count as an unsuppressable first-line banner (stdout, and mirrored to stderr) and marks each amended event `attribution amended → <to>` next to its recorded actor; `--effective` swaps the display to the effective actor with the recorded one in parentheses and prints an unsuppressable first line `effective view — recorded actors in parentheses; N amendments applied` (so a piped consumer cannot strip the pairing without stripping the header). A default render that hid the existence of amendments would break goal 2 (NOOA, finding 2) |
 | git hook / Worker stamping | fixes WHO at seal time | unchanged — amendments never touch sealing |
 
 The rule for every surface: **never show the effective actor without the recorded one within
@@ -255,6 +270,12 @@ context, not a replacement.
     effective, the second `no_supersede`; seq order is the tiebreak, there is no "pending" state.
 7c. An amendment whose target is itself an amendment → `target_is_amendment`.
 7d. `to.type === "human"` in v1 → `human_beneficiary_unsupported`.
+7e. Target is an `instructed` event → `target_is_instruction`.
+7f. `supersedes` names an ineffective amendment → `no_supersede`; the effective chain is unbroken.
+5e. Evidence edit is unstamped, or itself carries an effective attribution amendment → `uncorroborated`.
+5f. Human-sealed amendment with no covering-window evidence → `uncorroborated` (Tier 1 does not
+    bypass the evidence rule).
+9e. Target commit has an open `producer_disagreement` → never downgraded, whatever the covering set.
 8. Amendment sealed before target (pre-planted) → `not_older`.
 9. Reconcile: misattributed commit + effective amendment to the actor that covered **every**
    failing file → `info` with `amended`; an amendment to an actor that covered only some files
@@ -271,8 +292,10 @@ context, not a replacement.
 
 1. Land core + tests + MCP + CLI (one PR, reviewed by Codex and Grok, committed under the identity
    that wrote it — no bundling).
-2. First real amendment, human-sealed by Jordan: seq 18 → `claude-code` (evidence: the adjacent
-   claude-code edit events). Second: bfe87c3 → `claude-code`, evidence `c375ed4` and the edit
+2. First real amendment, human-sealed by Jordan: seq 18 → `claude-code` — **contingent on**
+   server-stamped claude-code edit events existing inside seq 18's capture windows. Check before
+   promising; if day-one edits were not logged in the window, the amendment seals `uncorroborated`
+   and seq 18 stays an honest `uncovered` gap. That outcome is acceptable and must not be forced. Second: bfe87c3 → `claude-code`, evidence `c375ed4` and the edit
    events. Both become `docs/examples.md` material.
 3. Flip the README, examples, reference and battle-card lines from "not built yet" to earned.
 
@@ -322,4 +345,11 @@ Codex.
   unsuppressable header; (L5) one shared `checkAttributionAmendment` for handler and core; (L6)
   back-to-back amendments resolve by seq (test 7b). First review of this design by a model from a
   vendor other than the one that wrote it.
+- **NOOA on Nemotron 3 Ultra, re-run by Grok against v4 (2026-09-05, sealed #1890, producer-signed;
+  seven findings, all accepted, folded into v5):** (H1) evidence edits must be server-stamped and
+  themselves unamended; (H2) Tier 1 clarified — the evidence rule binds humans too, single-operator
+  limit stated, test 5f; (M3) open `producer_disagreement` blocks the downgrade, test 9e; (M4)
+  `supersedes` must name the latest *effective* amendment, test 7f; (L5) default banner
+  unsuppressable; (L6) `to.model` dropped from the v1 shape; (L7) `instructed` events may not be
+  targets, test 7e. Q1–Q4 unchanged. §9's seq-18 rollout made contingent on evidence existing.
 - **Codex:** pending (returns 2026-09-07).
