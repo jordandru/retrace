@@ -116,4 +116,4 @@ That is the real output for the public NOOA project above. And the tool refuses 
 
 1. Browse the live ledger: <https://retrace-api.slcwitit.workers.dev/s/sh_ea81439e010abb1c0ec7167c> (timeline · printable report · signed export).
 2. Verify a bundle offline with the command in §6 — the pre-verified snapshot is in the [releases](https://github.com/jordandru/retrace/releases/tag/ledger-2026-09-03).
-3. Wire your own agents: the [Quick start](../README.md#quick-start-local-no-cloud-needed) runs locally with no cloud account; the [SETUP-GUIDE](../SETUP-GUIDE.md) covers the hosted Worker. Apache-2.0; self-host free.
+3. Wire your own agents: the [Quick start](reference.md#quick-start-local-no-cloud-needed) runs locally with no cloud account; the [SETUP-GUIDE](../SETUP-GUIDE.md) covers the hosted Worker. Apache-2.0; self-host free.
