@@ -2,7 +2,7 @@
 
 Retrace is a provenance ledger for AI coding agents. Every event records **who** did **what**, **when**, **where**, **why** (a `caused_by` chain back to the human instruction) and **how**, sealed in a hash chain that anyone can verify offline.
 
-Everything below comes from **this repository's own public ledger** — 1,700+ events and 220 commits, written by the six agents that built the tool (Claude Code, Codex, Gemini CLI, Grok, GitHub Copilot, Cursor Agent) under one human. Nothing here is invented: every example names a commit, an event id, or a command you can run.
+Everything below comes from **this repository's own public ledger** — 1,700+ events and 220 commits, written by the six agents that built the tool (Claude Code, Codex, Gemini CLI, Grok, GitHub Copilot, Cursor Agent) and one outside framework (NOOA, NVIDIA Labs' research preview) under one human. Nothing here is invented: every example names a commit, an event id, or a command you can run.
 
 - Browse the live ledger: <https://retrace-api.slcwitit.workers.dev/s/sh_ea81439e010abb1c0ec7167c>
 - The full reference is the [README](../README.md); this page is the three-minute version.
@@ -102,12 +102,36 @@ That is the real output for the public NOOA project above. And the tool refuses 
 
 ---
 
+## 7. "An AI reviewed this design. Which AI, on what model, and can I check?"
+
+**The problem.** AI reviews are becoming load-bearing: a design gets "reviewed by the model" and merged. Nothing records which harness ran, which model answered, what exact text it reviewed, or what it actually said. A month later the review is a sentence in a PR description.
+
+**With Retrace.** A review is an event like any other. The attribution-amendment design in this repo ([docs/design/attribution-amendment.md](design/attribution-amendment.md)) was reviewed under NOOA's own signing identity twice — once on an Anthropic model, once on **NVIDIA Nemotron 3 Ultra** through NVIDIA's public inference API — and each review is a producer-signed ledger event. This is #1873, the Nemotron one, as the ledger holds it:
+
+```
+#1873  «nooa» [agent: «nvidia_nim/nvidia/nemotron-3-ultra-550b-a55b»]
+       on behalf of «jordansboxing@gmail.com» — design-review
+  used      repo:jordandru/retrace#docs/design/attribution-amendment.md
+            @ 4d9b96d  sha256 d6aef2146553…          ← the exact revision reviewed
+  generated design-review-attribution-amendment-review_2e0bfa2918c3.md
+            after_hash 5a4077a6380b992c…              ← the exact review text
+  why:      «NOOA peer review … needs changes: Medium findings 1–3 …»
+  ↳ because #1869 «jordansboxing@gmail.com» instructed «NOOA peer review of …»
+  sealed_by pinned:nooa · producer_sig verified (kid e0c4934645522e62)
+```
+
+So the record answers every question in the heading: the harness is server-stamped (`nooa`, pinned credential), the model is on the event, the design is pinned by git revision **and** content hash, the review text is hashed, the human who asked is the causal root, and the whole thing is signed with a key the server never held. The six findings it raised were folded into the next revision of the design, which the review log in that document credits by event number.
+
+**And when the "review" is fake.** The same afternoon a 4B local model was asked to do the same job. It returned a fluent result block — an instruction id, a review path, a SHA-256 — in two minutes. The ledger has no events from that run. It made zero tool calls; the ids were invented. One query falsified it. That is the difference between "the AI said it reviewed it" and a review you can check.
+
+---
+
 ## What it deliberately does not do
 
 - It is **tamper-evident, not tamper-proof** — see the checkpoint window above.
 - **Model names are asserted** by the agent, and labeled so. Verifying them waits on harnesses exposing a verifiable model id.
 - **Coverage is what producers log.** Complete for commits (enforced by the CI gate); it does not record keystrokes, prompts wholesale, or the harness's system prompt.
-- **A wrong actor stays sealed.** Corrections are appended (`c375ed4` above), never edited. `retrace_amend` can supply a missing artifact role or attest a missing causal root; a first-class *attribution amendment* that re-attributes an actor is not built yet — this ledger's own seq 18 still carries a model name where an actor id belongs.
+- **A wrong actor stays sealed.** Corrections are appended (`c375ed4` above), never edited. `retrace_amend` can supply a missing artifact role or attest a missing causal root; a first-class *attribution amendment* that re-attributes an actor is [designed and triple-reviewed](design/attribution-amendment.md) (Grok, NOOA on Sonnet #1852, NOOA on Nemotron #1873) but **not built yet** — this ledger's own seq 18 still carries a model name where an actor id belongs.
 - **No line-level attribution** ("GPT wrote this function") — not a feature, not planned.
 
 ---
