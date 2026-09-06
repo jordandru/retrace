@@ -106,7 +106,26 @@ export function readRepoConfig(repo: string): ReconcileCfg {
 
 async function fetchEvents(project: string, pubkeyFlag?: unknown): Promise<{ events: Event[]; note: string }> {
   const store = makeStore();
-  if (store instanceof RemoteStore) return verifiedExportEvents(await store.export({ project }), pubkeyFlag);
+  if (store instanceof RemoteStore) {
+    // Live build first: reconcile judges commits against the ledger as of NOW, and the hourly cache stops at its build
+    // time — a commit pushed after it is a false `missing_commit`, a correction sealed after it an acknowledgement
+    // reconcile cannot see (2026-09-06: seq 1942 acked 15c44f4 while the cache stopped at 1933). The live build is the
+    // Worker's CPU-heaviest request and 503s (Cloudflare 1102) at this ledger size, so fall back to the cached bundle
+    // and SAY SO in the note, with the live head, rather than fail the run or pretend the view is current.
+    try { return await verifiedExportEvents(await store.export({ project }, { fresh: true }), pubkeyFlag); }
+    catch (e: any) {
+      if (!/→ 5\d\d\b/.test(String(e?.message))) throw e;
+      const cached = await store.export({ project });
+      const r = await verifiedExportEvents(cached, pubkeyFlag);
+      const cachedHead = (cached.chain?.total_events ?? 0) - 1;
+      const live = await store.head(project).catch(() => null);
+      const behind = live && live.seq > cachedHead
+        ? `; LIVE HEAD IS #${live.seq} — seals and corrections after #${cachedHead} are not in this view, so a commit sealed after it is reported missing here`
+        : "";
+      const reason = String(e?.message ?? e).split("\n")[0].replace(/:\s*\{.*$/, "").slice(0, 140);
+      return { events: r.events, note: `${r.note}; live export unavailable (${reason}), reconciled against the cached bundle through #${cachedHead}${behind}` };
+    }
+  }
   const events = await store.all(project);
   return { events, note: `${events.length} events from the local store` };
 }

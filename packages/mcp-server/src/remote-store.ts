@@ -40,8 +40,11 @@ export class RemoteStore implements EventStore {
   async share(body: { project: string; artifact_id?: string; label?: string; expires_in_days?: number }) {
     return this.req<{ share: Share; url: string }>("POST", `/projects/${encodeURIComponent(body.project)}/share`, body);
   }
-  async export(scope: { project: string; artifact_id?: string }) {
-    const p = new URLSearchParams(); if (scope.artifact_id) p.set("artifact_id", scope.artifact_id);
+  /** `fresh` bypasses the Worker's cron-precomputed full-export cache (`?fresh=1`, router.ts). The cache is a signed
+   *  export as of its own hourly build, so a consumer that compares the ledger against something newer than that
+   *  build — reconcile walking commits pushed minutes ago — must ask for the live build or it reports false gaps. */
+  async export(scope: { project: string; artifact_id?: string }, opts: { fresh?: boolean } = {}) {
+    const p = new URLSearchParams(); if (scope.artifact_id) p.set("artifact_id", scope.artifact_id); if (opts.fresh) p.set("fresh", "1");
     return this.req<ExportBundle>("GET", `/projects/${encodeURIComponent(scope.project)}/export?${p}`);
   }
   async head(project: string) {
