@@ -785,3 +785,25 @@ test("GET /projects/:p/events returns a newest-window page, not a genesis prefix
   assert.equal(rest.truncated, false);
   assert.equal((await get(h, "/projects/p/events?before_seq=-1", "tok")).status, 400);
 });
+
+test("POST /events with a body that is not JSON → 400 naming the parse error, never a 500; nothing is appended", async () => {
+  // 2026-09-06: a human correction pasted from a wrapped terminal carried a raw newline inside the intent string;
+  // the Worker answered "internal error (ref …)" — a client mistake reported as a server fault.
+  const store = new MemStore();
+  const handle = createHandler(store, { token: "tok" });
+  const raw = (body: string) => handle(new Request("http://test/events", { method: "POST", body, headers: { "content-type": "application/json", authorization: "Bearer tok" } }));
+  const res = await raw('{"project": "rpg", "intent": "line one\nline two"}');
+  assert.equal(res.status, 400);
+  const out = await res.json() as { error: string; hint?: string };
+  assert.match(out.error, /^invalid JSON body: /);
+  assert.match(out.hint ?? "", /line break/);
+  assert.equal(store.events.length, 0);
+  // the same guard covers the Drive forwarder route
+  const drive = await handle(new Request("http://test/hooks/gdrive", { method: "POST", body: "not json", headers: { "content-type": "application/json", authorization: "Bearer tok" } }));
+  assert.equal(drive.status, 400);
+  assert.match(((await drive.json()) as { error: string }).error, /^invalid JSON body: /);
+  // and a well-formed body still fails validation with the schema's 400, not the parser's
+  const invalid = await raw('{"project": "rpg"}');
+  assert.equal(invalid.status, 400);
+  assert.equal(((await invalid.json()) as { error: string }).error, "invalid event");
+});

@@ -165,6 +165,16 @@ const CORS = { "access-control-allow-origin": "*", "access-control-allow-headers
 const SHARE_CACHE = { "cache-control": "public, max-age=15" };
 const json = (data: unknown, status = 200, extra?: Record<string, string>) =>
   new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json", ...CORS, ...extra } });
+/** Parse a JSON request body, or produce the 400 the caller should return. A body that is not JSON is the CLIENT's
+ *  error and must say so: an uncaught `req.json()` fell through to the 500 handler and answered "internal error
+ *  (ref …)" for a raw line break inside a string (2026-09-06, a human correction pasted from a wrapped terminal). */
+const readJsonBody = async (req: Request): Promise<{ ok: true; value: unknown } | { ok: false; response: Response }> => {
+  try { return { ok: true, value: await req.json() }; }
+  catch (e: any) {
+    const reason = String(e?.message ?? e).slice(0, 200);
+    return { ok: false, response: json({ error: `invalid JSON body: ${reason}`, hint: "the body must be a single JSON document; a raw line break inside a string value is the usual cause" }, 400) };
+  }
+};
 const html = (body: string, status = 200, extra?: Record<string, string>) =>
   new Response(body, { status, headers: { "content-type": "text/html; charset=utf-8", ...extra } });
 
@@ -396,7 +406,8 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
         const principal = await authenticate(req, url);
         if (principal === "unauthorized") return json({ error: "unauthorized" }, 401);
         if (principal?.kind === "credential" && principal.credential.trust !== "assert") return json({ error: "forbidden: the Drive forwarder needs the owner token or an assert-trust credential" }, 403);
-        const payload = (await req.json()) as DrivePayload;
+        const body = await readJsonBody(req); if (!body.ok) return body.response;
+        const payload = body.value as DrivePayload;
         const project = url.searchParams.get("project") ?? payload.project ?? "google-drive";
         if (!projectAllowed(principal, project)) return json({ error: `forbidden: this credential is not scoped to project "${project}"` }, 403);
         const inputs = mapDriveActivities({ ...payload, project }, "google-drive");
@@ -476,7 +487,8 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
       if (principal?.kind === "credential" && (req.method === "DELETE" || (req.method === "POST" && parts[0] !== "events")))
         return json({ error: "forbidden: this route needs the owner token" }, 403);
       if (req.method === "POST" && parts[0] === "events" && parts.length === 1) {
-        const parsed = EventInput.safeParse(await req.json());
+        const body = await readJsonBody(req); if (!body.ok) return body.response;
+        const parsed = EventInput.safeParse(body.value);
         if (!parsed.success) return json({ error: "invalid event", issues: parsed.error.issues }, 400);
         if (!projectAllowed(principal, parsed.data.project))
           return json({ error: `forbidden: this credential is not scoped to project "${parsed.data.project}"` }, 403);
