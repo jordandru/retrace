@@ -562,7 +562,8 @@ test("git adapter: install writes post-merge too; a real merge is sealed live as
   assert.match(out, /installed post-commit hook/);
   assert.match(out, /installed post-merge hook/);
   const mergeHook = readFileSync(join(dir, ".git/hooks/post-merge"), "utf8");
-  assert.match(mergeHook, /HEAD\^2/, "post-merge must skip fast-forwards, where HEAD is someone else's commit");
+  assert.match(mergeHook, /Merge made by/, "post-merge must seal only when git's reflog says this invocation made a merge");
+  assert.doesNotMatch(mergeHook, /HEAD\^2/, "a second parent is not proof this invocation made the merge (fast-forward onto someone else's merge commit)");
   assert.match(mergeHook, /commit --hook /, "a merge commit IS produced by this process: live path");
 
   // a branch with one commit (sealed by post-commit), merged back with --no-ff → a merge commit only post-merge sees
@@ -592,6 +593,24 @@ test("git adapter: install writes post-merge too; a real merge is sealed live as
   sh(dir, "git", ["merge", "-q", "--ff-only", "ff"], agentEnv);
   events = await new SqliteStore(db).all("rpg");
   assert.equal(events.length, 2, "a fast-forward produced no commit here, so post-merge must not seal HEAD");
+
+  // Grok's case (2026-09-06): a fast-forward onto a merge commit ANOTHER process made — HEAD gains a second parent,
+  // yet nothing was produced here. Build the merge on a side branch with no ledger (so nothing is sealed there), then
+  // fast-forward main onto it from an agent shell: post-merge must stay silent.
+  sh(dir, "git", ["checkout", "-qb", "theirs"]);
+  sh(dir, "git", ["checkout", "-qb", "theirs-topic"]);
+  writeFileSync(join(dir, "d.ts"), "4\n");
+  sh(dir, "git", ["add", "."]);
+  sh(dir, "git", ["commit", "-qm", "their topic"]);
+  sh(dir, "git", ["checkout", "-q", "theirs"]);
+  sh(dir, "git", ["merge", "-q", "--no-ff", "-m", "their merge", "theirs-topic"]); // no ledger env → nothing sealed
+  const theirMerge = sh(dir, "git", ["rev-parse", "HEAD"]).trim();
+  sh(dir, "git", ["checkout", "-q", "main"]);
+  sh(dir, "git", ["merge", "-q", "--ff-only", "theirs"], agentEnv);
+  assert.equal(sh(dir, "git", ["rev-parse", "HEAD"]).trim(), theirMerge, "main fast-forwarded onto their merge commit");
+  assert.equal(sh(dir, "git", ["rev-list", "--parents", "-1", "HEAD"]).trim().split(" ").length, 3, "HEAD now has two parents");
+  events = await new SqliteStore(db).all("rpg");
+  assert.equal(events.length, 2, "fast-forward onto someone else's merge commit: post-merge must not stamp this shell onto it");
 
   // uninstall removes both
   const un = sh(dir, "node", [bin, "uninstall", "--repo", dir], env);

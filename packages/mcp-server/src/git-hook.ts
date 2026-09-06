@@ -260,13 +260,17 @@ const HOOK_MARK = "# retrace-git hook";
  *  post-commit does not fire for `git merge` — git runs post-merge instead — so a repo with only post-commit never
  *  sealed its merge commits (2026-09-05: four checkpoint merges had to be replayed by hand). post-merge also fires after
  *  a fast-forward (`git pull`), where HEAD is a commit some other process produced; sealing it from here would stamp
- *  this shell's session/surface onto someone else's work, so the post-merge script exits unless HEAD has a second
- *  parent — i.e. this merge created a commit. (`--squash` creates none; its later `git commit` is post-commit's.) */
+ *  this shell's session/surface onto someone else's work. "HEAD has a second parent" is NOT the test — a fast-forward
+ *  onto a merge commit someone else made (a PR merged on GitHub, then `git pull`) has one too (Grok's review, 2026-09-06).
+ *  The deterministic signal is git's own reflog subject for the HEAD update this hook follows: "…: Merge made by the
+ *  'ort' strategy." for a merge this invocation created, "…: Fast-forward" otherwise. Fail closed: no "Merge made by",
+ *  no seal — the webhook or a replay can still seal the sha, but nothing fabricates WHERE evidence.
+ *  (`--squash` creates no commit; its later `git commit` is post-commit's.) */
 export const HOOK_KINDS = ["post-commit", "post-merge"] as const;
 export type HookKind = (typeof HOOK_KINDS)[number];
 export function hookScript(kind: HookKind = "post-commit"): string {
   const self = new URL(import.meta.url).pathname;
-  const merge = kind === "post-merge" ? `git rev-parse -q --verify HEAD^2 >/dev/null 2>&1 || exit 0 # fast-forward: no commit was produced here\n` : "";
+  const merge = kind === "post-merge" ? `case "$(git reflog -1 --format=%gs 2>/dev/null)" in *"Merge made by"*) ;; *) exit 0 ;; esac # seal only a merge this invocation made; a fast-forward (even onto someone else's merge commit) produced nothing here\n` : "";
   return `#!/bin/sh\n${HOOK_MARK}\n${merge}node "${self}" commit --hook --repo "$(git rev-parse --show-toplevel)" >/dev/null 2>&1 || echo "retrace: failed to log commit (non-fatal; reason appended to $(git rev-parse --git-dir)/retrace-hook.log)" >&2\n`;
 }
 
