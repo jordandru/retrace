@@ -2,7 +2,7 @@
 /**
  * retrace-git — Git adapter. Turns commits into Retrace events.
  *
- *   retrace-git install [--project <name>] [--repo <path>]   write .git/hooks/post-commit + .retrace.json
+ *   retrace-git install [--project <name>] [--repo <path>]   write .git/hooks/post-commit + post-merge + .retrace.json
  *   retrace-git commit [--repo <path>] [<sha>]                log one commit (default HEAD) — what the hook runs
  *   retrace-git backfill [--repo <path>] [--since <ref>] [--max <n>]   log history oldest→newest (idempotent by sha)
  *   retrace-git uninstall [--repo <path>]
@@ -256,9 +256,18 @@ async function logCommit(repo: string, sha: string, cfg: Cfg, live = false): Pro
 }
 
 const HOOK_MARK = "# retrace-git hook";
-function hookScript(): string {
+/** Both hooks are the producing process for the commit they see, so both pass --hook (the live path).
+ *  post-commit does not fire for `git merge` — git runs post-merge instead — so a repo with only post-commit never
+ *  sealed its merge commits (2026-09-05: four checkpoint merges had to be replayed by hand). post-merge also fires after
+ *  a fast-forward (`git pull`), where HEAD is a commit some other process produced; sealing it from here would stamp
+ *  this shell's session/surface onto someone else's work, so the post-merge script exits unless HEAD has a second
+ *  parent — i.e. this merge created a commit. (`--squash` creates none; its later `git commit` is post-commit's.) */
+export const HOOK_KINDS = ["post-commit", "post-merge"] as const;
+export type HookKind = (typeof HOOK_KINDS)[number];
+export function hookScript(kind: HookKind = "post-commit"): string {
   const self = new URL(import.meta.url).pathname;
-  return `#!/bin/sh\n${HOOK_MARK}\nnode "${self}" commit --hook --repo "$(git rev-parse --show-toplevel)" >/dev/null 2>&1 || echo "retrace: failed to log commit (non-fatal; reason appended to $(git rev-parse --git-dir)/retrace-hook.log)" >&2\n`;
+  const merge = kind === "post-merge" ? `git rev-parse -q --verify HEAD^2 >/dev/null 2>&1 || exit 0 # fast-forward: no commit was produced here\n` : "";
+  return `#!/bin/sh\n${HOOK_MARK}\n${merge}node "${self}" commit --hook --repo "$(git rev-parse --show-toplevel)" >/dev/null 2>&1 || echo "retrace: failed to log commit (non-fatal; reason appended to $(git rev-parse --git-dir)/retrace-hook.log)" >&2\n`;
 }
 
 async function main() {
@@ -286,21 +295,31 @@ async function main() {
 
   if (cmd === "install") {
     mkdirSync(join(gitDir, "hooks"), { recursive: true });
-    const hookPath = join(gitDir, "hooks", "post-commit");
-    if (existsSync(hookPath) && !readFileSync(hookPath, "utf8").includes(HOOK_MARK)) {
-      console.error(`A post-commit hook already exists at ${hookPath}. Append this line to it manually:\n  ${hookScript().split("\n")[2]}`);
-      process.exit(1);
+    // Refuse before writing anything: a foreign hook of either kind is left untouched and named.
+    for (const kind of HOOK_KINDS) {
+      const hookPath = join(gitDir, "hooks", kind);
+      if (existsSync(hookPath) && !readFileSync(hookPath, "utf8").includes(HOOK_MARK)) {
+        console.error(`A ${kind} hook already exists at ${hookPath}. Append these lines to it manually:\n  ${hookScript(kind).split("\n").slice(2).filter(Boolean).join("\n  ")}`);
+        process.exit(1);
+      }
     }
-    writeFileSync(hookPath, hookScript());
-    chmodSync(hookPath, 0o755);
+    const installed: string[] = [];
+    for (const kind of HOOK_KINDS) {
+      const hookPath = join(gitDir, "hooks", kind);
+      writeFileSync(hookPath, hookScript(kind));
+      chmodSync(hookPath, 0o755);
+      installed.push(`installed ${kind} hook → ${hookPath}`);
+    }
     const cfgPath = join(repo, ".retrace.json");
     if (!existsSync(cfgPath)) writeFileSync(cfgPath, JSON.stringify({ project: cfg.project, environment: cfg.environment }, null, 2) + "\n");
-    console.log(`installed post-commit hook → ${hookPath}\nproject: ${cfg.project}\nconfig: ${cfgPath} (commit it; add db/url/token there or via env)`);
+    console.log(`${installed.join("\n")}\nproject: ${cfg.project}\nconfig: ${cfgPath} (commit it; add db/url/token there or via env)`);
     return;
   }
   if (cmd === "uninstall") {
-    const hookPath = join(gitDir, "hooks", "post-commit");
-    if (existsSync(hookPath) && readFileSync(hookPath, "utf8").includes(HOOK_MARK)) { unlinkSync(hookPath); console.log("removed hook"); }
+    for (const kind of HOOK_KINDS) {
+      const hookPath = join(gitDir, "hooks", kind);
+      if (existsSync(hookPath) && readFileSync(hookPath, "utf8").includes(HOOK_MARK)) { unlinkSync(hookPath); console.log(`removed ${kind} hook`); }
+    }
     return;
   }
   if (cmd === "backfill") {

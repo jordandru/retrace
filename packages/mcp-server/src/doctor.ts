@@ -223,6 +223,11 @@ async function main() {
     const hook = join(gitDir, "hooks", "post-commit");
     const hookOk = existsSync(hook) && readFileSync(hook, "utf8").includes("# retrace-git hook");
     findings.push(hookOk ? result("pass", "post-commit hook", hook) : result("fail", "post-commit hook", `not installed at ${hook}; run retrace-git install --repo ${repo}`));
+    // git runs post-merge, not post-commit, for `git merge`; an install from before 2026-09-06 wrote only post-commit,
+    // so its merge commits were never sealed by the hook. A warning, not a failure: commits still seal, merges don't.
+    const mergeHook = join(gitDir, "hooks", "post-merge");
+    const mergeHookOk = existsSync(mergeHook) && readFileSync(mergeHook, "utf8").includes("# retrace-git hook");
+    findings.push(mergeHookOk ? result("pass", "post-merge hook", mergeHook) : result("warn", "post-merge hook", `not installed at ${mergeHook}; merge commits are not sealed by the hook — re-run retrace-git install --repo ${repo}`));
   }
 
   const project = process.env.RETRACE_PROJECT ?? cfg.project ?? basename(repo);

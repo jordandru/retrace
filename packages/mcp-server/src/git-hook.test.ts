@@ -545,3 +545,57 @@ test("git adapter: a scratch repo with RETRACE_URL in the env refuses to write, 
   assert.ok(existsSync(join(dir, ".retrace.json")));
   assert.doesNotMatch(run([bin, "commit", "--repo", dir]).out, /refusing to log/);
 });
+
+test("git adapter: install writes post-merge too; a real merge is sealed live as `merged`, a fast-forward seals nothing", async () => {
+  // 2026-09-05: four checkpoint-PR merges in the retrace repo were never sealed by the hook, because git fires
+  // post-merge (not post-commit) for `git merge`. They had to be replayed by hand as #1913–#1916.
+  const dir = mkdtempSync(join(tmpdir(), "retrace-git-merge-"));
+  const db = join(dir, "ledger.db");
+  const env = { RETRACE_DB: db, RETRACE_PROJECT: "rpg" };
+  const agentEnv = { ...env, CLAUDE_CODE_SESSION_ID: "sess-merge" };
+  sh(dir, "git", ["init", "-q", "-b", "main"]);
+  writeFileSync(join(dir, "a.ts"), "1\n");
+  sh(dir, "git", ["add", "."]);
+  sh(dir, "git", ["commit", "-qm", "initial"]);
+
+  const out = sh(dir, "node", [bin, "install", "--repo", dir], env);
+  assert.match(out, /installed post-commit hook/);
+  assert.match(out, /installed post-merge hook/);
+  const mergeHook = readFileSync(join(dir, ".git/hooks/post-merge"), "utf8");
+  assert.match(mergeHook, /HEAD\^2/, "post-merge must skip fast-forwards, where HEAD is someone else's commit");
+  assert.match(mergeHook, /commit --hook /, "a merge commit IS produced by this process: live path");
+
+  // a branch with one commit (sealed by post-commit), merged back with --no-ff → a merge commit only post-merge sees
+  sh(dir, "git", ["checkout", "-qb", "feature"]);
+  writeFileSync(join(dir, "b.ts"), "2\n");
+  sh(dir, "git", ["add", "."]);
+  sh(dir, "git", ["commit", "-qm", "feature work"], env);
+  sh(dir, "git", ["checkout", "-q", "main"]);
+  sh(dir, "git", ["merge", "-q", "--no-ff", "-m", "Merge branch 'feature'", "feature"], agentEnv);
+  const mergeSha = sh(dir, "git", ["rev-parse", "HEAD"]).trim();
+
+  let events = await new SqliteStore(db).all("rpg");
+  assert.equal(events.length, 2, "feature commit + merge commit");
+  const merged = events[1];
+  assert.equal(merged.action, "merged");
+  assert.equal(merged.artifacts[0].kind, "commit");
+  assert.ok(merged.artifacts[0].id.endsWith(`@${mergeSha.slice(0, 12)}`), merged.artifacts[0].id);
+  assert.ok(merged.tags?.includes("merge"));
+  assert.equal(merged.location?.session, "sess-merge", "post-merge is the producing process, so it stamps like post-commit");
+
+  // a fast-forward: HEAD moves to a commit this merge did not create → post-merge exits, nothing new is sealed
+  sh(dir, "git", ["checkout", "-qb", "ff"]);
+  writeFileSync(join(dir, "c.ts"), "3\n");
+  sh(dir, "git", ["add", "."]);
+  sh(dir, "git", ["commit", "-qm", "ff work"]); // no env → post-commit has no ledger and logs nothing (hook is non-fatal)
+  sh(dir, "git", ["checkout", "-q", "main"]);
+  sh(dir, "git", ["merge", "-q", "--ff-only", "ff"], agentEnv);
+  events = await new SqliteStore(db).all("rpg");
+  assert.equal(events.length, 2, "a fast-forward produced no commit here, so post-merge must not seal HEAD");
+
+  // uninstall removes both
+  const un = sh(dir, "node", [bin, "uninstall", "--repo", dir], env);
+  assert.match(un, /removed post-commit hook/);
+  assert.match(un, /removed post-merge hook/);
+  assert.ok(!existsSync(join(dir, ".git/hooks/post-merge")));
+});
