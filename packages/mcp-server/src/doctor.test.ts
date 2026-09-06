@@ -182,3 +182,16 @@ test("gate dual witness never infers leniency from the ref layout: a detached, p
   assert.equal(parseArgs2(["doctor", "--gate", "--local"]).local, true);
   assert.equal(parseArgs2(["doctor", "--gate"]).local, false);
 });
+
+import { exportReachesSeal } from "./doctor.js";
+
+test("gate export: a cached bundle is accepted only when it already reaches the newest seal of HEAD", () => {
+  // cron bundle built at head #1905 (1906 events); HEAD sealed at #1895 (inside) vs #1907 (pushed after the build)
+  assert.equal(exportReachesSeal({ chain: { total_events: 1906 } }, 1895), true);
+  assert.equal(exportReachesSeal({ chain: { total_events: 1906 } }, 1905), true);
+  assert.equal(exportReachesSeal({ chain: { total_events: 1906 } }, 1906), false);
+  assert.equal(exportReachesSeal({ chain: { total_events: 1906 } }, 1907), false);
+  // no declared size, or no seal seq at all → never trust the cache
+  assert.equal(exportReachesSeal({}, 0), false);
+  assert.equal(exportReachesSeal({ chain: { total_events: 1906 } }, -Infinity), false);
+});

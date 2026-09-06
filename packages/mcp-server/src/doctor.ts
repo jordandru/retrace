@@ -130,6 +130,16 @@ export function pinSessionFinding(gate: boolean, commit: Event, why: Event[]): F
 
 /** Capture coverage for HEAD (roadmap rung 4): were the edits behind this commit logged, and by whom? A reconcile
  *  report for exactly one commit → one finding at its worst unacknowledged level. `info`-only reports pass. */
+/** The gate reconciles HEAD against one full export. Since the export cache (the 503 CPU fix, option a) the plain
+ *  export endpoint serves the hourly cron's precomputed bundle, and a commit sealed after that build cannot be in it —
+ *  every push gate from 2026-09-03 18:25Z to 2026-09-05 failed with a false `missing_commit` for exactly this reason.
+ *  A cached bundle is usable only when its claimed size already reaches the sealed commit event; a bundle that does
+ *  not declare its size is never trusted here (the verifier rejects it as incomplete anyway). */
+export function exportReachesSeal(bundle: { chain?: { total_events?: number } }, sealSeq: number): boolean {
+  const total = bundle.chain?.total_events;
+  return typeof total === "number" && Number.isFinite(sealSeq) && total - 1 >= sealSeq;
+}
+
 export function captureCoverageFinding(report: ReconcileReport): Finding {
   const v = report.commits[0];
   if (!v) return result("fail", "capture coverage", "no commit in the reconcile report");
@@ -255,15 +265,26 @@ async function main() {
         if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
         const events = doctorHistoryEvents(await res.json());
         const sealed = sealedCommitEvent(events);
+        const newestSeal = Math.max(...events.map((e) => e.seq ?? 0)); // both producers' seals of HEAD, if present
         const delivery = headDelivery(gate, commit, !!sealed);
         findings.push(sealed ? result("pass", "HEAD delivery", `${commit} is event #${sealed.seq}`) : delivery);
         if (sealed) findings.push(attributionFinding(gate, sealed));
         if (gate && sealed) {
           // capture coverage: the edits behind HEAD, from one full export (docs/reconciliation-plan.md)
           try {
-            const exp = await fetch(`${url}/projects/${encodeURIComponent(project)}/export`, { headers });
+            const exportUrl = `${url}/projects/${encodeURIComponent(project)}/export`;
+            let exp = await fetch(exportUrl, { headers });
             if (!exp.ok) throw new Error(`HTTP ${exp.status}: ${await exp.text()}`);
-            const bundle = await exp.json() as ExportBundle;
+            let bundle = await exp.json() as ExportBundle;
+            // The Worker serves the hourly cron's cached bundle by default; a commit sealed after that build is not in
+            // it, and reconciling against it reports a false missing_commit. Use the cache only when it reaches every
+            // seal of HEAD; otherwise ask for the live build (see exportReachesSeal).
+            if (!exportReachesSeal(bundle, newestSeal)) {
+              const cachedHead = (bundle.chain?.total_events ?? 0) - 1;
+              exp = await fetch(`${exportUrl}?fresh=1`, { headers });
+              if (!exp.ok) throw new Error(`HTTP ${exp.status} on the live export (the cached bundle stops at #${cachedHead}, HEAD is sealed at #${newestSeal}): ${await exp.text()}`);
+              bundle = await exp.json() as ExportBundle;
+            }
             // fail closed: the bundle must verify as a complete full export signed by the trusted issuer key
             const { events } = await verifiedExportEvents(bundle, undefined, url);
             // Dual witness: fail on a lone producer unless the operator passed --local on a developer machine (never
