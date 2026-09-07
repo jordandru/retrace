@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createHandler, parseCredentials, Credential, EventStore, Event, Share, appendEvent, EventInput, verifyProject, ChainHead, HeadMovedError, schemaSurface, Location, Action, tokenEquals, parseGithubRepoProjects, resolveGithubProject, pageHistoryNewest } from "./index.js";
+import { createHandler, parseCredentials, Credential, EventStore, Event, Share, appendEvent, EventInput, verifyProject, ChainHead, HeadMovedError, schemaSurface, Location, Action, tokenEquals, parseGithubRepoProjects, resolveGithubProject, pageHistoryNewest, generateSigningKey } from "./index.js";
 
 /** minimal in-memory store for tests */
 class MemStore implements EventStore {
@@ -806,4 +806,28 @@ test("POST /events with a body that is not JSON → 400 naming the parse error, 
   const invalid = await raw('{"project": "rpg"}');
   assert.equal(invalid.status, 400);
   assert.equal(((await invalid.json()) as { error: string }).error, "invalid event");
+});
+
+test("credentials: CI assert reader with empty allowed_actors can GET gate routes and cannot POST /events", async () => {
+  const store = new MemStore();
+  await appendEvent(store, ev({ project: "acme-app" }));
+  const key = await generateSigningKey();
+  const ci = Credential.parse({
+    token: "ci-reader-token-0123456789ab",
+    name: "acme-app · CI gate reader",
+    actor: { type: "system", id: "ci-acme-app" },
+    trust: "assert",
+    allowed_actors: [],
+    projects: ["acme-app"],
+  });
+  const h = createHandler(store, { token: "tok", credentials: [ci], signingKey: key.privateKey });
+  assert.equal((await get(h, "/projects/acme-app/export", ci.token)).status, 200);
+  const signed = await get(h, "/projects/acme-app/head?signed=1", ci.token);
+  assert.equal(signed.status, 200);
+  assert.equal((await signed.json()).seq, 0);
+  assert.equal((await get(h, "/projects/acme-app/events", ci.token)).status, 200);
+  const write = await post(h, "/events", ev({ project: "acme-app", actor: { type: "system", id: "ci-acme-app" } }), ci.token);
+  assert.equal(write.status, 403);
+  assert.match((await write.json()).error, /allowed_actors/);
+  assert.equal(store.events.length, 1);
 });
