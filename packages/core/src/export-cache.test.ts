@@ -201,4 +201,17 @@ test("router: signed head uses the export issuer key while plain head stays unch
   const unavailable = await unsigned(new Request("http://x/projects/p/head?signed=1&token=" + encodeURIComponent(token)));
   assert.equal(unavailable.status, 404);
   assert.match((await unavailable.json()).error, /no signing key/);
+
+  const empty = createHandler(new MemStore(), { token, signingKey: key.privateKey });
+  const emptySigned = await empty(new Request("http://x/projects/ghost/head?signed=1&token=" + encodeURIComponent(token)));
+  assert.equal(emptySigned.status, 200);
+  const emptyBody = await emptySigned.json();
+  assert.equal(emptyBody.project, "ghost");
+  assert.equal(emptyBody.seq, -1);
+  assert.equal(emptyBody.hash, "0".repeat(64));
+  assert.equal(await verifyCanonical(
+    key.publicKey,
+    { project: emptyBody.project, seq: emptyBody.seq, hash: emptyBody.hash, signed_at: emptyBody.signed_at },
+    emptyBody.signature,
+  ), true);
 });
