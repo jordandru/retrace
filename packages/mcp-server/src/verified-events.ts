@@ -22,6 +22,16 @@ export async function verifiedExportEvents(bundle: ExportBundle, pubkeyFlag?: un
   if (!exportVerdictOk(verdict)) {
     throw new Error(`refusing to reconcile against an export that does not verify (signature ${verdict.signature}, events intact ${verdict.events_intact}, chain ${verdict.chain_ok_at_export}, coverage ${verdict.coverage.complete})${verdict.problems.length ? ": " + verdict.problems.join("; ") : ""}`);
   }
+  if (verdict.coverage.scope !== "full" || verdict.coverage.complete !== true) {
+    const scope = bundle.scope ?? {};
+    const named = [
+      scope.artifact_id && `artifact_id=${scope.artifact_id}`,
+      scope.actor_id && `actor_id=${scope.actor_id}`,
+      scope.since && `since=${scope.since}`,
+      scope.until && `until=${scope.until}`,
+    ].filter(Boolean).join(", ") || "unspecified filters";
+    throw new Error(`refusing to reconcile against a ${verdict.coverage.scope} export (scope ${named}); need a full export with complete coverage`);
+  }
   return { events: bundle.events, note: `${bundle.events.length} events from a full export verified against ${trusted.from} (kid ${verdict.kid})` };
 }
 

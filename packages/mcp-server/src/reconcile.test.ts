@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   generateSigningKey, appendEvent, buildExportBundle, EventStore, Event, Share, EventInput,
-  pageHistoryNewest, keyId, publicFromPrivate, signCanonical,
+  pageHistoryNewest, keyId, publicFromPrivate, signCanonical, verifyExportBundle,
 } from "@retrace-dev/core";
 import { parseNameStatus, verifiedExportEvents } from "./reconcile.js";
 import { fetchVerifiedRemoteEvents, historyTail } from "./verified-events.js";
@@ -63,6 +63,11 @@ test("verifiedExportEvents fails closed: no trusted key, wrong key, tampered eve
   await assert.rejects(() => verifiedExportEvents(tampered, flag), /does not verify/);
   const unsigned = await buildExportBundle(store, { project: "p" }, {});
   await assert.rejects(() => verifiedExportEvents(unsigned, flag), /does not verify/);
+  const scoped = await buildExportBundle(store, { project: "p", artifact_id: "repo:p#a.ts" }, { signingKey: issuer.privateKey, issuerName: "test" });
+  const scopedVerdict = await verifyExportBundle(scoped, issuer.publicKey);
+  assert.equal(scopedVerdict.signature, "valid");
+  assert.equal(scopedVerdict.coverage.scope, "scoped");
+  await assert.rejects(() => verifiedExportEvents(scoped, flag), /scoped export \(scope artifact_id=repo:p#a\.ts\)/);
 });
 
 test("remote events: signed cache is extended by a chain-verified HTTP tail without trying fresh export", async () => {
