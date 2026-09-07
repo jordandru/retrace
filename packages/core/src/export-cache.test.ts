@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {
   appendEvent, buildExportBundle, createHandler, generateSigningKey, verifyExportBundle,
   refreshExportCache, exportBuilder, CachedExport, ExportCacheStore,
-  EventStore, Event, EventInput, Share, pageHistoryNewest,
+  EventStore, Event, EventInput, Share, pageHistoryNewest, verifyCanonical,
 } from "./index.js";
 
 class MemStore implements EventStore {
@@ -127,4 +127,48 @@ test("router: full export serves cached bytes (hit), labels stale, and ?fresh=1 
   const live = await plain(new Request("http://x/projects/p/export", { headers: { authorization: `Bearer ${token}` } }));
   assert.equal(live.headers.get("x-retrace-export-cache"), null);
   assert.equal(JSON.parse(await live.text()).chain.total_events, 3);
+
+  const unavailable = await plain(new Request("http://x/projects/p/export?cached=1", { headers: { authorization: `Bearer ${token}` } }));
+  assert.equal(unavailable.status, 503);
+  assert.match((await unavailable.json()).error, /not configured/);
+
+  const brokenCache: ExportCacheStore = {
+    async get() { throw new Error("backend unavailable"); },
+    async put() {},
+  };
+  const broken = createHandler(store, { token, signingKey: key.privateKey, exportCache: brokenCache });
+  const failedRead = await broken(new Request("http://x/projects/p/export?cached=1&token=" + encodeURIComponent(token)));
+  assert.equal(failedRead.status, 503);
+  assert.equal(failedRead.headers.get("x-retrace-export-cache"), null);
+  assert.match((await failedRead.json()).error, /backend unavailable/);
+  const ordinaryAfterFailure = await broken(new Request("http://x/projects/p/export?token=" + encodeURIComponent(token)));
+  assert.equal(ordinaryAfterFailure.status, 200);
+  assert.equal(JSON.parse(await ordinaryAfterFailure.text()).chain.total_events, 3);
+});
+
+test("router: signed head uses the export issuer key while plain head stays unchanged", async () => {
+  const store = new MemStore();
+  await appendEvent(store, ev("p"));
+  const key = await generateSigningKey();
+  const token = "owner-token-owner-token-owner-ok";
+  const handle = createHandler(store, { token, signingKey: key.privateKey });
+  const plain = await handle(new Request("http://x/projects/p/head?token=" + encodeURIComponent(token)));
+  assert.deepEqual(await plain.json(), await store.head("p"));
+
+  const signed = await handle(new Request("http://x/projects/p/head?signed=1&token=" + encodeURIComponent(token)));
+  assert.equal(signed.status, 200);
+  const body = await signed.json();
+  assert.equal(body.project, "p");
+  assert.equal(body.issuer.kid, key.kid);
+  assert.deepEqual(body.issuer.public_key, key.publicKey);
+  assert.equal(await verifyCanonical(
+    key.publicKey,
+    { project: body.project, seq: body.seq, hash: body.hash, signed_at: body.signed_at },
+    body.signature,
+  ), true);
+
+  const unsigned = createHandler(store, { token });
+  const unavailable = await unsigned(new Request("http://x/projects/p/head?signed=1&token=" + encodeURIComponent(token)));
+  assert.equal(unavailable.status, 404);
+  assert.match((await unavailable.json()).error, /no signing key/);
 });

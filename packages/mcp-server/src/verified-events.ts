@@ -2,9 +2,10 @@ import {
   Event,
   ExportBundle,
   GENESIS_HASH,
-  HISTORY_LIMIT_MAX,
   exportVerdictOk,
+  keyId,
   verifyChainTail,
+  verifyCanonical,
   verifyExportBundle,
 } from "@retrace-dev/core";
 import { RemoteApiError, RemoteStore } from "./remote-store.js";
@@ -24,11 +25,17 @@ export async function verifiedExportEvents(bundle: ExportBundle, pubkeyFlag?: un
   return { events: bundle.events, note: `${bundle.events.length} events from a full export verified against ${trusted.from} (kid ${verdict.kid})` };
 }
 
-async function historyTail(store: RemoteStore, project: string, afterSeq: number, throughSeq: number): Promise<Event[]> {
+const HISTORY_TAIL_PAGE_MAX = 500;
+const SIGNED_HEAD_MAX_AGE_MS = 10 * 60 * 1000;
+
+export async function historyTail(store: RemoteStore, project: string, afterSeq: number, throughSeq: number): Promise<Event[]> {
   const bySeq = new Map<number, Event>();
   let before_seq: number | undefined;
   for (let pages = 0; pages < 10_000; pages++) {
-    const page = await store.history({ project, before_seq, limit: HISTORY_LIMIT_MAX });
+    const upperExclusive = before_seq ?? throughSeq + 1;
+    const remaining = upperExclusive - (afterSeq + 1);
+    if (remaining <= 0) break;
+    const page = await store.history({ project, before_seq, limit: Math.min(remaining, HISTORY_TAIL_PAGE_MAX) });
     for (const event of page.events) {
       if (event.seq > afterSeq && event.seq <= throughSeq) bySeq.set(event.seq, event);
     }
@@ -50,7 +57,11 @@ export async function fetchVerifiedRemoteEvents(
   try {
     bundle = await store.export({ project }, { cached: true });
   } catch (error) {
-    if (!(error instanceof RemoteApiError) || error.status !== 404) throw error;
+    if (
+      !(error instanceof RemoteApiError)
+      || error.status !== 404
+      || error.headers.get("x-retrace-export-cache") !== "miss"
+    ) throw error;
     const liveBundle = await store.export({ project }, { fresh: true });
     const verified = await verifiedExportEvents(liveBundle, pubkeyFlag, baseUrl);
     return { events: verified.events, note: `${verified.note}; no signed export cache, verified live full export` };
@@ -61,18 +72,44 @@ export async function fetchVerifiedRemoteEvents(
   const cachedHead = total > 0
     ? { seq: total - 1, hash: bundle.chain.head_hash! }
     : { seq: -1, hash: GENESIS_HASH };
-  const liveHead = await store.head(project);
+  const trusted = await resolveTrustedKey(pubkeyFlag, baseUrl);
+  if (!trusted) throw new Error("no trusted issuer key for signed live head");
+  const liveHead = await store.signedHead(project);
 
   if (!liveHead) {
     if (total === 0) return { events: verified.events, note: `${verified.note}; signed cache is empty; no tail` };
     throw new Error(`live ledger has no head but the signed cache claims through #${cachedHead.seq}`);
+  }
+  if (
+    typeof liveHead.project !== "string"
+    || !Number.isInteger(liveHead.seq)
+    || typeof liveHead.hash !== "string"
+    || typeof liveHead.signed_at !== "string"
+    || typeof liveHead.signature !== "string"
+    || !liveHead.issuer
+    || typeof liveHead.issuer.kid !== "string"
+    || liveHead.issuer.alg !== "Ed25519"
+  ) {
+    throw new Error("signed live head response is malformed or unsigned");
+  }
+  const trustedKid = await keyId(trusted.key);
+  if (liveHead.issuer.kid !== trustedKid) {
+    throw new Error(`signed live head issuer kid ${liveHead.issuer.kid} does not match trusted key kid ${trustedKid}`);
+  }
+  const signedAt = Date.parse(liveHead.signed_at);
+  if (!Number.isFinite(signedAt) || Date.now() - signedAt > SIGNED_HEAD_MAX_AGE_MS) {
+    throw new Error(`signed live head is stale or has an invalid signed_at: ${liveHead.signed_at}`);
+  }
+  const headPayload = { project: liveHead.project, seq: liveHead.seq, hash: liveHead.hash, signed_at: liveHead.signed_at };
+  if (liveHead.project !== project || !(await verifyCanonical(trusted.key, headPayload, liveHead.signature))) {
+    throw new Error("signed live head does not verify against the trusted issuer key");
   }
   if (liveHead.seq < cachedHead.seq) {
     throw new Error(`live head #${liveHead.seq} is behind signed cache head #${cachedHead.seq}`);
   }
   if (liveHead.seq === cachedHead.seq) {
     if (liveHead.hash !== cachedHead.hash) throw new Error(`live head hash disagrees with signed cache head #${cachedHead.seq}`);
-    return { events: verified.events, note: `${verified.note}; signed cache through #${cachedHead.seq}; no tail` };
+    return { events: verified.events, note: `${verified.note}; signed live head confirms cache through #${cachedHead.seq}; no tail` };
   }
 
   const tail = await historyTail(store, project, cachedHead.seq, liveHead.seq);
@@ -85,6 +122,6 @@ export async function fetchVerifiedRemoteEvents(
   if (tailHead.hash !== liveHead.hash) throw new Error(`chain-verified tail head #${liveHead.seq} disagrees with live head hash`);
   return {
     events: [...verified.events, ...tail],
-    note: `${verified.note}; signed cache through #${cachedHead.seq}; chain-verified tail #${cachedHead.seq + 1}..#${liveHead.seq}`,
+    note: `${verified.note}; signed cache through #${cachedHead.seq}; chain-verified tail #${cachedHead.seq + 1}..#${liveHead.seq} verified against signed live head`,
   };
 }

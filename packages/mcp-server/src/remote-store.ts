@@ -6,6 +6,7 @@ export class RemoteApiError extends Error {
     public readonly method: string,
     public readonly path: string,
     public readonly status: number,
+    public readonly headers: Headers,
     detail: string,
   ) {
     super(`Retrace API ${method} ${path} → ${status}: ${detail}`);
@@ -33,7 +34,7 @@ export class RemoteStore implements EventStore {
       headers: retraceHeaders(this.token),
       body: body ? JSON.stringify(body) : undefined,
     });
-    if (!res.ok) throw new RemoteApiError(method, path, res.status, await res.text());
+    if (!res.ok) throw new RemoteApiError(method, path, res.status, new Headers(res.headers), await res.text());
     return (await res.json()) as T;
   }
   /** Remote appends server-side (chain sealing must happen where the head lives). */
@@ -64,6 +65,16 @@ export class RemoteStore implements EventStore {
   }
   async head(project: string) {
     return this.req<{ seq: number; hash: string } | null>("GET", `/projects/${encodeURIComponent(project)}/head`);
+  }
+  async signedHead(project: string) {
+    return this.req<{
+      project: string;
+      seq: number;
+      hash: string;
+      signed_at: string;
+      issuer: { kid: string; alg: "Ed25519"; public_key: JsonWebKey };
+      signature: string;
+    } | null>("GET", `/projects/${encodeURIComponent(project)}/head?signed=1`);
   }
   async insert(): Promise<void> {
     throw new Error("RemoteStore.insert is not supported; use append()");

@@ -12,7 +12,7 @@
  *   POST /events                         append (EventInput)
  *   GET  /events/:id · /events/:id/why
  *   GET  /projects · /projects/:p/events?limit=&before_seq=&artifact_id=&actor_id=&since=&text=
- *   GET  /projects/:p/head · /projects/:p/verify · /projects/:p/status
+ *   GET  /projects/:p/head[?signed=1] · /projects/:p/verify · /projects/:p/status
  *   GET  /projects/:p/export?artifact_id=…      signed JSON bundle
  *   GET  /projects/:p/report?artifact_id=…      printable HTML report
  *   GET  /projects/:p/lineage?artifact_id=&format=json|dot|mermaid&actors=1   artifact lineage graph
@@ -44,7 +44,7 @@ import { buildLineage, renderLineageDot, renderLineageMermaid } from "./lineage.
 import { mapGithubWebhook, verifyGithubSignature } from "./github.js";
 import { mapDriveActivities, DrivePayload } from "./gdrive.js";
 import { buildProjectStatus } from "./status.js";
-import { publicFromPrivate, keyId } from "./signing.js";
+import { publicFromPrivate, keyId, signCanonical } from "./signing.js";
 import { UI_HTML } from "./ui-html.js";
 
 function writeClientError(e: unknown): string | undefined {
@@ -321,8 +321,20 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
   /** Fast path for full exports: serve the cron-precomputed signed JSON (see RouterOptions.exportCache). Returns
    *  null when there is no usable cache entry, and the caller falls through to the live build. */
   const cachedExportResponse = async (project: string, fresh: boolean, cacheOnly: boolean, extra?: Record<string, string>): Promise<Response | null> => {
-    if (fresh || !opts.exportCache) return null;
-    const cached = await opts.exportCache.get(project).catch(() => null);
+    if (fresh) return null;
+    if (!opts.exportCache) {
+      return cacheOnly
+        ? json({ error: "export cache is not configured" }, 503, extra)
+        : null;
+    }
+    let cached;
+    try {
+      cached = await opts.exportCache.get(project);
+    } catch (error: any) {
+      return cacheOnly
+        ? json({ error: `export cache read failed: ${String(error?.message ?? error)}` }, 503, extra)
+        : null;
+    }
     if (!cached) return cacheOnly
       ? json(
         { error: `no cached export for project "${project}"; retry with ?fresh=1 to build one live` },
@@ -555,7 +567,20 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
         const q = Object.fromEntries(url.searchParams) as Record<string, string>;
         delete q.token;
         if (req.method === "GET") {
-          if (sub === "head") return json(await store.head(project));
+          if (sub === "head") {
+            const head = await store.head(project);
+            if (q.signed !== "1") return json(head);
+            if (!opts.signingKey) return json({ error: "no signing key configured" }, 404);
+            if (head === null) return json(null);
+            const signed_at = new Date().toISOString();
+            const payload = { project, seq: head.seq, hash: head.hash, signed_at };
+            const pub = publicFromPrivate(opts.signingKey);
+            return json({
+              ...payload,
+              issuer: { kid: await keyId(pub), alg: "Ed25519", public_key: pub },
+              signature: await signCanonical(opts.signingKey, payload),
+            });
+          }
           if (sub === "verify") return json(await verifyProject(store, project));
           if (sub === "status") return json(await buildProjectStatus(store, project));
           if (sub === "events") {

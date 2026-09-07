@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { Credential, Event, EventInput, EventStore, Share, appendEvent, buildExportBundle, generateSigningKey, pageHistoryNewest, schemaSurface } from "@retrace-dev/core";
+import { Credential, Event, EventInput, EventStore, Share, appendEvent, buildExportBundle, generateSigningKey, pageHistoryNewest, schemaSurface, signCanonical } from "@retrace-dev/core";
 import { attributionFinding, credentialAuthorization, doctorHistoryEvents, headDelivery, instructRootFinding, missingSchema, parseDoctorArgs, pinSessionFinding, remoteCaptureCoverage, sealedCommitEvent, sealedLooksAgent } from "./doctor.js";
 import { RemoteStore } from "./remote-store.js";
 
@@ -199,7 +199,15 @@ test("doctor capture coverage sees a HEAD seal after the signed cache without re
   globalThis.fetch = async (input) => {
     const url = String(input); calls.push(url);
     if (url.endsWith("/projects/p/export?cached=1")) return Response.json(cached);
-    if (url.endsWith("/projects/p/head")) return Response.json({ seq: 2, hash: store.events[2].hash });
+    if (url.endsWith("/projects/p/head?signed=1")) {
+      const signed_at = new Date().toISOString();
+      const payload = { project: "p", seq: 2, hash: store.events[2].hash, signed_at };
+      return Response.json({
+        ...payload,
+        issuer: { kid: issuer.kid, alg: "Ed25519", public_key: issuer.publicKey },
+        signature: await signCanonical(issuer.privateKey, payload),
+      });
+    }
     if (url.includes("/projects/p/events?")) return Response.json({ events: store.events.slice(1), truncated: false });
     if (url.includes("fresh=1")) return new Response("mock 503", { status: 503 });
     return new Response("not found", { status: 404 });
