@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   appendEvent, buildExportBundle, createHandler, generateSigningKey, verifyExportBundle,
-  refreshExportCache, exportBuilder, CachedExport, ExportCacheStore,
+  refreshExportCache, exportBuilder, CachedExport, ExportCacheStore, TornExportCacheError,
   EventStore, Event, EventInput, Share, pageHistoryNewest, verifyCanonical,
 } from "./index.js";
 
@@ -144,6 +144,36 @@ test("router: full export serves cached bytes (hit), labels stale, and ?fresh=1 
   const ordinaryAfterFailure = await broken(new Request("http://x/projects/p/export?token=" + encodeURIComponent(token)));
   assert.equal(ordinaryAfterFailure.status, 200);
   assert.equal(JSON.parse(await ordinaryAfterFailure.text()).chain.total_events, 3);
+
+  const tornCache: ExportCacheStore = {
+    async get() { throw new TornExportCacheError("p"); },
+    async put() {},
+  };
+  const torn = createHandler(store, { token, signingKey: key.privateKey, exportCache: tornCache });
+  const tornRead = await torn(new Request("http://x/projects/p/export?cached=1&token=" + encodeURIComponent(token)));
+  assert.equal(tornRead.status, 503);
+  assert.match((await tornRead.json()).error, /torn \(inconsistent chunks\)/);
+  const ordinaryAfterTorn = await torn(new Request("http://x/projects/p/export?token=" + encodeURIComponent(token)));
+  assert.equal(ordinaryAfterTorn.status, 200);
+  assert.equal(JSON.parse(await ordinaryAfterTorn.text()).chain.total_events, 3);
+
+  cache.entries.set("ghost", {
+    project: "ghost",
+    head_seq: 0,
+    head_hash: "a".repeat(64),
+    generated_at: "2026-09-07T00:00:00.000Z",
+    bundle_json: "{\"must\":\"not be served or rebuilt\"}",
+  });
+  let liveBuilds = 0;
+  const counting: EventStore = Object.create(store, {
+    all: { value: async (project: string) => { liveBuilds++; return store.all(project); } },
+  });
+  const noHead = createHandler(counting, { token, signingKey: key.privateKey, exportCache: cache });
+  const cachedNoHead = await noHead(new Request("http://x/projects/ghost/export?cached=1&token=" + encodeURIComponent(token)));
+  assert.equal(cachedNoHead.status, 404);
+  assert.equal(cachedNoHead.headers.get("x-retrace-export-cache"), "miss");
+  assert.match((await cachedNoHead.json()).error, /no live head/);
+  assert.equal(liveBuilds, 0, "cached=1 with no live head must not fall through to a live build");
 });
 
 test("router: signed head uses the export issuer key while plain head stays unchanged", async () => {

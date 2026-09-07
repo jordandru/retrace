@@ -321,6 +321,7 @@ test("remote events: cache unavailability throws without requesting a fresh expo
     for (const response of [
       new Response("export cache is not configured", { status: 503 }),
       new Response("export cache read failed: boom", { status: 503 }),
+      new Response(JSON.stringify({ error: 'export cache read failed: export cache for project "p" is torn (inconsistent chunks)' }), { status: 503, headers: { "content-type": "application/json" } }),
       new Response("not a confirmed cache miss", { status: 404 }),
     ]) {
       const calls: string[] = [];

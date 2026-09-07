@@ -29,6 +29,15 @@ export interface ExportCacheStore {
   put(entry: CachedExport): Promise<void>;
 }
 
+/** Absent cache is null; a torn/inconsistent chunk set must throw this instead of looking like a miss. */
+export class TornExportCacheError extends Error {
+  readonly torn = true as const;
+  constructor(project: string) {
+    super(`export cache for project "${project}" is torn (inconsistent chunks)`);
+    this.name = "TornExportCacheError";
+  }
+}
+
 export interface RefreshResult {
   project: string;
   action: "unchanged" | "refreshed" | "skipped" | "failed";

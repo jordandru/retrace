@@ -343,7 +343,15 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
       )
       : null;
     const head = await store.head(project);
-    if (!head) return null;
+    if (!head) {
+      return cacheOnly
+        ? json(
+          { error: `no live head for project "${project}"; a project with no head has nothing to serve` },
+          404,
+          { ...extra, "x-retrace-export-cache": "miss" },
+        )
+        : null;
+    }
     const hit = head.seq === cached.head_seq && head.hash === cached.head_hash;
     return new Response(cached.bundle_json, {
       status: 200,
