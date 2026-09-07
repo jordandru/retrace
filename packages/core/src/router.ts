@@ -320,10 +320,16 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
   const exportFor = async (scope: { project: string; artifact_id?: string }) => buildExportBundle(store, scope, { signingKey: opts.signingKey, issuerName: opts.issuerName, producers: await bundleProducers() });
   /** Fast path for full exports: serve the cron-precomputed signed JSON (see RouterOptions.exportCache). Returns
    *  null when there is no usable cache entry, and the caller falls through to the live build. */
-  const cachedExportResponse = async (project: string, fresh: boolean, extra?: Record<string, string>): Promise<Response | null> => {
+  const cachedExportResponse = async (project: string, fresh: boolean, cacheOnly: boolean, extra?: Record<string, string>): Promise<Response | null> => {
     if (fresh || !opts.exportCache) return null;
     const cached = await opts.exportCache.get(project).catch(() => null);
-    if (!cached) return null;
+    if (!cached) return cacheOnly
+      ? json(
+        { error: `no cached export for project "${project}"; retry with ?fresh=1 to build one live` },
+        404,
+        { ...extra, "x-retrace-export-cache": "miss" },
+      )
+      : null;
     const head = await store.head(project);
     if (!head) return null;
     const hit = head.seq === cached.head_seq && head.hash === cached.head_hash;
@@ -460,7 +466,7 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
         }
         if (sub === "export") {
           if (!share.artifact_id) {
-            const c = await cachedExportResponse(share.project, false, SHARE_CACHE);
+            const c = await cachedExportResponse(share.project, false, false, SHARE_CACHE);
             if (c) return c;
           }
           return cachedShare(cacheKey, async () => json(await exportFor({ project: share.project, artifact_id: share.artifact_id }), 200, SHARE_CACHE));
@@ -575,7 +581,11 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
           }
           if (sub === "export") {
             if (!q.artifact_id) {
-              const c = await cachedExportResponse(project, url.searchParams.get("fresh") === "1");
+              const c = await cachedExportResponse(
+                project,
+                url.searchParams.get("fresh") === "1",
+                url.searchParams.get("cached") === "1",
+              );
               if (c) return c;
             }
             return json(await exportFor({ project, artifact_id: q.artifact_id }));

@@ -101,6 +101,20 @@ test("router: full export serves cached bytes (hit), labels stale, and ?fresh=1 
   const staleVerdict = await verifyExportBundle(JSON.parse(cachedJson), key.publicKey);
   assert.equal(staleVerdict.coverage.complete, true, "stale bundle stays a complete export against its own claim");
 
+  // cache-only clients get an explicit miss; ordinary exports preserve the live fallback
+  const savedEntry = cache.entries.get("p")!;
+  cache.entries.delete("p");
+  const miss = await get("/projects/p/export?cached=1");
+  assert.equal(miss.status, 404);
+  assert.equal(miss.headers.get("x-retrace-export-cache"), "miss");
+  const ordinary = await get("/projects/p/export");
+  assert.equal(ordinary.status, 200);
+  assert.equal(JSON.parse(await ordinary.text()).chain.total_events, 3);
+  const liveAfterMiss = await get("/projects/p/export?fresh=1");
+  assert.equal(liveAfterMiss.status, 200);
+  assert.equal(JSON.parse(await liveAfterMiss.text()).chain.total_events, 3);
+  cache.entries.set("p", savedEntry);
+
   // share route uses the cache too
   await store.createShare({ id: "sh_test000000000000000000", project: "p", created_at: new Date().toISOString() });
   const shared = await handle(new Request("http://x/s/sh_test000000000000000000/export"));
