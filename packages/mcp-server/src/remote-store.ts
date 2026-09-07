@@ -1,6 +1,19 @@
 /** Remote store: talks to the Retrace Cloudflare Worker over HTTP. Set RETRACE_URL (+ RETRACE_TOKEN). */
 import { Event, EventStore, HistoryQuery, HistoryPage, VerifyResult, EventInput, Share, ExportBundle, ProjectStatus, asHistoryPage, collectHistory } from "@retrace-dev/core";
 
+export class RemoteApiError extends Error {
+  constructor(
+    public readonly method: string,
+    public readonly path: string,
+    public readonly status: number,
+    public readonly headers: Headers,
+    detail: string,
+  ) {
+    super(`Retrace API ${method} ${path} → ${status}: ${detail}`);
+    this.name = "RemoteApiError";
+  }
+}
+
 /** Consistent headers for CLI-originated requests, including runtimes that require an explicit user agent. */
 export function retraceHeaders(token?: string): Record<string, string> {
   return {
@@ -21,7 +34,7 @@ export class RemoteStore implements EventStore {
       headers: retraceHeaders(this.token),
       body: body ? JSON.stringify(body) : undefined,
     });
-    if (!res.ok) throw new Error(`Retrace API ${method} ${path} → ${res.status}: ${await res.text()}`);
+    if (!res.ok) throw new RemoteApiError(method, path, res.status, new Headers(res.headers), await res.text());
     return (await res.json()) as T;
   }
   /** Remote appends server-side (chain sealing must happen where the head lives). */
@@ -40,15 +53,28 @@ export class RemoteStore implements EventStore {
   async share(body: { project: string; artifact_id?: string; label?: string; expires_in_days?: number }) {
     return this.req<{ share: Share; url: string }>("POST", `/projects/${encodeURIComponent(body.project)}/share`, body);
   }
-  /** `fresh` bypasses the Worker's cron-precomputed full-export cache (`?fresh=1`, router.ts). The cache is a signed
-   *  export as of its own hourly build, so a consumer that compares the ledger against something newer than that
-   *  build — reconcile walking commits pushed minutes ago — must ask for the live build or it reports false gaps. */
-  async export(scope: { project: string; artifact_id?: string }, opts: { fresh?: boolean } = {}) {
-    const p = new URLSearchParams(); if (scope.artifact_id) p.set("artifact_id", scope.artifact_id); if (opts.fresh) p.set("fresh", "1");
+  /** `cached` requests only the cron-precomputed signed full export and reports a miss instead of building live.
+   *  `fresh` explicitly requests the O(n) live rebuild. Reconcile/doctor use cached + head + history tail, reserving
+   *  fresh for projects that have no cached bundle yet. */
+  async export(scope: { project: string; artifact_id?: string }, opts: { fresh?: boolean; cached?: boolean } = {}) {
+    const p = new URLSearchParams();
+    if (scope.artifact_id) p.set("artifact_id", scope.artifact_id);
+    if (opts.fresh) p.set("fresh", "1");
+    if (opts.cached) p.set("cached", "1");
     return this.req<ExportBundle>("GET", `/projects/${encodeURIComponent(scope.project)}/export?${p}`);
   }
   async head(project: string) {
     return this.req<{ seq: number; hash: string } | null>("GET", `/projects/${encodeURIComponent(project)}/head`);
+  }
+  async signedHead(project: string) {
+    return this.req<{
+      project: string;
+      seq: number;
+      hash: string;
+      signed_at: string;
+      issuer: { kid: string; alg: "Ed25519"; public_key: JsonWebKey };
+      signature: string;
+    } | null>("GET", `/projects/${encodeURIComponent(project)}/head?signed=1`);
   }
   async insert(): Promise<void> {
     throw new Error("RemoteStore.insert is not supported; use append()");

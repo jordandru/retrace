@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { sealEvent, verifyChain, canonicalize, computeHash, hashPayload, hashRule, HASH_VERSION, sha256Hex, EventInput, Event, GENESIS_HASH, defaultArtifactRole, applyDefaultRoles, Action } from "./index.js";
+import { sealEvent, verifyChain, verifyChainTail, canonicalize, computeHash, hashPayload, hashRule, HASH_VERSION, sha256Hex, EventInput, Event, GENESIS_HASH, defaultArtifactRole, applyDefaultRoles, Action } from "./index.js";
 
 const base = (over: Partial<EventInput> = {}): EventInput => ({
   project: "test",
@@ -43,6 +43,38 @@ test("deleting a middle event breaks the chain", async () => {
   const r = await verifyChain([e0, e2]);
   assert.equal(r.ok, false);
   assert.equal(r.first_bad_seq, 2);
+});
+
+test("verifyChainTail accepts empty, one-event, and multi-event v2 tails", async () => {
+  const cached = await sealEvent(base(), null);
+  const e1 = await sealEvent(base(), { seq: cached.seq, hash: cached.hash });
+  const e2 = await sealEvent(base(), { seq: e1.seq, hash: e1.hash });
+  assert.deepEqual(await verifyChainTail(cached, []), { ok: true, checked: 0, legacy_events: 0 });
+  assert.deepEqual(await verifyChainTail(cached, [e1]), { ok: true, checked: 1, legacy_events: 0 });
+  assert.deepEqual(await verifyChainTail(cached, [e1, e2]), { ok: true, checked: 2, legacy_events: 0 });
+});
+
+test("verifyChainTail fails closed on a wrong anchor, gap, bad hash, or non-v2 event", async () => {
+  const cached = await sealEvent(base(), null);
+  const e1 = await sealEvent(base(), { seq: cached.seq, hash: cached.hash });
+  const e2 = await sealEvent(base(), { seq: e1.seq, hash: e1.hash });
+
+  const wrongAnchor = await verifyChainTail({ seq: cached.seq, hash: "f".repeat(64) }, [e1]);
+  assert.equal(wrongAnchor.ok, false);
+  assert.match(wrongAnchor.reason!, /prev_hash/);
+
+  const gap = await verifyChainTail(cached, [e2]);
+  assert.equal(gap.ok, false);
+  assert.match(gap.reason!, /sequence gap/);
+
+  const badHash = await verifyChainTail(cached, [{ ...e1, intent: "tampered" }]);
+  assert.equal(badHash.ok, false);
+  assert.match(badHash.reason!, /content hash/);
+
+  const { hash_v: _hashV, ...legacy } = e1;
+  const missingV2 = await verifyChainTail(cached, [legacy as Event]);
+  assert.equal(missingV2.ok, false);
+  assert.match(missingV2.reason!, /hash_v 2/);
 });
 
 // ---- artifact role (PROV used / generated) ----

@@ -1,7 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { generateSigningKey, appendEvent, buildExportBundle, EventStore, Event, Share, EventInput, pageHistoryNewest } from "@retrace-dev/core";
+import {
+  generateSigningKey, appendEvent, buildExportBundle, EventStore, Event, Share, EventInput,
+  pageHistoryNewest, keyId, publicFromPrivate, signCanonical,
+} from "@retrace-dev/core";
 import { parseNameStatus, verifiedExportEvents } from "./reconcile.js";
+import { fetchVerifiedRemoteEvents, historyTail } from "./verified-events.js";
+import { RemoteStore } from "./remote-store.js";
 
 class MemStore implements EventStore {
   events: Event[] = []; shares = new Map<string, Share>();
@@ -16,6 +21,21 @@ class MemStore implements EventStore {
   async getShare(id: string) { return this.shares.get(id) ?? null; }
 }
 const ev = (): EventInput => ({ project: "p", actor: { type: "agent", id: "claude-code" }, action: "edited", artifacts: [{ id: "repo:p#a.ts" }] });
+async function signedHead(
+  privateKey: JsonWebKey,
+  head: { seq: number; hash: string },
+  options: { project?: string; signedAt?: string; publicKey?: JsonWebKey } = {},
+) {
+  const project = options.project ?? "p";
+  const signed_at = options.signedAt ?? new Date().toISOString();
+  const payload = { project, seq: head.seq, hash: head.hash, signed_at };
+  const publicKey = options.publicKey ?? publicFromPrivate(privateKey);
+  return {
+    ...payload,
+    issuer: { kid: await keyId(publicKey), alg: "Ed25519", public_key: publicKey },
+    signature: await signCanonical(privateKey, payload),
+  };
+}
 
 test("parseNameStatus: modify, add, delete, rename with source", () => {
   assert.deepEqual(parseNameStatus("M\ta.ts\nA\tb.ts\nD\tc.ts\nR095\told.ts\tnew.ts\nC100\tsrc.ts\tdst.ts\n"), [
@@ -45,6 +65,236 @@ test("verifiedExportEvents fails closed: no trusted key, wrong key, tampered eve
   await assert.rejects(() => verifiedExportEvents(unsigned, flag), /does not verify/);
 });
 
+test("remote events: signed cache is extended by a chain-verified HTTP tail without trying fresh export", async () => {
+  const store = new MemStore();
+  await appendEvent(store, ev());
+  const issuer = await generateSigningKey();
+  const cached = await buildExportBundle(store, { project: "p" }, { signingKey: issuer.privateKey, issuerName: "test" });
+  await appendEvent(store, ev());
+  await appendEvent(store, ev());
+  const tail = store.events.slice(1);
+  const calls: string[] = [];
+  const savedFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = String(input); calls.push(url);
+    if (url.endsWith("/projects/p/export?cached=1")) return Response.json(cached);
+    if (url.endsWith("/projects/p/head?signed=1")) return Response.json(await signedHead(issuer.privateKey, { seq: 2, hash: tail[1].hash }));
+    if (url.includes("/projects/p/events?")) return Response.json({ events: tail, truncated: false });
+    if (url.includes("fresh=1")) return new Response("mock live rebuild unavailable", { status: 503 });
+    return new Response("not found", { status: 404 });
+  };
+  try {
+    const got = await fetchVerifiedRemoteEvents(new RemoteStore("https://mock.test"), "p", JSON.stringify(issuer.publicKey));
+    assert.deepEqual(got.events.map((e) => e.seq), [0, 1, 2]);
+    assert.match(got.note, /signed cache through #0; chain-verified tail #1\.\.#2/);
+    assert.equal(calls.some((url) => url.includes("fresh=1")), false);
+  } finally { globalThis.fetch = savedFetch; }
+});
+
+test("remote events: newest-window history pages are walked backward and reassembled ascending", async () => {
+  const store = new MemStore();
+  await appendEvent(store, ev());
+  const issuer = await generateSigningKey();
+  const cached = await buildExportBundle(store, { project: "p" }, { signingKey: issuer.privateKey, issuerName: "test" });
+  await appendEvent(store, ev());
+  await appendEvent(store, ev());
+  await appendEvent(store, ev());
+  const calls: string[] = [];
+  const savedFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = new URL(String(input)); calls.push(url.toString());
+    if (url.pathname === "/projects/p/export" && url.searchParams.get("cached") === "1") return Response.json(cached);
+    if (url.pathname === "/projects/p/head" && url.searchParams.get("signed") === "1") {
+      return Response.json(await signedHead(issuer.privateKey, { seq: 3, hash: store.events[3].hash }));
+    }
+    if (url.pathname === "/projects/p/events" && !url.searchParams.has("before_seq")) {
+      return Response.json({ events: [store.events[2], store.events[3]], truncated: true, next_before_seq: 2 });
+    }
+    if (url.pathname === "/projects/p/events" && url.searchParams.get("before_seq") === "2") {
+      return Response.json({ events: [store.events[1]], truncated: false });
+    }
+    return new Response("not found", { status: 404 });
+  };
+  try {
+    const got = await fetchVerifiedRemoteEvents(new RemoteStore("https://mock.test"), "p", JSON.stringify(issuer.publicKey));
+    assert.deepEqual(got.events.map((event) => event.seq), [0, 1, 2, 3]);
+    assert.equal(calls.filter((url) => url.includes("/events?")).length, 2);
+  } finally { globalThis.fetch = savedFetch; }
+});
+
+test("remote events: a tail gap fails closed without cache-only success or fresh retry", async () => {
+  const store = new MemStore();
+  await appendEvent(store, ev());
+  const issuer = await generateSigningKey();
+  const cached = await buildExportBundle(store, { project: "p" }, { signingKey: issuer.privateKey, issuerName: "test" });
+  await appendEvent(store, ev());
+  await appendEvent(store, ev());
+  const calls: string[] = [];
+  const savedFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = String(input); calls.push(url);
+    if (url.endsWith("/projects/p/export?cached=1")) return Response.json(cached);
+    if (url.endsWith("/projects/p/head?signed=1")) return Response.json(await signedHead(issuer.privateKey, { seq: 2, hash: store.events[2].hash }));
+    if (url.includes("/projects/p/events?")) return Response.json({ events: [store.events[2]], truncated: false });
+    if (url.includes("fresh=1")) return new Response("must not retry", { status: 503 });
+    return new Response("not found", { status: 404 });
+  };
+  try {
+    await assert.rejects(
+      () => fetchVerifiedRemoteEvents(new RemoteStore("https://mock.test"), "p", JSON.stringify(issuer.publicKey)),
+      /sequence gap/,
+    );
+    assert.equal(calls.some((url) => url.includes("fresh=1")), false);
+
+    globalThis.fetch = async (input) => {
+      const url = String(input); calls.push(url);
+      if (url.endsWith("/projects/p/export?cached=1")) return Response.json(cached);
+      if (url.endsWith("/projects/p/head?signed=1")) return Response.json(await signedHead(issuer.privateKey, { seq: 2, hash: store.events[2].hash }));
+      if (url.includes("/projects/p/events?")) {
+        return Response.json({ events: [{ ...store.events[1], intent: "tampered" }, store.events[2]], truncated: false });
+      }
+      if (url.includes("fresh=1")) return new Response("must not retry", { status: 503 });
+      return new Response("not found", { status: 404 });
+    };
+    await assert.rejects(
+      () => fetchVerifiedRemoteEvents(new RemoteStore("https://mock.test"), "p", JSON.stringify(issuer.publicKey)),
+      /content hash mismatch/,
+    );
+    assert.equal(calls.some((url) => url.includes("fresh=1")), false);
+  } finally { globalThis.fetch = savedFetch; }
+});
+
+test("remote events: live-behind and equal-seq hash disagreement fail closed", async () => {
+  const store = new MemStore();
+  await appendEvent(store, ev());
+  await appendEvent(store, ev());
+  const issuer = await generateSigningKey();
+  const cached = await buildExportBundle(store, { project: "p" }, { signingKey: issuer.privateKey, issuerName: "test" });
+  const savedFetch = globalThis.fetch;
+  try {
+    for (const head of [{ seq: 0, hash: store.events[0].hash }, { seq: 1, hash: "f".repeat(64) }]) {
+      globalThis.fetch = async (input) => {
+        const url = String(input);
+        if (url.endsWith("/projects/p/export?cached=1")) return Response.json(cached);
+        if (url.endsWith("/projects/p/head?signed=1")) return Response.json(await signedHead(issuer.privateKey, head));
+        return new Response("not found", { status: 404 });
+      };
+      await assert.rejects(
+        () => fetchVerifiedRemoteEvents(new RemoteStore("https://mock.test"), "p", JSON.stringify(issuer.publicKey)),
+        head.seq === 0 ? /behind signed cache/ : /hash disagrees/,
+      );
+    }
+  } finally { globalThis.fetch = savedFetch; }
+});
+
+test("remote events: only a cache miss requests fresh, whose mocked 503 fails closed", async () => {
+  const calls: string[] = [];
+  const savedFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = String(input); calls.push(url);
+    if (url.endsWith("/projects/p/export?cached=1")) return new Response("no cached export", { status: 404, headers: { "x-retrace-export-cache": "miss" } });
+    if (url.includes("fresh=1")) return new Response("mock live rebuild unavailable", { status: 503 });
+    return new Response("not found", { status: 404 });
+  };
+  try {
+    await assert.rejects(
+      () => fetchVerifiedRemoteEvents(new RemoteStore("https://mock.test"), "p", "{}"),
+      /503/,
+    );
+    assert.equal(calls.filter((url) => url.includes("/export")).length, 2);
+    assert.equal(calls.some((url) => url.includes("fresh=1")), true);
+  } finally { globalThis.fetch = savedFetch; }
+});
+
+test("remote events: forged unsigned, wrong-key, and stale signed heads fail closed without a fresh retry", async () => {
+  const store = new MemStore();
+  await appendEvent(store, ev());
+  const issuer = await generateSigningKey();
+  const impostor = await generateSigningKey();
+  const cached = await buildExportBundle(store, { project: "p" }, { signingKey: issuer.privateKey, issuerName: "test" });
+  await appendEvent(store, ev());
+  const forgedTail = [{ ...store.events[1] }];
+  const cases = [
+    {
+      name: "unsigned",
+      head: { seq: 1, hash: forgedTail[0].hash },
+      pattern: /malformed or unsigned/,
+    },
+    {
+      name: "wrong key",
+      head: await signedHead(impostor.privateKey, { seq: 1, hash: forgedTail[0].hash }),
+      pattern: /does not match trusted key/,
+    },
+    {
+      name: "stale",
+      head: await signedHead(issuer.privateKey, { seq: 1, hash: forgedTail[0].hash }, { signedAt: "2026-09-01T00:00:00.000Z" }),
+      pattern: /is stale/,
+    },
+  ];
+  const savedFetch = globalThis.fetch;
+  try {
+    for (const scenario of cases) {
+      const calls: string[] = [];
+      globalThis.fetch = async (input) => {
+        const url = String(input); calls.push(url);
+        if (url.endsWith("/projects/p/export?cached=1")) return Response.json(cached);
+        if (url.endsWith("/projects/p/head?signed=1")) return Response.json(scenario.head);
+        if (url.includes("/projects/p/events?")) return Response.json({ events: forgedTail, truncated: false });
+        if (url.includes("fresh=1")) return new Response("must not retry", { status: 503 });
+        return new Response("not found", { status: 404 });
+      };
+      await assert.rejects(
+        () => fetchVerifiedRemoteEvents(new RemoteStore("https://mock.test"), "p", JSON.stringify(issuer.publicKey)),
+        scenario.pattern,
+        scenario.name,
+      );
+      assert.equal(calls.some((url) => url.includes("/events?")), false, scenario.name);
+      assert.equal(calls.some((url) => url.includes("fresh=1")), false, scenario.name);
+    }
+  } finally { globalThis.fetch = savedFetch; }
+});
+
+test("history tail: a one-event suffix on a 100,001-event ledger requests and receives exactly one event", async () => {
+  const ledgerSize = 100_001;
+  const event = { seq: ledgerSize - 1 } as Event;
+  const requests: URL[] = [];
+  const savedFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = new URL(String(input)); requests.push(url);
+    return Response.json({ events: [event], truncated: false });
+  };
+  try {
+    const tail = await historyTail(new RemoteStore("https://mock.test"), "p", ledgerSize - 2, ledgerSize - 1);
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].searchParams.get("limit"), "1");
+    assert.deepEqual(tail, [event]);
+  } finally { globalThis.fetch = savedFetch; }
+});
+
+test("remote events: cache unavailability throws without requesting a fresh export", async () => {
+  const savedFetch = globalThis.fetch;
+  try {
+    for (const response of [
+      new Response("export cache is not configured", { status: 503 }),
+      new Response("export cache read failed: boom", { status: 503 }),
+      new Response("not a confirmed cache miss", { status: 404 }),
+    ]) {
+      const calls: string[] = [];
+      globalThis.fetch = async (input) => {
+        const url = String(input); calls.push(url);
+        if (url.endsWith("/projects/p/export?cached=1")) return response.clone();
+        if (url.includes("fresh=1")) return new Response("must not retry", { status: 500 });
+        return new Response("not found", { status: 404 });
+      };
+      await assert.rejects(
+        () => fetchVerifiedRemoteEvents(new RemoteStore("https://mock.test"), "p", "{}"),
+        /404|503/,
+      );
+      assert.equal(calls.some((url) => url.includes("fresh=1")), false);
+    }
+  } finally { globalThis.fetch = savedFetch; }
+});
+
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -58,6 +308,90 @@ function tempRepo(): { repo: string; g: (...a: string[]) => string; write: (f: s
   g("init", "-q", "-b", "main");
   return { repo, g, write: (f, c) => writeFileSync(join(repo, f), c) };
 }
+
+async function remoteTail(
+  cached: Awaited<ReturnType<typeof buildExportBundle>>,
+  events: Event[],
+  issuer: { privateKey: JsonWebKey; publicKey: JsonWebKey },
+): Promise<{ events: Event[]; calls: string[] }> {
+  const calls: string[] = [];
+  const savedFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = String(input); calls.push(url);
+    if (url.endsWith("/projects/p/export?cached=1")) return Response.json(cached);
+    if (url.endsWith("/projects/p/head?signed=1")) {
+      const head = events.at(-1)!;
+      return Response.json(await signedHead(issuer.privateKey, { seq: head.seq, hash: head.hash }));
+    }
+    if (url.includes("/projects/p/events?")) {
+      return Response.json({ events: events.slice(cached.chain.total_events), truncated: false });
+    }
+    if (url.includes("fresh=1")) return new Response("mock live rebuild unavailable", { status: 503 });
+    return new Response("not found", { status: 404 });
+  };
+  try {
+    const result = await fetchVerifiedRemoteEvents(new RemoteStore("https://mock.test"), "p", JSON.stringify(issuer.publicKey));
+    return { events: result.events, calls };
+  } finally { globalThis.fetch = savedFetch; }
+}
+
+test("remote tail: a seal after the signed cache prevents a false missing_commit without a live export", async () => {
+  const repo = tempRepo();
+  repo.write("a.ts", "one\n"); repo.g("add", "a.ts"); repo.g("commit", "-q", "-m", "one");
+  const sha = repo.g("rev-parse", "HEAD");
+  const store = new MemStore();
+  await appendEvent(store, {
+    project: "p", actor: { type: "agent", id: "github-copilot" }, action: "edited",
+    artifacts: [{ id: "repo:o/r#a.ts" }],
+  });
+  const issuer = await generateSigningKey();
+  const cached = await buildExportBundle(store, { project: "p" }, { signingKey: issuer.privateKey, issuerName: "test" });
+  await appendEvent(store, {
+    project: "p", actor: { type: "agent", id: "github-copilot" }, action: "committed",
+    artifacts: [{ id: `commit:o/r@${sha.slice(0, 12)}`, kind: "commit" }, { id: "repo:o/r#a.ts" }],
+    method: { tool: "git", params: { sealed_by: "assert:retrace-git" } },
+  });
+
+  const remote = await remoteTail(cached, store.events, issuer);
+  const report = reconcileWithGit(repo.repo, [commitFacts(repo.repo, "HEAD")], remote.events, {
+    repoName: "o/r", hookSealedBy: ["assert:retrace-git"], allowUnstampedSeals: true,
+  });
+  assert.equal(report.commits[0].findings.some((finding) => finding.kind === "missing_commit"), false);
+  assert.equal(remote.calls.some((url) => url.includes("fresh=1")), false);
+});
+
+test("remote tail: a correction after the signed cache acknowledges the live finding", async () => {
+  const repo = tempRepo();
+  repo.write("a.ts", "one\n"); repo.g("add", "a.ts"); repo.g("commit", "-q", "-m", "one");
+  const sha = repo.g("rev-parse", "HEAD");
+  const commitId = `commit:o/r@${sha.slice(0, 12)}`;
+  const store = new MemStore();
+  await appendEvent(store, {
+    project: "p", actor: { type: "agent", id: "claude-code" }, action: "edited",
+    artifacts: [{ id: "repo:o/r#a.ts" }],
+  });
+  await appendEvent(store, {
+    project: "p", actor: { type: "agent", id: "github-copilot" }, action: "committed",
+    artifacts: [{ id: commitId, kind: "commit" }, { id: "repo:o/r#a.ts" }],
+    method: { tool: "git", params: { sealed_by: "assert:retrace-git" } },
+  });
+  const issuer = await generateSigningKey();
+  const cached = await buildExportBundle(store, { project: "p" }, { signingKey: issuer.privateKey, issuerName: "test" });
+  await appendEvent(store, {
+    project: "p", actor: { type: "human", id: "reviewer@example.com" }, action: "other",
+    action_detail: "attributed", tags: ["correction"], artifacts: [{ id: commitId, kind: "commit" }],
+  });
+
+  const remote = await remoteTail(cached, store.events, issuer);
+  const report = reconcileWithGit(repo.repo, [commitFacts(repo.repo, "HEAD")], remote.events, {
+    repoName: "o/r", hookSealedBy: ["assert:retrace-git"],
+  });
+  const finding = report.commits[0].findings.find((item) => item.kind === "misattributed");
+  assert.equal(finding?.level, "info");
+  assert.equal(finding?.acknowledged?.seq, 2);
+  assert.equal(report.ok, true);
+  assert.equal(remote.calls.some((url) => url.includes("fresh=1")), false);
+});
 
 test("unreachableSeals: ref reachability with a horizon — an amended original that still exists as an object IS unreachable; history older than the checkout is NOT", () => {
   const { repo, g, write } = tempRepo();

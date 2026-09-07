@@ -8,26 +8,14 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
-import { CommitFacts, CommitFile, CommitFileStatus, Event, ExportBundle, ReconcileLevel, ReconcileOptions, ReconcileReport, exportVerdictOk, reconcile, renderReconcileReport, verifyExportBundle } from "@retrace-dev/core";
-import { resolveTrustedKey } from "./trusted-key.js";
+import { CommitFacts, CommitFile, CommitFileStatus, Event, ReconcileLevel, ReconcileOptions, ReconcileReport, reconcile, renderReconcileReport } from "@retrace-dev/core";
 import { Cfg, remoteName } from "./git-hook.js";
 import { makeStore } from "./index.js";
 import { RemoteStore } from "./remote-store.js";
+import { fetchVerifiedRemoteEvents, verifiedExportEvents } from "./verified-events.js";
 
 export type ReconcileCfg = Cfg & { reconcile?: { uncovered?: ReconcileLevel; ack_actors?: string[]; /** exact `assert:<credential name>` stamps of this repo's git hook credential */ hook_sealed_by?: string[]; owner_seals?: boolean; dual_witness?: "fail" | "warn" } };
-
-/**
- * Events from a remote export are used only after the bundle verifies as a complete full export signed by the TRUSTED
- * issuer key (never the key the bundle carries). A broken chain, an unsigned or self-attested bundle, or an incomplete
- * export throws — reconcile must not say OK on data it cannot vouch for (Codex review of 48d7914, P1).
- */
-export async function verifiedExportEvents(bundle: ExportBundle, pubkeyFlag?: unknown, baseUrl?: string): Promise<{ events: Event[]; note: string }> {
-  const trusted = await resolveTrustedKey(pubkeyFlag, baseUrl);
-  if (!trusted) throw new Error("no trusted issuer key: pass --pubkey <jwk.json|https-url>, set RETRACE_PUBKEY, or set RETRACE_URL to an https Retrace server (its /.well-known/retrace-pubkey is used)");
-  const v = await verifyExportBundle(bundle, trusted.key);
-  if (!exportVerdictOk(v)) throw new Error(`refusing to reconcile against an export that does not verify (signature ${v.signature}, events intact ${v.events_intact}, chain ${v.chain_ok_at_export}, coverage ${v.coverage.complete})${v.problems.length ? ": " + v.problems.join("; ") : ""}`);
-  return { events: bundle.events, note: `${bundle.events.length} events from a full export verified against ${trusted.from} (kid ${v.kid})` };
-}
+export { verifiedExportEvents } from "./verified-events.js";
 
 const git = (repo: string, args: string[]) => execFileSync("git", ["-C", repo, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 
@@ -107,24 +95,7 @@ export function readRepoConfig(repo: string): ReconcileCfg {
 async function fetchEvents(project: string, pubkeyFlag?: unknown): Promise<{ events: Event[]; note: string }> {
   const store = makeStore();
   if (store instanceof RemoteStore) {
-    // Live build first: reconcile judges commits against the ledger as of NOW, and the hourly cache stops at its build
-    // time — a commit pushed after it is a false `missing_commit`, a correction sealed after it an acknowledgement
-    // reconcile cannot see (2026-09-06: seq 1942 acked 15c44f4 while the cache stopped at 1933). The live build is the
-    // Worker's CPU-heaviest request and 503s (Cloudflare 1102) at this ledger size, so fall back to the cached bundle
-    // and SAY SO in the note, with the live head, rather than fail the run or pretend the view is current.
-    try { return await verifiedExportEvents(await store.export({ project }, { fresh: true }), pubkeyFlag); }
-    catch (e: any) {
-      if (!/→ 5\d\d\b/.test(String(e?.message))) throw e;
-      const cached = await store.export({ project });
-      const r = await verifiedExportEvents(cached, pubkeyFlag);
-      const cachedHead = (cached.chain?.total_events ?? 0) - 1;
-      const live = await store.head(project).catch(() => null);
-      const behind = live && live.seq > cachedHead
-        ? `; LIVE HEAD IS #${live.seq} — seals and corrections after #${cachedHead} are not in this view, so a commit sealed after it is reported missing here`
-        : "";
-      const reason = String(e?.message ?? e).split("\n")[0].replace(/:\s*\{.*$/, "").slice(0, 140);
-      return { events: r.events, note: `${r.note}; live export unavailable (${reason}), reconciled against the cached bundle through #${cachedHead}${behind}` };
-    }
+    return fetchVerifiedRemoteEvents(store, project, pubkeyFlag);
   }
   const events = await store.all(project);
   return { events, note: `${events.length} events from the local store` };

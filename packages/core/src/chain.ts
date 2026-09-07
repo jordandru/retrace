@@ -116,3 +116,28 @@ export async function verifyChain(events: Event[]): Promise<VerifyResult> {
   }
   return { ok: true, checked: expectedSeq, legacy_events: legacy };
 }
+
+/** Verify a v2-only chain suffix anchored to an already verified cached head. */
+export async function verifyChainTail(cachedHead: { seq: number; hash: string }, tail: Event[]): Promise<VerifyResult> {
+  let prevHash = cachedHead.hash;
+  let expectedSeq = cachedHead.seq + 1;
+  let checked = 0;
+  for (const e of tail) {
+    if (e.hash_v !== HASH_VERSION) {
+      return { ok: false, checked, first_bad_seq: e.seq, reason: `tail event #${e.seq} must use hash_v 2` };
+    }
+    if (e.seq !== expectedSeq) {
+      return { ok: false, checked, first_bad_seq: e.seq, reason: `sequence gap: expected ${expectedSeq}, got ${e.seq}` };
+    }
+    if (e.prev_hash !== prevHash) {
+      return { ok: false, checked, first_bad_seq: e.seq, reason: "prev_hash mismatch (chain broken)" };
+    }
+    if (await computeHash(e) !== e.hash) {
+      return { ok: false, checked, first_bad_seq: e.seq, reason: "content hash mismatch (event tampered)" };
+    }
+    prevHash = e.hash;
+    expectedSeq++;
+    checked++;
+  }
+  return { ok: true, checked, legacy_events: 0 };
+}

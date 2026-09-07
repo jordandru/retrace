@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { Credential, Event, schemaSurface } from "@retrace-dev/core";
-import { attributionFinding, credentialAuthorization, doctorHistoryEvents, headDelivery, instructRootFinding, missingSchema, parseDoctorArgs, pinSessionFinding, sealedCommitEvent, sealedLooksAgent } from "./doctor.js";
+import { Credential, Event, EventInput, EventStore, Share, appendEvent, buildExportBundle, generateSigningKey, pageHistoryNewest, schemaSurface, signCanonical } from "@retrace-dev/core";
+import { attributionFinding, credentialAuthorization, doctorHistoryEvents, headDelivery, instructRootFinding, missingSchema, parseDoctorArgs, pinSessionFinding, remoteCaptureCoverage, sealedCommitEvent, sealedLooksAgent } from "./doctor.js";
+import { RemoteStore } from "./remote-store.js";
 
 const why = (rows: Array<{ id: string; action: Event["action"]; type: Event["actor"]["type"]; caused_by?: string }>): Event[] =>
   rows.map((r, seq) => ({
@@ -156,6 +157,76 @@ test("captureCoverageFinding: worst unacknowledged level wins; acknowledged and 
   assert.equal(captureCoverageFinding({ ...base([]), commits: [] }).level, "fail");
 });
 
+class DoctorMemStore implements EventStore {
+  events: Event[] = [];
+  async head(project: string) { const event = this.events.filter((item) => item.project === project).at(-1); return event ? { seq: event.seq, hash: event.hash } : null; }
+  async insert(event: Event) { this.events.push(event); }
+  async byIdempotencyKey() { return null; }
+  async get(id: string) { return this.events.find((event) => event.id === id) ?? null; }
+  async history(query: any) { return pageHistoryNewest(this.events, query); }
+  async all(project: string) { return this.events.filter((event) => event.project === project); }
+  async projects() { return ["p"]; }
+  async createShare(_share: Share) {}
+  async getShare() { return null; }
+}
+
+test("doctor capture coverage sees a HEAD seal after the signed cache without requesting fresh export", async () => {
+  const repo = mkTemp(joinP(tmpD(), "retrace-doctor-tail-"));
+  const env = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@x", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@x" };
+  const g = (...args: string[]) => execGit("git", ["-C", repo, ...args], { encoding: "utf8", env, stdio: ["ignore", "pipe", "pipe"] }).trim();
+  g("init", "-q", "-b", "main"); writeF(joinP(repo, "a.ts"), "one\n"); g("add", "a.ts"); g("commit", "-q", "-m", "one");
+  const sha = g("rev-parse", "HEAD");
+  const store = new DoctorMemStore();
+  const edit: EventInput = {
+    project: "p", actor: { type: "agent", id: "github-copilot" }, action: "edited",
+    artifacts: [{ id: "repo:o/r#a.ts" }],
+  };
+  await appendEvent(store, edit);
+  const issuer = await generateSigningKey();
+  const cached = await buildExportBundle(store, { project: "p" }, { signingKey: issuer.privateKey, issuerName: "test" });
+  await appendEvent(store, {
+    project: "p", actor: { type: "agent", id: "github-copilot" }, action: "committed",
+    artifacts: [{ id: `commit:o/r@${sha.slice(0, 12)}`, kind: "commit" }, { id: "repo:o/r#a.ts" }],
+    method: { tool: "git", params: { sealed_by: "assert:retrace-git" } },
+  });
+  await appendEvent(store, {
+    project: "p", actor: { type: "agent", id: "github-copilot" }, action: "committed", tags: ["push"],
+    artifacts: [{ id: `commit:o/r@${sha.slice(0, 12)}`, kind: "commit" }, { id: "repo:o/r#a.ts" }],
+    method: { tool: "github-webhook", params: { sealed_by: "webhook:github" } },
+  });
+  const savedFetch = globalThis.fetch;
+  const calls: string[] = [];
+  globalThis.fetch = async (input) => {
+    const url = String(input); calls.push(url);
+    if (url.endsWith("/projects/p/export?cached=1")) return Response.json(cached);
+    if (url.endsWith("/projects/p/head?signed=1")) {
+      const signed_at = new Date().toISOString();
+      const payload = { project: "p", seq: 2, hash: store.events[2].hash, signed_at };
+      return Response.json({
+        ...payload,
+        issuer: { kid: issuer.kid, alg: "Ed25519", public_key: issuer.publicKey },
+        signature: await signCanonical(issuer.privateKey, payload),
+      });
+    }
+    if (url.includes("/projects/p/events?")) return Response.json({ events: store.events.slice(1), truncated: false });
+    if (url.includes("fresh=1")) return new Response("mock 503", { status: 503 });
+    return new Response("not found", { status: 404 });
+  };
+  try {
+    const finding = await remoteCaptureCoverage(
+      repo,
+      "p",
+      new RemoteStore("https://mock.test"),
+      { repoName: "o/r", reconcile: { hook_sealed_by: ["assert:retrace-git"] } },
+      { gate: true, local: false },
+      JSON.stringify(issuer.publicKey),
+    );
+    assert.equal(finding.level, "pass", finding.detail);
+    assert.match(finding.detail, /signed cache through #0; chain-verified tail #1\.\.#2/);
+    assert.equal(calls.some((url) => url.includes("fresh=1")), false);
+  } finally { globalThis.fetch = savedFetch; }
+});
+
 import { gateDualWitness, parseDoctorArgs as parseArgs2 } from "./doctor.js";
 import { execFileSync as execGit } from "node:child_process";
 import { mkdtempSync as mkTemp, writeFileSync as writeF } from "node:fs";
@@ -181,17 +252,4 @@ test("gate dual witness never infers leniency from the ref layout: a detached, p
   assert.throws(() => gateDualWitness({ gate: true, local: true }, { CI: "1" }), /not allowed under CI/);
   assert.equal(parseArgs2(["doctor", "--gate", "--local"]).local, true);
   assert.equal(parseArgs2(["doctor", "--gate"]).local, false);
-});
-
-import { exportReachesSeal } from "./doctor.js";
-
-test("gate export: a cached bundle is accepted only when it already reaches the newest seal of HEAD", () => {
-  // cron bundle built at head #1905 (1906 events); HEAD sealed at #1895 (inside) vs #1907 (pushed after the build)
-  assert.equal(exportReachesSeal({ chain: { total_events: 1906 } }, 1895), true);
-  assert.equal(exportReachesSeal({ chain: { total_events: 1906 } }, 1905), true);
-  assert.equal(exportReachesSeal({ chain: { total_events: 1906 } }, 1906), false);
-  assert.equal(exportReachesSeal({ chain: { total_events: 1906 } }, 1907), false);
-  // no declared size, or no seal seq at all → never trust the cache
-  assert.equal(exportReachesSeal({}, 0), false);
-  assert.equal(exportReachesSeal({ chain: { total_events: 1906 } }, -Infinity), false);
 });
