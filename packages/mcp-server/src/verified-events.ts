@@ -27,6 +27,9 @@ export async function verifiedExportEvents(bundle: ExportBundle, pubkeyFlag?: un
 
 const HISTORY_TAIL_PAGE_MAX = 500;
 const SIGNED_HEAD_MAX_AGE_MS = 10 * 60 * 1000;
+/** A signed head dated in the future is not "fresh", it is wrong: the age check alone would accept any future stamp
+ *  because the age comes out negative (Codex follow-up on PR 12). Allow only ordinary clock skew. */
+const SIGNED_HEAD_MAX_SKEW_MS = 2 * 60 * 1000;
 
 export async function historyTail(store: RemoteStore, project: string, afterSeq: number, throughSeq: number): Promise<Event[]> {
   const bySeq = new Map<number, Event>();
@@ -97,8 +100,12 @@ export async function fetchVerifiedRemoteEvents(
     throw new Error(`signed live head issuer kid ${liveHead.issuer.kid} does not match trusted key kid ${trustedKid}`);
   }
   const signedAt = Date.parse(liveHead.signed_at);
-  if (!Number.isFinite(signedAt) || Date.now() - signedAt > SIGNED_HEAD_MAX_AGE_MS) {
+  const age = Date.now() - signedAt;
+  if (!Number.isFinite(signedAt) || age > SIGNED_HEAD_MAX_AGE_MS) {
     throw new Error(`signed live head is stale or has an invalid signed_at: ${liveHead.signed_at}`);
+  }
+  if (age < -SIGNED_HEAD_MAX_SKEW_MS) {
+    throw new Error(`signed live head is dated in the future beyond clock skew: ${liveHead.signed_at}`);
   }
   const headPayload = { project: liveHead.project, seq: liveHead.seq, hash: liveHead.hash, signed_at: liveHead.signed_at };
   if (liveHead.project !== project || !(await verifyCanonical(trusted.key, headPayload, liveHead.signature))) {

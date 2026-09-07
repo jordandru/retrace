@@ -230,6 +230,12 @@ test("remote events: forged unsigned, wrong-key, and stale signed heads fail clo
       head: await signedHead(issuer.privateKey, { seq: 1, hash: forgedTail[0].hash }, { signedAt: "2026-09-01T00:00:00.000Z" }),
       pattern: /is stale/,
     },
+    {
+      // Codex follow-up on PR 12: a future stamp made the age negative and slipped past the staleness bound
+      name: "future-dated",
+      head: await signedHead(issuer.privateKey, { seq: 1, hash: forgedTail[0].hash }, { signedAt: new Date(Date.now() + 60 * 60 * 1000).toISOString() }),
+      pattern: /dated in the future/,
+    },
   ];
   const savedFetch = globalThis.fetch;
   try {
