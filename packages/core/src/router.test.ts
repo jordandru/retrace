@@ -33,6 +33,15 @@ class MemStore implements EventStore {
   }
 }
 
+test("human authority probe exposes only the authenticated owner and never scoped credential secrets",async()=>{
+  const token="owner-token-long-enough", scoped="agent-token-long-enough";
+  const handler=createHandler(new MemStore(),{token,ownerActor:{type:"human",id:"owner@example.com"},credentials:[{token:scoped,trust:"pinned",actor:{type:"agent",id:"codex"}}]});
+  const request=(key?:string)=>handler(new Request("http://localhost/identity",{headers:key?{authorization:`Bearer ${key}`}:{}}));
+  assert.equal((await request()).status,401);assert.equal((await request(scoped)).status,403);
+  const response=await request(token);assert.equal(response.status,200);const body=await response.json() as any;
+  assert.deepEqual(body.actor,{type:"human",id:"owner@example.com"});assert.equal(body.sealed_by,"owner");assert.equal(JSON.stringify(body).includes(token),false);assert.equal(JSON.stringify(body).includes(scoped),false);
+});
+
 const ev = (over: Partial<EventInput>): EventInput => ({ project: "junk", actor: { type: "agent", id: "claude" }, action: "edited", artifacts: [{ id: "a" }], ...over });
 
 async function seeded() {

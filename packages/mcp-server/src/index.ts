@@ -25,6 +25,7 @@
  *                    (the Worker never holds this; register the public half on the credential). Distinct from
  *                    RETRACE_SIGNING_KEY (export issuer). Remote: refuses to sign if GET /api lacks event.producer_sig.
  */
+import { attributionViewForStore, attributionStatusForStore } from "./attribution.js";
 import { McpServer } from "@modelcontextprotocol/server";
 import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
 import { z } from "zod";
@@ -259,6 +260,7 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
       inputSchema: z.object({
         project: z.string().optional(),
         target_event_id: z.string().describe("Existing sealed event being qualified"),
+        attribution: z.object({ to:z.object({type:z.enum(["agent","system"]),id:z.string().min(1)}).strict(),artifacts:z.array(z.string()).optional(),evidence:z.array(z.string()),supersedes:z.string().optional() }).strict().optional().describe("Tier 1 attribution requires the human CLI; agent relays are refused"),
         artifact_roles: z.array(z.object({ index: z.number().int().nonnegative(), role: z.enum(["used", "generated", "both"]) })).optional().describe("Roles for zero-based artifact indexes whose original role is absent"),
         attest_causal_root: z.boolean().optional().describe("Attest that an otherwise unlinked historical event was performed under human direction"),
         reason: z.string().min(1).describe("Evidence-based explanation for the correction"),
@@ -269,6 +271,10 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
     async (args) => {
       const project = writeProject(args.project);
       const actor = resolveActor(args.actor);
+      if(args.attribution) {
+        if(args.artifact_roles !== undefined || args.attest_causal_root !== undefined) throw new Error("malformed: attribution cannot be mixed with provenance amendments");
+        throw new Error("relay_disabled: Tier 1 attribution requires the human owner CLI (retrace-export amend-attribution)");
+      }
       const target = await store.get(args.target_event_id);
       if (!target || target.project !== project) throw new Error(`target event "${args.target_event_id}" does not exist in project "${project}"`);
       const all = await store.all(project);
@@ -333,18 +339,18 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
       const note = page.truncated
         ? `\n\ntruncated — ${page.events.length} newest matching events; pass before_seq ${page.next_before_seq} for the previous page`
         : "";
-      return { content: [{ type: "text", text: renderTimeline(page.events) + note }], structuredContent: { count: page.events.length, events: page.events.map(eventForModel), truncated: page.truncated, next_before_seq: page.next_before_seq } };
+      return { content: [{ type: "text", text: renderTimeline(page.events,{attribution:await attributionViewForStore(store,process.cwd(),args.project ?? DEFAULT_PROJECT)}) + note }], structuredContent: { count: page.events.length, events: page.events.map(eventForModel), truncated: page.truncated, next_before_seq: page.next_before_seq } };
     };
 
   auditHandlers.why = async ({ event_id }) => {
       const chain = await explainEvent(store, event_id);
       if (!chain.length) return { content: [{ type: "text", text: `no event ${event_id}` }], isError: true };
-      return { content: [{ type: "text", text: renderWhyChain(chain) }], structuredContent: { chain: chain.map(eventForModel) } };
+      return { content: [{ type: "text", text: renderWhyChain(chain,{attribution:await attributionViewForStore(store,process.cwd(),chain[0].project)}) }], structuredContent: { chain: chain.map(eventForModel) } };
     };
 
   auditHandlers.status = async ({ project }) => {
       const p = project ?? DEFAULT_PROJECT;
-      const status = remote ? await remote.status(p) : await buildProjectStatus(store, p);
+      const status = await attributionStatusForStore(store, process.cwd(), p);
       return { content: [{ type: "text", text: renderProjectStatus(status) }], structuredContent: { status: projectStatusForModel(status) } };
     };
 
@@ -411,7 +417,7 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
       const events = args.artifact_id
         ? (remote ? await remote.export({ project, artifact_id: args.artifact_id }) : await buildExportBundle(store, { project, artifact_id: args.artifact_id })).events
         : await store.all(project);
-      const l = buildLineage(events, { includeActors: !!args.include_actors });
+      const l = buildLineage(events, { includeActors: !!args.include_actors, attribution:await attributionViewForStore(store,process.cwd(),args.project ?? DEFAULT_PROJECT) });
       const fmt = args.format ?? "text";
       const marked = lineageForModel(l);
       const text = fmt === "dot" ? renderLineageDot(l) : fmt === "mermaid" ? renderLineageMermaid(l) : fmt === "json" ? JSON.stringify(marked, null, 2) : renderLineageText(l);

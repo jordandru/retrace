@@ -33,7 +33,7 @@ test("lineage: derived + causal flow edges, layering, renderers", async () => {
   assert.ok(has("task:jab", "f:loop", "flow"), "instruction → read");
   assert.ok(has("f:loop", "f:hud", "flow"), "read → create (causal)");
   assert.ok(has("f:hud", "pr:57", "flow"), "create → approve");
-  assert.equal(l.nodes.find((n) => n.id === "f:hud")!.actors!.join(), "claude");
+  assert.equal(l.nodes.find((n) => n.id === "f:hud")!.actors!.join(), "agent/claude");
 
   const layers = layerLineage(l);
   assert.equal(layers.get("task:jab"), 0);
@@ -52,8 +52,8 @@ test("lineage: derived + causal flow edges, layering, renderers", async () => {
   assert.equal(layerLineage(layeringCollision).get("child"), 1);
 
   const withActors = buildLineage(all, { includeActors: true });
-  assert.ok(withActors.nodes.some((n) => n.type === "actor" && n.id === "claude"));
-  assert.ok(withActors.edges.some((e) => e.type === "touched" && e.from === "u:claude" && e.to === "f:hud"));
+  assert.ok(withActors.nodes.some((n) => n.type === "actor" && n.id === "agent/claude"));
+  assert.ok(withActors.edges.some((e) => e.type === "touched" && e.from === "u:agent/claude" && e.to === "f:hud"));
 
   assert.match(renderLineageDot(l), /digraph retrace/);
   assert.match(renderLineageMermaid(l), /graph LR/);

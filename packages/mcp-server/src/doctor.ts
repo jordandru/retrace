@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
-import { Actor, Credential, Event, ProjectStatus, ReconcileReport, asHistoryPage, causalRootState, renderProjectStatus, schemaSurface } from "@retrace-dev/core";
+import { isAttributionAmendment, Actor, Credential, Event, ProjectStatus, ReconcileReport, asHistoryPage, causalRootState, renderProjectStatus, schemaSurface } from "@retrace-dev/core";
 import { Cfg, commitToEvent, resolveHookToken } from "./git-hook.js";
 import { ReconcileCfg, commitFacts, reconcileOptionsFrom, reconcileWithGit, repoNamesFor } from "./reconcile.js";
 import { RemoteStore, retraceHeaders } from "./remote-store.js";
@@ -289,13 +289,30 @@ export async function remoteCaptureCoverage(
   prefetched?: { events: Event[]; note: string },
 ): Promise<Finding> {
   const { events, note } = prefetched ?? await fetchVerifiedRemoteEvents(store, project, pubkeyFlag, baseUrl);
+  let attribution: import("@retrace-dev/core").AttributionOptions | undefined;
+  let attributionNote = "";
+  if (events.some(isAttributionAmendment)) {
+    try {
+      const { attributionOptionsForRepo } = await import("./attribution.js");
+      attribution = await attributionOptionsForRepo(repo, events, project);
+    } catch (error) {
+      attributionNote = `; attribution evaluation unavailable: ${error instanceof Error ? error.message : error}`;
+    }
+  }
   const report = reconcileWithGit(repo, [commitFacts(repo, "HEAD")], events, {
+    attribution,
     ...repoNamesFor(repo, cfg),
     repoPath: repo,
     ...reconcileOptionsFrom(cfg, gateDualWitness(args)),
   });
   const finding = captureCoverageFinding(report);
-  return { ...finding, detail: `${finding.detail}; ${note}` };
+  return { ...finding, detail: `${finding.detail}; ${note}${attributionNote}` };
+}
+
+export function attributionDeployment(api: { capabilities?: unknown }, gate: boolean): Finding {
+  return Array.isArray(api.capabilities) && api.capabilities.includes("attribution-v7")
+    ? result("pass", "attribution deployment", "Worker advertises attribution-v7")
+    : result(gate ? "fail" : "warn", "attribution deployment", "Worker predates attribution-v7; Jordan must deploy before the PR gate can pass");
 }
 
 export function missingSchema(remote: Record<string, unknown>, local = schemaSurface()): string[] {
@@ -388,6 +405,7 @@ async function main() {
     try {
       const res = await fetch(`${url}/api`, { headers: retraceHeaders() }); if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const api: any = await res.json(); const missing = missingSchema(api.schema ?? {});
+      findings.push(attributionDeployment(api, gate));
       findings.push(missing.length ? result("fail", "deployment schema", `would drop: ${missing.join(", ")}; deploy this build first`) : result("pass", "deployment schema", `${url} understands this build`));
     } catch (e: any) { findings.push(result("fail", "deployment", `${url}/api is unreachable: ${e.message}`)); }
     try {

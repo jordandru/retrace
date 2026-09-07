@@ -1,18 +1,21 @@
 /** Printable provenance report (HTML → "Save as PDF" in any browser). Self-contained, no scripts required. */
 import { ExportBundle, ExportVerdict } from "./export.js";
 import { latestArtifactLabels } from "./lineage.js";
-import { roleMark } from "./explain.js";
+import { collectAttributionAmendments, attributionSummary, type AttributionCollection } from "./attribution.js";
+import { describeActor, roleMark } from "./explain.js";
 import { Event } from "./schema.js";
 
 const esc = (s: unknown) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]!));
 const actorName = (e: Event) => e.actor.display_name ?? e.actor.id;
 const verb = (e: Event) => (e.action === "other" ? e.action_detail ?? "acted on" : e.action);
 
-export function renderReportHtml(bundle: ExportBundle, verdict?: ExportVerdict, opts: { title?: string; baseUrl?: string } = {}): string {
+export function renderReportHtml(bundle: ExportBundle, verdict?: ExportVerdict, opts: { title?: string; baseUrl?: string; attribution?: AttributionCollection } = {}): string {
   const title = opts.title ?? `Provenance report — ${bundle.scope.project}${bundle.scope.artifact_id ? " · " + bundle.scope.artifact_id : ""}`;
   const events = [...bundle.events].sort((a, b) => a.seq - b.seq);
   const byId = new Map(events.map((e) => [e.id, e]));
   const labels = latestArtifactLabels(events);
+  const attribution={...(opts.attribution ?? collectAttributionAmendments(events))};
+  if(bundle.scope.artifact_id || bundle.scope.actor_id || bundle.scope.since || bundle.scope.until) attribution.unavailable="incomplete_snapshot: scoped export";
   const humans = new Set(events.filter((e) => e.actor.type === "human").map((e) => e.actor.id));
   const agents = new Set(events.filter((e) => e.actor.type === "agent").map((e) => e.actor.id));
   const arts = new Set(events.flatMap((e) => e.artifacts.map((a) => a.id)));
@@ -39,7 +42,7 @@ export function renderReportHtml(bundle: ExportBundle, verdict?: ExportVerdict, 
     const how = [e.method?.tool, e.method?.automated == null ? "" : e.method.automated ? "automated" : "manual", e.method?.tokens != null ? `${e.method.tokens} tokens` : ""].filter(Boolean).join(" · ");
     return `<tr class="${esc(e.actor.type)}">
       <td class="mono">#${e.seq}<br><small>${esc(new Date(e.timestamp).toISOString().replace("T", " ").slice(0, 19))}Z</small></td>
-      <td><b>${esc(actorName(e))}</b><br><small>${esc(e.actor.type)}${e.actor.model ? " · " + esc(e.actor.model) : ""}${e.actor.on_behalf_of ? "<br>for " + esc(e.actor.on_behalf_of) : ""}</small></td>
+      <td><b>${esc(describeActor(e,{attribution}))}</b><br><small>${esc(e.actor.type)}${e.actor.model ? " · " + esc(e.actor.model) : ""}${e.actor.on_behalf_of ? "<br>for " + esc(e.actor.on_behalf_of) : ""}</small></td>
       <td><b>${esc(verb(e))}</b> ${e.artifacts.map((a) => `${roleMark(a.role) ? `<small class="role">${roleMark(a.role)}</small>` : ""}<code>${esc(labels.get(a.id) ?? a.label ?? a.id)}</code>`).join(" ")}${e.change?.summary ? `<br><small>${esc(e.change.summary)}</small>` : ""}</td>
       <td><small>${esc(where)}</small></td>
       <td>${why}</td>
@@ -66,6 +69,7 @@ export function renderReportHtml(bundle: ExportBundle, verdict?: ExportVerdict, 
 </style></head><body>
 <button class="print" onclick="window.print()">Print / Save as PDF</button>
 <h1>${esc(title)}</h1>
+<div class="box">${esc(attributionSummary(events,attribution))}</div>
 <div><small>Generated ${esc(bundle.generated_at)} · Retrace ${esc(bundle.format)}</small></div>
 
 <h2>Summary</h2>

@@ -1,10 +1,10 @@
 # Attribution amendment — design
 
-**Status:** draft v6, 2026-09-06. Author: claude-code, at Jordan's request (ledger evt_243a9442).
+**Status:** v7 implementation contract, 2026-09-07. Author: claude-code, at Jordan's request (ledger evt_243a9442).
 v2 folded in Grok's review (six findings); v3 NOOA on Sonnet 5 (two, #1852); v4 NOOA on NVIDIA
 Nemotron 3 Ultra (six, #1873); v5 the same reviewer re-run by Grok against v4 (seven, #1890); v6
 Codex on GPT-5.6 Sol (four, #2046) — see §11. All four reviewers have reported; the Core Four
-review round is closed. Nothing here is built yet.
+v6 review round is closed. B2/B3 inclusion in v1 awaits Jordan's decision; the v7 contract below defines this branch for review. Implementation is in progress on `codex/attribution-v1`; not released.
 
 **Decisions so far:** v1 ships **Tier 1 (human-sealed) only**; evidence is the **capture-window**
 rule, required for **every artifact in the amendment's scope** (v6); an amendment is **scoped to
@@ -12,6 +12,58 @@ artifacts** and changes the event-level effective actor only when its scope is t
 (v6); evidence is evaluated against the **final ledger** in target-seq order (v6); actor identity
 is **{type,id}** everywhere (v6); export stays render-time; no model-only amendments. Tier 2 stays
 designed, not built.
+
+
+## V7 normative changes (implementation gate #2139)
+
+This section supersedes conflicting v6 wording below. Source: Codex implementation gate
+**#2139**, `evt_4f2bb7c1480f4766b88ad309fd5a797d`, reviewing `1d24ee8`.
+The three blocking findings were B1 (eligible universe), B2 (scoped replay), and B3
+(required capture inputs). The full gate contract is preserved in
+[attribution-v7-contract.md](attribution-v7-contract.md); its scope/input, algorithm,
+interfaces, rejection precedence, and test matrix are normative for this implementation.
+
+1. **B1 — eligible contribution universe.** Scope means recorded output/invalidation
+   claims, excluding commit/event/actor references, causal links, and input-only refs.
+   Recorded `generated`/`both` roles qualify; absent roles fall back to change verbs
+   (including commit/merge file references). Role amendments never expand this universe.
+   Git units must correspond to verified changed-file transitions. Duplicate canonical
+   units collapse. Omitted scope means the nonempty eligible universe; an explicit empty
+   scope is invalid. `whole_event` requires a single amendment covering the entire
+   universe AND every Git changed-file transition. Disjoint amendments never combine
+   into a whole-event amendment. Context and input refs retain their recorded association.
+   Effective identities preserve only `{type,id}` and the target's `on_behalf_of`;
+   target model/display/version are not inferred from witnesses.
+2. **B2 — scoped prefix-state replay.** Resolve targets by target seq, then attempts by
+   amendment seq. `from` binds to every scoped artifact's effective identity immediately
+   before that attempt. Zero overlapping active predecessors requires no `supersedes`;
+   one requires that exact predecessor; multiple overlaps reject `no_supersede`.
+   Admission removes the predecessor in full, so dropped scope returns to the recorded
+   actor. Rejection changes no state. Admitted/superseded, active, rejected, and unavailable
+   are distinct. Any active amendment on an evidence event excludes that entire event;
+   another clean cited witness may still cover the artifact. Final-snapshot invalidation
+   may reverse after later amendments: reactivation is legal. `no_supersede` precedes
+   `stale_from`; withdrawn evidence precedes partial/zero coverage diagnostics.
+3. **B3 — explicit reproducible capture context.** Authoritative derivation requires a
+   verified complete project snapshot through an authenticated head plus a versioned
+   policy and Git facts (aliases, exact hook stamps, diffs/renames, and ref reachability
+   with a checkout horizon). Results name head, policy digest, and Git-facts digest.
+   Missing required context means **unavailable**, never zero effective amendments or
+   guessed history. All seals of one full commit OID share the earliest applicable
+   cutoff; their own OID is excluded from preceding touches. Ordinary repository edits
+   use those same commit boundaries. Other schemes require explicitly configured capture
+   producers; ordinary edits do not close their windows. A witness satisfies
+   `after < evidence.seq < before <= target.seq < amendment position`.
+   Preflight uses an after-head candidate position, never a fabricated server seal;
+   acceptance is advisory and the actual appended record must be re-evaluated.
+
+Git-context-free surfaces retain recorded identities and show “attribution evaluation
+unavailable” when that context is needed. Filtered views cannot infer effectiveness from
+only their visible events. Optional blob matching never determines effectiveness.
+Reconcile first computes its recorded-actor report; only a complete per-file certificate
+for the exact selected seal may downgrade a commit-level misattribution failure. A partial
+certificate leaves the original failure intact. Open producer disagreement vetoes that
+downgrade; existing per-file warnings and independent acknowledgements keep their semantics.
 
 ## 1. The problem, in the ledger's own words
 

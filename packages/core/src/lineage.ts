@@ -8,6 +8,7 @@
  *     touched   — actor → artifact (only when includeActors)
  * Pure function of events; the same code runs in the UI (embedded), MCP server and Worker.
  */
+import { collectAttributionAmendments, effectiveActor, type AttributionCollection } from "./attribution.js";
 import { Event } from "./schema.js";
 import { eventReferenceForModel, markUntrustedText } from "./explain.js";
 
@@ -25,13 +26,13 @@ export interface LineageNode {
 export interface LineageEdge {
   from: string;
   to: string;
-  type: "derived" | "flow" | "touched";
+  type: "derived" | "flow" | "touched" | "recorded-as";
   weight: number;             // number of supporting events
   via?: string[];             // event ids supporting the edge (capped)
 }
-export interface Lineage { nodes: LineageNode[]; edges: LineageEdge[] }
+export interface Lineage { nodes: LineageNode[]; edges: LineageEdge[]; attribution_unavailable?: string }
 
-export interface LineageOptions { includeActors?: boolean; maxVia?: number }
+export interface LineageOptions { includeActors?: boolean; maxVia?: number; attribution?: AttributionCollection }
 
 /**
  * Latest known label per artifact id: the label on the last event (by seq) that carries one.
@@ -47,6 +48,8 @@ export function latestArtifactLabels(events: Pick<Event, "seq" | "artifacts">[])
 }
 
 export function buildLineage(events: Event[], opts: LineageOptions = {}): Lineage {
+  const attribution=opts.attribution ?? collectAttributionAmendments(events);
+  const effective = attribution.unavailable ? new Map() : attribution.effective;
   const maxVia = opts.maxVia ?? 5;
   const nodes = new Map<string, LineageNode>();
   const edges = new Map<string, LineageEdge>();
@@ -61,9 +64,9 @@ export function buildLineage(events: Event[], opts: LineageOptions = {}): Lineag
     return n;
   };
   const actorNode = (e: Event): LineageNode => {
-    const id = e.actor.id;
+    const id = `${e.actor.type}/${e.actor.id}`;
     let n = nodes.get("u:" + id);
-    if (!n) { n = { id, type: "actor", label: e.actor.display_name ?? id, kind: e.actor.type, events: 0, first_seq: e.seq, last_seq: e.seq }; nodes.set("u:" + id, n); }
+    if (!n) { n = { id, type: "actor", label: e.actor.display_name ?? e.actor.id, kind: e.actor.type, events: 0, first_seq: e.seq, last_seq: e.seq }; nodes.set("u:" + id, n); }
     return n;
   };
   const addEdge = (from: string, to: string, type: LineageEdge["type"], via?: string) => {
@@ -79,10 +82,14 @@ export function buildLineage(events: Event[], opts: LineageOptions = {}): Lineag
     for (const a of e.artifacts) {
       const n = artNode(a.id, a.label, a.kind, e.seq);
       n.events++; n.last_seq = e.seq; n.first_seq = Math.min(n.first_seq, e.seq);
-      if (!n.actors!.includes(e.actor.id)) n.actors!.push(e.actor.id);
+      const view=effectiveActor(e,effective);
+      const canonical=attribution.context?.canonicalArtifact(a.id,e.seq) ?? a.id;
+      const changed=view.by_artifact.get(canonical);
+      const who=changed?.actor ?? e.actor;
+      if (!n.actors!.includes(`${who.type}/${who.id}`)) n.actors!.push(`${who.type}/${who.id}`);
       n.actions![e.action] = (n.actions![e.action] ?? 0) + 1;
       for (const src of a.derived_from ?? []) { artNode(src, undefined, undefined, e.seq); addEdge(src, a.id, "derived", e.id); }
-      if (opts.includeActors) { const u = actorNode(e); u.events++; u.last_seq = e.seq; addEdge("u:" + e.actor.id, a.id, "touched", e.id); }
+      if (opts.includeActors) { const u = actorNode({...e,actor:who}); u.events++; u.last_seq = e.seq; addEdge("u:" + u.id, a.id, "touched", e.id); if(changed) {const recorded=actorNode(e);addEdge("u:"+u.id,"u:"+recorded.id,"recorded-as",changed.amended.amendment_id);} }
     }
     if (e.caused_by) {
       const parent = byId.get(e.caused_by);
@@ -91,7 +98,7 @@ export function buildLineage(events: Event[], opts: LineageOptions = {}): Lineag
       }
     }
   }
-  return { nodes: [...nodes.values()], edges: [...edges.values()] };
+  return { nodes: [...nodes.values()], edges: [...edges.values()], ...(attribution.unavailable?{attribution_unavailable:attribution.unavailable}:{}) };
 }
 
 /** Roots → leaves layering by longest path (cycles broken by seq order). Returns node id → layer. */
@@ -117,6 +124,7 @@ export function layerLineage(l: Lineage): Map<string, number> {
 }
 
 export type ModelLineage = {
+  attribution_unavailable?: string;
   nodes: Array<{
     key: string;
     type: LineageNode["type"];
@@ -139,13 +147,14 @@ export type ModelLineage = {
 
 const lineageNodeKey = (type: LineageNode["type"], id: string) => `${type}\0${id}`;
 const touchedActorId = (edge: LineageEdge) =>
-  edge.type === "touched" && edge.from.startsWith("u:") ? edge.from.slice(2) : edge.from;
+  (edge.type === "touched" || edge.type === "recorded-as") && edge.from.startsWith("u:") ? edge.from.slice(2) : edge.from;
 
 export function lineageForModel(lineage: Lineage): ModelLineage {
   const keys = new Map<string, string>();
   lineage.nodes.forEach((node, index) => keys.set(lineageNodeKey(node.type, node.id), `n${index}`));
   const keyFor = (type: LineageNode["type"], id: string) => keys.get(lineageNodeKey(type, id)) ?? "missing";
   return {
+    ...(lineage.attribution_unavailable ? { attribution_unavailable: markUntrustedText(lineage.attribution_unavailable) } : {}),
     nodes: lineage.nodes.map((node) => ({
       key: keyFor(node.type, node.id),
       type: node.type,
@@ -158,8 +167,8 @@ export function lineageForModel(lineage: Lineage): ModelLineage {
       ...(node.actions === undefined ? {} : { actions: node.actions }),
     })),
     edges: lineage.edges.map((edge) => ({
-      from: keyFor(edge.type === "touched" ? "actor" : "artifact", touchedActorId(edge)),
-      to: keyFor("artifact", edge.to),
+      from: keyFor(edge.type === "touched" || edge.type === "recorded-as" ? "actor" : "artifact", touchedActorId(edge)),
+      to: keyFor(edge.type === "recorded-as" ? "actor" : "artifact", edge.type === "recorded-as" ? edge.to.slice(2) : edge.to),
       type: edge.type,
       weight: edge.weight,
       ...(edge.via === undefined ? {} : { via: edge.via.map(eventReferenceForModel) }),
@@ -178,11 +187,12 @@ export function renderLineageDot(l: Lineage): string {
     return ids.get(key)!;
   };
   const lines = ["digraph retrace {", "  rankdir=LR; node [fontname=Helvetica, fontsize=10]; edge [fontsize=9];"];
+  if (l.attribution_unavailable) lines.push(`  label=${q(`attribution evaluation unavailable: ${markUntrustedText(l.attribution_unavailable)}`)};`);
   for (const n of l.nodes) lines.push(`  ${q(nodeId(n.type, n.id))} [label=${q(`${markUntrustedText(n.label)}${n.type === "artifact" ? `\n${n.events} event${n.events === 1 ? "" : "s"}` : ""}`)}, shape=${shape(n)}${n.type === "actor" ? ", style=dashed" : ""}];`);
   for (const e of l.edges) {
-    const fromType = e.type === "touched" ? "actor" : "artifact";
+    const fromType = e.type === "touched" || e.type === "recorded-as" ? "actor" : "artifact";
     const fromId = touchedActorId(e);
-    lines.push(`  ${q(nodeId(fromType, fromId))} -> ${q(nodeId("artifact", e.to))} [label=${q(e.type === "derived" ? "derived" : e.type === "flow" ? `flow ×${e.weight}` : "")}${e.type === "derived" ? ", penwidth=2" : e.type === "touched" ? ", style=dashed, color=gray" : ""}];`);
+    lines.push(`  ${q(nodeId(fromType, fromId))} -> ${q(nodeId(e.type === "recorded-as" ? "actor" : "artifact", e.type === "recorded-as" ? e.to.slice(2) : e.to))} [label=${q(e.type === "derived" ? "derived" : e.type === "flow" ? `flow ×${e.weight}` : e.type === "recorded-as" ? "recorded-as" : "")}${e.type === "derived" ? ", penwidth=2" : e.type === "touched" || e.type === "recorded-as" ? ", style=dashed, color=gray" : ""}];`);
   }
   lines.push("}");
   return lines.join("\n");
@@ -196,21 +206,22 @@ export function renderLineageMermaid(l: Lineage): string {
     return idOf.get(key)!;
   };
   const lines = ["graph LR"];
+  if (l.attribution_unavailable) lines.push(`  attribution_notice["attribution evaluation unavailable: ${markUntrustedText(l.attribution_unavailable).replace(/[^a-zA-Z0-9 :_-]/g, " ")}"]`);
   for (const n of l.nodes) {
     const lbl = `${markUntrustedText(n.label)}${n.type === "artifact" ? ` (${n.events})` : ""}`.replace(/"/g, "'");
     lines.push(n.type === "actor" ? `  ${nid(n.type, n.id)}(["${lbl}"])` : `  ${nid(n.type, n.id)}["${lbl}"]`);
   }
   for (const e of l.edges) {
-    const fromType = e.type === "touched" ? "actor" : "artifact";
+    const fromType = e.type === "touched" || e.type === "recorded-as" ? "actor" : "artifact";
     const fromId = touchedActorId(e);
-    lines.push(`  ${nid(fromType, fromId)} ${e.type === "derived" ? "==>" : e.type === "flow" ? "-->" : "-.->"}${e.type === "flow" && e.weight > 1 ? `|×${e.weight}|` : ""} ${nid("artifact", e.to)}`);
+    lines.push(`  ${nid(fromType, fromId)} ${e.type === "derived" ? "==>" : e.type === "flow" ? "-->" : "-.->"}${e.type === "flow" && e.weight > 1 ? `|×${e.weight}|` : ""} ${nid(e.type === "recorded-as" ? "actor" : "artifact", e.type === "recorded-as" ? e.to.slice(2) : e.to)}`);
   }
   return lines.join("\n");
 }
 
 export function renderLineageText(l: Lineage): string {
   const arts = l.nodes.filter((n) => n.type === "artifact");
-  const out = [`${arts.length} artifacts, ${l.edges.length} edges`];
+  const out = [...(l.attribution_unavailable ? [`attribution evaluation unavailable: ${l.attribution_unavailable}`] : []), `${arts.length} artifacts, ${l.edges.length} edges`];
   for (const n of arts) {
     const ins = l.edges.filter((e) => e.to === n.id && e.type !== "touched").map((e) => `${markUntrustedText(e.from)} (${e.type})`);
     const outs = l.edges.filter((e) => e.from === n.id && e.type !== "touched").map((e) => `${markUntrustedText(e.to)} (${e.type})`);

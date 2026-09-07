@@ -4,6 +4,7 @@ import {
   applyDefaultRoles,
   buildExportBundle,
   buildLineage,
+  collectAttributionAmendments,
   buildProjectStatus,
   CausedByError,
   causedByErrorMessage,
@@ -165,14 +166,14 @@ export function buildRemoteMcpServer(
       const p = requirePinnedProject(args.project, credential);
       const page = await store.history({ ...args, project: p });
       const note = page.truncated ? `\n\ntruncated — ${page.events.length} newest matching events; pass before_seq ${page.next_before_seq} for the previous page` : "";
-      return textResult(renderTimeline(page.events) + note, { count: page.events.length, events: page.events.map(eventForModel), truncated: page.truncated, next_before_seq: page.next_before_seq });
+      return textResult(renderTimeline(page.events,{attribution:collectAttributionAmendments(await store.all(project))}) + note, { count: page.events.length, events: page.events.map(eventForModel), truncated: page.truncated, next_before_seq: page.next_before_seq });
     },
 
     async why({ event_id }) {
       const first = await store.get(event_id);
       if (!first || first.project !== project) return { ...textResult(`no event ${event_id}`), isError: true };
       const chain = await explainEvent(store, event_id);
-      return textResult(renderWhyChain(chain), { chain: chain.map(eventForModel) });
+      return textResult(renderWhyChain(chain,{attribution:collectAttributionAmendments(await store.all(project))}), { chain: chain.map(eventForModel) });
     },
 
     async status(args) {
@@ -201,7 +202,9 @@ export function buildRemoteMcpServer(
       const events = args.artifact_id
         ? (await buildExportBundle(store, { project: p, artifact_id: args.artifact_id })).events
         : await store.all(p);
-      const lineage = buildLineage(events, { includeActors: !!args.include_actors });
+      const attribution = collectAttributionAmendments(events);
+      if (args.artifact_id) attribution.unavailable = "incomplete_snapshot: scoped lineage";
+      const lineage = buildLineage(events, { includeActors: !!args.include_actors, attribution });
       const format = args.format ?? "text";
       const marked = lineageForModel(lineage);
       const text = format === "dot" ? renderLineageDot(lineage) : format === "mermaid" ? renderLineageMermaid(lineage) : format === "json" ? JSON.stringify(marked, null, 2) : renderLineageText(lineage);

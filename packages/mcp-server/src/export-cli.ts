@@ -27,6 +27,8 @@ import { ensureSigningKey, loadSigningKey } from "./keys.js";
 import { defaultProducerKeyPath, ensureProducerKey } from "./producer-key.js";
 import { witnessCheckpoint, verifyWitness, parseWitnessLog, witnessFor, fetchRekorPublicKey, DEFAULT_REKOR_URL } from "./witness.js";
 import { isMainModule } from "./is-main.js";
+import { amendAttributionMain, attributionOptionsForRepo } from "./attribution.js";
+import { collectAttributionAmendments, attributionSummary, renderTimeline } from "@retrace-dev/core";
 import { reconcileMain } from "./reconcile.js";
 import { loadPublicKey, resolveTrustedKey } from "./trusted-key.js";
 
@@ -49,6 +51,21 @@ function parseArgs(argv: string[]) {
 async function main() {
   const { flags, pos } = parseArgs(process.argv.slice(2));
   const cmd = pos[0];
+  if (cmd === "amend-attribution") { process.exitCode = await amendAttributionMain(flags); return; }
+  if (cmd === "render") {
+    if (!pos[1]) throw new Error("usage: retrace-export render <bundle.json> [--effective] [--repo . --policy policy.json]");
+    const bundle = JSON.parse(readFileSync(pos[1],"utf8")) as ExportBundle;
+    const trusted=await resolveTrustedKey(flags.pubkey);
+    const verdict=await verifyExportBundle(bundle,trusted?.key);
+    let attribution=collectAttributionAmendments(bundle.events);
+    if (exportVerdictOk(verdict) && !bundle.scope.artifact_id) {
+      try { attribution=collectAttributionAmendments(bundle.events,undefined,await attributionOptionsForRepo(String(flags.repo ?? process.cwd()),bundle.events,bundle.scope.project,[],typeof flags.policy === "string" ? flags.policy : undefined)); } catch(error) { attribution.unavailable=error instanceof Error?error.message:String(error); }
+    }
+    if(!exportVerdictOk(verdict))attribution.unavailable="untrusted_export: signature or complete-chain verification failed";
+    if(verdict.coverage.scope!=="full")attribution.unavailable="incomplete_snapshot: scoped export";
+    const header=flags.effective && !attribution.unavailable ? `effective view — recorded actors in parentheses; ${[...attribution.effective.values()].flat().length} amendments applied` : attributionSummary(bundle.events,attribution);
+    console.error(header); console.log(renderTimeline(bundle.events,{attribution,effective:flags.effective===true,banner:true})); return;
+  }
   if (cmd === "keygen") {
     const k = await ensureSigningKey();
     console.log(`${k.created ? "created" : "existing"} signing key at ${k.path}\nkid: ${k.kid}\npublic JWK: ${JSON.stringify(k.publicKey)}`);
@@ -99,6 +116,13 @@ async function main() {
     if (v.signature === "self_attested" && flags["allow-self-attested"] && v.events_intact && v.links_consistent && v.chain_ok_at_export && v.coverage.complete !== false) ok = true;
     console.log(`${ok ? "VALID" : "NOT VALID"} — signature: ${v.signature}${v.kid ? " (kid " + v.kid + (trusted ? ", trusted key from " + trusted.from : ", key embedded in bundle — NOT a trusted key") + ")" : ""}; events intact: ${v.events_intact}; links: ${v.links_consistent}; chain ok at export: ${v.chain_ok_at_export}; coverage: ${v.coverage.scope === "full" ? (v.coverage.complete ? "complete" : "INCOMPLETE") : "scoped (omission not checkable offline)"} — ${v.coverage.events} of ${v.coverage.total_events} events${v.legacy_hash_events ? `; ${v.legacy_hash_events} legacy-hash event${v.legacy_hash_events === 1 ? "" : "s"} (received_at not provably covered)` : ""}${v.producer_signed || v.producer_invalid || v.producer_unsigned_agent_events ? `; producer sigs: ${v.producer_signed} verified · ${v.producer_invalid} INVALID · ${v.producer_unsigned_agent_events} unsigned agent event${v.producer_unsigned_agent_events === 1 ? "" : "s"}` : ""}`);
     console.log("  coverage: " + v.coverage.note);
+    let attribution=collectAttributionAmendments(bundle.events);
+    if(exportVerdictOk(v) && !bundle.scope.artifact_id) {
+      try { attribution=collectAttributionAmendments(bundle.events,undefined,await attributionOptionsForRepo(String(flags.repo ?? process.cwd()),bundle.events,bundle.scope.project,[],typeof flags.policy === "string" ? flags.policy : undefined)); } catch(error) { attribution.unavailable=error instanceof Error?error.message:String(error); }
+    }
+    if(!exportVerdictOk(v))attribution.unavailable="untrusted_export: signature or complete-chain verification failed";
+    if(v.coverage.scope!=="full")attribution.unavailable="incomplete_snapshot: scoped export";
+    console.log(attributionSummary(bundle.events,attribution));
     if (v.signature === "self_attested" && !flags["allow-self-attested"]) console.log("  pass the issuer's public key (--pubkey, RETRACE_PUBKEY, or RETRACE_URL for its /.well-known/retrace-pubkey), or --allow-self-attested to accept an unattributed bundle");
     for (const p of v.problems) console.log("  - " + p);
     if (flags.checkpoint) {
@@ -205,6 +229,6 @@ async function main() {
     console.log(`${base}/s/${id}\nreport: ${base}/s/${id}/report`);
     return;
   }
-  console.log("retrace-export <keygen|producer-keygen|export <project>|verify <bundle.json>|checkpoint <project>|witness <project>|reconcile|share <project>> [--artifact id] [--out f] [--report f.html] [--pubkey jwk|https-url] [--allow-self-attested] [--checkpoint f.jsonl] [--checkpoint-pubkey jwk|https-url] [--bundle f.json] [--label s] [--days n] [--actor id]");
+  console.log("retrace-export <amend-attribution|render <bundle.json>|keygen|producer-keygen|export <project>|verify <bundle.json>|checkpoint <project>|witness <project>|reconcile|share <project>> [--artifact id] [--out f] [--report f.html] [--pubkey jwk|https-url] [--allow-self-attested] [--checkpoint f.jsonl] [--checkpoint-pubkey jwk|https-url] [--bundle f.json] [--label s] [--days n] [--actor id]");
 }
 if (isMainModule(import.meta.url)) main().catch((e) => { console.error("retrace-export:", e.message ?? e); process.exit(1); });

@@ -17,3 +17,5 @@ export * from "./amendment.js";
 export * from "./reconcile.js";
 export * from "./commit-actor.js";
 export * from "./producer-sig.js";
+export * from "./attribution.js";
+export * from "./attribution-context.js";
