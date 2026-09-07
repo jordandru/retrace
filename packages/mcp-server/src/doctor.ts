@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /** retrace doctor — read-only preflight for the Git → Worker developer workflow. */
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { Actor, Credential, Event, ProjectStatus, ReconcileReport, asHistoryPage, causalRootState, renderProjectStatus, schemaSurface } from "@retrace-dev/core";
@@ -18,6 +18,66 @@ type RepoConfig = ReconcileCfg & { credential?: string };
 
 const git = (repo: string, args: string[]) => execFileSync("git", ["-C", repo, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 const result = (level: Level, label: string, detail: string): Finding => ({ level, label, detail });
+
+function gitOutput(repo: string, args: string[]): string | undefined {
+  try { return git(repo, args); }
+  catch { return undefined; }
+}
+
+/** Read-only object database preflight. Ref resolution alone does not prove the referenced object is readable. */
+export function objectStoreFinding(repo: string): Finding {
+  const objectsDirRaw = gitOutput(repo, ["rev-parse", "--git-path", "objects"]);
+  if (!objectsDirRaw) return result("fail", "object store", "could not locate the Git object store");
+  const objectsDir = resolve(repo, objectsDirRaw);
+  const emptyObjectIds: string[] = [];
+  try {
+    for (const fanout of readdirSync(objectsDir, { withFileTypes: true })) {
+      if (!fanout.isDirectory() || !/^[0-9a-f]{2}$/i.test(fanout.name)) continue;
+      const dir = join(objectsDir, fanout.name);
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        if (entry.isFile() && statSync(join(dir, entry.name)).size === 0) emptyObjectIds.push(fanout.name + entry.name);
+      }
+    }
+  } catch (error: any) {
+    return result("fail", "object store", `could not scan ${objectsDir}: ${error?.message ?? error}`);
+  }
+
+  const empty = new Set(emptyObjectIds);
+  const headSha = gitOutput(repo, ["rev-parse", "HEAD"]);
+  const headType = gitOutput(repo, ["cat-file", "-t", "HEAD"]);
+  const originRef = "refs/remotes/origin/main";
+  const hasOriginMain = gitOutput(repo, ["show-ref", "--verify", originRef]) !== undefined;
+  const originSha = hasOriginMain ? gitOutput(repo, ["rev-parse", "origin/main"]) : undefined;
+  const originType = hasOriginMain ? gitOutput(repo, ["cat-file", "-t", "origin/main"]) : undefined;
+
+  const problems: string[] = [];
+  if (emptyObjectIds.length) problems.push(`${emptyObjectIds.length} empty loose object file${emptyObjectIds.length === 1 ? "" : "s"}`);
+  if (headType !== "commit") problems.push(`HEAD is not a readable commit${headSha && empty.has(headSha) ? " and points to an empty loose object" : ""}`);
+  if (hasOriginMain && originType !== "commit") problems.push(`origin/main is not a readable commit${originSha && empty.has(originSha) ? " and points to an empty loose object" : ""}`);
+
+  if (!problems.length) {
+    return result("pass", "object store", `no empty loose objects; HEAD is a readable commit; origin/main is ${hasOriginMain ? "a readable commit" : "not configured"}`);
+  }
+  return result(
+    "fail",
+    "object store",
+    `git rev-parse printing a SHA is not proof the object exists; ${problems.join("; ")}. Delete the empty files, run git fetch origin (or fetch from a healthy clone), then git cat-file -t origin/main must return commit. Do not reset/pull until then.`,
+  );
+}
+
+export function hookFindings(repo: string): Finding[] {
+  const hooksDir = resolve(repo, git(repo, ["rev-parse", "--git-path", "hooks"]));
+  const hook = join(hooksDir, "post-commit");
+  const hookOk = existsSync(hook) && readFileSync(hook, "utf8").includes("# retrace-git hook");
+  const mergeHook = join(hooksDir, "post-merge");
+  const mergeHookOk = existsSync(mergeHook) && readFileSync(mergeHook, "utf8").includes("# retrace-git hook");
+  return [
+    hookOk ? result("pass", "post-commit hook", hook) : result("fail", "post-commit hook", `not installed at ${hook}; run retrace-git install --repo ${repo}`),
+    // git runs post-merge, not post-commit, for `git merge`; an install from before 2026-09-06 wrote only post-commit,
+    // so its merge commits were never sealed by the hook. A warning, not a failure: commits still seal, merges don't.
+    mergeHookOk ? result("pass", "post-merge hook", mergeHook) : result("warn", "post-merge hook", `not installed at ${mergeHook}; merge commits are not sealed by the hook — re-run retrace-git install --repo ${repo}`),
+  ];
+}
 
 export function parseDoctorArgs(argv: string[]): DoctorArgs {
   const flags = new Set(argv.filter((a) => a.startsWith("--")));
@@ -220,6 +280,7 @@ async function main() {
   try { repo = resolve(git(resolve(args.repo ?? process.cwd()), ["rev-parse", "--show-toplevel"])); }
   catch { console.error("FAIL  repository — not inside a Git repository (or pass its path)"); process.exit(1); return; }
   const findings: Finding[] = [];
+  if (command === "doctor") findings.push(objectStoreFinding(repo));
   const cfgPath = join(repo, ".retrace.json");
   let cfg: RepoConfig = {};
   if (!existsSync(cfgPath)) findings.push(result("fail", "repository wiring", `${cfgPath} is missing; run retrace-git install --repo ${repo}`));
@@ -227,15 +288,7 @@ async function main() {
   catch (e: any) { findings.push(result("fail", "repository wiring", `${cfgPath} is invalid JSON: ${e.message}`)); }
 
   if (!gate) {
-    const gitDir = resolve(repo, git(repo, ["rev-parse", "--git-dir"]));
-    const hook = join(gitDir, "hooks", "post-commit");
-    const hookOk = existsSync(hook) && readFileSync(hook, "utf8").includes("# retrace-git hook");
-    findings.push(hookOk ? result("pass", "post-commit hook", hook) : result("fail", "post-commit hook", `not installed at ${hook}; run retrace-git install --repo ${repo}`));
-    // git runs post-merge, not post-commit, for `git merge`; an install from before 2026-09-06 wrote only post-commit,
-    // so its merge commits were never sealed by the hook. A warning, not a failure: commits still seal, merges don't.
-    const mergeHook = join(gitDir, "hooks", "post-merge");
-    const mergeHookOk = existsSync(mergeHook) && readFileSync(mergeHook, "utf8").includes("# retrace-git hook");
-    findings.push(mergeHookOk ? result("pass", "post-merge hook", mergeHook) : result("warn", "post-merge hook", `not installed at ${mergeHook}; merge commits are not sealed by the hook — re-run retrace-git install --repo ${repo}`));
+    findings.push(...hookFindings(repo));
   }
 
   const project = process.env.RETRACE_PROJECT ?? cfg.project ?? basename(repo);

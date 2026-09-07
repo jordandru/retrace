@@ -227,11 +227,98 @@ test("doctor capture coverage sees a HEAD seal after the signed cache without re
   } finally { globalThis.fetch = savedFetch; }
 });
 
-import { gateDualWitness, parseDoctorArgs as parseArgs2 } from "./doctor.js";
+import { gateDualWitness, hookFindings, objectStoreFinding, parseDoctorArgs as parseArgs2 } from "./doctor.js";
 import { execFileSync as execGit } from "node:child_process";
-import { mkdtempSync as mkTemp, writeFileSync as writeF } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync as mkTemp, readFileSync, statSync, truncateSync, writeFileSync as writeF } from "node:fs";
 import { tmpdir as tmpD } from "node:os";
 import { join as joinP } from "node:path";
+
+function objectStoreRepo(): { repo: string; g: (...args: string[]) => string; commit: (content: string) => string; objectPath: (sha: string) => string } {
+  const repo = mkTemp(joinP(tmpD(), "retrace-object-store-"));
+  const env = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@x", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@x" };
+  const g = (...args: string[]) => execGit("git", ["-C", repo, ...args], { encoding: "utf8", env, stdio: ["ignore", "pipe", "pipe"] }).trim();
+  g("init", "-q", "-b", "main");
+  let n = 0;
+  const commit = (content: string) => {
+    writeF(joinP(repo, "object-store.txt"), content);
+    g("add", "object-store.txt");
+    g("commit", "-q", "-m", `commit ${++n}`);
+    return g("rev-parse", "HEAD");
+  };
+  return { repo, g, commit, objectPath: (sha) => joinP(repo, ".git", "objects", sha.slice(0, 2), sha.slice(2)) };
+}
+
+test("objectStoreFinding: rev-parse HEAD can succeed while its zero-byte loose commit object fails integrity", () => {
+  const fixture = objectStoreRepo();
+  const sha = fixture.commit("one\n");
+  const path = fixture.objectPath(sha);
+  const original = readFileSync(path);
+  chmodSync(path, 0o600);
+  truncateSync(path, 0);
+
+  assert.equal(fixture.g("rev-parse", "HEAD"), sha);
+  const failed = objectStoreFinding(fixture.repo);
+  assert.equal(failed.level, "fail");
+  assert.match(failed.detail, /1 empty loose object/);
+  assert.match(failed.detail, /HEAD.*empty/i);
+  assert.match(failed.detail, /rev-parse.*not proof/i);
+  assert.match(failed.detail, /do not reset\/pull/i);
+  assert.doesNotMatch(failed.detail, /WSL|outage|2026/i);
+  assert.equal(statSync(path).size, 0, "doctor must not repair or otherwise mutate the empty object");
+
+  writeF(path, original);
+  assert.equal(objectStoreFinding(fixture.repo).level, "pass");
+});
+
+test("objectStoreFinding: readable HEAD still fails when origin/main points at a zero-byte object", () => {
+  const fixture = objectStoreRepo();
+  const originMain = fixture.commit("origin\n");
+  fixture.g("update-ref", "refs/remotes/origin/main", originMain);
+  const head = fixture.commit("head\n");
+  const originPath = fixture.objectPath(originMain);
+  chmodSync(originPath, 0o600);
+  truncateSync(originPath, 0);
+
+  assert.equal(fixture.g("rev-parse", "origin/main"), originMain);
+  assert.equal(fixture.g("cat-file", "-t", head), "commit");
+  const finding = objectStoreFinding(fixture.repo);
+  assert.equal(finding.level, "fail");
+  assert.match(finding.detail, /origin\/main.*empty/i);
+  assert.match(finding.detail, /git fetch origin/);
+  assert.match(finding.detail, /healthy clone/);
+  assert.match(finding.detail, /git cat-file -t origin\/main.*commit/);
+  assert.equal(statSync(originPath).size, 0, "doctor must leave the damaged origin/main object untouched");
+});
+
+test("objectStoreFinding: clean repo without origin/main passes", () => {
+  const fixture = objectStoreRepo();
+  fixture.commit("clean\n");
+  assert.equal(objectStoreFinding(fixture.repo).level, "pass");
+});
+
+test("objectStoreFinding: packed-only commit objects pass without loose files", () => {
+  const fixture = objectStoreRepo();
+  const sha = fixture.commit("packed\n");
+  const loose = fixture.objectPath(sha);
+  fixture.g("gc", "--prune=now");
+  assert.equal(existsSync(loose), false);
+  assert.equal(fixture.g("cat-file", "-t", "HEAD"), "commit");
+  assert.equal(objectStoreFinding(fixture.repo).level, "pass");
+});
+
+test("hookFindings: linked worktrees use hooks from the common Git directory", () => {
+  const fixture = objectStoreRepo();
+  fixture.commit("hooks\n");
+  writeF(joinP(fixture.repo, ".git", "hooks", "post-commit"), "#!/bin/sh\n# retrace-git hook\n");
+  writeF(joinP(fixture.repo, ".git", "hooks", "post-merge"), "#!/bin/sh\n# retrace-git hook\n");
+  const parent = mkTemp(joinP(tmpD(), "retrace-hook-worktree-"));
+  const worktree = joinP(parent, "linked");
+  fixture.g("worktree", "add", "-q", "-b", "feature", worktree);
+
+  const findings = hookFindings(worktree);
+  assert.deepEqual(findings.map((finding) => finding.level), ["pass", "pass"]);
+  assert.ok(findings.every((finding) => finding.detail.startsWith(joinP(fixture.repo, ".git", "hooks"))));
+});
 
 test("gate dual witness never infers leniency from the ref layout: a detached, pushed sha with no refs/remotes branch containing HEAD still fails on a lone producer; --local is explicit and refused under CI", () => {
   // a checkout the way actions/checkout does it for pull_request: detached at an explicit sha, no remote-tracking branch contains it
