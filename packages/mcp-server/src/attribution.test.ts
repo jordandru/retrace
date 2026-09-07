@@ -9,7 +9,8 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { generateSigningKey, buildExportBundle, appendEvent, collectAttributionAmendments, AttributionPolicy } from "@retrace-dev/core";
 import { SqliteStore } from "./sqlite-store.js";
-import { attributionDeployment } from "./doctor.js";
+import type { RemoteStore } from "./remote-store.js";
+import { attributionDeployment, remoteCaptureCoverage } from "./doctor.js";
 import { attributionOptionsForRepo } from "./attribution.js";
 
 test("human CLI: dry-run, sealed amendment, real blob/trailer observations and exported render pairing",async()=>{
@@ -39,6 +40,12 @@ test("human CLI: dry-run, sealed amendment, real blob/trailer observations and e
     const events=await store.all("p"),options=await attributionOptionsForRepo(dir,events,"p");
     assert.equal(collectAttributionAmendments(events,undefined,options).effective.get(seal.id)?.[0].whole_event,true);
     assert.equal(events.find(e=>e.id===seal.id)?.actor.id,"O");
+    const noRemoteReads = {export: async () => {throw new Error("must reuse the verified event set");}} as unknown as RemoteStore;
+    const coverage = await remoteCaptureCoverage(dir,"p",noRemoteReads,{repoName:"org/r",reconcile:{hook_sealed_by:["assert:hook"]}},{gate:true,local:false},undefined,undefined,{events,note:"prefetched verified fixture"});
+    assert.equal(coverage.level,"pass",coverage.detail);
+    assert.match(coverage.detail,/prefetched verified fixture/);
+    assert.doesNotMatch(coverage.detail,/attribution evaluation unavailable/);
+
     assert.deepEqual(options.contentBoundArtifacts?.(seal,[edit]),[artifact]);
     assert.deepEqual(options.contentBoundArtifacts?.(seal,[{...edit,artifacts:[...edit.artifacts,{id:"repo:org/r#another.txt",role:"generated"}]}]),[],"one scalar hash does not bind multiple outputs");
     // Same receipt, but an absent or mismatching content observation leaves the amendment effective.
