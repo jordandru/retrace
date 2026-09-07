@@ -10,6 +10,7 @@ This repository records verifiable provenance through the `retrace` MCP server.
 - Add commit trailers `Retrace-Actor: claude-code`, `Retrace-Model: <actual model>`, and `Retrace-Caused-By: <instruction event id>`.
 - These instructions are authoritative for Claude Code. Do not copy another agent's `Retrace-Actor` from `GEMINI.md`, `GROK.md`, `.github/copilot-instructions.md`, or `.cursor/rules/retrace-provenance.mdc`.
 - Packages are `@retrace-dev/core` and `@retrace-dev/cli` (the workspace folder is still `packages/mcp-server`).
+- Producer signing: when this agent's private JWK exists, set `RETRACE_PRODUCER_KEY_FILE` on the MCP server (mode 0600). Do not put that file in the Worker secret.
 
 ## Operational notes (multi-agent, multi-clone)
 

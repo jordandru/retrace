@@ -135,12 +135,13 @@ Claude example (`args` = absolute `packages/mcp-server/dist/index.js`):
     "RETRACE_ACTOR": "claude-code",
     "RETRACE_ON_BEHALF_OF": "<your email>",
     "RETRACE_URL": "https://retrace-api.<you>.workers.dev",
-    "RETRACE_TOKEN": "<pinned claude-code token, not the owner token>"
+    "RETRACE_TOKEN": "<pinned claude-code token, not the owner token>",
+    "RETRACE_PRODUCER_KEY_FILE": "/home/<you>/.retrace/producer-keys/claude-code.jwk"
   }
 }
 ```
 
-Leave `RETRACE_ACTOR_MODEL` unset so the agent reports the model it actually ran. After `dist/` changes, **respawn** the MCP server (it keeps old `dist` and session id until restart).
+Leave `RETRACE_ACTOR_MODEL` unset so the agent reports the model it actually ran. After `dist/` changes, **respawn** the MCP server (it keeps old `dist` and session id until restart). Set `RETRACE_PRODUCER_KEY_FILE` to this agent's private JWK (mode 0600). The git hook uses `RETRACE_HOOK_KEY_FILE` or a `producer_key_file` path on the credentials-file entry. New `retrace-admin` teams mint those keys with `require_signature: true`; this dogfood repo is not flipped until keys exist. Never put a private JWK in `RETRACE_CREDENTIALS`.
 
 Per-harness notes: `CLAUDE.md`, `GEMINI.md`, `GROK.md`, `AGENTS.md` (Codex), `.github/copilot-instructions.md`, `.cursor/rules/retrace-provenance.mdc`. Grok also loads `.grok/rules/retrace.md` (it still auto-loads `CLAUDE.md` via compatibility). After changing `.cursor/mcp.json` or `cursor.env`, **reload MCP in that Cursor window** — a running agent session does not pick up a newly deployed token.
 
