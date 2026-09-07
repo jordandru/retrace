@@ -65,6 +65,20 @@ export function objectStoreFinding(repo: string): Finding {
   );
 }
 
+export function hookFindings(repo: string): Finding[] {
+  const hooksDir = resolve(repo, git(repo, ["rev-parse", "--git-path", "hooks"]));
+  const hook = join(hooksDir, "post-commit");
+  const hookOk = existsSync(hook) && readFileSync(hook, "utf8").includes("# retrace-git hook");
+  const mergeHook = join(hooksDir, "post-merge");
+  const mergeHookOk = existsSync(mergeHook) && readFileSync(mergeHook, "utf8").includes("# retrace-git hook");
+  return [
+    hookOk ? result("pass", "post-commit hook", hook) : result("fail", "post-commit hook", `not installed at ${hook}; run retrace-git install --repo ${repo}`),
+    // git runs post-merge, not post-commit, for `git merge`; an install from before 2026-09-06 wrote only post-commit,
+    // so its merge commits were never sealed by the hook. A warning, not a failure: commits still seal, merges don't.
+    mergeHookOk ? result("pass", "post-merge hook", mergeHook) : result("warn", "post-merge hook", `not installed at ${mergeHook}; merge commits are not sealed by the hook — re-run retrace-git install --repo ${repo}`),
+  ];
+}
+
 export function parseDoctorArgs(argv: string[]): DoctorArgs {
   const flags = new Set(argv.filter((a) => a.startsWith("--")));
   const pos = argv.filter((a) => !a.startsWith("--"));
@@ -274,15 +288,7 @@ async function main() {
   catch (e: any) { findings.push(result("fail", "repository wiring", `${cfgPath} is invalid JSON: ${e.message}`)); }
 
   if (!gate) {
-    const gitDir = resolve(repo, git(repo, ["rev-parse", "--git-dir"]));
-    const hook = join(gitDir, "hooks", "post-commit");
-    const hookOk = existsSync(hook) && readFileSync(hook, "utf8").includes("# retrace-git hook");
-    findings.push(hookOk ? result("pass", "post-commit hook", hook) : result("fail", "post-commit hook", `not installed at ${hook}; run retrace-git install --repo ${repo}`));
-    // git runs post-merge, not post-commit, for `git merge`; an install from before 2026-09-06 wrote only post-commit,
-    // so its merge commits were never sealed by the hook. A warning, not a failure: commits still seal, merges don't.
-    const mergeHook = join(gitDir, "hooks", "post-merge");
-    const mergeHookOk = existsSync(mergeHook) && readFileSync(mergeHook, "utf8").includes("# retrace-git hook");
-    findings.push(mergeHookOk ? result("pass", "post-merge hook", mergeHook) : result("warn", "post-merge hook", `not installed at ${mergeHook}; merge commits are not sealed by the hook — re-run retrace-git install --repo ${repo}`));
+    findings.push(...hookFindings(repo));
   }
 
   const project = process.env.RETRACE_PROJECT ?? cfg.project ?? basename(repo);

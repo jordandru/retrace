@@ -227,7 +227,7 @@ test("doctor capture coverage sees a HEAD seal after the signed cache without re
   } finally { globalThis.fetch = savedFetch; }
 });
 
-import { gateDualWitness, objectStoreFinding, parseDoctorArgs as parseArgs2 } from "./doctor.js";
+import { gateDualWitness, hookFindings, objectStoreFinding, parseDoctorArgs as parseArgs2 } from "./doctor.js";
 import { execFileSync as execGit } from "node:child_process";
 import { chmodSync, existsSync, mkdtempSync as mkTemp, readFileSync, statSync, truncateSync, writeFileSync as writeF } from "node:fs";
 import { tmpdir as tmpD } from "node:os";
@@ -304,6 +304,20 @@ test("objectStoreFinding: packed-only commit objects pass without loose files", 
   assert.equal(existsSync(loose), false);
   assert.equal(fixture.g("cat-file", "-t", "HEAD"), "commit");
   assert.equal(objectStoreFinding(fixture.repo).level, "pass");
+});
+
+test("hookFindings: linked worktrees use hooks from the common Git directory", () => {
+  const fixture = objectStoreRepo();
+  fixture.commit("hooks\n");
+  writeF(joinP(fixture.repo, ".git", "hooks", "post-commit"), "#!/bin/sh\n# retrace-git hook\n");
+  writeF(joinP(fixture.repo, ".git", "hooks", "post-merge"), "#!/bin/sh\n# retrace-git hook\n");
+  const parent = mkTemp(joinP(tmpD(), "retrace-hook-worktree-"));
+  const worktree = joinP(parent, "linked");
+  fixture.g("worktree", "add", "-q", "-b", "feature", worktree);
+
+  const findings = hookFindings(worktree);
+  assert.deepEqual(findings.map((finding) => finding.level), ["pass", "pass"]);
+  assert.ok(findings.every((finding) => finding.detail.startsWith(joinP(fixture.repo, ".git", "hooks"))));
 });
 
 test("gate dual witness never infers leniency from the ref layout: a detached, pushed sha with no refs/remotes branch containing HEAD still fails on a lone producer; --local is explicit and refused under CI", () => {
