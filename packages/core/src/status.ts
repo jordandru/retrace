@@ -37,22 +37,8 @@ export type ProjectStatus = {
   integrations: StatusIntegration[];
 };
 
-type RootState = "rooted" | "broken" | "unlinked";
-
-/** Does this event's caused_by chain terminate at a human instruction root? */
-export function causalRootState(event: Event, byId: Map<string, Event>): RootState {
-  const seen = new Set<string>();
-  let cur: Event | undefined = event;
-  while (cur) {
-    if (seen.has(cur.id)) return "broken";
-    seen.add(cur.id);
-    if (cur.actor.type === "human" && cur.action === "instructed") return "rooted";
-    if (!cur.caused_by) return "unlinked";
-    cur = byId.get(cur.caused_by);
-    if (!cur) return "broken";
-  }
-  return "broken";
-}
+import { causalRootState, type RootState } from "./causality.js";
+export { causalRootState } from "./causality.js";
 
 export async function buildProjectStatus(store: EventStore, project: string, now = new Date(), attributionOptions?: AttributionOptions): Promise<ProjectStatus> {
   const events = await store.all(project);

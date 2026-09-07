@@ -7,7 +7,7 @@ import { verifiedAttributionSnapshot, prepareAttributionContext, AttributionGitF
 import { collectProvenanceAmendments, collectRejectedAmendments } from "./amendment.js";
 import { reconcile } from "./reconcile.js";
 import { renderTimeline, renderWhyChain } from "./explain.js";
-import { buildProjectStatus } from "./status.js";
+import { buildProjectStatus, causalRootState } from "./status.js";
 import { buildLineage, renderLineageDot, renderLineageMermaid, lineageForModel } from "./lineage.js";
 import { buildExportBundle, verifyExportBundle } from "./export.js";
 import { renderReportHtml } from "./report.js";
@@ -54,6 +54,7 @@ for(const [name,modify,expected] of [
   ["instruction target",(x:Event[])=>{x[4].method!.params!.target_event_id="R";x[4].artifacts[0].id="event:R";},"target_is_instruction"],
   ["agent relay",(x:Event[])=>{x[4].actor=B;},"relay_disabled"],
   ["unstamped authority",(x:Event[])=>{delete x[4].method!.params!.sealed_by;},"untrusted_authority"],
+  ["pinned human authority",(x:Event[])=>{x[4].method!.params!.sealed_by="pinned:H";},"untrusted_authority"],
   ["human beneficiary",(x:Event[])=>{(x[4].method!.params!.attribution as any).to=H;},"human_beneficiary_unsupported"],
   ["model injection",(x:Event[])=>{(x[4].method!.params!.attribution as any).to={...B,model:"forged"};},"malformed"],
   ["no-op",(x:Event[])=>{(x[4].method!.params!.attribution as any).to=O;},"no_op"],
@@ -162,6 +163,7 @@ test("v6 5g: content observations are optional and do not decide effectiveness",
     const c=collectAttributionAmendments(r.events,undefined,{...r.options,...(bound?{contentBoundArtifacts:()=>bound}:{})});
     assert.equal(c.effective.get("T")?.length,1);
     assert.equal(c.effective.get("T")![0].flags.content_bound,bound?.length===2?true:undefined);
+    assert.deepEqual(c.effective.get("T")![0].flags.content_bound_artifacts,bound??[]);
   }
 });
 
@@ -216,4 +218,32 @@ test("v6 9f: reconcile does not collapse matching ids across actor types",async(
   assert.equal(report.commits[0].findings.some(f=>f.kind==="producer_disagreement"&&f.level==="fail"),true);
   assert.equal(report.commits[0].findings.some(f=>f.kind==="misattributed"&&f.level==="fail"),true);
   assert.deepEqual(report.commits[0].coverage.a.actor_refs,[O]);
+});
+
+test("human amendment authority accepts owner/assert and rejects pinned, webhook and unauthenticated receipts",async()=>{
+  for(const stamp of ["owner","assert:human-operator","pinned:H","webhook:github","unauthenticated"]){
+    const x=base();x[4].method!.params!.sealed_by=stamp;const r=await prepare(x);
+    if(stamp==="owner"||stamp.startsWith("assert:"))assert.equal(active(r).length,1,stamp);
+    else assert.equal(reason(r),"untrusted_authority",stamp);
+  }
+});
+
+test("v6 5d witness-and-notary: a covering edit exists but citing only the same human's correction is insufficient",async()=>{
+  const x=base();const correction={...ev("notary",H,[{id:"commit:r@aaaaaaa",role:"used"},{id:"event:E",role:"used"}] as any,"other"),tags:["correction"],method:{params:{sealed_by:"owner",attributed_to:B.id}},location:{session:"same-human-session"}};
+  x[3].artifacts.push({id:"commit:r@aaaaaaa",role:"used"} as any);
+  x.splice(4,0,correction);x[5]=amendment("A","T",O,B,undefined,["notary"]);x[5].location={session:"same-human-session"};
+  assert.equal(reason(await prepare(x)),"uncorroborated");
+  (x[5].method!.params!.attribution as any).evidence.push("E");x[5].artifacts.push({id:"event:E",role:"used"});
+  assert.equal(active(await prepare(x)).length,1,"directly citing the existing edit changes the outcome");
+});
+
+test("shared causal root walker: strict attribution parents reject forward/foreign links and cycles",()=>{
+  const r={...root(),seq:0},e={...ev("E"),seq:1};
+  const state=(events:Event[])=>causalRootState(events[1],new Map(events.map(x=>[x.id,x])),{strictParents:true});
+  assert.equal(state([r,e]),"rooted");
+  assert.equal(state([{...r,seq:2},e]),"broken");
+  assert.equal(state([{...r,project:"foreign"},e]),"broken");
+  assert.equal(state([r,{...e,caused_by:undefined}]),"unlinked");
+  assert.equal(state([r,{...e,caused_by:"missing"}]),"broken");
+  assert.equal(state([r,{...e,caused_by:e.id}]),"broken");
 });

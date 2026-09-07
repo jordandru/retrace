@@ -136,7 +136,11 @@ test("adversarial: acknowledgements must be sealed after the commit, by someone 
   const level = (evs: Event[], opts: Partial<Parameters<typeof reconcile>[2]> = {}) => reconcile([commit("c", ["z.ts"])], evs, { repoName: REPO, aliases: ["retrace"], ...opts }).commits[0].findings[0];
   assert.equal(level(base).level, "fail");
   assert.equal(level([...base, correction(8, claude)]).level, "fail", "a correction sealed before the commit is a pre-ack, not an acknowledgement");
-  assert.equal(level([...base, correction(10, codex)]).level, "fail", "the accused committer cannot acknowledge itself");
+  for (const type of ["agent", "human", "system"] as const) {
+    const finding = level([...base, correction(10, { type, id: codex.id })], { ackActors: [codex.id] });
+    assert.equal(finding.level, "fail", `the accused id cannot acknowledge itself as ${type}`);
+    assert.equal(finding.acknowledged, undefined);
+  }
   assert.equal(level([...base, correction(10, claude)]).level, "fail", "an agent cannot acknowledge by default — only a listed reviewer agent may");
   assert.equal(level([...base, correction(10, jordan)]).level, "info", "a human always may");
   const listed = level([...base, correction(10, claude)], { ackActors: ["claude-code"] });

@@ -33,16 +33,20 @@ test("human CLI: dry-run, sealed amendment, real blob/trailer observations and e
     const seal=(await appendEvent(store,{project:"p",actor:recorded,action:"committed",artifacts:[{id:cid,role:"generated"},{id:artifact,role:"generated"}],caused_by:root.id,method:{tool:"git",params:{sealed_by:"assert:hook"}},idempotency_key:`git:${oid}`})).event;
     const witness=(await appendEvent(store,{project:"p",actor:beneficiary,action:"committed",artifacts:[{id:cid,role:"generated"},{id:artifact,role:"generated"}],caused_by:root.id,method:{tool:"git",params:{sealed_by:"assert:hook"}}})).event;
     const args=["amend-attribution","--target",seal.id,"--to","agent/B","--evidence",`${edit.id},${witness.id}`,"--reason","human reviewed the covering contribution","--caused-by",root.id,"--human",human.id];
-    const dry=cli([...args,"--dry-run"]);assert.equal(dry.status,0,dry.stderr);const preview=JSON.parse(dry.stdout);assert.equal(preview.recorded,false);assert.equal(preview.result.flags.content_bound,true);assert.equal(preview.result.flags.trailer_corroborated,true);
+    const dry=cli([...args,"--dry-run"]);assert.equal(dry.status,0,dry.stderr);const preview=JSON.parse(dry.stdout);assert.equal(preview.recorded,false);assert.equal(preview.result.flags.content_bound,true);assert.deepEqual(preview.result.flags.content_bound_artifacts,[artifact]);assert.equal(preview.result.flags.trailer_corroborated,true);
     assert.equal((await store.all("p")).length,4);
     const written=cli(args);assert.equal(written.status,0,written.stderr+written.stdout);assert.match(written.stdout,/"recorded":true/);assert.match(written.stdout,/"effective":true/);
     const events=await store.all("p"),options=await attributionOptionsForRepo(dir,events,"p");
     assert.equal(collectAttributionAmendments(events,undefined,options).effective.get(seal.id)?.[0].whole_event,true);
     assert.equal(events.find(e=>e.id===seal.id)?.actor.id,"O");
+    assert.deepEqual(options.contentBoundArtifacts?.(seal,[edit]),[artifact]);
+    assert.deepEqual(options.contentBoundArtifacts?.(seal,[{...edit,artifacts:[...edit.artifacts,{id:"repo:org/r#another.txt",role:"generated"}]}]),[],"one scalar hash does not bind multiple outputs");
     // Same receipt, but an absent or mismatching content observation leaves the amendment effective.
     const result=collectAttributionAmendments(events,undefined,{...options,contentBoundArtifacts:()=>[]});assert.equal(result.effective.get(seal.id)?.length,1);assert.equal(result.effective.get(seal.id)?.[0].flags.content_bound,undefined);
     // A sealed commit by B is not trailer corroboration if the actual Git trailer says someone else.
     assert.equal(options.trailerCorroborated?.(seal,[witness],{type:"agent",id:"other"}),false);
+    assert.equal(options.trailerCorroborated?.(seal,[{...witness,actor:recorded}],beneficiary),true,"trailer identity, not the receipt actor, supplies this observation");
+    assert.equal(options.trailerCorroborated?.(seal,[],beneficiary),false,"a bare Git object without a cited seal is insufficient");
     const key=await generateSigningKey();const bundle=await buildExportBundle(store,{project:"p"},{signingKey:key.privateKey});
     const bundlePath=join(dir,"bundle.json"),pubkeyPath=join(dir,"public.jwk");writeFileSync(bundlePath,JSON.stringify(bundle));writeFileSync(pubkeyPath,JSON.stringify(key.publicKey));
     const rendered=cli(["render",bundlePath,"--pubkey",pubkeyPath]);assert.equal(rendered.status,0,rendered.stderr);assert.match(rendered.stdout,/^attribution amendments: 1 effective/);assert.match(rendered.stderr,/attribution amendments: 1 effective/);assert.match(rendered.stdout,/recorded|attribution amended →/);
@@ -57,6 +61,8 @@ test("human CLI: dry-run, sealed amendment, real blob/trailer observations and e
 
 test("PR gate refuses an older Worker while ordinary doctor reports deployment pending", () => {
   assert.equal(attributionDeployment({}, true).level, "fail");
+  assert.match(attributionDeployment({}, true).detail, /deploy the Worker from this build first/);
+  assert.doesNotMatch(attributionDeployment({}, true).detail, /Jordan/);
   assert.equal(attributionDeployment({capabilities: ["attribution-v7"]}, true).level, "pass");
   assert.equal(attributionDeployment({}, false).level, "warn");
 });

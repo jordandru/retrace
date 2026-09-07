@@ -312,7 +312,7 @@ export async function remoteCaptureCoverage(
 export function attributionDeployment(api: { capabilities?: unknown }, gate: boolean): Finding {
   return Array.isArray(api.capabilities) && api.capabilities.includes("attribution-v7")
     ? result("pass", "attribution deployment", "Worker advertises attribution-v7")
-    : result(gate ? "fail" : "warn", "attribution deployment", "Worker predates attribution-v7; Jordan must deploy before the PR gate can pass");
+    : result(gate ? "fail" : "warn", "attribution deployment", "Worker predates this build's attribution profile (attribution-v7); deploy the Worker from this build first");
 }
 
 export function missingSchema(remote: Record<string, unknown>, local = schemaSurface()): string[] {

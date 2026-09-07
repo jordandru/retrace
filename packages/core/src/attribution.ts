@@ -1,4 +1,5 @@
 /** Derived attribution only. Never mutate sealed event bodies or trust a stored effectiveness flag. */
+import { causalRootState } from "./causality.js";
 import type { Actor, Event, EventInput } from "./schema.js";
 import { actorKey, sameActor, sameArtifact, generatesArtifact } from "./capture.js";
 
@@ -10,7 +11,7 @@ export interface AttributionAmendment {
   from: ActorRef; to: ActorRef; artifacts: string[]; whole_event: boolean;
   tier: "human"; evidence: string[]; reason: string;
   matches: Record<string, string[]>;
-  flags: { human_corroborated?: boolean; trailer_corroborated?: boolean; content_bound?: boolean };
+  flags: { human_corroborated?: boolean; trailer_corroborated?: boolean; content_bound?: boolean; content_bound_artifacts?: string[] };
   supersedes?: string;
 }
 export type AttributionReason = "unrooted" | "missing_target" | "wrong_project" | "not_older" | "malformed" |
@@ -30,15 +31,7 @@ const strings = (v: unknown): v is string[] => Array.isArray(v) && v.length > 0 
 export const isAttributionAmendment = (e: Event): boolean => e.action === "other" && e.action_detail === "amended" && (e.method?.params?.attribution !== undefined || e.tags?.includes("attribution") === true);
 
 export function attributionRooted(e: Event, events: Event[]): boolean {
-  const byId = new Map(events.map(x => [x.id, x])); const seen = new Set<string>(); let cur: Event | undefined = e;
-  while (cur && !seen.has(cur.id)) {
-    if (cur.project !== e.project) return false;
-    if (cur.actor.type === "human" && cur.action === "instructed") return true;
-    seen.add(cur.id); const next: Event | undefined = cur.caused_by ? byId.get(cur.caused_by) : undefined;
-    if (next && next.seq >= cur.seq) return false;
-    cur = next;
-  }
-  return false;
+  return causalRootState(e, new Map(events.map(x => [x.id, x])), { strictParents: true }) === "rooted";
 }
 
 export interface AttributionRequest {
@@ -75,7 +68,7 @@ function checkCandidate(attempt: Attempt, events: Event[], options: AttributionO
   if (target.action === "instructed") return fail("target_is_instruction");
   if (candidate.actor.type !== "human") return fail("relay_disabled");
   const authority = attempt.authority;
-  if (!(authority === "owner" || typeof authority === "string" && /^(assert:|pinned:)/.test(authority))) return fail("untrusted_authority");
+  if (!(authority === "owner" || typeof authority === "string" && /^assert:/.test(authority))) return fail("untrusted_authority");
   if (raw.to.type === "human") return fail("human_beneficiary_unsupported");
   if (sameActor(raw.from, raw.to)) return fail("no_op");
   const domain = options.context!.domains.get(target.id)!;
@@ -111,7 +104,8 @@ function checkCandidate(attempt: Attempt, events: Event[], options: AttributionO
       (e.method?.params?.attributed_to === (raw.to as ActorRef).id || e.artifacts.some(a => a.id === `actor:${(raw.to as ActorRef).id}`)))) flags.human_corroborated = true;
   if (options.trailerCorroborated?.(target,refs,raw.to)) flags.trailer_corroborated = true;
   const bound = options.contentBoundArtifacts?.(target, covering) ?? [];
-  if (artifacts.every(id => bound.includes(id))) flags.content_bound = true;
+  flags.content_bound_artifacts = artifacts.filter(id => bound.includes(id));
+  if (flags.content_bound_artifacts.length === artifacts.length) flags.content_bound = true;
   const whole_event = domain.complete && artifacts.length === domain.units.length;
   const amendment: AttributionAmendment = { amendment_id: attempt.key, seq: attempt.position.kind === "sealed" ? attempt.position.seq : -1, target_id: target.id, from: raw.from, to: raw.to, artifacts, whole_event, tier: "human", evidence: [...new Set(raw.evidence)].sort(), reason: candidate.intent ?? "", flags, matches: evidenceMatches, ...(typeof raw.supersedes === "string" ? { supersedes: raw.supersedes } : {}) };
   return { ok: true, tier: "human", flags, whole_event, amendment };

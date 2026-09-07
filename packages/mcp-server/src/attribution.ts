@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { buildProjectStatus, EventStore, parseTrailers, Event, AttributionPolicy, AttributionGitFacts, AttributionOptions, verifiedAttributionSnapshot, prepareAttributionContext, isAttributionAmendment, sameActor, preflightAttributionAmendment, AttributionRequest, collectAttributionAmendments, appendEvent, GENESIS_HASH } from "@retrace-dev/core";
+import { generatesArtifact, buildProjectStatus, EventStore, parseTrailers, Event, AttributionPolicy, AttributionGitFacts, AttributionOptions, verifiedAttributionSnapshot, prepareAttributionContext, isAttributionAmendment, sameActor, preflightAttributionAmendment, AttributionRequest, collectAttributionAmendments, appendEvent, GENESIS_HASH } from "@retrace-dev/core";
 import { makeStore } from "./index.js";
 import { RemoteStore } from "./remote-store.js";
 import { fetchVerifiedRemoteEvents } from "./verified-events.js";
@@ -76,7 +76,10 @@ export async function attributionOptionsForRepo(repo: string, events: Event[], p
         const entry=git(repo,["ls-tree","-z",r.oid,"--",f.path]).split("\0")[0];
         const match=/^[0-7]+ blob ([0-9a-f]+)\t/.exec(entry); if(!match)continue;
         const id=`repo:${r.repo}#${f.path}`;
-        if(evidence.some(e=>e.change?.after_hash===match[1] && e.artifacts.some(a=>context.canonicalArtifact(a.id,e.seq)===id)))bound.push(id);
+        if (evidence.some(e => {
+          const outputs = new Set(e.artifacts.filter(a => generatesArtifact(e, a)).map(a => context.canonicalArtifact(a.id, e.seq)));
+          return e.change?.after_hash === match[1] && outputs.size === 1 && outputs.has(id);
+        })) bound.push(id);
       } catch { /* optional blob observation does not decide effectiveness */ }
     }
     return bound;

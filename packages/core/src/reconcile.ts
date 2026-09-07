@@ -151,7 +151,7 @@ function ackFor(acks: Map<string, Ack[]>, sha12: string, sealed: Event, ackActor
   for (const [k, list] of acks) if (k === sha12 || (k.length >= 7 && sha12.startsWith(k))) candidates.push(...list);
   const accused = sealed.actor.id, accusedModel = sealed.actor.model, accusedSession = sealed.location?.session;
   const ok = candidates.filter((a) => {
-    if (a.seq <= sealed.seq || (a.actor === accused && a.actorType === sealed.actor.type)) return false;
+    if (a.seq <= sealed.seq || a.actor === accused) return false;
     if (a.actorType === "human") return true;
     if (a.actorType !== "agent" || !ackActors?.includes(a.actor)) return false;
     if (accusedModel && a.model && a.model === accusedModel) return false;

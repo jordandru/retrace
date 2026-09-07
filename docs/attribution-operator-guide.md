@@ -81,8 +81,9 @@ matches are annotations, not sufficient evidence.
 
 ## Review and rollout
 
-Merge `cursor/gate-trust-boundary` first, then `copilot/object-store-doctor`, then
-rebase this branch onto both. Claude reviews before merge. Jordan deploys the Worker
+Rebase this branch onto the merged `cursor/gate-trust-boundary` and
+`copilot/object-store-doctor` prerequisites before landing. Claude reviews before
+merge. Jordan deploys the Worker after the NOOA Ultra review and review fixes,
 before the PR gate can pass; Codex does not deploy it.
 
 Worker runtime changes are `apps/worker/src/mcp.ts`, shared core router/status/
