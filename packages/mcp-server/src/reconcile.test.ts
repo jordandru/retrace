@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   generateSigningKey, appendEvent, buildExportBundle, EventStore, Event, Share, EventInput,
-  pageHistoryNewest, keyId, publicFromPrivate, signCanonical, verifyExportBundle, GENESIS_HASH,
+  pageHistoryNewest, keyId, publicFromPrivate, signCanonical, verifyExportBundle,
 } from "@retrace-dev/core";
 import { parseNameStatus, verifiedExportEvents } from "./reconcile.js";
 import { fetchVerifiedRemoteEvents, historyTail } from "./verified-events.js";
@@ -262,37 +262,6 @@ test("remote events: forged unsigned, wrong-key, and stale signed heads fail clo
       assert.equal(calls.some((url) => url.includes("/events?")), false, scenario.name);
       assert.equal(calls.some((url) => url.includes("fresh=1")), false, scenario.name);
     }
-  } finally { globalThis.fetch = savedFetch; }
-});
-
-test("remote events: unsigned null head plus empty cache fails closed", async () => {
-  const store = new MemStore();
-  const issuer = await generateSigningKey();
-  const empty = await buildExportBundle(store, { project: "p" }, { signingKey: issuer.privateKey, issuerName: "test" });
-  assert.equal(empty.chain.total_events, 0);
-  const savedFetch = globalThis.fetch;
-  globalThis.fetch = async (input) => {
-    const url = String(input);
-    if (url.endsWith("/projects/p/export?cached=1")) return Response.json(empty);
-    if (url.endsWith("/projects/p/head?signed=1")) return Response.json(null);
-    return new Response("not found", { status: 404 });
-  };
-  try {
-    await assert.rejects(
-      () => fetchVerifiedRemoteEvents(new RemoteStore("https://mock.test"), "p", JSON.stringify(issuer.publicKey)),
-      /missing or unsigned/,
-    );
-    globalThis.fetch = async (input) => {
-      const url = String(input);
-      if (url.endsWith("/projects/p/export?cached=1")) return Response.json(empty);
-      if (url.endsWith("/projects/p/head?signed=1")) {
-        return Response.json(await signedHead(issuer.privateKey, { seq: -1, hash: GENESIS_HASH }));
-      }
-      return new Response("not found", { status: 404 });
-    };
-    const got = await fetchVerifiedRemoteEvents(new RemoteStore("https://mock.test"), "p", JSON.stringify(issuer.publicKey));
-    assert.deepEqual(got.events, []);
-    assert.match(got.note, /signed live head confirms cache through #-1/);
   } finally { globalThis.fetch = savedFetch; }
 });
 

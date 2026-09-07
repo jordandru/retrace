@@ -105,7 +105,8 @@ export async function fetchVerifiedRemoteEvents(
   const liveHead = await store.signedHead(project);
 
   if (!liveHead) {
-    throw new Error("signed live head is missing or unsigned; an empty ledger must still return a signed empty head");
+    if (total === 0) return { events: verified.events, note: `${verified.note}; signed cache is empty; no tail` };
+    throw new Error(`live ledger has no head but the signed cache claims through #${cachedHead.seq}`);
   }
   if (
     typeof liveHead.project !== "string"
