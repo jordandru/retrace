@@ -12,8 +12,7 @@
  *   1. Mints project-scoped credentials (Credential.projects = [<project>], so a leaked team token cannot read or write
  *      any other team's ledger): one PINNED agent credential per member × harness (actor.on_behalf_of = the member, so
  *      retrace_instruct can record that member's instructions and nobody else's), one ASSERT credential for the team's
- *      git hook (actor.id retrace-git-<project>, allowed_actors = the team's agents + members), and one assert-trust CI
- *      reader with allowed_actors: [] so it can GET the gate routes but cannot POST /events.
+ *      git hook (actor.id retrace-git-<project>, allowed_actors = the team's agents + members), and one pinned CI reader.
  *   2. Mints an Ed25519 producer keypair per pinned agent (except OpenClaw) and the git hook: `public_key` +
  *      `require_signature: true` go on the credential (Worker-uploadable); the private JWK is a separate 0600 file
  *      under producer-keys/. The CI reader and OpenClaw get neither — OpenClaw is remote HTTP MCP and the Worker must
@@ -73,10 +72,9 @@ export interface AgentSpec {
 /** Local mirror may carry `producer_key_file` (a path). The Worker Credential schema must not grow this field. */
 export type LocalCredential = Credential & { producer_key_file?: string };
 
-/** OpenClaw is remote HTTP MCP (Worker must not hold the private key). CI is a read-only assert credential. Everyone else who writes, signs. */
+/** OpenClaw is remote HTTP MCP (Worker must not hold the private key). CI is a reader. Everyone else who writes, signs. */
 export function shouldMintProducerKey(c: Credential): boolean {
   if (c.actor.id === "openclaw") return false;
-  if (c.actor.id.startsWith("ci-")) return false;
   if (c.trust === "assert") return true;
   return c.trust === "pinned" && c.actor.type === "agent";
 }
@@ -170,8 +168,7 @@ export function planCredentials(spec: TeamSpec, rand: (n: number) => Buffer = ra
     token: mintToken(rand),
     name: `${spec.project} · CI gate reader`,
     actor: { type: "system", id: ciActorId(spec.project) },
-    trust: "assert",
-    allowed_actors: [],
+    trust: "pinned",
     projects: [spec.project],
   });
   return out;
@@ -237,7 +234,7 @@ export function renderOnboarding(spec: TeamSpec, credentials: LocalCredential[])
     "    RETRACE_TOKEN: ${{ secrets.RETRACE_CI_TOKEN }}",
     "  run: npx -y --package=@retrace-dev/cli retrace doctor --gate",
   ].join("\n")), "");
-  lines.push("A commit with no provenance behind it fails the check. Make `gate` a required status check on your default branch. The CI reader is minted with trust `assert` and `allowed_actors: []`, so it can GET `/export`, `/head?signed=1` and `/events` but cannot POST `/events` (or any other write). It has no producer key. Re-mint after this Worker/admin change deploys; an older pinned CI token can still write as its pinned actor.", "");
+  lines.push("A commit with no provenance behind it fails the check. Make `gate` a required status check on your default branch. The CI reader has no producer key.", "");
   lines.push("## 4. Prove it to someone else", "");
   lines.push(fence("bash", [
     `npx -y --package=@retrace-dev/cli retrace-export export ${spec.project} --out ${spec.project}.json`,
