@@ -265,6 +265,39 @@ test("remote events: forged unsigned, wrong-key, and stale signed heads fail clo
   } finally { globalThis.fetch = savedFetch; }
 });
 
+test("remote events: the trusted issuer key is resolved once even if well-known rotates mid-fetch", async () => {
+  const store = new MemStore();
+  await appendEvent(store, ev());
+  await appendEvent(store, ev());
+  const keyA = await generateSigningKey();
+  const keyB = await generateSigningKey();
+  const cached = await buildExportBundle(store, { project: "p" }, { signingKey: keyA.privateKey, issuerName: "test" });
+  const wellKnown: string[] = [];
+  const savedFetch = globalThis.fetch;
+  const savedPubkey = process.env.RETRACE_PUBKEY;
+  delete process.env.RETRACE_PUBKEY;
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    if (url.endsWith("/.well-known/retrace-pubkey")) {
+      const key = wellKnown.length === 0 ? keyA : keyB;
+      wellKnown.push(key.kid);
+      return Response.json({ kid: key.kid, alg: "Ed25519", public_key: key.publicKey });
+    }
+    if (url.endsWith("/projects/p/export?cached=1")) return Response.json(cached);
+    if (url.endsWith("/projects/p/head?signed=1")) return Response.json(await signedHead(keyA.privateKey, { seq: 1, hash: store.events[1].hash }));
+    return new Response("not found", { status: 404 });
+  };
+  try {
+    const got = await fetchVerifiedRemoteEvents(new RemoteStore("https://mock.test"), "p", undefined, "https://mock.test");
+    assert.deepEqual(got.events.map((e) => e.seq), [0, 1]);
+    assert.deepEqual(wellKnown, [keyA.kid], "exactly one well-known fetch; a second key must not be consulted");
+  } finally {
+    globalThis.fetch = savedFetch;
+    if (savedPubkey !== undefined) process.env.RETRACE_PUBKEY = savedPubkey;
+    else delete process.env.RETRACE_PUBKEY;
+  }
+});
+
 test("history tail: a one-event suffix on a 100,001-event ledger requests and receives exactly one event", async () => {
   const ledgerSize = 100_001;
   const event = { seq: ledgerSize - 1 } as Event;
