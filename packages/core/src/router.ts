@@ -33,7 +33,7 @@
  *   DELETE /s/:id                        owner-only revoke
  */
 import { z } from "zod";
-import { Actor, ActorType, EventInput, schemaSurface } from "./schema.js";
+import { Actor, ActorType, EventInput, GENESIS_HASH, schemaSurface } from "./schema.js";
 import { EventStore, appendEvent, AdapterIdempotencyError, CausedByError, verifyProject, explainEvent, newShareId, shareIsLive, Share, isHeadMovedError, SEALED_BY_PARAM, SEALED_BY_OWNER, SEALED_BY_UNAUTHENTICATED, SEALED_BY_GITHUB_WEBHOOK } from "./store.js";
 import { sealEvent } from "./chain.js";
 import { buildExportBundle, verifyExportBundle } from "./export.js";
@@ -343,7 +343,15 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
       )
       : null;
     const head = await store.head(project);
-    if (!head) return null;
+    if (!head) {
+      return cacheOnly
+        ? json(
+          { error: `no live head for project "${project}"; a project with no head has nothing to serve` },
+          404,
+          { ...extra, "x-retrace-export-cache": "miss" },
+        )
+        : null;
+    }
     const hit = head.seq === cached.head_seq && head.hash === cached.head_hash;
     return new Response(cached.bundle_json, {
       status: 200,
@@ -571,9 +579,10 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
             const head = await store.head(project);
             if (q.signed !== "1") return json(head);
             if (!opts.signingKey) return json({ error: "no signing key configured" }, 404);
-            if (head === null) return json(null);
             const signed_at = new Date().toISOString();
-            const payload = { project, seq: head.seq, hash: head.hash, signed_at };
+            const payload = head === null
+              ? { project, seq: -1, hash: GENESIS_HASH, signed_at }
+              : { project, seq: head.seq, hash: head.hash, signed_at };
             const pub = publicFromPrivate(opts.signingKey);
             return json({
               ...payload,

@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   generateSigningKey, appendEvent, buildExportBundle, EventStore, Event, Share, EventInput,
-  pageHistoryNewest, keyId, publicFromPrivate, signCanonical,
+  pageHistoryNewest, keyId, publicFromPrivate, signCanonical, verifyExportBundle, GENESIS_HASH,
 } from "@retrace-dev/core";
 import { parseNameStatus, verifiedExportEvents } from "./reconcile.js";
 import { fetchVerifiedRemoteEvents, historyTail } from "./verified-events.js";
@@ -63,6 +63,11 @@ test("verifiedExportEvents fails closed: no trusted key, wrong key, tampered eve
   await assert.rejects(() => verifiedExportEvents(tampered, flag), /does not verify/);
   const unsigned = await buildExportBundle(store, { project: "p" }, {});
   await assert.rejects(() => verifiedExportEvents(unsigned, flag), /does not verify/);
+  const scoped = await buildExportBundle(store, { project: "p", artifact_id: "repo:p#a.ts" }, { signingKey: issuer.privateKey, issuerName: "test" });
+  const scopedVerdict = await verifyExportBundle(scoped, issuer.publicKey);
+  assert.equal(scopedVerdict.signature, "valid");
+  assert.equal(scopedVerdict.coverage.scope, "scoped");
+  await assert.rejects(() => verifiedExportEvents(scoped, flag), /scoped export \(scope artifact_id=repo:p#a\.ts\)/);
 });
 
 test("remote events: signed cache is extended by a chain-verified HTTP tail without trying fresh export", async () => {
@@ -260,6 +265,70 @@ test("remote events: forged unsigned, wrong-key, and stale signed heads fail clo
   } finally { globalThis.fetch = savedFetch; }
 });
 
+test("remote events: unsigned null head plus empty cache fails closed", async () => {
+  const store = new MemStore();
+  const issuer = await generateSigningKey();
+  const empty = await buildExportBundle(store, { project: "p" }, { signingKey: issuer.privateKey, issuerName: "test" });
+  assert.equal(empty.chain.total_events, 0);
+  const savedFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    if (url.endsWith("/projects/p/export?cached=1")) return Response.json(empty);
+    if (url.endsWith("/projects/p/head?signed=1")) return Response.json(null);
+    return new Response("not found", { status: 404 });
+  };
+  try {
+    await assert.rejects(
+      () => fetchVerifiedRemoteEvents(new RemoteStore("https://mock.test"), "p", JSON.stringify(issuer.publicKey)),
+      /missing or unsigned/,
+    );
+    globalThis.fetch = async (input) => {
+      const url = String(input);
+      if (url.endsWith("/projects/p/export?cached=1")) return Response.json(empty);
+      if (url.endsWith("/projects/p/head?signed=1")) {
+        return Response.json(await signedHead(issuer.privateKey, { seq: -1, hash: GENESIS_HASH }));
+      }
+      return new Response("not found", { status: 404 });
+    };
+    const got = await fetchVerifiedRemoteEvents(new RemoteStore("https://mock.test"), "p", JSON.stringify(issuer.publicKey));
+    assert.deepEqual(got.events, []);
+    assert.match(got.note, /signed live head confirms cache through #-1/);
+  } finally { globalThis.fetch = savedFetch; }
+});
+
+test("remote events: the trusted issuer key is resolved once even if well-known rotates mid-fetch", async () => {
+  const store = new MemStore();
+  await appendEvent(store, ev());
+  await appendEvent(store, ev());
+  const keyA = await generateSigningKey();
+  const keyB = await generateSigningKey();
+  const cached = await buildExportBundle(store, { project: "p" }, { signingKey: keyA.privateKey, issuerName: "test" });
+  const wellKnown: string[] = [];
+  const savedFetch = globalThis.fetch;
+  const savedPubkey = process.env.RETRACE_PUBKEY;
+  delete process.env.RETRACE_PUBKEY;
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    if (url.endsWith("/.well-known/retrace-pubkey")) {
+      const key = wellKnown.length === 0 ? keyA : keyB;
+      wellKnown.push(key.kid);
+      return Response.json({ kid: key.kid, alg: "Ed25519", public_key: key.publicKey });
+    }
+    if (url.endsWith("/projects/p/export?cached=1")) return Response.json(cached);
+    if (url.endsWith("/projects/p/head?signed=1")) return Response.json(await signedHead(keyA.privateKey, { seq: 1, hash: store.events[1].hash }));
+    return new Response("not found", { status: 404 });
+  };
+  try {
+    const got = await fetchVerifiedRemoteEvents(new RemoteStore("https://mock.test"), "p", undefined, "https://mock.test");
+    assert.deepEqual(got.events.map((e) => e.seq), [0, 1]);
+    assert.deepEqual(wellKnown, [keyA.kid], "exactly one well-known fetch; a second key must not be consulted");
+  } finally {
+    globalThis.fetch = savedFetch;
+    if (savedPubkey !== undefined) process.env.RETRACE_PUBKEY = savedPubkey;
+    else delete process.env.RETRACE_PUBKEY;
+  }
+});
+
 test("history tail: a one-event suffix on a 100,001-event ledger requests and receives exactly one event", async () => {
   const ledgerSize = 100_001;
   const event = { seq: ledgerSize - 1 } as Event;
@@ -283,6 +352,7 @@ test("remote events: cache unavailability throws without requesting a fresh expo
     for (const response of [
       new Response("export cache is not configured", { status: 503 }),
       new Response("export cache read failed: boom", { status: 503 }),
+      new Response(JSON.stringify({ error: 'export cache read failed: export cache for project "p" is torn (inconsistent chunks)' }), { status: 503, headers: { "content-type": "application/json" } }),
       new Response("not a confirmed cache miss", { status: 404 }),
     ]) {
       const calls: string[] = [];

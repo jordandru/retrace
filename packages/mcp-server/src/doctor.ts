@@ -206,6 +206,78 @@ export function captureCoverageFinding(report: ReconcileReport): Finding {
   return result(worst, "capture coverage", top.map((f) => `${f.kind}: ${f.detail}`).join("; "));
 }
 
+/** Walk caused_by inside an already-verified event set. Same project + depth bound as explainEvent. */
+export function whyChainFromVerified(events: Event[], start: Event, maxDepth = 25): Event[] {
+  const byId = new Map(events.map((e) => [e.id, e]));
+  const chain: Event[] = [];
+  const seen = new Set<string>();
+  let cur: Event | undefined = start;
+  const project = start.project;
+  while (cur && chain.length < maxDepth && !seen.has(cur.id)) {
+    seen.add(cur.id);
+    chain.push(cur);
+    const parent: Event | undefined = cur.caused_by ? byId.get(cur.caused_by) : undefined;
+    cur = parent?.project === project ? parent : undefined;
+  }
+  return chain;
+}
+
+export function sealedCommitForArtifact(events: Event[], commitId: string | undefined): Event | undefined {
+  if (!commitId) return undefined;
+  return sealedCommitEvent(events.filter((e) =>
+    (e.action === "committed" || e.action === "merged") && e.artifacts.some((a) => a.id === commitId),
+  ));
+}
+
+export function verifiedLedgerHeads(events: Event[]): string {
+  if (!events.length) return "verified set is empty";
+  const last = events[events.length - 1]!;
+  return `verified set through #${last.seq}`;
+}
+
+/**
+ * Gate authorization from a verified event set only. Unsigned /events and /why must not decide
+ * delivery, actor, pin/session, or instruct-root.
+ */
+export function verifiedHeadFindings(
+  gate: boolean,
+  commitId: string | undefined,
+  verified: { events: Event[]; note: string },
+): Finding[] {
+  const sealed = sealedCommitForArtifact(verified.events, commitId);
+  if (!sealed) {
+    return [result(
+      "fail",
+      "HEAD delivery",
+      `${commitId ?? "HEAD"} is not in the verified ledger (${verifiedLedgerHeads(verified.events)}; ${verified.note})`,
+    )];
+  }
+  const findings: Finding[] = [
+    result("pass", "HEAD delivery", `${commitId} is event #${sealed.seq}`),
+    attributionFinding(gate, sealed),
+  ];
+  if (sealedLooksAgent(sealed)) {
+    const why = whyChainFromVerified(verified.events, sealed);
+    findings.push(pinSessionFinding(gate, sealed, why));
+    if (gate) findings.push(instructRootFinding("agent", why));
+  } else if (gate) {
+    findings.push(instructRootFinding(sealed.actor.type, []));
+  }
+  return findings;
+}
+
+/** Fetch the verified ledger once, then derive HEAD delivery + authorization from that set. */
+export async function gateRemoteAuthorization(
+  commitId: string | undefined,
+  store: RemoteStore,
+  project: string,
+  pubkeyFlag?: unknown,
+  baseUrl?: string,
+): Promise<{ findings: Finding[]; verified: { events: Event[]; note: string } }> {
+  const verified = await fetchVerifiedRemoteEvents(store, project, pubkeyFlag, baseUrl);
+  return { findings: verifiedHeadFindings(true, commitId, verified), verified };
+}
+
 export async function remoteCaptureCoverage(
   repo: string,
   project: string,
@@ -214,8 +286,9 @@ export async function remoteCaptureCoverage(
   args: { gate: boolean; local: boolean },
   pubkeyFlag?: unknown,
   baseUrl?: string,
+  prefetched?: { events: Event[]; note: string },
 ): Promise<Finding> {
-  const { events, note } = await fetchVerifiedRemoteEvents(store, project, pubkeyFlag, baseUrl);
+  const { events, note } = prefetched ?? await fetchVerifiedRemoteEvents(store, project, pubkeyFlag, baseUrl);
   const report = reconcileWithGit(repo, [commitFacts(repo, "HEAD")], events, {
     ...repoNamesFor(repo, cfg),
     repoPath: repo,
@@ -325,33 +398,40 @@ async function main() {
     } catch (e: any) { findings.push(result("fail", "ledger access", `${e.message}; check URL and credential`)); }
     if (headEvent) {
       const commit = headEvent.artifacts.find((a) => a.kind === "commit")?.id;
-      try {
-        const action = headEvent.action === "merged" ? "merged" : "committed";
-        const res = await fetch(`${url}/projects/${encodeURIComponent(project)}/events?artifact_id=${encodeURIComponent(commit ?? "")}&action=${action}`, { headers });
-        if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
-        const events = doctorHistoryEvents(await res.json());
-        const sealed = sealedCommitEvent(events);
-        const delivery = headDelivery(gate, commit, !!sealed);
-        findings.push(sealed ? result("pass", "HEAD delivery", `${commit} is event #${sealed.seq}`) : delivery);
-        if (sealed) findings.push(attributionFinding(gate, sealed));
-        if (gate && sealed) {
-          // Capture coverage uses a verified signed cache plus any separately chain-verified live tail.
+      if (gate) {
+        // Gate authorization reads the verified signed export + chain-verified tail only. Unsigned
+        // /events and /why must not decide delivery, actor, pin/session, or instruct-root.
+        try {
+          const remote = new RemoteStore(url, auth.token);
+          const { findings: authFindings, verified } = await gateRemoteAuthorization(commit, remote, project, undefined, url);
+          findings.push(...authFindings);
           try {
-            findings.push(await remoteCaptureCoverage(repo, project, new RemoteStore(url, auth.token), cfg, args, undefined, url));
+            findings.push(await remoteCaptureCoverage(repo, project, remote, cfg, args, undefined, url, verified));
           } catch (e: any) { findings.push(result("fail", "capture coverage", e.message)); }
-        }
-        if (sealed && sealedLooksAgent(sealed)) {
-          try {
-            const whyRes = await fetch(`${url}/events/${encodeURIComponent(sealed.id)}/why`, { headers });
-            if (!whyRes.ok) throw new Error(`HTTP ${whyRes.status}: ${await whyRes.text()}`);
-            const why = await whyRes.json() as Event[];
-            findings.push(pinSessionFinding(gate, sealed, why));
-            if (gate) findings.push(instructRootFinding("agent", why));
-          } catch (e: any) { findings.push(result("fail", "instruct root", e.message)); }
-        } else if (gate && sealed) {
-          findings.push(instructRootFinding(sealed.actor.type, []));
-        }
-      } catch (e: any) { findings.push(result("fail", "HEAD delivery", e.message)); }
+        } catch (e: any) { findings.push(result("fail", "HEAD delivery", e.message)); }
+      } else {
+        try {
+          const action = headEvent.action === "merged" ? "merged" : "committed";
+          const res = await fetch(`${url}/projects/${encodeURIComponent(project)}/events?artifact_id=${encodeURIComponent(commit ?? "")}&action=${action}`, { headers });
+          if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+          const events = doctorHistoryEvents(await res.json());
+          const sealed = sealedCommitEvent(events);
+          const delivery = headDelivery(false, commit, !!sealed);
+          findings.push(sealed
+            ? result("pass", "HEAD delivery", `${commit} is event #${sealed.seq} (unsigned /events; --gate uses the verified ledger)`)
+            : { ...delivery, detail: `${delivery.detail} (unsigned /events; --gate uses the verified ledger)` });
+          if (sealed) findings.push(attributionFinding(false, sealed));
+          if (sealed && sealedLooksAgent(sealed)) {
+            try {
+              const whyRes = await fetch(`${url}/events/${encodeURIComponent(sealed.id)}/why`, { headers });
+              if (!whyRes.ok) throw new Error(`HTTP ${whyRes.status}: ${await whyRes.text()}`);
+              const why = await whyRes.json() as Event[];
+              const pin = pinSessionFinding(false, sealed, why);
+              findings.push({ ...pin, detail: `${pin.detail} (unsigned /why; --gate walks caused_by in the verified ledger)` });
+            } catch (e: any) { findings.push(result("fail", "instruct root", `${e.message} (unsigned /why)`)); }
+          }
+        } catch (e: any) { findings.push(result("fail", "HEAD delivery", `${e.message} (unsigned /events)`)); }
+      }
     }
   }
 

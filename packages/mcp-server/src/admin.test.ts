@@ -74,7 +74,8 @@ test("planCredentials: one pinned credential per member×harness, scoped to the 
     { type: "human", id: "alice@acme.dev" }, { type: "human", id: "bob@acme.dev" },
   ]);
   const ci = creds.find((c) => c.actor.id === ciActorId("acme-app"))!;
-  assert.deepEqual([ci.trust, ci.actor.type, ci.projects], ["pinned", "system", ["acme-app"]]);
+  assert.deepEqual([ci.trust, ci.actor.type, ci.projects], ["assert", "system", ["acme-app"]]);
+  assert.deepEqual(ci.allowed_actors, []);
   // The Worker's own schema accepts what we minted.
   assert.equal(parseCredentials(JSON.stringify(creds)).length, creds.length);
 });
@@ -97,6 +98,8 @@ test("renderOnboarding: every member's tokens appear once each, under their own 
   assert.match(doc, /"credential": "retrace-git-acme-app"/);
   assert.match(doc, /retrace-git install --project acme-app/);
   assert.match(doc, /RETRACE_CI_TOKEN/);
+  assert.match(doc, /trust `assert` and `allowed_actors: \[\]`/);
+  assert.match(doc, /cannot POST `\/events`/);
   assert.match(doc, /Tamper-\*\*evident\*\*, not tamper-proof/);
   assert.doesNotMatch(doc, /RETRACE_ACTOR_MODEL": /, "the onboarding never pins a model");
 });

@@ -1,9 +1,9 @@
-import { CachedExport, ExportCacheStore } from "@retrace-dev/core";
+import { CachedExport, ExportCacheStore, TornExportCacheError } from "@retrace-dev/core";
 
 /** D1 rows cap strings around 2MB and the retrace bundle already exceeds that, so the cached JSON is stored in
  *  ordered chunks. put() replaces a project's chunks in one atomic batch; get() re-validates that every chunk
- *  belongs to the same head and that none are missing before serving — a torn or half-replaced cache reads as
- *  absent, never as a corrupt bundle. */
+ *  belongs to the same head and that none are missing before serving — a torn or half-replaced cache throws
+ *  rather than looking like a miss that authorizes a live rebuild. */
 const CHUNK_CHARS = 900_000;
 
 export class D1ExportCache implements ExportCacheStore {
@@ -19,7 +19,7 @@ export class D1ExportCache implements ExportCacheStore {
     const consistent =
       results.length === first.total_chunks &&
       results.every((r, i) => r.chunk === i && r.head_seq === first.head_seq && r.head_hash === first.head_hash && r.total_chunks === first.total_chunks);
-    if (!consistent) return null;
+    if (!consistent) throw new TornExportCacheError(project);
     return {
       project,
       head_seq: first.head_seq,

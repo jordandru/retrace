@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Credential, Event, EventInput, EventStore, Share, appendEvent, buildExportBundle, generateSigningKey, pageHistoryNewest, schemaSurface, signCanonical } from "@retrace-dev/core";
-import { attributionFinding, credentialAuthorization, doctorHistoryEvents, headDelivery, instructRootFinding, missingSchema, parseDoctorArgs, pinSessionFinding, remoteCaptureCoverage, sealedCommitEvent, sealedLooksAgent } from "./doctor.js";
+import { attributionFinding, credentialAuthorization, doctorHistoryEvents, gateRemoteAuthorization, headDelivery, instructRootFinding, missingSchema, parseDoctorArgs, pinSessionFinding, remoteCaptureCoverage, sealedCommitEvent, sealedLooksAgent } from "./doctor.js";
 import { RemoteStore } from "./remote-store.js";
 
 const why = (rows: Array<{ id: string; action: Event["action"]; type: Event["actor"]["type"]; caused_by?: string }>): Event[] =>
@@ -224,6 +224,87 @@ test("doctor capture coverage sees a HEAD seal after the signed cache without re
     assert.equal(finding.level, "pass", finding.detail);
     assert.match(finding.detail, /signed cache through #0; chain-verified tail #1\.\.#2/);
     assert.equal(calls.some((url) => url.includes("fresh=1")), false);
+  } finally { globalThis.fetch = savedFetch; }
+});
+
+test("gate authorization: unsigned /events cannot turn an unrooted agent seal into a system pass", async () => {
+  const store = new DoctorMemStore();
+  const commitId = "commit:o/r@abc123def456";
+  await appendEvent(store, {
+    project: "p", actor: { type: "agent", id: "codex" }, action: "committed",
+    artifacts: [{ id: commitId, kind: "commit" }],
+  });
+  const issuer = await generateSigningKey();
+  const cached = await buildExportBundle(store, { project: "p" }, { signingKey: issuer.privateKey, issuerName: "test" });
+  const forgedSystem = {
+    ...store.events[0],
+    actor: { type: "system" as const, id: "retrace-git" },
+  };
+  const savedFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    if (url.endsWith("/projects/p/export?cached=1")) return Response.json(cached);
+    if (url.endsWith("/projects/p/head?signed=1")) {
+      const signed_at = new Date().toISOString();
+      const payload = { project: "p", seq: 0, hash: store.events[0].hash, signed_at };
+      return Response.json({
+        ...payload,
+        issuer: { kid: issuer.kid, alg: "Ed25519", public_key: issuer.publicKey },
+        signature: await signCanonical(issuer.privateKey, payload),
+      });
+    }
+    if (url.includes("/projects/p/events?")) return Response.json({ events: [forgedSystem], truncated: false });
+    if (url.includes("/why")) return Response.json([forgedSystem]);
+    return new Response("not found", { status: 404 });
+  };
+  try {
+    const { findings } = await gateRemoteAuthorization(commitId, new RemoteStore("https://mock.test"), "p", JSON.stringify(issuer.publicKey));
+    const delivery = findings.find((f) => f.label === "HEAD delivery")!;
+    const root = findings.find((f) => f.label === "instruct root")!;
+    assert.equal(delivery.level, "pass", delivery.detail);
+    assert.equal(root.level, "fail", root.detail);
+    assert.match(root.detail, /not rooted|no why-chain/);
+  } finally { globalThis.fetch = savedFetch; }
+});
+
+test("gate authorization: unsigned /events omitting the seal cannot hide a verified HEAD delivery", async () => {
+  const store = new DoctorMemStore();
+  const commitId = "commit:o/r@fedcba987654";
+  await appendEvent(store, {
+    project: "p", actor: { type: "human", id: "jordan@example.com" }, action: "instructed",
+    artifacts: [{ id: "task:1" }],
+  });
+  await appendEvent(store, {
+    project: "p", actor: { type: "agent", id: "codex" }, action: "committed",
+    artifacts: [{ id: commitId, kind: "commit" }],
+    caused_by: store.events[0].id,
+  });
+  const issuer = await generateSigningKey();
+  const cached = await buildExportBundle(store, { project: "p" }, { signingKey: issuer.privateKey, issuerName: "test" });
+  const savedFetch = globalThis.fetch;
+  const eventsCalls: string[] = [];
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    if (url.includes("/projects/p/events?")) eventsCalls.push(url);
+    if (url.endsWith("/projects/p/export?cached=1")) return Response.json(cached);
+    if (url.endsWith("/projects/p/head?signed=1")) {
+      const signed_at = new Date().toISOString();
+      const payload = { project: "p", seq: 1, hash: store.events[1].hash, signed_at };
+      return Response.json({
+        ...payload,
+        issuer: { kid: issuer.kid, alg: "Ed25519", public_key: issuer.publicKey },
+        signature: await signCanonical(issuer.privateKey, payload),
+      });
+    }
+    if (url.includes("/projects/p/events?")) return Response.json({ events: [], truncated: false });
+    return new Response("not found", { status: 404 });
+  };
+  try {
+    const { findings } = await gateRemoteAuthorization(commitId, new RemoteStore("https://mock.test"), "p", JSON.stringify(issuer.publicKey));
+    const delivery = findings.find((f) => f.label === "HEAD delivery")!;
+    assert.equal(delivery.level, "pass", delivery.detail);
+    assert.match(delivery.detail, new RegExp(commitId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.equal(eventsCalls.length, 0, "gate authorization must not consult unsigned /events for HEAD delivery");
   } finally { globalThis.fetch = savedFetch; }
 });
 

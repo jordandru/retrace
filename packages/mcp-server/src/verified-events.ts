@@ -11,16 +11,35 @@ import {
 import { RemoteApiError, RemoteStore } from "./remote-store.js";
 import { resolveTrustedKey } from "./trusted-key.js";
 
+export type TrustedIssuer = { key: JsonWebKey; from: string };
+
+const NO_TRUSTED_KEY = "no trusted issuer key: pass --pubkey <jwk.json|https-url>, set RETRACE_PUBKEY, or set RETRACE_URL to an https Retrace server (its /.well-known/retrace-pubkey is used)";
+
 /**
  * Use remote export events only after the signed full bundle verifies against a trusted issuer key.
  * Tail events are deliberately not inserted into the bundle: its signature and coverage claim remain unchanged.
  */
-export async function verifiedExportEvents(bundle: ExportBundle, pubkeyFlag?: unknown, baseUrl?: string): Promise<{ events: Event[]; note: string }> {
-  const trusted = await resolveTrustedKey(pubkeyFlag, baseUrl);
-  if (!trusted) throw new Error("no trusted issuer key: pass --pubkey <jwk.json|https-url>, set RETRACE_PUBKEY, or set RETRACE_URL to an https Retrace server (its /.well-known/retrace-pubkey is used)");
+export async function verifiedExportEvents(
+  bundle: ExportBundle,
+  pubkeyFlag?: unknown,
+  baseUrl?: string,
+  trustedKey?: TrustedIssuer,
+): Promise<{ events: Event[]; note: string }> {
+  const trusted = trustedKey ?? await resolveTrustedKey(pubkeyFlag, baseUrl);
+  if (!trusted) throw new Error(NO_TRUSTED_KEY);
   const verdict = await verifyExportBundle(bundle, trusted.key);
   if (!exportVerdictOk(verdict)) {
     throw new Error(`refusing to reconcile against an export that does not verify (signature ${verdict.signature}, events intact ${verdict.events_intact}, chain ${verdict.chain_ok_at_export}, coverage ${verdict.coverage.complete})${verdict.problems.length ? ": " + verdict.problems.join("; ") : ""}`);
+  }
+  if (verdict.coverage.scope !== "full" || verdict.coverage.complete !== true) {
+    const scope = bundle.scope ?? {};
+    const named = [
+      scope.artifact_id && `artifact_id=${scope.artifact_id}`,
+      scope.actor_id && `actor_id=${scope.actor_id}`,
+      scope.since && `since=${scope.since}`,
+      scope.until && `until=${scope.until}`,
+    ].filter(Boolean).join(", ") || "unspecified filters";
+    throw new Error(`refusing to reconcile against a ${verdict.coverage.scope} export (scope ${named}); need a full export with complete coverage`);
   }
   return { events: bundle.events, note: `${bundle.events.length} events from a full export verified against ${trusted.from} (kid ${verdict.kid})` };
 }
@@ -56,6 +75,13 @@ export async function fetchVerifiedRemoteEvents(
   pubkeyFlag?: unknown,
   baseUrl?: string,
 ): Promise<{ events: Event[]; note: string }> {
+  let resolved: TrustedIssuer | undefined;
+  const issuer = async (): Promise<TrustedIssuer> => {
+    if (resolved) return resolved;
+    resolved = await resolveTrustedKey(pubkeyFlag, baseUrl);
+    if (!resolved) throw new Error(NO_TRUSTED_KEY);
+    return resolved;
+  };
   let bundle: ExportBundle;
   try {
     bundle = await store.export({ project }, { cached: true });
@@ -66,22 +92,20 @@ export async function fetchVerifiedRemoteEvents(
       || error.headers.get("x-retrace-export-cache") !== "miss"
     ) throw error;
     const liveBundle = await store.export({ project }, { fresh: true });
-    const verified = await verifiedExportEvents(liveBundle, pubkeyFlag, baseUrl);
+    const verified = await verifiedExportEvents(liveBundle, pubkeyFlag, baseUrl, await issuer());
     return { events: verified.events, note: `${verified.note}; no signed export cache, verified live full export` };
   }
 
-  const verified = await verifiedExportEvents(bundle, pubkeyFlag, baseUrl);
+  const trusted = await issuer();
+  const verified = await verifiedExportEvents(bundle, pubkeyFlag, baseUrl, trusted);
   const total = bundle.chain.total_events;
   const cachedHead = total > 0
     ? { seq: total - 1, hash: bundle.chain.head_hash! }
     : { seq: -1, hash: GENESIS_HASH };
-  const trusted = await resolveTrustedKey(pubkeyFlag, baseUrl);
-  if (!trusted) throw new Error("no trusted issuer key for signed live head");
   const liveHead = await store.signedHead(project);
 
   if (!liveHead) {
-    if (total === 0) return { events: verified.events, note: `${verified.note}; signed cache is empty; no tail` };
-    throw new Error(`live ledger has no head but the signed cache claims through #${cachedHead.seq}`);
+    throw new Error("signed live head is missing or unsigned; an empty ledger must still return a signed empty head");
   }
   if (
     typeof liveHead.project !== "string"
