@@ -121,6 +121,7 @@ Each client gets its **own** `RETRACE_TOKEN` (pinned credential). Reusing Claude
 | GitHub Copilot CLI | `github-copilot` | `~/.copilot/mcp-config.json` (user; already lists `retrace`) |
 | GitHub Copilot Chat (VS Code) | `github-copilot` | **VS Code user MCP** (`MCP: Open User Configuration`). Same pin as CLI. Do not commit `.vscode/mcp.json`. |
 | Cursor Agent | `cursor-agent` | committed `.cursor/mcp.json` (interpolated paths) + `~/.retrace/cursor.env` (`RETRACE_TOKEN=` only, mode 0600) |
+| OpenCode | `opencode` | committed `opencode.json` + `OPENCODE.md`; token and NIM key in `~/.retrace/opencode.env` (mode 0600) via bash `-c` wrapper |
 
 VS Code Copilot Chat: Command Palette → **MCP: Open User Configuration**. Paste a `servers` entry with `RETRACE_ACTOR=github-copilot`, the same token Copilot CLI already uses, and `args` pointing at this checkout's `packages/mcp-server/dist/index.js`. Prompt the token with `${input:…}` — never commit it. 2026-09-01 on this checkout, with `.vscode/mcp.json` still present: `agent mcp list` showed only `retrace` (from `.cursor/mcp.json`); `agent mcp list-tools retrace-github-copilot` returned **not found in config**. Cursor CLI does not import `.vscode/mcp.json`. The Cursor GUI can still Start a workspace MCP file if one exists (a server id is a label), so this repo does not ship `.vscode/mcp.json`.
 
@@ -143,7 +144,7 @@ Claude example (`args` = absolute `packages/mcp-server/dist/index.js`):
 
 Leave `RETRACE_ACTOR_MODEL` unset so the agent reports the model it actually ran. After `dist/` changes, **respawn** the MCP server (it keeps old `dist` and session id until restart). Set `RETRACE_PRODUCER_KEY_FILE` to this agent's private JWK (mode 0600). The git hook uses `RETRACE_HOOK_KEY_FILE` or a `producer_key_file` path on the credentials-file entry. New `retrace-admin` teams mint those keys with `require_signature: true`; this dogfood repo is not flipped until keys exist. Never put a private JWK in `RETRACE_CREDENTIALS`.
 
-Per-harness notes: `CLAUDE.md`, `GEMINI.md`, `GROK.md`, `AGENTS.md` (Codex), `.github/copilot-instructions.md`, `.cursor/rules/retrace-provenance.mdc`. Grok also loads `.grok/rules/retrace.md` (it still auto-loads `CLAUDE.md` via compatibility). After changing `.cursor/mcp.json` or `cursor.env`, **reload MCP in that Cursor window** — a running agent session does not pick up a newly deployed token.
+Per-harness notes: `CLAUDE.md`, `GEMINI.md`, `GROK.md`, `AGENTS.md` (Codex), `OPENCODE.md` (OpenCode; it also auto-loads `AGENTS.md`, so the override line at the top of `OPENCODE.md` is required), `.github/copilot-instructions.md`, `.cursor/rules/retrace-provenance.mdc`. Grok also loads `.grok/rules/retrace.md` (it still auto-loads `CLAUDE.md` via compatibility). OpenCode's committed `opencode.json` points at NVIDIA NIM (`nvidia/nemotron-3-super-120b-a12b`); put `NVIDIA_API_KEY` in `~/.retrace/opencode.env`, never in the repo. After changing `.cursor/mcp.json` or `cursor.env`, **reload MCP in that Cursor window** — a running agent session does not pick up a newly deployed token.
 
 **Check:** client shows Retrace tools (11). One real `retrace_instruct` → timeline shows an amber instruction, then blue agent events with `caused_by`.
 
