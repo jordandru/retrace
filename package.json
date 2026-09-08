@@ -16,7 +16,8 @@
     "check-deploy": "node scripts/check-deploy.mjs"
   },
   "devDependencies": {
-    "typescript": "^5.6.0",
-    "@types/node": "^22.0.0"
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
   }
 }
