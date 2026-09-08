@@ -6,5 +6,21 @@
     "hook_sealed_by": [
       "assert:git hook (assert)"
     ]
+  },
+  "attribution": {
+    "profile": "retrace-attribution/1",
+    "repositories": [
+      {
+        "name": "jordandru/retrace",
+        "aliases": [
+          "retrace"
+        ],
+        "from_seq": 0,
+        "hook_sealed_by": [
+          "assert:git hook (assert)"
+        ]
+      }
+    ],
+    "non_git": []
   }
 }
