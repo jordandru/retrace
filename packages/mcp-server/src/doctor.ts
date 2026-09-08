@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /** retrace doctor — read-only preflight for the Git → Worker developer workflow. */
-import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { existsSync, lstatSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { isAttributionAmendment, Actor, Credential, Event, ProjectStatus, ReconcileReport, asHistoryPage, causalRootState, renderProjectStatus, schemaSurface } from "@retrace-dev/core";
@@ -46,13 +46,30 @@ export function objectStoreFinding(repo: string): Finding {
   const headSha = gitOutput(repo, ["rev-parse", "HEAD"]);
   const headType = gitOutput(repo, ["cat-file", "-t", "HEAD"]);
   const originRef = "refs/remotes/origin/main";
-  const hasOriginMain = gitOutput(repo, ["show-ref", "--verify", originRef]) !== undefined;
-  const originSha = hasOriginMain ? gitOutput(repo, ["rev-parse", "origin/main"]) : undefined;
+  const originLookup = spawnSync("git", ["-C", repo, "show-ref", "--verify", "--quiet", originRef], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const originRefPathRaw = gitOutput(repo, ["rev-parse", "--git-path", originRef]);
+  let looseOriginMain: boolean | undefined;
+  if (originRefPathRaw) {
+    try {
+      lstatSync(resolve(repo, originRefPathRaw));
+      looseOriginMain = true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") looseOriginMain = false;
+    }
+  }
+  const originAbsent = originLookup.status === 1 && looseOriginMain === false;
+  const originLookupFailed = originLookup.error !== undefined || originLookup.status === null || (originLookup.status !== 0 && !originAbsent);
+  const hasOriginMain = !originAbsent;
+  const originSha = hasOriginMain ? gitOutput(repo, ["rev-parse", "--verify", originRef]) : undefined;
   const originType = hasOriginMain ? gitOutput(repo, ["cat-file", "-t", "origin/main"]) : undefined;
 
   const problems: string[] = [];
   if (emptyObjectIds.length) problems.push(`${emptyObjectIds.length} empty loose object file${emptyObjectIds.length === 1 ? "" : "s"}`);
   if (headType !== "commit") problems.push(`HEAD is not a readable commit${headSha && empty.has(headSha) ? " and points to an empty loose object" : ""}`);
+  if (originLookupFailed) problems.push(`origin/main ref lookup failed${originLookup.stderr.trim() ? `: ${originLookup.stderr.trim()}` : ""}`);
   if (hasOriginMain && originType !== "commit") problems.push(`origin/main is not a readable commit${originSha && empty.has(originSha) ? " and points to an empty loose object" : ""}`);
 
   if (!problems.length) {

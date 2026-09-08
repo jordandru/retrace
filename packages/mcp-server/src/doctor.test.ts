@@ -310,7 +310,7 @@ test("gate authorization: unsigned /events omitting the seal cannot hide a verif
 
 import { gateDualWitness, hookFindings, objectStoreFinding, parseDoctorArgs as parseArgs2 } from "./doctor.js";
 import { execFileSync as execGit } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync as mkTemp, readFileSync, statSync, truncateSync, writeFileSync as writeF } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync as mkTemp, readFileSync, readdirSync, statSync, truncateSync, writeFileSync as writeF } from "node:fs";
 import { tmpdir as tmpD } from "node:os";
 import { join as joinP } from "node:path";
 
@@ -327,6 +327,14 @@ function objectStoreRepo(): { repo: string; g: (...args: string[]) => string; co
     return g("rev-parse", "HEAD");
   };
   return { repo, g, commit, objectPath: (sha) => joinP(repo, ".git", "objects", sha.slice(0, 2), sha.slice(2)) };
+}
+
+function objectStoreSnapshot(root: string, relative = ""): Array<[string, string]> {
+  const dir = joinP(root, relative);
+  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const path = joinP(relative, entry.name);
+    return entry.isDirectory() ? objectStoreSnapshot(root, path) : [[path, readFileSync(joinP(root, path)).toString("hex")]];
+  });
 }
 
 test("objectStoreFinding: rev-parse HEAD can succeed while its zero-byte loose commit object fails integrity", () => {
@@ -370,6 +378,54 @@ test("objectStoreFinding: readable HEAD still fails when origin/main points at a
   assert.match(finding.detail, /git cat-file -t origin\/main.*commit/);
   assert.equal(statSync(originPath).size, 0, "doctor must leave the damaged origin/main object untouched");
 });
+
+test("objectStoreFinding: an origin/main ref pointing to a missing object fails without mutation", () => {
+  const fixture = objectStoreRepo();
+  fixture.commit("healthy head\n");
+  const ref = joinP(fixture.repo, ".git", "refs", "remotes", "origin", "main");
+  const missingSha = "f".repeat(40);
+  mkdirSync(joinP(fixture.repo, ".git", "refs", "remotes", "origin"), { recursive: true });
+  writeF(ref, `${missingSha}\n`);
+  const refBefore = readFileSync(ref, "utf8");
+  const objectsDir = joinP(fixture.repo, ".git", "objects");
+  const objectsBefore = objectStoreSnapshot(objectsDir);
+
+  assert.equal(fixture.g("rev-parse", "origin/main"), missingSha);
+  assert.equal(fixture.g("cat-file", "-t", "HEAD"), "commit");
+  const finding = objectStoreFinding(fixture.repo);
+
+  assert.equal(finding.level, "fail");
+  assert.match(finding.detail, /origin\/main ref lookup failed/i);
+  assert.match(finding.detail, /origin\/main is not a readable commit/i);
+  assert.equal(readFileSync(ref, "utf8"), refBefore, "doctor must not modify the corrupt ref");
+  assert.deepEqual(objectStoreSnapshot(objectsDir), objectsBefore, "doctor must not modify the object store");
+});
+
+for (const malformed of [
+  { name: "invalid content", content: "invalid\n" },
+  { name: "empty content", content: "" },
+  { name: "dangling symbolic ref", content: "ref: refs/remotes/origin/absent\n" },
+]) {
+  test(`objectStoreFinding: ${malformed.name} in origin/main fails without mutation`, () => {
+    const fixture = objectStoreRepo();
+    fixture.commit("healthy head\n");
+    const ref = joinP(fixture.repo, ".git", "refs", "remotes", "origin", "main");
+    mkdirSync(joinP(fixture.repo, ".git", "refs", "remotes", "origin"), { recursive: true });
+    writeF(ref, malformed.content);
+    const refBefore = readFileSync(ref, "utf8");
+    const objectsDir = joinP(fixture.repo, ".git", "objects");
+    const objectsBefore = objectStoreSnapshot(objectsDir);
+
+    assert.equal(fixture.g("cat-file", "-t", "HEAD"), "commit");
+    const finding = objectStoreFinding(fixture.repo);
+
+    assert.equal(finding.level, "fail");
+    assert.match(finding.detail, /origin\/main ref lookup failed/i);
+    assert.match(finding.detail, /origin\/main is not a readable commit/i);
+    assert.equal(readFileSync(ref, "utf8"), refBefore, "doctor must not modify the malformed ref");
+    assert.deepEqual(objectStoreSnapshot(objectsDir), objectsBefore, "doctor must not modify the object store");
+  });
+}
 
 test("objectStoreFinding: clean repo without origin/main passes", () => {
   const fixture = objectStoreRepo();
