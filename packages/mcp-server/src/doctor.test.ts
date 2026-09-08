@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { Credential, Event, EventInput, EventStore, Share, appendEvent, buildExportBundle, generateSigningKey, pageHistoryNewest, schemaSurface, signCanonical } from "@retrace-dev/core";
 import { attributionFinding, credentialAuthorization, doctorHistoryEvents, gateRemoteAuthorization, headDelivery, instructRootFinding, missingSchema, parseDoctorArgs, pinSessionFinding, remoteCaptureCoverage, sealedCommitEvent, sealedLooksAgent } from "./doctor.js";
 import { RemoteStore } from "./remote-store.js";
+import { SqliteStore } from "./sqlite-store.js";
 
 const why = (rows: Array<{ id: string; action: Event["action"]; type: Event["actor"]["type"]; caused_by?: string }>): Event[] =>
   rows.map((r, seq) => ({
@@ -309,10 +310,11 @@ test("gate authorization: unsigned /events omitting the seal cannot hide a verif
 });
 
 import { gateDualWitness, hookFindings, objectStoreFinding, parseDoctorArgs as parseArgs2 } from "./doctor.js";
-import { execFileSync as execGit } from "node:child_process";
+import { execFileSync as execGit, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync as mkTemp, readFileSync, readdirSync, statSync, truncateSync, writeFileSync as writeF } from "node:fs";
 import { tmpdir as tmpD } from "node:os";
 import { join as joinP } from "node:path";
+import { fileURLToPath } from "node:url";
 
 function objectStoreRepo(): { repo: string; g: (...args: string[]) => string; commit: (content: string) => string; objectPath: (sha: string) => string } {
   const repo = mkTemp(joinP(tmpD(), "retrace-object-store-"));
@@ -455,6 +457,41 @@ test("hookFindings: linked worktrees use hooks from the common Git directory", (
   const findings = hookFindings(worktree);
   assert.deepEqual(findings.map((finding) => finding.level), ["pass", "pass"]);
   assert.ok(findings.every((finding) => finding.detail.startsWith(joinP(fixture.repo, ".git", "hooks"))));
+});
+
+test("doctor: a local-db repo with installed hooks and a sealed commit is READY without a credential", async () => {
+  const repo = mkTemp(joinP(tmpD(), "retrace-local-doctor-"));
+  const home = mkTemp(joinP(tmpD(), "retrace-local-doctor-home-"));
+  const db = joinP(repo, "ledger.db");
+  const project = "local-doctor";
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("RETRACE_") && !key.startsWith("GIT_")));
+  Object.assign(env, {
+    HOME: home,
+    GIT_AUTHOR_NAME: "Local Doctor",
+    GIT_AUTHOR_EMAIL: "local-doctor@example.com",
+    GIT_COMMITTER_NAME: "Local Doctor",
+    GIT_COMMITTER_EMAIL: "local-doctor@example.com",
+  });
+  const git = (...args: string[]) => execGit("git", ["-C", repo, ...args], { encoding: "utf8", env, stdio: ["ignore", "pipe", "pipe"] }).trim();
+  const hookBin = fileURLToPath(new URL("./git-hook.js", import.meta.url));
+  const doctorBin = fileURLToPath(new URL("./doctor.js", import.meta.url));
+
+  git("init", "-q", "-b", "main");
+  const install = spawnSync(process.execPath, [hookBin, "install", "--repo", repo, "--project", project], { encoding: "utf8", env });
+  assert.equal(install.status, 0, install.stderr + install.stdout);
+  writeF(joinP(repo, ".retrace.json"), JSON.stringify({ project, db }, null, 2) + "\n");
+  writeF(joinP(repo, "local.txt"), "sealed locally\n");
+  git("add", ".retrace.json", "local.txt");
+  git("commit", "-q", "-m", "sealed local commit");
+
+  const events = await new SqliteStore(db).all(project);
+  assert.equal(events.some((event) => event.action === "committed"), true, "post-commit hook must seal the local commit");
+
+  const doctor = spawnSync(process.execPath, [doctorBin, "doctor", repo], { encoding: "utf8", env });
+  assert.equal(doctor.status, 0, doctor.stderr + doctor.stdout);
+  assert.match(doctor.stdout, /READY/);
+  assert.doesNotMatch(doctor.stdout, /no hook token is configured/);
+  assert.doesNotMatch(doctor.stdout, /^PASS  credential|^WARN  credential|^FAIL  credential/m);
 });
 
 test("gate dual witness never infers leniency from the ref layout: a detached, pushed sha with no refs/remotes branch containing HEAD still fails on a lone producer; --local is explicit and refused under CI", () => {

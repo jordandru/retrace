@@ -400,7 +400,12 @@ async function main() {
 
   const project = process.env.RETRACE_PROJECT ?? cfg.project ?? basename(repo);
   const url = (process.env.RETRACE_URL ?? cfg.url ?? "").replace(/\/$/, "");
-  const auth = loadCredential(cfg, process.env, gate); findings.push(auth.finding);
+  let auth: { credential?: Credential; token?: string } = {};
+  if (url) {
+    const loaded = loadCredential(cfg, process.env, gate);
+    auth = loaded;
+    findings.push(loaded.finding);
+  }
   if (command === "status") {
     const selected = args.statusProject ?? project;
     if (!url) { console.error("retrace status: RETRACE_URL or .retrace.json url is required"); process.exit(1); return; }

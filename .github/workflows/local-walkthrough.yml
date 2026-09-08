@@ -59,6 +59,7 @@ jobs:
           git commit -q -m "Local walkthrough feature"
           git switch -q main
           git merge -q --no-ff feature -m "Merge local walkthrough feature"
+          retrace doctor
           retrace-export export local-walkthrough --out retrace.json
           retrace-export verify retrace.json --allow-self-attested
           grep -q '"action": "merged"' retrace.json
