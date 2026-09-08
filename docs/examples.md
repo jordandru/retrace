@@ -126,12 +126,53 @@ So the record answers every question in the heading: the harness is server-stamp
 
 ---
 
+## 8. Correct the actor without rewriting the sealed record
+
+**The problem.** Commit `5d7290f` was recorded as `codex`, but seven files under `packages/mcp-server` were supported by stamped `cursor-agent` evidence #1647/#1648. The other two disputed files had mixed evidence, so a whole-commit rewrite would have overstated what the ledger proved.
+
+**With Retrace.** Human-sealed attribution amendment #2543 (`evt_51c4a8ad2b3b450788ebc8f7b69969fe`) partially amends only those seven files to `cursor-agent`. The original `codex` actor remains sealed and visible; consumers report both the recorded and effective actors.
+
+A skeptic takes a fresh full export and verifies it against the published issuer key:
+
+```bash
+retrace-export export retrace --out retrace.json
+retrace-export verify retrace.json \
+  --pubkey https://retrace-api.slcwitit.workers.dev/.well-known/retrace-pubkey \
+  --repo .
+```
+
+The current CLI prints:
+
+```text
+attribution amendments: 1 effective · 0 ineffective · 0 superseded
+```
+
+Then reconcile from the parent of `5d7290f` and inspect the amendment rows:
+
+```bash
+retrace-export reconcile --repo . --since 5d7290f^
+```
+
+These are the real `AMND` rows from main:
+
+```text
+  AMND misattributed  packages/mcp-server/README.md: edits logged only by cursor-agent, committed by codex (attribution amended to agent/cursor-agent by #2543, evt_51c4a8ad2b3b450788ebc8f7b69969fe)
+  AMND misattributed  packages/mcp-server/src/export-cli.test.ts: edits logged only by cursor-agent, committed by codex (attribution amended to agent/cursor-agent by #2543, evt_51c4a8ad2b3b450788ebc8f7b69969fe)
+  AMND misattributed  packages/mcp-server/src/export-cli.ts: edits logged only by cursor-agent, committed by codex (attribution amended to agent/cursor-agent by #2543, evt_51c4a8ad2b3b450788ebc8f7b69969fe)
+  AMND misattributed  packages/mcp-server/src/git-hook.test.ts: edits logged only by cursor-agent, committed by codex (attribution amended to agent/cursor-agent by #2543, evt_51c4a8ad2b3b450788ebc8f7b69969fe)
+  AMND misattributed  packages/mcp-server/src/git-hook.ts: edits logged only by cursor-agent, committed by codex (attribution amended to agent/cursor-agent by #2543, evt_51c4a8ad2b3b450788ebc8f7b69969fe)
+  AMND misattributed  packages/mcp-server/src/producer-key.test.ts: edits logged only by cursor-agent, committed by codex (attribution amended to agent/cursor-agent by #2543, evt_51c4a8ad2b3b450788ebc8f7b69969fe)
+  AMND misattributed  packages/mcp-server/src/producer-key.ts: edits logged only by cursor-agent, committed by codex (attribution amended to agent/cursor-agent by #2543, evt_51c4a8ad2b3b450788ebc8f7b69969fe)
+```
+
+---
+
 ## What it deliberately does not do
 
 - It is **tamper-evident, not tamper-proof** — see the checkpoint window above.
 - **Model names are asserted** by the agent, and labeled so. Verifying them waits on harnesses exposing a verifiable model id.
 - **Coverage is what producers log.** Complete for commits (enforced by the CI gate); it does not record keystrokes, prompts wholesale, or the harness's system prompt.
-- **A wrong actor stays sealed.** Corrections are appended (`c375ed4` above), never edited. `retrace_amend` can supply a missing artifact role or attest a missing causal root; a first-class *attribution amendment* that re-attributes an actor is [designed and triple-reviewed](design/attribution-amendment.md) (Grok, NOOA on Sonnet #1852, NOOA on Nemotron #1873) but **not built yet** — this ledger's own seq 18 still carries a model name where an actor id belongs.
+- **A wrong actor stays sealed.** Corrections and attribution amendments are appended, never edited; Tier 1 can change the effective actor only where human-sealed evidence supports it, while the recorded actor remains visible.
 - **No line-level attribution** ("GPT wrote this function") — not a feature, not planned.
 
 ---

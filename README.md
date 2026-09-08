@@ -6,7 +6,7 @@ It exists because a commit in this repo named the wrong AI agent as its author. 
 
 ## Start here
 
-- **[Retrace by example](docs/examples.md)** — seven real problems from this repo's ledger and what Retrace shows for each. Three minutes.
+- **[Retrace by example](docs/examples.md)** — eight real problems from this repo's ledger and what Retrace shows for each. Three minutes.
 - **[Full reference](docs/reference.md)** — every adapter, the cloud Worker, team hosting, event shape, status and roadmap.
 - **[SETUP-GUIDE](SETUP-GUIDE.md)** — the guided walkthrough: clone → MCP → Worker → GitHub/Drive.
 - **Live ledger:** [browse](https://retrace-api.slcwitit.workers.dev/s/sh_ea81439e010abb1c0ec7167c) · [pre-verified snapshot](https://github.com/jordandru/retrace/releases/tag/ledger-2026-09-03) (bundle + checkpoints + witnesses + keys).
@@ -71,7 +71,7 @@ Commits, GitHub PRs and Google Drive become events through adapters; the hosted 
 - It is **tamper-evident, not tamper-proof** — between hourly checkpoints there is a window in which an operator could rewrite; after a checkpoint, rewriting means rewriting Rekor.
 - **Model names are asserted** by the agent and labeled as such; the identity and time are what's cryptographically bound.
 - **Coverage is what producers log** — complete for commits (enforced by the gate), not keystrokes, prompts, the harness's system prompt, or the model's reasoning.
-- **A wrong actor stays sealed.** Corrections are appended, never edited; a first-class attribution amendment is not built yet.
+- **A wrong actor stays sealed.** Tier 1 human-sealed attribution amendments shipped in 0.1.7; the first real one is ledger #2543 (`evt_51c4a8ad2b3b450788ebc8f7b69969fe`): commit `5d7290f`, recorded as `codex`, with seven files under `packages/mcp-server` amended to `cursor-agent` on stamped evidence #1647/#1648. The recorded actor stays visible.
 - **No line-level attribution** ("GPT wrote this function") — not a feature, not planned.
 
 ## Layout
