@@ -1,0 +1,64 @@
+name: local-walkthrough
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  walkthrough:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CLEAN_HOME: ${{ runner.temp }}/retrace-clean-home
+      RETRACE_DB: ${{ runner.temp }}/retrace-walkthrough.db
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+      - name: Isolate local state and block the project Worker
+        run: |
+          set -euo pipefail
+          rm -rf "$CLEAN_HOME"
+          install -d -m 700 "$CLEAN_HOME"
+          export HOME="$CLEAN_HOME"
+          unset RETRACE_URL RETRACE_TOKEN
+          if env | grep -Eq '^RETRACE_(URL|TOKEN)='; then
+            echo "::error::local walkthrough must not inherit RETRACE_URL or RETRACE_TOKEN" >&2
+            exit 1
+          fi
+          echo "127.0.0.1 retrace-api.slcwitit.workers.dev" | sudo tee -a /etc/hosts
+          getent ahostsv4 retrace-api.slcwitit.workers.dev | awk '{print $1}' | grep -qx 127.0.0.1
+      - name: Install, build, and seed the local demo
+        run: |
+          set -euo pipefail
+          export HOME="$CLEAN_HOME"
+          unset RETRACE_URL RETRACE_TOKEN
+          npm install
+          npm run build
+          node scripts/seed-demo.mjs
+      - name: Exercise the documented local consumer path
+        run: |
+          set -euo pipefail
+          export HOME="$CLEAN_HOME"
+          unset RETRACE_URL RETRACE_TOKEN
+          export PATH="$GITHUB_WORKSPACE/node_modules/.bin:$PATH"
+          app="$RUNNER_TEMP/retrace-walkthrough-app"
+          mkdir -p "$app"
+          cd "$app"
+          git init -q -b main
+          git config user.name "Local Walkthrough"
+          git config user.email "walkthrough@example.com"
+          retrace-git install --project local-walkthrough
+          printf 'base\n' > base.txt
+          git add .retrace.json base.txt
+          git commit -q -m "Local walkthrough base"
+          git switch -q -c feature
+          printf 'feature\n' > feature.txt
+          git add feature.txt
+          git commit -q -m "Local walkthrough feature"
+          git switch -q main
+          git merge -q --no-ff feature -m "Merge local walkthrough feature"
+          retrace-export export local-walkthrough --out retrace.json
+          retrace-export verify retrace.json --allow-self-attested
+          grep -q '"action": "merged"' retrace.json

@@ -1,4 +1,4 @@
-# Retrace — setup walkthrough (v0.1.5)
+# Retrace — setup walkthrough (v0.1.6)
 
 Work top to bottom. Each stage ends with a check. Commands assume macOS/Linux or **Ubuntu WSL**. Fill in `<angle brackets>`.
 
@@ -9,7 +9,7 @@ Published packages: [`@retrace-dev/core`](https://www.npmjs.com/package/@retrace
 The `retrace` binary name collides with Android’s R8 `retrace`. Prefer:
 
 ```bash
-npm exec --package=@retrace-dev/cli -- retrace doctor
+npx -p @retrace-dev/cli retrace doctor
 ```
 
 or a global `@retrace-dev/cli` install, not whatever `retrace` happens to be first on `PATH`.
@@ -43,7 +43,7 @@ Note the absolute path for MCP configs:
 pwd
 ```
 
-Consumers who only need the CLI can skip the clone and use `npx @retrace-dev/cli` / `npm i -g @retrace-dev/cli@0.1.5`. Bundles sealed after 2026-08-30 need verify >= 0.1.2; the strict rules (`hash_v`, trusted-key signatures, checkpoint conflicts) ship in >= 0.1.3.
+Consumers who only need the CLI can skip the clone and use a named binary such as `npx -p @retrace-dev/cli retrace doctor` / `npx -p @retrace-dev/cli retrace-git install --project <project>`, or `npm i -g @retrace-dev/cli@0.1.6`. Bundles sealed after 2026-08-30 need verify >= 0.1.2; the strict rules (`hash_v`, trusted-key signatures, checkpoint conflicts) ship in >= 0.1.3.
 
 ---
 
@@ -77,7 +77,7 @@ Stop the server (Ctrl-C). Throw away `/tmp/demo.db`. The real local ledger is `~
 
 ```bash
 node packages/mcp-server/dist/export-cli.js keygen
-# or: npm exec --package=@retrace-dev/cli -- retrace-export keygen   (there is no npm package named "retrace-export" — it's a bin inside @retrace-dev/cli)
+# or: npx -p @retrace-dev/cli retrace-export keygen   (there is no npm package named "retrace-export" — it's a bin inside @retrace-dev/cli)
 ```
 
 Writes `~/.retrace/signing-key.json` (private). Prints `kid`. `--print-private` later for the Worker secret (Stage 5).
@@ -90,8 +90,8 @@ Writes `~/.retrace/signing-key.json` (private). Prints `kid`. `--print-private` 
 
 ```bash
 cd <your-repo>
-node <abs path>/retrace/packages/mcp-server/dist/git-hook.js install --project <project>
-node <abs path>/retrace/packages/mcp-server/dist/git-hook.js backfill   # optional, idempotent
+npx -p @retrace-dev/cli retrace-git install --project <project>
+npx -p @retrace-dev/cli retrace-git backfill   # optional, idempotent
 ```
 
 Commit `.retrace.json` (name only — no owner token). For a remote ledger, set `"credential": "retrace-git"` and keep the hook token in `~/.retrace/worker-credentials.json`.
@@ -99,10 +99,19 @@ Commit `.retrace.json` (name only — no owner token). For a remote ledger, set 
 **Check:**
 
 ```bash
-npm exec --package=@retrace-dev/cli -- retrace doctor
+npx -p @retrace-dev/cli retrace doctor
 ```
 
 READY when the repo is wired to a ledger it can reach. On a **local-only** scratch repo (no Worker URL, no credential) expect `FAIL credential` — that's doctor telling you the hook has no token, not a broken install; add `"db": "<path>"` to `.retrace.json` for a purely local ledger, or the `url` + `credential` pair for a remote one. Failures name the repair. Hook misses go in `.git/retrace-hook.log`; re-log with `retrace-git commit <sha>`.
+
+To reconcile a local-only repository, allow its unstamped hook seals explicitly:
+
+```bash
+npx -p @retrace-dev/cli retrace-export reconcile --allow-unstamped-seals
+```
+
+Local seals are unstamped because no remote credentialed server authenticated which producer wrote them. Do not use
+`--allow-unstamped-seals` for current remote history.
 
 Without `.retrace.json`, `retrace-git` **refuses** a remote write so a stray `RETRACE_URL` cannot create junk projects on the live Worker.
 

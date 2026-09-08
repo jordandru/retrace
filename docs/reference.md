@@ -9,7 +9,7 @@ guided walkthrough (clone → MCP → Worker → GitHub/Drive).
 
 ## Quick start (local, no cloud needed)
 
-Walkthrough (clone → MCP → Worker → GitHub/Drive): [SETUP-GUIDE.md](SETUP-GUIDE.md). Published CLI: `npx @retrace-dev/cli` (`@retrace-dev/core` is the library).
+Walkthrough (clone → MCP → Worker → GitHub/Drive): [SETUP-GUIDE.md](SETUP-GUIDE.md). Invoke a named published CLI binary, for example `npx -p @retrace-dev/cli retrace doctor` (`@retrace-dev/core` is the library).
 
 ```bash
 npm install

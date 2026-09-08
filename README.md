@@ -6,7 +6,7 @@ It exists because a commit in this repo named the wrong AI agent as its author. 
 
 ## Start here
 
-- **[Retrace by example](docs/examples.md)** — six real problems from this repo's ledger and what Retrace shows for each. Three minutes.
+- **[Retrace by example](docs/examples.md)** — seven real problems from this repo's ledger and what Retrace shows for each. Three minutes.
 - **[Full reference](docs/reference.md)** — every adapter, the cloud Worker, team hosting, event shape, status and roadmap.
 - **[SETUP-GUIDE](SETUP-GUIDE.md)** — the guided walkthrough: clone → MCP → Worker → GitHub/Drive.
 - **Live ledger:** [browse](https://retrace-api.slcwitit.workers.dev/s/sh_ea81439e010abb1c0ec7167c) · [pre-verified snapshot](https://github.com/jordandru/retrace/releases/tag/ledger-2026-09-03) (bundle + checkpoints + witnesses + keys).
@@ -15,11 +15,11 @@ It exists because a commit in this repo named the wrong AI agent as its author. 
 
 - **Server-stamped identity.** A pinned credential decides the actor; agents cannot impersonate each other.
 - **Causality.** Every agent event links to the human instruction behind it; a dangling link is rejected at write time, never silently stored.
-- **Tamper-evident history.** Hash chain, hourly checkpoints witnessed in Sigstore's Rekor transparency log, and every commit sealed twice (git hook + GitHub push webhook).
+- **Tamper-evident history.** Every setup gets a hash chain. Hosted setups with the push webhook also get hourly Rekor-witnessed checkpoints and two commit seals (git hook + GitHub push webhook); the local quick start seals each commit once with the git hook.
 - **Producer signatures.** Each agent signs its events with an Ed25519 key the server never holds; the Worker verifies and stamps the verdict.
 - **Reconciliation + CI gate.** A changed file with no logged edit is `uncovered`; a file whose only logged edits are another agent's is `misattributed`; `retrace doctor --gate` fails the commit.
 - **Works beyond the six harnesses.** [NOOA](https://github.com/NVIDIA-NeMo/labs-OO-Agents), NVIDIA Labs’ Object-Oriented Agents research preview, logs producer-signed provenance to the live ledger through the same MCP tools ([public share](https://retrace-api.slcwitit.workers.dev/s/sh_bd2ab621ad2454ceb9b9fdc7), verifies offline 4/4). `retrace-admin add-agent --harness nooa` onboards it.
-- **Proof you can hand to a skeptic.** Signed exports, printable reports and read-only share links, all verifiable offline against the published key.
+- **Proof you can hand to a skeptic.** Hosted setups produce signed exports verifiable against a separately trusted published key. Local quick-start exports are self-attested and require an explicit `--allow-self-attested`; printable reports and read-only shares work in both modes.
 
 ## Quick start (local, no cloud account)
 
@@ -49,10 +49,18 @@ Give your agent the MCP server — Claude Code shown (`~/.claude.json` or the pr
 
 Leave `RETRACE_ACTOR_MODEL` unset so the agent reports the model it actually ran. `RETRACE_PRODUCER_KEY_FILE` is the agent's private signing key (mode 0600, minted by `retrace-export producer-keygen`); only the public half ever goes on a credential. Locally, events land in `~/.retrace/retrace.db`; for the hosted Worker add `RETRACE_URL` and a scoped `RETRACE_TOKEN` (never another agent's).
 
-Verify a ledger without trusting anyone's dashboard:
+Export and verify a local ledger. Local exports are signed with a locally generated key, so verification labels them
+self-attested and requires explicit acceptance:
 
 ```bash
-npx -y --package=@retrace-dev/cli retrace-export verify retrace.json \
+npx -p @retrace-dev/cli retrace-export export <project> --out retrace.json
+npx -p @retrace-dev/cli retrace-export verify retrace.json --allow-self-attested
+```
+
+For a hosted ledger, pass a separately trusted issuer key. This repository's hosted ledger is one example:
+
+```bash
+npx -p @retrace-dev/cli retrace-export verify retrace.json \
   --pubkey https://retrace-api.slcwitit.workers.dev/.well-known/retrace-pubkey
 ```
 
