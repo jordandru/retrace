@@ -59,7 +59,7 @@ async function main() {
     const verdict=await verifyExportBundle(bundle,trusted?.key);
     let attribution=collectAttributionAmendments(bundle.events);
     if (exportVerdictOk(verdict) && !bundle.scope.artifact_id) {
-      try { attribution=collectAttributionAmendments(bundle.events,undefined,await attributionOptionsForRepo(String(flags.repo ?? process.cwd()),bundle.events,bundle.scope.project,[],typeof flags.policy === "string" ? flags.policy : undefined)); } catch(error) { attribution.unavailable=error instanceof Error?error.message:String(error); }
+      try { attribution=collectAttributionAmendments(bundle.events, await attributionOptionsForRepo(String(flags.repo ?? process.cwd()),bundle.events,bundle.scope.project,[],typeof flags.policy === "string" ? flags.policy : undefined)); } catch(error) { attribution.unavailable=error instanceof Error?error.message:String(error); }
     }
     if(!exportVerdictOk(verdict))attribution.unavailable="untrusted_export: signature or complete-chain verification failed";
     if(verdict.coverage.scope!=="full")attribution.unavailable="incomplete_snapshot: scoped export";
@@ -118,7 +118,7 @@ async function main() {
     console.log("  coverage: " + v.coverage.note);
     let attribution=collectAttributionAmendments(bundle.events);
     if(exportVerdictOk(v) && !bundle.scope.artifact_id) {
-      try { attribution=collectAttributionAmendments(bundle.events,undefined,await attributionOptionsForRepo(String(flags.repo ?? process.cwd()),bundle.events,bundle.scope.project,[],typeof flags.policy === "string" ? flags.policy : undefined)); } catch(error) { attribution.unavailable=error instanceof Error?error.message:String(error); }
+      try { attribution=collectAttributionAmendments(bundle.events, await attributionOptionsForRepo(String(flags.repo ?? process.cwd()),bundle.events,bundle.scope.project,[],typeof flags.policy === "string" ? flags.policy : undefined)); } catch(error) { attribution.unavailable=error instanceof Error?error.message:String(error); }
     }
     if(!exportVerdictOk(v))attribution.unavailable="untrusted_export: signature or complete-chain verification failed";
     if(v.coverage.scope!=="full")attribution.unavailable="incomplete_snapshot: scoped export";

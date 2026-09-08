@@ -273,7 +273,7 @@ export function reconcile(commits: CommitFacts[], events: Event[], opts: Reconci
     commitTouches.push({key:seal.key,seq:seal.seq,paths});
   }
   const prevTouchSeq = (path: string, beforeSeq: number | null) => previousCaptureTouch(commitTouches,path,beforeSeq);
-  const attribution = collectAttributionAmendments(evs, undefined, opts.attribution);
+  const attribution = collectAttributionAmendments(evs, opts.attribution);
 
 
   const verdicts: CommitVerdict[] = [];

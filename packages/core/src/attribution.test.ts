@@ -31,7 +31,7 @@ async function prepare(input:Event[],facts=noGit(),p=policy) {
   const snapshot=await verifiedAttributionSnapshot(events,"p",{seq:events.length-1,hash:events.at(-1)!.hash});
   const context=await prepareAttributionContext(snapshot,p,facts,["T","E","G"]);
   const options:AttributionOptions={snapshot,context};
-  return {events,options,result:collectAttributionAmendments(events,undefined,options)};
+  return {events,options,result:collectAttributionAmendments(events, options)};
 }
 const reason=(r:Awaited<ReturnType<typeof prepare>>,id="A")=>r.result.rejected.find(x=>x.event.id===id)?.reason;
 const active=(r:Awaited<ReturnType<typeof prepare>>,target="T")=>r.result.effective.get(target)??[];
@@ -57,6 +57,7 @@ for(const [name,modify,expected] of [
   ["pinned human authority",(x:Event[])=>{x[4].method!.params!.sealed_by="pinned:H";},"untrusted_authority"],
   ["human beneficiary",(x:Event[])=>{(x[4].method!.params!.attribution as any).to=H;},"human_beneficiary_unsupported"],
   ["model injection",(x:Event[])=>{(x[4].method!.params!.attribution as any).to={...B,model:"forged"};},"malformed"],
+  ["self-interested operator",(x:Event[])=>{x[4].actor={...H,id:B.id};},"self_interested"],
   ["no-op",(x:Event[])=>{(x[4].method!.params!.attribution as any).to=O;},"no_op"],
   ["unknown actor",(x:Event[])=>{(x[4].method!.params!.attribution as any).to=actor("unknown");},"unknown_actor"],
   ["foreign scope",(x:Event[])=>{(x[4].method!.params!.attribution as any).artifacts=["doc:c"];},"scope_invalid"],
@@ -91,7 +92,7 @@ test("v6 7g–7i: final-ledger cascade, successor rejection, reactivation, and i
   const state=(r:ReturnType<typeof collectAttributionAmendments>)=>JSON.stringify({effective:[...r.effective],superseded:r.superseded,rejected:r.rejected.map(x=>[x.event.id,x.reason]),unavailable:r.unavailable});
   const expected=state(restored.result);
   let seed=2139;
-  for(let i=0;i<100;i++) {const perm=[...restored.events];for(let j=perm.length-1;j>0;j--){seed=(Math.imul(seed,1664525)+1013904223)>>>0;const k=seed%(j+1);[perm[j],perm[k]]=[perm[k],perm[j]];}assert.equal(state(collectAttributionAmendments(perm,undefined,restored.options)),expected);}
+  for(let i=0;i<100;i++) {const perm=[...restored.events];for(let j=perm.length-1;j>0;j--){seed=(Math.imul(seed,1664525)+1013904223)>>>0;const k=seed%(j+1);[perm[j],perm[k]]=[perm[k],perm[j]];}assert.equal(state(collectAttributionAmendments(perm, restored.options)),expected);}
 });
 
 test("event-wide witness exclusion and surviving alternative/missing extra citation",async()=>{
@@ -110,7 +111,7 @@ test("non-Git capture policy: ordinary edits do not bound windows, exact capture
 test("snapshots: incomplete, forged, conflicting and tampered inputs never yield an active map",async()=>{
   const r=await prepare(base());
   assert.equal(collectAttributionAmendments(r.events).unavailable,"untrusted_snapshot");
-  assert.equal(collectAttributionAmendments(r.events.slice(1),undefined,r.options).unavailable,"incomplete_snapshot");
+  assert.equal(collectAttributionAmendments(r.events.slice(1), r.options).unavailable,"incomplete_snapshot");
   await assert.rejects(()=>verifiedAttributionSnapshot([...r.events,{...r.events[2],intent:"changed"}],"p",r.options.snapshot!.head),/conflicting id/);
   await assert.rejects(()=>verifiedAttributionSnapshot(r.events.map((e,i)=>i===2?{...e,intent:"changed"}:e),"p",r.options.snapshot!.head),/invalid_snapshot/);
   const duplicate=await verifiedAttributionSnapshot([...r.events,r.events[2]],"p",r.options.snapshot!.head);assert.equal(duplicate.events.length,5);
@@ -160,7 +161,7 @@ test("v6 5d: human structured correction and prose never substitute for covering
 test("v6 5g: content observations are optional and do not decide effectiveness",async()=>{
   const r=await prepare(base());
   for(const bound of [undefined,[],["doc:a"],["doc:a","doc:b"]]) {
-    const c=collectAttributionAmendments(r.events,undefined,{...r.options,...(bound?{contentBoundArtifacts:()=>bound}:{})});
+    const c=collectAttributionAmendments(r.events, {...r.options,...(bound?{contentBoundArtifacts:()=>bound}:{})});
     assert.equal(c.effective.get("T")?.length,1);
     assert.equal(c.effective.get("T")![0].flags.content_bound,bound?.length===2?true:undefined);
     assert.deepEqual(c.effective.get("T")![0].flags.content_bound_artifacts,bound??[]);

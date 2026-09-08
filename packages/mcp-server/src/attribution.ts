@@ -127,7 +127,7 @@ export async function amendAttributionMain(flags: Record<string,string|boolean>)
   if(!sameActor(event.actor,{type:"human",id:human}))throw new Error("sealed actor differs from requested human authority");
   try {
     const all=await read(), after=await attributionOptionsForRepo(repo,all,project,[],typeof flags.policy==="string"?flags.policy:undefined);
-    const result=collectAttributionAmendments(all,undefined,after);
+    const result=collectAttributionAmendments(all, after);
     const active=[...result.effective.values()].flat().some(a=>a.amendment_id===event.id);
     console.log(JSON.stringify({recorded:true,id:event.id,effective:active,unavailable:result.unavailable,rejection:result.rejected.find(r=>r.event.id===event.id)?.reason}));return active?0:2;
   }catch(error){console.error(`recorded ${event.id}; attribution evaluation unavailable: ${error instanceof Error?error.message:error}`);return 2;}
@@ -136,7 +136,7 @@ export async function amendAttributionMain(flags: Record<string,string|boolean>)
 export async function attributionViewForEvents(repo: string, events: Event[], project: string, policyFile?: string) {
   const result=collectAttributionAmendments(events);
   if (!events.some(isAttributionAmendment)) return result;
-  try { return collectAttributionAmendments(events,undefined,await attributionOptionsForRepo(repo,events,project,[],policyFile)); }
+  try { return collectAttributionAmendments(events, await attributionOptionsForRepo(repo,events,project,[],policyFile)); }
   catch(error) { return {...result,unavailable:error instanceof Error?error.message:String(error)}; }
 }
 

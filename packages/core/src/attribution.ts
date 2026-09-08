@@ -16,7 +16,7 @@ export interface AttributionAmendment {
 }
 export type AttributionReason = "unrooted" | "missing_target" | "wrong_project" | "not_older" | "malformed" |
   "relay_disabled" | "human_beneficiary_unsupported" | "untrusted_authority" | "target_is_amendment" | "target_is_instruction" |
-  "scope_invalid" | "no_op" | "unknown_actor" | "stale_from" | "no_supersede" | "uncorroborated" | "partial_coverage" | "evidence_amended";
+  "scope_invalid" | "self_interested" | "no_op" | "unknown_actor" | "stale_from" | "no_supersede" | "uncorroborated" | "partial_coverage" | "evidence_amended";
 export interface AttributionOptions {
   snapshot?: AttributionSnapshot;
   context?: AttributionCaptureContext;
@@ -70,6 +70,7 @@ function checkCandidate(attempt: Attempt, events: Event[], options: AttributionO
   const authority = attempt.authority;
   if (!(authority === "owner" || typeof authority === "string" && /^assert:/.test(authority))) return fail("untrusted_authority");
   if (raw.to.type === "human") return fail("human_beneficiary_unsupported");
+  if (candidate.actor.id === raw.to.id) return fail("self_interested");
   if (sameActor(raw.from, raw.to)) return fail("no_op");
   const domain = options.context!.domains.get(target.id)!;
   const canonical = options.context!.canonicalArtifact;
@@ -111,7 +112,7 @@ function checkCandidate(attempt: Attempt, events: Event[], options: AttributionO
   return { ok: true, tier: "human", flags, whole_event, amendment };
 }
 
-export function collectAttributionAmendments(events: Event[], isRooted: (e: Event) => boolean = e => attributionRooted(e, events), options: AttributionOptions = {}): AttributionCollection {
+export function collectAttributionAmendments(events: Event[], options: AttributionOptions = {}): AttributionCollection {
   const effective = new Map<string, AttributionAmendment[]>(); const superseded: AttributionAmendment[] = []; const rejected: AttributionCollection["rejected"] = [];
   const unavailable = (reason: string): AttributionCollection => ({ effective, superseded, rejected, unavailable: reason });
   if (!events.some(isAttributionAmendment)) return { effective, superseded, rejected };
@@ -144,7 +145,7 @@ export function collectAttributionAmendments(events: Event[], isRooted: (e: Even
 
 /** Check a sealed record through the identical final-snapshot replay. */
 export function checkAttributionAmendment(candidate: Event, events: Event[], options: AttributionOptions): CheckResult {
-  const result = collectAttributionAmendments(events, undefined, options);
+  const result = collectAttributionAmendments(events, options);
   if (result.unavailable) throw new Error(`attribution evaluation unavailable: ${result.unavailable}`);
   const rejected = result.rejected.find(r => r.event.id === candidate.id);
   if (rejected) return {ok:false,reason:rejected.reason};
@@ -156,7 +157,7 @@ export function checkAttributionAmendment(candidate: Event, events: Event[], opt
 export function preflightAttributionAmendment(request: AttributionRequest, authority: {actor: Actor; sealed_by: string}, options: AttributionOptions): {input: EventInput; result: CheckResult; affected: string[]} {
   if (!isVerifiedAttributionSnapshot(options.snapshot) || !options.context) throw new Error("attribution evaluation unavailable: context_missing");
   const snapshot = options.snapshot, events = snapshot.events;
-  const current = collectAttributionAmendments(events, undefined, options);
+  const current = collectAttributionAmendments(events, options);
   if (current.unavailable) throw new Error(`attribution evaluation unavailable: ${current.unavailable}`);
   const target = events.find(e => e.id === request.target_event_id);
   const domain = target ? options.context.domains.get(target.id) : undefined;

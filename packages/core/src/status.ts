@@ -49,7 +49,7 @@ export async function buildProjectStatus(store: EventStore, project: string, now
   const roots = eligible.map((e) => causalRootState(e, byId));
   const count = (s: RootState) => roots.filter((x) => x === s).length;
 
-  const attribution=collectAttributionAmendments(events,undefined,attributionOptions);
+  const attribution=collectAttributionAmendments(events, attributionOptions);
   const actors = new Map<string, StatusActor>();
   const integrations = new Map<string, StatusIntegration>();
   for (const e of events) {

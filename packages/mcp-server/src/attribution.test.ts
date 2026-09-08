@@ -38,7 +38,7 @@ test("human CLI: dry-run, sealed amendment, real blob/trailer observations and e
     assert.equal((await store.all("p")).length,4);
     const written=cli(args);assert.equal(written.status,0,written.stderr+written.stdout);assert.match(written.stdout,/"recorded":true/);assert.match(written.stdout,/"effective":true/);
     const events=await store.all("p"),options=await attributionOptionsForRepo(dir,events,"p");
-    assert.equal(collectAttributionAmendments(events,undefined,options).effective.get(seal.id)?.[0].whole_event,true);
+    assert.equal(collectAttributionAmendments(events, options).effective.get(seal.id)?.[0].whole_event,true);
     assert.equal(events.find(e=>e.id===seal.id)?.actor.id,"O");
     const noRemoteReads = {export: async () => {throw new Error("must reuse the verified event set");}} as unknown as RemoteStore;
     const coverage = await remoteCaptureCoverage(dir,"p",noRemoteReads,{repoName:"org/r",reconcile:{hook_sealed_by:["assert:hook"]}},{gate:true,local:false},undefined,undefined,{events,note:"prefetched verified fixture"});
@@ -49,7 +49,7 @@ test("human CLI: dry-run, sealed amendment, real blob/trailer observations and e
     assert.deepEqual(options.contentBoundArtifacts?.(seal,[edit]),[artifact]);
     assert.deepEqual(options.contentBoundArtifacts?.(seal,[{...edit,artifacts:[...edit.artifacts,{id:"repo:org/r#another.txt",role:"generated"}]}]),[],"one scalar hash does not bind multiple outputs");
     // Same receipt, but an absent or mismatching content observation leaves the amendment effective.
-    const result=collectAttributionAmendments(events,undefined,{...options,contentBoundArtifacts:()=>[]});assert.equal(result.effective.get(seal.id)?.length,1);assert.equal(result.effective.get(seal.id)?.[0].flags.content_bound,undefined);
+    const result=collectAttributionAmendments(events, {...options,contentBoundArtifacts:()=>[]});assert.equal(result.effective.get(seal.id)?.length,1);assert.equal(result.effective.get(seal.id)?.[0].flags.content_bound,undefined);
     // A sealed commit by B is not trailer corroboration if the actual Git trailer says someone else.
     assert.equal(options.trailerCorroborated?.(seal,[witness],{type:"agent",id:"other"}),false);
     assert.equal(options.trailerCorroborated?.(seal,[{...witness,actor:recorded}],beneficiary),true,"trailer identity, not the receipt actor, supplies this observation");
