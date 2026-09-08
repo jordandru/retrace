@@ -3,6 +3,8 @@ import { GENESIS_HASH } from "./schema.js";
 import { canonicalize, verifyChain, sha256Hex } from "./chain.js";
 import { captureSeals, previousCaptureTouch } from "./capture.js";
 
+export const isAttributionAmendment = (e: Event): boolean => e.action === "other" && e.action_detail === "amended" && (e.method?.params?.attribution !== undefined || e.tags?.includes("attribution") === true);
+
 export interface AttributionSnapshot { project: string; events: Event[]; head: { seq: number; hash: string } }
 const verified = new WeakSet<AttributionSnapshot>();
 /** Call only after authenticating the head (trusted export/head signature, or authoritative local storage).
@@ -41,6 +43,8 @@ export interface AttributionCaptureContext {
   project: string; head_seq: number; head_hash: string;
   policy_digest: string; git_facts_digest: string;
   domains: Map<string, AttributionDomain>;
+  /** Non-seal commit references that cannot supply a capture identity. Raw events remain unchanged. */
+  diagnostics: { event_id: string; seq: number; artifact_id: string; status: "ignored"; reason: "malformed_commit_ref" | "unavailable_commit_ref" }[];
   canonicalArtifact: (id: string, seq: number) => string | undefined;
 }
 
@@ -64,6 +68,16 @@ const safePath = (p: string) => !!p && !p.startsWith("/") && !p.split("/").some(
 export async function prepareAttributionContext(snapshot: AttributionSnapshot, policy: AttributionPolicy, facts: AttributionGitFacts, extraTargets: string[] = []): Promise<AttributionCaptureContext> {
   if (!isVerifiedAttributionSnapshot(snapshot)) throw new Error("untrusted_snapshot");
   if (policy.profile !== "retrace-attribution/1" || !Array.isArray(policy.repositories) || !Array.isArray(policy.non_git)) throw new Error("context_missing: attribution policy");
+  const isCommitEvent = (e: Event) => e.action === "committed" || e.action === "merged";
+  const commitRef = /^commit:[^@]+@[0-9a-f]{7,64}$/;
+  const fullOid = new RegExp(`^[0-9a-f]{${facts.object_format === "sha256" ? 64 : 40}}$`);
+  const resolvedRef = (id: string) => commitRef.test(id) && !!facts.resolutions[id] && fullOid.test(facts.resolutions[id].oid);
+  const diagnostics: AttributionCaptureContext["diagnostics"] = [];
+  const resolve = (id: string) => {
+    if (!resolvedRef(id)) throw new Error(`context_missing: full commit identity ${id}`);
+    const r = facts.resolutions[id];
+    return `${r.repo}@${r.oid}`;
+  };
   const canonicalArtifact = (id: string, seq: number): string | undefined => {
     const match = /^repo:([^#]+)#(.+)$/.exec(id);
     if (match) {
@@ -80,20 +94,22 @@ export async function prepareAttributionContext(snapshot: AttributionSnapshot, p
   };
   // Historical coverage is mandatory for every reference using a declared repository alias.
   for (const e of snapshot.events) for (const a of e.artifacts) {
+    if (a.id.startsWith("commit:")) {
+      if (!isCommitEvent(e)) {
+        if (!resolvedRef(a.id)) diagnostics.push({event_id:e.id,seq:e.seq,artifact_id:a.id,status:"ignored",reason:commitRef.test(a.id) ? "unavailable_commit_ref" : "malformed_commit_ref"});
+        // Push reports and other non-seal references cannot define a capture boundary.
+        continue;
+      }
+      resolve(a.id); // Required seal identities must remain fail-closed, including malformed refs.
+    }
     const repo=/^(?:repo:([^#]+)#|commit:([^@]+)@)/.exec(a.id)?.slice(1).find(Boolean);
     if (!repo) continue;
     const declared=policy.repositories.filter(p=>[p.name,...p.aliases].includes(repo));
     if (declared.length && !declared.some(p=>inInterval(p,e.seq))) throw new Error(`context_missing: historical mapping at #${e.seq}`);
-    if((e.action === "committed" || e.action === "merged") && a.id.startsWith("commit:") && declared.length && !facts.resolutions[a.id])throw new Error(`context_missing: prior commit identity ${a.id}`);
   }
-  const resolve = (id: string) => {
-    const r = facts.resolutions[id];
-    if (!r || !new RegExp(`^[0-9a-f]{${facts.object_format === "sha256" ? 64 : 40}}$`).test(r.oid)) throw new Error(`context_missing: full commit identity ${id}`);
-    return `${r.repo}@${r.oid}`;
-  };
   const seals = new Map<string, { key: string; seq: number; paths: Set<string> }>();
   for (const p of policy.repositories) {
-    const events = snapshot.events.filter(e => inInterval(p,e.seq) && e.artifacts.some(a => a.id.startsWith("commit:") && facts.resolutions[a.id]?.repo === p.name));
+    const events = snapshot.events.filter(e => isCommitEvent(e) && inInterval(p,e.seq) && e.artifacts.some(a => a.id.startsWith("commit:") && facts.resolutions[a.id]?.repo === p.name));
     const index = captureSeals(events, { repoName:p.name, hookSealedBy:p.hook_sealed_by, ownerSeals:p.owner_seals, allowUnstampedSeals:p.allow_unstamped_seals, unreachableShas:facts.excluded,firstStampedSeq:snapshot.events.find(e=>typeof e.method?.params?.sealed_by==="string")?.seq ?? Infinity }, resolve);
     for (const t of index) {
       const old = seals.get(t.key);
@@ -105,7 +121,7 @@ export async function prepareAttributionContext(snapshot: AttributionSnapshot, p
       seals.set(t.key,value);
     }
   }
-  const targets = new Set([...extraTargets, ...snapshot.events.filter(e => e.action_detail === "amended").map(e => String(e.method?.params?.target_event_id))]);
+  const targets = new Set([...extraTargets, ...snapshot.events.filter(isAttributionAmendment).map(e => String(e.method?.params?.target_event_id))]);
   const domains = new Map<string, AttributionDomain>();
   for (const target of snapshot.events.filter(e => targets.has(e.id))) {
     const gitTarget = target.action === "committed" || target.action === "merged";
@@ -140,5 +156,5 @@ export async function prepareAttributionContext(snapshot: AttributionSnapshot, p
     });
     domains.set(target.id, { units:[...units.values()].sort((a,b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0), complete:!diff || diff.files.every(f => units.has(`repo:${diff.repo}#${f.path}`)) });
   }
-  return { profile:policy.profile,project:snapshot.project,head_seq:snapshot.head.seq,head_hash:snapshot.head.hash,policy_digest:await sha256Hex(canonicalize(policy)),git_facts_digest:await sha256Hex(canonicalize(facts)),domains,canonicalArtifact };
+  return { profile:policy.profile,project:snapshot.project,head_seq:snapshot.head.seq,head_hash:snapshot.head.hash,policy_digest:await sha256Hex(canonicalize(policy)),git_facts_digest:await sha256Hex(canonicalize(facts)),domains,diagnostics,canonicalArtifact };
 }

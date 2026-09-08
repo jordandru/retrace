@@ -51,7 +51,12 @@ Optional `--artifacts` narrows scope to comma-separated canonical artifact IDs.
 `--supersedes evt_ID` explicitly replaces the intersecting active amendment.
 
 The preview names the verified head and policy/Git digests. It is advisory under
-concurrent writes. The CLI prints the durable event ID before attempting a post-write
+concurrent writes. Its `diagnostics` lists malformed or unavailable commit references
+on non-seal events (for example, a `sent` git-push report) as `ignored`, with the
+event ID, sequence, and original artifact ID. These references neither define capture
+windows nor get corrected by guessing an object ID. Required references on commit
+and merge events still fail closed when their full identity is unavailable.
+The CLI prints the durable event ID before attempting a post-write
 read, then reports whether that sealed record is effective. Exit 0 means successful
 preview/effectiveness; 1 means a rejected command or preflight; 2 means a durable
 record exists but is ineffective or its final evaluation is unavailable.

@@ -3,7 +3,8 @@ import { causalRootState } from "./causality.js";
 import type { Actor, Event, EventInput } from "./schema.js";
 import { actorKey, sameActor, sameArtifact, generatesArtifact } from "./capture.js";
 
-import { isVerifiedAttributionSnapshot, type AttributionSnapshot, type AttributionCaptureContext } from "./attribution-context.js";
+import { isAttributionAmendment, isVerifiedAttributionSnapshot, type AttributionSnapshot, type AttributionCaptureContext } from "./attribution-context.js";
+export { isAttributionAmendment } from "./attribution-context.js";
 
 export type ActorRef = Pick<Actor, "type" | "id">;
 export interface AttributionAmendment {
@@ -28,7 +29,6 @@ type CheckResult = { ok: true; tier: "human"; flags: AttributionAmendment["flags
 const object = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
 const ref = (v: unknown): v is ActorRef => object(v) && ["agent", "human", "system"].includes(String(v.type)) && typeof v.id === "string" && !!v.id && Object.keys(v).every(k => k === "type" || k === "id");
 const strings = (v: unknown): v is string[] => Array.isArray(v) && v.length > 0 && v.every(x => typeof x === "string" && !!x) && new Set(v).size === v.length;
-export const isAttributionAmendment = (e: Event): boolean => e.action === "other" && e.action_detail === "amended" && (e.method?.params?.attribution !== undefined || e.tags?.includes("attribution") === true);
 
 export function attributionRooted(e: Event, events: Event[]): boolean {
   return causalRootState(e, new Map(events.map(x => [x.id, x])), { strictParents: true }) === "rooted";

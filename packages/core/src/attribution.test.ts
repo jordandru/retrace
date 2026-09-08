@@ -36,6 +36,44 @@ async function prepare(input:Event[],facts=noGit(),p=policy) {
 const reason=(r:Awaited<ReturnType<typeof prepare>>,id="A")=>r.result.rejected.find(x=>x.event.id===id)?.reason;
 const active=(r:Awaited<ReturnType<typeof prepare>>,target="T")=>r.result.effective.get(target)??[];
 
+test("capture context ignores non-seal commit refs and never imports a push report's paths into a seal",async()=>{
+  const oid="a".repeat(40),cid=`commit:org/r@${oid}`,f="repo:org/r#a";
+  const malformed="commit:org/r@not-a-sha",unavailable="commit:org/r@f29f2071a1b1";
+  const seal={...ev("S",O,ids(cid,"repo:org/r#other"),"committed"),method:{tool:"git",params:{sealed_by:"assert:hook"}}};
+  const push={...ev("P",O,ids(unavailable,cid,malformed,f),"sent"),method:{tool:"git push"}};
+  const x=[root(),seal,ev("E",B,ids(f)),push,ev("T",O,ids(f)),amendment("A")];
+  const facts:AttributionGitFacts={...noGit(),resolutions:{[cid]:{repo:"org/r",oid}}};
+  const r=await prepare(x,facts);
+  assert.equal(active(r).length,1,"the bad push reference must not prevent checker evaluation");
+  assert.equal(r.options.context!.domains.get("T")!.units[0].after,-1,"a non-seal's paths must not become prior sealed touches");
+  assert.deepEqual(r.options.context!.diagnostics,[
+    {event_id:"P",seq:3,artifact_id:unavailable,status:"ignored",reason:"unavailable_commit_ref"},
+    {event_id:"P",seq:3,artifact_id:malformed,status:"ignored",reason:"malformed_commit_ref"},
+  ]);
+  assert.deepEqual(r.events[3].artifacts,push.artifacts,"keep the recorded references intact");
+});
+
+test("capture context fails closed for unresolved or malformed refs on commit and merge seals",async()=>{
+  const oid="a".repeat(40),cid=`commit:org/r@${oid}`;
+  const facts:AttributionGitFacts={...noGit(),resolutions:{[cid]:{repo:"org/r",oid}}};
+  for(const action of ["committed","merged"] as const) for(const bad of ["commit:org/r@f29f2071a1b1","commit:org/r@not-a-sha","commit:broken"]) {
+    const seal={...ev("S",O,ids(cid,bad),action),method:{tool:"git",params:{sealed_by:"assert:hook"}}};
+    await assert.rejects(()=>prepare([root(),seal],facts),/context_missing: full commit identity/);
+  }
+});
+
+test("ordinary provenance amendments do not require unrelated target diffs, while attribution attempts still do",async()=>{
+  const oid="a".repeat(40),cid=`commit:org/r@${oid}`;
+  const seal={...ev("S",O,ids(cid,"repo:org/r#a"),"committed"),method:{tool:"git",params:{sealed_by:"assert:hook"}}};
+  const facts:AttributionGitFacts={...noGit(),resolutions:{[cid]:{repo:"org/r",oid}}};
+  for(const correction of [{artifact_roles:[{index:1,role:"generated"}]},{attest_causal_root:true}]) {
+    const ordinary={...ev("P",H,ids("event:S"),"other"),action_detail:"amended",method:{params:{sealed_by:"owner",target_event_id:"S",...correction}}};
+    const r=await prepare([root(),seal,ordinary],facts);
+    assert.equal(r.options.context!.domains.has("S"),false);
+    await assert.rejects(()=>prepare([root(),seal,{...ordinary,tags:["attribution"]}],facts),/context_missing: target diff S/);
+  }
+});
+
 test("v7 B1 / v6 4, 5h: a beneficiary's signed-in claim plus human selection is effective, not proof of authorship",async()=>{
   const x=base();x[3].actor={...O,model:"old-model",display_name:"old display",on_behalf_of:"principal"};
   x[3].artifacts.push({id:"event:context",role:"used"} as any);
