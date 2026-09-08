@@ -51,8 +51,9 @@ Optional `--artifacts` narrows scope to comma-separated canonical artifact IDs.
 `--supersedes evt_ID` explicitly replaces the intersecting active amendment.
 
 The preview names the verified head and policy/Git digests. It is advisory under
-concurrent writes. Its `diagnostics` lists malformed or unavailable commit references
-on non-seal events (for example, a `sent` git-push report) as `ignored`, with the
+concurrent writes. Its `diagnostics_summary` gives a total and counts by reason.
+Add `--verbose` to include the full `diagnostics` list of malformed or unavailable
+commit references on non-seal events (for example, a `sent` git-push report) as `ignored`, with the
 event ID, sequence, and original artifact ID. These references neither define capture
 windows nor get corrected by guessing an object ID. Required references on commit
 and merge events still fail closed when their full identity is unavailable.

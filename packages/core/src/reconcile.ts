@@ -32,6 +32,8 @@ export interface CommitFacts {
 
 export type ReconcileFindingKind = "missing_commit" | "misattributed" | "uncovered" | "loose_match" | "orphan_edit" | "non_agent" | "producer_disagreement" | "unreachable_seal";
 export type ReconcileLevel = "fail" | "warn" | "info";
+export type CommitAttributionCertificate = { original_level: "fail"; target_seal: string; policy_digest: string; git_facts_digest: string; head_hash: string; files: { file: string; artifact: string; beneficiary: { type: Event["actor"]["type"]; id: string }; amendment: { id: string; seq: number }; evidence: string[] }[] };
+export type FileAttributionAmendment = { seq: number; id: string; to: Pick<Event["actor"], "type" | "id"> };
 export interface ReconcileFinding {
   kind: ReconcileFindingKind;
   level: ReconcileLevel;
@@ -42,7 +44,7 @@ export interface ReconcileFinding {
    *  opts.ackActors when set), that references the commit; the finding then never counts as a failure. Unsealed
    *  commits cannot be acknowledged at all — a sha is computable before the commit exists, so a pre-logged
    *  "correction" would let anyone whitelist a commit in advance. */
-  amended?: { original_level: "fail"; target_seal: string; policy_digest: string; git_facts_digest: string; head_hash: string; files: { file: string; artifact: string; beneficiary: { type: Event["actor"]["type"]; id: string }; amendment: { id: string; seq: number }; evidence: string[] }[] };
+  amended?: CommitAttributionCertificate | FileAttributionAmendment;
   acknowledged?: { seq: number; id: string; actor: string };
 }
 
@@ -364,19 +366,27 @@ export function reconcile(commits: CommitFacts[], events: Event[], opts: Reconci
       }
     }
     const failure = v.findings.find(f => f.kind === "misattributed" && f.level === "fail" && !f.file && !f.acknowledged);
-    if (failure && !attribution.unavailable && attribution.context && !v.findings.some(f => f.kind === "producer_disagreement" && !f.acknowledged)) {
+    if (!attribution.unavailable && attribution.context && !v.findings.some(f => f.kind === "producer_disagreement" && !f.acknowledged)) {
       const amendments = attribution.effective.get(sealedEvent.id) ?? [];
-      const certificate: NonNullable<ReconcileFinding["amended"]>["files"] = [];
+      const certificate: CommitAttributionCertificate["files"] = [];
       for (const [path,cov] of files) {
         const a = amendments.find(a => a.artifacts.some(id => artifactPath(id,{repoNames,repoPath:opts.repoPath})?.path === path) && cov.actor_refs?.some(actor => sameActor(actor,a.to)));
         const artifact = a?.artifacts.find(id => artifactPath(id,{repoNames,repoPath:opts.repoPath})?.path === path);
         const unit=attribution.context.domains.get(sealedEvent.id)?.units.find(u=>u.id===artifact);
         if (a && artifact && unit && unit.after===cov.window.after && unit.before===cov.window.before && !artifactPath(artifact,{repoNames,repoPath:opts.repoPath})?.loose && a.matches[artifact]?.length) certificate.push({file:path,artifact,beneficiary:a.to,amendment:{id:a.amendment_id,seq:a.seq},evidence:a.matches[artifact]});
       }
-      if (certificate.length === files.length) {
+      for (const finding of v.findings) {
+        if (finding.kind !== "misattributed" || finding.level !== "warn" || !finding.file || finding.acknowledged) continue;
+        const correction = certificate.find(f => f.file === finding.file);
+        if (correction) {
+          finding.level = "info";
+          finding.amended = {...correction.amendment, to: correction.beneficiary};
+        }
+      }
+      if (failure && certificate.length === files.length) {
         failure.level = "info";
         failure.amended = {original_level:"fail",target_seal:sealedEvent.id,policy_digest:attribution.context.policy_digest,git_facts_digest:attribution.context.git_facts_digest,head_hash:attribution.context.head_hash,files:certificate};
-      } else if (certificate.length) {
+      } else if (failure && certificate.length) {
         for (const [path] of files) if (!certificate.some(f => f.file === path)) add("misattributed","warn",`${path}: no effective attribution correction covers this failing file`,path);
       }
     }
@@ -424,7 +434,7 @@ export function renderReconcileReport(r: ReconcileReport): string {
   const s = r.summary;
   lines.push(`reconcile ${r.repo_name}: ${s.commits} commit${s.commits === 1 ? "" : "s"}, ${s.sealed} sealed — ${s.missing_commit} missing, ${s.misattributed} misattributed, ${s.producer_disagreement} producer-disagreement, ${s.unreachable_seal} unreachable-seal, ${s.uncovered} uncovered, ${s.loose_match} loose, ${s.non_agent} non-agent, ${s.orphan_edit} orphan path${s.orphan_edit === 1 ? "" : "s"}, ${r.pending.length} pending${s.acknowledged ? `, ${s.acknowledged} acknowledged` : ""} → ${r.ok ? "OK" : "NOT OK"}`);
   for (const v of r.commits) for (const f of v.findings) {
-    lines.push(`  ${f.amended ? "AMND" : f.acknowledged ? "ACK " : f.level.toUpperCase().padEnd(4)} ${f.kind.padEnd(14)} ${f.detail}${f.acknowledged ? ` (corrected by #${f.acknowledged.seq}, ${f.acknowledged.actor})` : ""}`);
+    lines.push(`  ${f.amended ? "AMND" : f.acknowledged ? "ACK " : f.level.toUpperCase().padEnd(4)} ${f.kind.padEnd(14)} ${f.detail}${f.amended && "to" in f.amended ? ` (attribution amended to ${f.amended.to.type}/${f.amended.to.id} by #${f.amended.seq}, ${f.amended.id})` : ""}${f.acknowledged ? ` (corrected by #${f.acknowledged.seq}, ${f.acknowledged.actor})` : ""}`);
   }
   for (const o of r.orphans) lines.push(`  INFO orphan_edit    ${o.path}: ${o.events} edit${o.events === 1 ? "" : "s"} by ${o.actors.join(", ")} (last #${o.last_seq}) not carried by any commit in range`);
   return lines.join("\n");

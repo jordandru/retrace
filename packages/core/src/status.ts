@@ -1,4 +1,4 @@
-import { collectAttributionAmendments, effectiveActor, type AttributionOptions } from "./attribution.js";
+import { collectAttributionAmendments, effectiveActor, isAttributionAmendment, type AttributionOptions } from "./attribution.js";
 import { Event } from "./schema.js";
 import { VerifyResult } from "./chain.js";
 import { EventStore, verifyProject } from "./store.js";
@@ -14,7 +14,9 @@ export type ProjectStatus = {
   integrity: VerifyResult;
   events: { total: number; last_event_at?: string };
   capture: {
-    attribution_amendments?: number; attribution_amended_events?: number; partially_amended_events?: number; superseded_attribution_amendments?: number; attribution_unavailable?: string; attribution_attempts?: number; ineffective_amendment_reasons?: {id:string; reason:string}[];
+    attribution: "available" | `unavailable: ${string}`;
+    attribution_attempts: number;
+    attribution_amendments?: number; attribution_amended_events?: number; partially_amended_events?: number; superseded_attribution_amendments?: number; attribution_unavailable?: string; ineffective_amendment_reasons?: {id:string; reason:string}[];
     artifact_refs: number;
     artifact_refs_without_role: number;
     agent_events: number;
@@ -50,6 +52,8 @@ export async function buildProjectStatus(store: EventStore, project: string, now
   const count = (s: RootState) => roots.filter((x) => x === s).length;
 
   const attribution=collectAttributionAmendments(events, attributionOptions);
+  // The Worker has no local Git context. An empty effective map there is not an evaluation.
+  const attributionUnavailable = !attributionOptions?.context ? "no_git_context" : attribution.unavailable;
   const actors = new Map<string, StatusActor>();
   const integrations = new Map<string, StatusIntegration>();
   for (const e of events) {
@@ -97,8 +101,9 @@ export async function buildProjectStatus(store: EventStore, project: string, now
       unlinked_commits: commits.filter((e) => causalRootState(e, byId) !== "rooted" && !attested.has(e.id)).length,
       amended_unlinked_commits: commits.filter((e) => attested.has(e.id)).length,
       ineffective_amendments: rejectedAmendments.length + attribution.rejected.length,
-      attribution_attempts: events.filter(e=>e.action_detail==="amended"&&(e.method?.params?.attribution!==undefined||e.tags?.includes("attribution"))).length,
-      ...(attribution.unavailable ? {attribution_unavailable:attribution.unavailable} : {attribution_amendments:[...attribution.effective.values()].flat().length,attribution_amended_events:[...attribution.effective.values()].filter(a=>a.some(x=>x.whole_event)).length,partially_amended_events:[...attribution.effective.values()].filter(a=>!a.some(x=>x.whole_event)).length,superseded_attribution_amendments:attribution.superseded.length}),
+      attribution_attempts: events.filter(isAttributionAmendment).length,
+      attribution: attributionUnavailable ? `unavailable: ${attributionUnavailable}` : "available",
+      ...(attributionUnavailable ? {attribution_unavailable:attributionUnavailable} : {attribution_amendments:[...attribution.effective.values()].flat().length,attribution_amended_events:[...attribution.effective.values()].filter(a=>a.some(x=>x.whole_event)).length,partially_amended_events:[...attribution.effective.values()].filter(a=>!a.some(x=>x.whole_event)).length,superseded_attribution_amendments:attribution.superseded.length}),
       ineffective_amendment_reasons:[...rejectedAmendments,...attribution.rejected].map(r=>({id:r.event.id,reason:r.reason})),
       unverified_links: events.filter((e) => e.tags?.includes(CAUSED_BY_UNVERIFIED_TAG)).length,
       sealed_by: sealedBy,
