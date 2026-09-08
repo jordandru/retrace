@@ -4,7 +4,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, 
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseCredentials } from "@retrace-dev/core";
-import { DEFAULT_HARNESSES, planAgentCredential, renderAgentOnboarding, planTeam, planCredentials, validateSpec, teamsIn, appendCredentials, writeSecretFile, readCredentialsFile, gitHookActorId, ciActorId, containingGitTree, defaultOnboardingFile, main, mintProducerKeys, producerKeyFileName, shouldMintProducerKey, TeamSpec } from "./admin.js";
+import { DEFAULT_HARNESSES, HARNESSES, planAgentCredential, renderAgentOnboarding, planTeam, planCredentials, validateSpec, teamsIn, appendCredentials, writeSecretFile, readCredentialsFile, gitHookActorId, ciActorId, containingGitTree, defaultOnboardingFile, main, mintProducerKeys, producerKeyFileName, shouldMintProducerKey, TeamSpec } from "./admin.js";
 
 /** deterministic "randomness": counter-filled buffers, distinct per call */
 const fakeRand = () => { let n = 0; return (len: number) => Buffer.alloc(len, ++n); };
@@ -192,6 +192,8 @@ test("main new-team: dry run touches nothing; real run appends, writes onboardin
 
 test("new-team defaults stay stable while OpenClaw is opt-in", async () => {
   assert.deepEqual(DEFAULT_HARNESSES, ["claude-code", "codex", "gemini", "grok", "github-copilot"]);
+  assert.ok((HARNESSES as readonly string[]).includes("opencode"));
+  assert.equal((DEFAULT_HARNESSES as readonly string[]).includes("opencode"), false);
   const dir = mkdtempSync(join(tmpdir(), "retrace-admin-default-"));
   const file = join(dir, "creds.json");
   const output: string[] = [];
@@ -199,6 +201,7 @@ test("new-team defaults stay stable while OpenClaw is opt-in", async () => {
   assert.match(output.join("\n"), /would add 7 credentials/);
   assert.match(output.join("\n"), new RegExp(defaultOnboardingFile("onboarding-default-team.md").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   assert.doesNotMatch(output.join("\n"), /openclaw/);
+  assert.doesNotMatch(output.join("\n"), /opencode/);
 });
 
 test("an explicit --out inside a Git worktree emits a live-token warning", async () => {
@@ -266,6 +269,32 @@ test("add-agent nooa: unlike openclaw, gets a producer key and a stdio retrace-m
   assert.ok(added.producer_key_file && existsSync(added.producer_key_file));
   const doc = readFileSync(onboarding, "utf8");
   assert.match(doc, /NVIDIA Labs Object-Oriented Agents, research preview/);
+  assert.match(doc, /RETRACE_PRODUCER_KEY_FILE/);
+  assert.match(doc, /retrace-mcp/);
+  assert.doesNotMatch(doc, /does not claim producer signatures/);
+});
+
+test("add-agent opencode: opt-in harness with producer key and stdio retrace-mcp entry", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "retrace-admin-opencode-"));
+  const file = join(dir, "creds.json");
+  const onboarding = join(dir, "opencode.md");
+  const keysDir = join(dir, "producer-keys");
+  appendCredentials(file, [], planCredentials(spec, fakeRand()));
+
+  const lines: string[] = [];
+  const argv = ["add-agent", "acme-app", "--member", "alice@acme.dev", "--harness", "opencode", "--url", "https://retrace.example", "--credentials-file", file, "--producer-keys-dir", keysDir, "--out", onboarding];
+  assert.equal(await main(argv, {}, (line) => lines.push(line)), 0);
+  const added = readCredentialsFile(file).at(-1)!;
+  assert.deepEqual(added.actor, { type: "agent", id: "opencode", on_behalf_of: "alice@acme.dev" });
+  assert.deepEqual([added.trust, added.projects], ["pinned", ["acme-app"]]);
+  assert.equal(added.require_signature, true);
+  assert.ok(added.public_key?.x);
+  assert.equal("d" in (added.public_key ?? {}), false, "private half must not sit on the credential");
+  assert.ok(added.producer_key_file && existsSync(added.producer_key_file));
+  const doc = readFileSync(onboarding, "utf8");
+  assert.match(doc, /OpenCode/);
+  assert.match(doc, /opencode\.json/);
+  assert.match(doc, /OPENCODE\.md/);
   assert.match(doc, /RETRACE_PRODUCER_KEY_FILE/);
   assert.match(doc, /retrace-mcp/);
   assert.doesNotMatch(doc, /does not claim producer signatures/);
