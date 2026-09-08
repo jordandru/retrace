@@ -45,14 +45,16 @@ jobs:
           set -euo pipefail
           export HOME="$CLEAN_HOME"
           unset RETRACE_URL RETRACE_TOKEN
-          export PATH="$GITHUB_WORKSPACE/node_modules/.bin:$PATH"
+          retrace_cli() {
+            npm --prefix "$GITHUB_WORKSPACE" exec --workspace @retrace-dev/cli -- "$@"
+          }
           app="$RUNNER_TEMP/retrace-walkthrough-app"
           mkdir -p "$app"
           cd "$app"
           git init -q -b main
           git config user.name "Local Walkthrough"
           git config user.email "walkthrough@example.com"
-          retrace-git install --project local-walkthrough
+          retrace_cli retrace-git install --project local-walkthrough
           printf 'base\n' > base.txt
           git add .retrace.json base.txt
           git commit -q -m "Local walkthrough base"
@@ -62,7 +64,7 @@ jobs:
           git commit -q -m "Local walkthrough feature"
           git switch -q main
           git merge -q --no-ff feature -m "Merge local walkthrough feature"
-          retrace doctor
-          retrace-export export local-walkthrough --out retrace.json
-          retrace-export verify retrace.json --allow-self-attested
+          retrace_cli retrace doctor
+          retrace_cli retrace-export export local-walkthrough --out retrace.json
+          retrace_cli retrace-export verify retrace.json --allow-self-attested
           grep -q '"action": "merged"' retrace.json
