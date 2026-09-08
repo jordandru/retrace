@@ -13,6 +13,38 @@ import type { RemoteStore } from "./remote-store.js";
 import { attributionDeployment, remoteCaptureCoverage } from "./doctor.js";
 import { attributionOptionsForRepo } from "./attribution.js";
 
+test("human CLI: seq 123-shaped push with a mistyped commit ref reports diagnostics without blocking a partial dry run",async()=>{
+  const dir=mkdtempSync(join(tmpdir(),"retrace-attribution-push-ref-"));
+  const env=Object.fromEntries(Object.entries(process.env).filter(([k])=>!k.startsWith("RETRACE_")&&!k.startsWith("GIT_")));
+  Object.assign(env,{GIT_AUTHOR_NAME:"Test",GIT_AUTHOR_EMAIL:"test@example.com",GIT_COMMITTER_NAME:"Test",GIT_COMMITTER_EMAIL:"test@example.com",RETRACE_DB:join(dir,"ledger.db"),RETRACE_PROJECT:"retrace"});
+  const git=(...args:string[])=>execFileSync("git",["-C",dir,...args],{env,encoding:"utf8",stdio:["ignore","pipe","pipe"]}).trim();
+  try {
+    git("init","-q");git("config","core.hooksPath","/dev/null");
+    for(const path of ["a.txt","b.txt"])writeFileSync(join(dir,path),"fixture\n");
+    git("add","a.txt","b.txt");git("commit","-qm","fixture");
+    const oid=git("rev-parse","HEAD"),cid=`commit:jordandru/retrace@${oid.slice(0,12)}`;
+    const policy:AttributionPolicy={profile:"retrace-attribution/1",repositories:[{name:"jordandru/retrace",aliases:[],from_seq:0,hook_sealed_by:["assert:hook"]}],non_git:[]};
+    writeFileSync(join(dir,".retrace.json"),JSON.stringify({project:"retrace",attribution:policy}));
+    const store=new SqliteStore(env.RETRACE_DB!),human={type:"human" as const,id:"test@example.com"};
+    const root=(await appendEvent(store,{project:"retrace",actor:human,action:"instructed",artifacts:[{id:"task:fixture"}]})).event;
+    const artifact="repo:jordandru/retrace#a.txt";
+    const edit=(await appendEvent(store,{project:"retrace",actor:{type:"agent",id:"B"},action:"edited",artifacts:[{id:artifact}],caused_by:root.id,method:{params:{sealed_by:"pinned:B"}}})).event;
+    const seal=(await appendEvent(store,{project:"retrace",actor:{type:"agent",id:"O"},action:"committed",artifacts:[{id:cid},{id:artifact},{id:"repo:jordandru/retrace#b.txt"}],caused_by:root.id,method:{tool:"git",params:{sealed_by:"assert:hook"}},idempotency_key:`git:${oid}`})).event;
+    for(let seq=3;seq<123;seq++)await appendEvent(store,{project:"retrace",actor:human,action:"read",artifacts:[{id:"task:fixture"}]});
+    const bad="commit:jordandru/retrace@f29f2071a1b1";
+    const push=(await appendEvent(store,{project:"retrace",actor:{type:"agent",id:"claude-code"},action:"sent",artifacts:[{id:bad,kind:"commit"},{id:cid,kind:"commit"}],method:{tool:"git push"}})).event;
+    assert.equal(push.seq,123);
+    const before=JSON.stringify(await store.all("retrace")),refs=git("show-ref"),status=git("status","--porcelain");
+    const result=spawnSync(process.execPath,[fileURLToPath(new URL("./export-cli.js",import.meta.url)),"amend-attribution","--target",seal.id,"--to","agent/B","--artifacts",artifact,"--evidence",edit.id,"--reason","scoped fixture review","--caused-by",root.id,"--human",human.id,"--dry-run"],{cwd:dir,env,encoding:"utf8"});
+    assert.equal(result.status,0,result.stderr);
+    const preview=JSON.parse(result.stdout);
+    assert.equal(preview.recorded,false);assert.equal(preview.result.ok,true);assert.equal(preview.result.whole_event,false);
+    assert.deepEqual(preview.diagnostics,[{event_id:push.id,seq:123,artifact_id:bad,status:"ignored",reason:"unavailable_commit_ref"}]);
+    assert.equal(JSON.stringify(await store.all("retrace")),before,"dry run must not append or rewrite any ledger event");
+    assert.equal(git("show-ref"),refs);assert.equal(git("status","--porcelain"),status);
+  } finally {rmSync(dir,{recursive:true,force:true});}
+});
+
 test("human CLI: dry-run, sealed amendment, real blob/trailer observations and exported render pairing",async()=>{
   const dir=mkdtempSync(join(tmpdir(),"retrace-attribution-"));
   const env=Object.fromEntries(Object.entries(process.env).filter(([k])=>!k.startsWith("RETRACE_")&&!k.startsWith("GIT_")));
