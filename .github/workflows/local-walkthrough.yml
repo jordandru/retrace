@@ -54,7 +54,7 @@ jobs:
           git init -q -b main
           git config user.name "Local Walkthrough"
           git config user.email "walkthrough@example.com"
-          retrace_cli retrace-git install --project local-walkthrough
+          retrace_cli retrace-git install --repo "$app" --project local-walkthrough
           printf 'base\n' > base.txt
           git add .retrace.json base.txt
           git commit -q -m "Local walkthrough base"
@@ -64,7 +64,7 @@ jobs:
           git commit -q -m "Local walkthrough feature"
           git switch -q main
           git merge -q --no-ff feature -m "Merge local walkthrough feature"
-          retrace_cli retrace doctor
-          retrace_cli retrace-export export local-walkthrough --out retrace.json
-          retrace_cli retrace-export verify retrace.json --allow-self-attested
-          grep -q '"action": "merged"' retrace.json
+          retrace_cli retrace doctor "$app"
+          retrace_cli retrace-export export local-walkthrough --out "$app/retrace.json"
+          retrace_cli retrace-export verify "$app/retrace.json" --allow-self-attested
+          grep -q '"action": "merged"' "$app/retrace.json"
