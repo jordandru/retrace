@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /** retrace doctor — read-only preflight for the Git → Worker developer workflow. */
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { isAttributionAmendment, Actor, Credential, Event, ProjectStatus, ReconcileReport, asHistoryPage, causalRootState, renderProjectStatus, schemaSurface } from "@retrace-dev/core";
@@ -50,7 +50,17 @@ export function objectStoreFinding(repo: string): Finding {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
   });
-  const originAbsent = originLookup.status === 1;
+  const originRefPathRaw = gitOutput(repo, ["rev-parse", "--git-path", originRef]);
+  let looseOriginMain: boolean | undefined;
+  if (originRefPathRaw) {
+    try {
+      lstatSync(resolve(repo, originRefPathRaw));
+      looseOriginMain = true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") looseOriginMain = false;
+    }
+  }
+  const originAbsent = originLookup.status === 1 && looseOriginMain === false;
   const originLookupFailed = originLookup.error !== undefined || originLookup.status === null || (originLookup.status !== 0 && !originAbsent);
   const hasOriginMain = !originAbsent;
   const originSha = hasOriginMain ? gitOutput(repo, ["rev-parse", "--verify", originRef]) : undefined;

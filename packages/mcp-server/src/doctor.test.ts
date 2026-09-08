@@ -401,6 +401,32 @@ test("objectStoreFinding: an origin/main ref pointing to a missing object fails 
   assert.deepEqual(objectStoreSnapshot(objectsDir), objectsBefore, "doctor must not modify the object store");
 });
 
+for (const malformed of [
+  { name: "invalid content", content: "invalid\n" },
+  { name: "empty content", content: "" },
+  { name: "dangling symbolic ref", content: "ref: refs/remotes/origin/absent\n" },
+]) {
+  test(`objectStoreFinding: ${malformed.name} in origin/main fails without mutation`, () => {
+    const fixture = objectStoreRepo();
+    fixture.commit("healthy head\n");
+    const ref = joinP(fixture.repo, ".git", "refs", "remotes", "origin", "main");
+    mkdirSync(joinP(fixture.repo, ".git", "refs", "remotes", "origin"), { recursive: true });
+    writeF(ref, malformed.content);
+    const refBefore = readFileSync(ref, "utf8");
+    const objectsDir = joinP(fixture.repo, ".git", "objects");
+    const objectsBefore = objectStoreSnapshot(objectsDir);
+
+    assert.equal(fixture.g("cat-file", "-t", "HEAD"), "commit");
+    const finding = objectStoreFinding(fixture.repo);
+
+    assert.equal(finding.level, "fail");
+    assert.match(finding.detail, /origin\/main ref lookup failed/i);
+    assert.match(finding.detail, /origin\/main is not a readable commit/i);
+    assert.equal(readFileSync(ref, "utf8"), refBefore, "doctor must not modify the malformed ref");
+    assert.deepEqual(objectStoreSnapshot(objectsDir), objectsBefore, "doctor must not modify the object store");
+  });
+}
+
 test("objectStoreFinding: clean repo without origin/main passes", () => {
   const fixture = objectStoreRepo();
   fixture.commit("clean\n");
