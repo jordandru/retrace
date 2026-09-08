@@ -211,6 +211,88 @@ test("remote events: only a cache miss requests fresh, whose mocked 503 fails cl
   } finally { globalThis.fetch = savedFetch; }
 });
 
+test("remote events: a cache-miss fresh export for another project is refused", async () => {
+  const foreignStore = new MemStore();
+  await appendEvent(foreignStore, { project: "other", actor: { type: "agent", id: "claude-code" }, action: "edited", artifacts: [{ id: "repo:other#a.ts" }] });
+  const issuer = await generateSigningKey();
+  const foreign = await buildExportBundle(foreignStore, { project: "other" }, { signingKey: issuer.privateKey, issuerName: "test" });
+  const calls: string[] = [];
+  const savedFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = String(input); calls.push(url);
+    if (url.endsWith("/projects/p/export?cached=1")) {
+      return new Response("no cached export", { status: 404, headers: { "x-retrace-export-cache": "miss" } });
+    }
+    if (url.endsWith("/projects/p/export?fresh=1")) return Response.json(foreign);
+    if (url.endsWith("/projects/p/head?signed=1")) {
+      return Response.json(await signedHead(issuer.privateKey, { seq: 0, hash: foreignStore.events[0].hash }, { project: "p" }));
+    }
+    return new Response("not found", { status: 404 });
+  };
+  try {
+    await assert.rejects(
+      () => fetchVerifiedRemoteEvents(new RemoteStore("https://mock.test"), "p", JSON.stringify(issuer.publicKey)),
+      /scoped to project "other"/,
+    );
+  } finally { globalThis.fetch = savedFetch; }
+});
+
+test("remote events: after a cache miss a missing or unsigned live head fails closed", async () => {
+  const store = new MemStore();
+  await appendEvent(store, ev());
+  const issuer = await generateSigningKey();
+  const live = await buildExportBundle(store, { project: "p" }, { signingKey: issuer.privateKey, issuerName: "test" });
+  const savedFetch = globalThis.fetch;
+  try {
+    for (const head of [null, { seq: 0, hash: store.events[0].hash }]) {
+      globalThis.fetch = async (input) => {
+        const url = String(input);
+        if (url.endsWith("/projects/p/export?cached=1")) {
+          return new Response("no cached export", { status: 404, headers: { "x-retrace-export-cache": "miss" } });
+        }
+        if (url.endsWith("/projects/p/export?fresh=1")) return Response.json(live);
+        if (url.endsWith("/projects/p/head?signed=1")) return Response.json(head);
+        return new Response("not found", { status: 404 });
+      };
+      await assert.rejects(
+        () => fetchVerifiedRemoteEvents(new RemoteStore("https://mock.test"), "p", JSON.stringify(issuer.publicKey)),
+        /missing or unsigned|malformed or unsigned/,
+      );
+    }
+  } finally { globalThis.fetch = savedFetch; }
+});
+
+test("remote events: a cache-miss same-project fresh export is bound to the signed live head", async () => {
+  const store = new MemStore();
+  await appendEvent(store, ev());
+  await appendEvent(store, ev());
+  const issuer = await generateSigningKey();
+  const live = await buildExportBundle(store, { project: "p" }, { signingKey: issuer.privateKey, issuerName: "test" });
+  const calls: string[] = [];
+  const savedFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = String(input); calls.push(url);
+    if (url.endsWith("/projects/p/export?cached=1")) {
+      return new Response("no cached export", { status: 404, headers: { "x-retrace-export-cache": "miss" } });
+    }
+    if (url.endsWith("/projects/p/export?fresh=1")) return Response.json(live);
+    if (url.endsWith("/projects/p/head?signed=1")) {
+      return Response.json(await signedHead(issuer.privateKey, { seq: 1, hash: store.events[1].hash }));
+    }
+    return new Response("not found", { status: 404 });
+  };
+  try {
+    const got = await fetchVerifiedRemoteEvents(new RemoteStore("https://mock.test"), "p", JSON.stringify(issuer.publicKey));
+    assert.deepEqual(got.events.map((e) => e.seq), [0, 1]);
+    assert.equal(new Set(got.events.map((e) => e.project)).size, 1);
+    assert.equal(got.events[0].project, "p");
+    assert.match(got.note, /no signed export cache, verified live full export/);
+    assert.match(got.note, /signed live head confirms cache through #1/);
+    assert.equal(calls.filter((url) => url.includes("fresh=1")).length, 1);
+    assert.equal(calls.some((url) => url.includes("/head?signed=1")), true);
+  } finally { globalThis.fetch = savedFetch; }
+});
+
 test("remote events: forged unsigned, wrong-key, and stale signed heads fail closed without a fresh retry", async () => {
   const store = new MemStore();
   await appendEvent(store, ev());

@@ -68,42 +68,39 @@ export async function historyTail(store: RemoteStore, project: string, afterSeq:
   return [...bySeq.values()].sort((a, b) => a.seq - b.seq);
 }
 
-/** Load a verified signed cache and extend it to the live head with a separately verified v2 hash-chain tail. */
-export async function fetchVerifiedRemoteEvents(
+function confirmedCacheMiss(error: unknown): boolean {
+  return error instanceof RemoteApiError
+    && error.status === 404
+    && error.headers.get("x-retrace-export-cache") === "miss";
+}
+
+/** A valid signature on another project's full export must not authorize this project. */
+export function assertExportMatchesProject(bundle: ExportBundle, project: string): void {
+  const scoped = bundle.scope?.project;
+  if (scoped !== project) {
+    throw new Error(`refusing export scoped to project "${scoped ?? ""}" when "${project}" was requested`);
+  }
+  const foreign = bundle.events.find((event) => event.project !== project);
+  if (foreign) {
+    throw new Error(`refusing export containing event #${foreign.seq} from project "${foreign.project}" when "${project}" was requested`);
+  }
+}
+
+type SignedLiveHead = {
+  project: string;
+  seq: number;
+  hash: string;
+  signed_at: string;
+  issuer: { kid: string; alg: string; public_key?: JsonWebKey };
+  signature: string;
+};
+
+async function authenticatedLiveHead(
   store: RemoteStore,
   project: string,
-  pubkeyFlag?: unknown,
-  baseUrl?: string,
-): Promise<{ events: Event[]; note: string }> {
-  let resolved: TrustedIssuer | undefined;
-  const issuer = async (): Promise<TrustedIssuer> => {
-    if (resolved) return resolved;
-    resolved = await resolveTrustedKey(pubkeyFlag, baseUrl);
-    if (!resolved) throw new Error(NO_TRUSTED_KEY);
-    return resolved;
-  };
-  let bundle: ExportBundle;
-  try {
-    bundle = await store.export({ project }, { cached: true });
-  } catch (error) {
-    if (
-      !(error instanceof RemoteApiError)
-      || error.status !== 404
-      || error.headers.get("x-retrace-export-cache") !== "miss"
-    ) throw error;
-    const liveBundle = await store.export({ project }, { fresh: true });
-    const verified = await verifiedExportEvents(liveBundle, pubkeyFlag, baseUrl, await issuer());
-    return { events: verified.events, note: `${verified.note}; no signed export cache, verified live full export` };
-  }
-
-  const trusted = await issuer();
-  const verified = await verifiedExportEvents(bundle, pubkeyFlag, baseUrl, trusted);
-  const total = bundle.chain.total_events;
-  const cachedHead = total > 0
-    ? { seq: total - 1, hash: bundle.chain.head_hash! }
-    : { seq: -1, hash: GENESIS_HASH };
+  trusted: TrustedIssuer,
+): Promise<SignedLiveHead> {
   const liveHead = await store.signedHead(project);
-
   if (!liveHead) {
     throw new Error("signed live head is missing or unsigned; an empty ledger must still return a signed empty head");
   }
@@ -135,24 +132,78 @@ export async function fetchVerifiedRemoteEvents(
   if (liveHead.project !== project || !(await verifyCanonical(trusted.key, headPayload, liveHead.signature))) {
     throw new Error("signed live head does not verify against the trusted issuer key");
   }
-  if (liveHead.seq < cachedHead.seq) {
-    throw new Error(`live head #${liveHead.seq} is behind signed cache head #${cachedHead.seq}`);
+  return liveHead;
+}
+
+/** Bind a verified full export to the live signed head, then extend with a chain-verified tail if needed. */
+async function extendVerifiedExportToLiveHead(
+  store: RemoteStore,
+  project: string,
+  bundle: ExportBundle,
+  verified: { events: Event[]; note: string },
+  trusted: TrustedIssuer,
+  origin: "cache" | "fresh",
+): Promise<{ events: Event[]; note: string }> {
+  assertExportMatchesProject(bundle, project);
+  const total = bundle.chain.total_events;
+  const bundleHead = total > 0
+    ? { seq: total - 1, hash: bundle.chain.head_hash! }
+    : { seq: -1, hash: GENESIS_HASH };
+  const liveHead = await authenticatedLiveHead(store, project, trusted);
+  const originNote = origin === "fresh"
+    ? `${verified.note}; no signed export cache, verified live full export`
+    : verified.note;
+  if (liveHead.seq < bundleHead.seq) {
+    throw new Error(`live head #${liveHead.seq} is behind signed cache head #${bundleHead.seq}`);
   }
-  if (liveHead.seq === cachedHead.seq) {
-    if (liveHead.hash !== cachedHead.hash) throw new Error(`live head hash disagrees with signed cache head #${cachedHead.seq}`);
-    return { events: verified.events, note: `${verified.note}; signed live head confirms cache through #${cachedHead.seq}; no tail` };
+  if (liveHead.seq === bundleHead.seq) {
+    if (liveHead.hash !== bundleHead.hash) throw new Error(`live head hash disagrees with signed cache head #${bundleHead.seq}`);
+    return { events: verified.events, note: `${originNote}; signed live head confirms cache through #${bundleHead.seq}; no tail` };
   }
 
-  const tail = await historyTail(store, project, cachedHead.seq, liveHead.seq);
-  const tailVerdict = await verifyChainTail(cachedHead, tail);
+  const tail = await historyTail(store, project, bundleHead.seq, liveHead.seq);
+  const foreign = tail.find((event) => event.project !== project);
+  if (foreign) {
+    throw new Error(`refusing export tail containing event #${foreign.seq} from project "${foreign.project}" when "${project}" was requested`);
+  }
+  const tailVerdict = await verifyChainTail(bundleHead, tail);
   if (!tailVerdict.ok) throw new Error(`refusing unverified export tail: ${tailVerdict.reason}`);
   const tailHead = tail.at(-1);
   if (!tailHead || tailHead.seq !== liveHead.seq) {
     throw new Error(`export tail is incomplete: expected through #${liveHead.seq}, got ${tailHead ? `#${tailHead.seq}` : "no events"}`);
   }
   if (tailHead.hash !== liveHead.hash) throw new Error(`chain-verified tail head #${liveHead.seq} disagrees with live head hash`);
-  return {
-    events: [...verified.events, ...tail],
-    note: `${verified.note}; signed cache through #${cachedHead.seq}; chain-verified tail #${cachedHead.seq + 1}..#${liveHead.seq} verified against signed live head`,
+  const tailNote = origin === "fresh"
+    ? `${originNote}; signed live head through #${liveHead.seq}; chain-verified tail #${bundleHead.seq + 1}..#${liveHead.seq}`
+    : `${originNote}; signed cache through #${bundleHead.seq}; chain-verified tail #${bundleHead.seq + 1}..#${liveHead.seq} verified against signed live head`;
+  return { events: [...verified.events, ...tail], note: tailNote };
+}
+
+/** Load a verified signed cache (or a confirmed-miss live full export) and extend it to the live head. */
+export async function fetchVerifiedRemoteEvents(
+  store: RemoteStore,
+  project: string,
+  pubkeyFlag?: unknown,
+  baseUrl?: string,
+): Promise<{ events: Event[]; note: string }> {
+  let resolved: TrustedIssuer | undefined;
+  const issuer = async (): Promise<TrustedIssuer> => {
+    if (resolved) return resolved;
+    resolved = await resolveTrustedKey(pubkeyFlag, baseUrl);
+    if (!resolved) throw new Error(NO_TRUSTED_KEY);
+    return resolved;
   };
+  let bundle: ExportBundle;
+  let origin: "cache" | "fresh" = "cache";
+  try {
+    bundle = await store.export({ project }, { cached: true });
+  } catch (error) {
+    if (!confirmedCacheMiss(error)) throw error;
+    bundle = await store.export({ project }, { fresh: true });
+    origin = "fresh";
+  }
+
+  const trusted = await issuer();
+  const verified = await verifiedExportEvents(bundle, pubkeyFlag, baseUrl, trusted);
+  return extendVerifiedExportToLiveHead(store, project, bundle, verified, trusted, origin);
 }
