@@ -1,6 +1,8 @@
 name: local-walkthrough
 on:
   pull_request:
+  push:
+    branches: [main]
   workflow_dispatch:
 permissions:
   contents: read
@@ -8,9 +10,6 @@ jobs:
   walkthrough:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    env:
-      CLEAN_HOME: ${{ runner.temp }}/retrace-clean-home
-      RETRACE_DB: ${{ runner.temp }}/retrace-walkthrough.db
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -19,6 +18,10 @@ jobs:
       - name: Isolate local state and block the project Worker
         run: |
           set -euo pipefail
+          CLEAN_HOME="$RUNNER_TEMP/retrace-clean-home"
+          RETRACE_DB="$RUNNER_TEMP/retrace-walkthrough.db"
+          echo "CLEAN_HOME=$CLEAN_HOME" >> "$GITHUB_ENV"
+          echo "RETRACE_DB=$RETRACE_DB" >> "$GITHUB_ENV"
           rm -rf "$CLEAN_HOME"
           install -d -m 700 "$CLEAN_HOME"
           export HOME="$CLEAN_HOME"
