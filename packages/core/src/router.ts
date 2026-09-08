@@ -40,6 +40,7 @@ import { buildExportBundle, verifyExportBundle } from "./export.js";
 import { ExportCacheStore } from "./export-cache.js";
 import { PRODUCER_SIG_VERDICT_PARAM, ProducerKey, ProducerSigVerdict, producerSigVerdict } from "./producer-sig.js";
 import { renderReportHtml } from "./report.js";
+import { collectAttributionAmendments } from "./attribution.js";
 import { buildLineage, renderLineageDot, renderLineageMermaid } from "./lineage.js";
 import { mapGithubWebhook, verifyGithubSignature } from "./github.js";
 import { mapDriveActivities, DrivePayload } from "./gdrive.js";
@@ -306,8 +307,10 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
     };
   };
 
-  const lineageResponse = async (events: any[], fmt: string | null, actors: boolean) => {
-    const l = buildLineage(events, { includeActors: actors });
+  const lineageResponse = async (events: any[], fmt: string | null, actors: boolean, scoped = false) => {
+    const attribution = collectAttributionAmendments(events);
+    if (scoped) attribution.unavailable = "incomplete_snapshot: scoped lineage";
+    const l = buildLineage(events, { includeActors: actors, attribution });
     if (fmt === "dot") return new Response(renderLineageDot(l), { headers: { "content-type": "text/vnd.graphviz; charset=utf-8", ...CORS } });
     if (fmt === "mermaid") return new Response(renderLineageMermaid(l), { headers: { "content-type": "text/plain; charset=utf-8", ...CORS } });
     return json(l);
@@ -379,7 +382,7 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
     // fields silently stripped by EventInput.safeParse below. Public, like the rest of this probe — the field NAMES
     // are already in the README, and being readable without a token is the point (you can check a deployment you
     // hold no credential for). See schemaSurface() and scripts/check-deploy.mjs.
-    if (parts[0] === "api" && parts.length === 1) return json({ name: "retrace-api", version: "0.1.0", ok: true, auth: !!token || credentials.length > 0, credentials: credentials.length, signing: !!opts.signingKey, schema: schemaSurface() });
+    if (parts[0] === "api" && parts.length === 1) return json({ name: "retrace-api", version: "0.1.0", ok: true, auth: !!token || credentials.length > 0, credentials: credentials.length, signing: !!opts.signingKey, capabilities: ["attribution-v7"], schema: schemaSurface() });
     if (parts[0] === ".well-known" && parts[1] === "retrace-pubkey") {
       if (!opts.signingKey) return json({ error: "no signing key configured" }, 404);
       const pub = publicFromPrivate(opts.signingKey);
@@ -494,7 +497,7 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
         if (sub === "lineage") {
           return cachedShare(cacheKey, async () => {
             const b = await buildExportBundle(store, { project: share.project, artifact_id: share.artifact_id });
-            return lineageResponse(b.events, url.searchParams.get("format"), url.searchParams.get("actors") === "1");
+            return lineageResponse(b.events, url.searchParams.get("format"), url.searchParams.get("actors") === "1", true);
           });
         }
         if (sub === "report") {
@@ -509,6 +512,13 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
       // ---- owner routes ----
       const principal = await authenticate(req, url);
       if (principal === "unauthorized") return json({ error: "unauthorized" }, 401);
+      // A human amendment preflight must resolve authority before it can submit anything.
+      // Return only this request's identity, never tokens or the credential registry.
+      if (req.method === "GET" && parts[0] === "identity" && parts.length === 1) {
+        if (principal?.kind !== "owner" || opts.ownerActor?.type !== "human")
+          return json({ error: "human owner authority required" }, 403);
+        return json({ actor: opts.ownerActor, sealed_by: "owner", attribution_profile: "retrace-attribution/1" });
+      }
       // Per-actor credentials may append and read; anything destructive or outward-facing stays owner-only.
       if (principal?.kind === "credential" && (req.method === "DELETE" || (req.method === "POST" && parts[0] !== "events")))
         return json({ error: "forbidden: this route needs the owner token" }, 403);
@@ -626,7 +636,7 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
           }
           if (sub === "lineage") {
             const evs = q.artifact_id ? (await buildExportBundle(store, { project, artifact_id: q.artifact_id })).events : await store.all(project);
-            return lineageResponse(evs, q.format ?? null, q.actors === "1");
+            return lineageResponse(evs, q.format ?? null, q.actors === "1", !!q.artifact_id);
           }
           if (sub === "report") {
             const b = await exportFor({ project, artifact_id: q.artifact_id });

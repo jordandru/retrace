@@ -1,4 +1,5 @@
 /** Human-readable rendering of events — used by the MCP server and CLI. */
+import { collectAttributionAmendments, effectiveActor, attributionSummary, type AttributionCollection } from "./attribution.js";
 import { ArtifactRole, Event } from "./schema.js";
 
 /** Short PROV role marker for an artifact ref: "in" (used) · "out" (generated) · "in/out" (both) · "" when unspecified. */
@@ -99,7 +100,7 @@ export function eventForModel(event: Event): ModelEventView {
   };
 }
 
-export function describeActor(e: Event): string {
+function describeRecordedActor(e: Event): string {
   const a = e.actor;
   const displayName = a.display_name === undefined ? "" : singleLine(a.display_name);
   const name = markUntrustedText(displayName || a.id);
@@ -110,7 +111,24 @@ export function describeActor(e: Event): string {
   return `${name}${tag}${obo}`;
 }
 
-export function describeEvent(e: Event): string {
+export interface AttributionRenderOptions { attribution?: AttributionCollection; effective?: boolean; banner?: boolean }
+export function describeActor(e: Event, opts: AttributionRenderOptions = {}): string {
+  const recorded = describeRecordedActor(e);
+  const collection = opts.attribution;
+  if (!collection || collection.unavailable) return recorded;
+  const view = effectiveActor(e,collection.effective);
+  const list = collection.effective.get(e.id) ?? [];
+  if (!list.length) return recorded;
+  if (view.amended) {
+    const effective = describeRecordedActor({...e,actor:view.actor});
+    const note = `attribution amended by #${view.amended.seq}, human: ${markUntrustedText(view.amended.reason)}`;
+    return opts.effective === false ? `${recorded} (attribution amended → ${effective}; ${note})` : `${effective} (recorded as ${recorded}; ${note})`;
+  }
+  const total = collection.context?.domains.get(e.id)?.units.length ?? e.artifacts.length;
+  return recorded + list.map(a => ` (attribution amended for ${a.artifacts.length} of ${total} artifacts by #${a.seq}: ${a.artifacts.map(markUntrustedText).join(", ")} → ${markUntrustedText(a.to.id)} [${a.to.type}])`).join("");
+}
+
+export function describeEvent(e: Event, opts: AttributionRenderOptions = {}): string {
   const arts = e.artifacts.map((a) => {
     const m = roleMark(a.role);
     const label = a.label === undefined ? "" : singleLine(a.label);
@@ -126,17 +144,21 @@ export function describeEvent(e: Event): string {
   const how = tool ? ` via ${markUntrustedText(tool)}` : "";
   const intent = e.intent === undefined ? "" : singleLine(e.intent);
   const why = intent ? ` — why: ${markUntrustedText(intent)}` : "";
-  return `#${e.seq} ${e.timestamp}  ${describeActor(e)} ${verb} ${arts}${where ? " @ " + where : ""}${how}${why}`;
+  return `#${e.seq} ${e.timestamp}  ${describeActor(e,opts)} ${verb} ${arts}${where ? " @ " + where : ""}${how}${why}`;
 }
 
-export function renderTimeline(events: Event[]): string {
-  if (!events.length) return "(no events)";
-  return events.map(describeEvent).join("\n");
+export function renderTimeline(events: Event[], opts: AttributionRenderOptions = {}): string {
+  const attribution=opts.attribution ?? collectAttributionAmendments(events);
+  const count=[...attribution.effective.values()].flat().length;
+  const header=opts.effective && !attribution.unavailable ? `effective view — recorded actors in parentheses; ${count} amendments applied` : attributionSummary(events,attribution);
+  const banner=opts.banner || attribution.unavailable || count || attribution.rejected.length || attribution.superseded.length;
+  return (banner ? header+"\n" : "") + (events.length ? events.map(e=>describeEvent(e,{...opts,attribution,effective:opts.effective ?? false})).join("\n") : "(no events)");
 }
 
-export function renderWhyChain(chain: Event[]): string {
+export function renderWhyChain(chain: Event[], opts: AttributionRenderOptions = {}): string {
   // chain[0] is the event, last is the root cause
-  return chain
-    .map((e, i) => `${"  ".repeat(i)}${i === 0 ? "" : "↳ because "}${describeEvent(e)}`)
+  const attribution=opts.attribution ?? collectAttributionAmendments(chain);
+  return (attribution.unavailable ? attributionSummary(chain,attribution)+"\n" : "") + chain
+    .map((e, i) => `${"  ".repeat(i)}${i === 0 ? "" : "↳ because "}${describeEvent(e,{...opts,attribution})}`)
     .join("\n");
 }

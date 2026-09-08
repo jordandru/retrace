@@ -1,4 +1,5 @@
 import { ArtifactRole, Event } from "./schema.js";
+import { isAttributionAmendment } from "./attribution.js";
 
 export const AMENDMENT_ACTION_DETAIL = "amended";
 
@@ -21,6 +22,7 @@ export function collectProvenanceAmendments(
   const byId = new Map(events.map((e) => [e.id, e]));
   const out = new Map<string, ProvenanceAmendment[]>();
   for (const event of events) {
+    if (isAttributionAmendment(event)) continue;
     if (event.action !== "other" || event.action_detail !== AMENDMENT_ACTION_DETAIL || !isRooted(event)) continue;
     const params = event.method?.params;
     const targetId = typeof params?.target_event_id === "string" ? params.target_event_id : undefined;
@@ -55,6 +57,7 @@ export function collectRejectedAmendments(
   const byId = new Map(events.map((e) => [e.id, e]));
   const out: RejectedAmendment[] = [];
   for (const event of events) {
+    if (isAttributionAmendment(event)) continue;
     if (event.action !== "other" || event.action_detail !== AMENDMENT_ACTION_DETAIL) continue;
     if (!isRooted(event)) { out.push({ event, reason: "unrooted" }); continue; }
     const params = event.method?.params;

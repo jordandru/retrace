@@ -1,10 +1,10 @@
 # Attribution amendment — design
 
-**Status:** draft v6, 2026-09-06. Author: claude-code, at Jordan's request (ledger evt_243a9442).
+**Status:** v7 implementation contract, 2026-09-07. Author: claude-code, at Jordan's request (ledger evt_243a9442).
 v2 folded in Grok's review (six findings); v3 NOOA on Sonnet 5 (two, #1852); v4 NOOA on NVIDIA
 Nemotron 3 Ultra (six, #1873); v5 the same reviewer re-run by Grok against v4 (seven, #1890); v6
 Codex on GPT-5.6 Sol (four, #2046) — see §11. All four reviewers have reported; the Core Four
-review round is closed. Nothing here is built yet.
+v6 review round is closed. B2/B3 inclusion in v1 awaits Jordan's decision; the v7 contract below defines this branch for review. Implementation is in progress on `codex/attribution-v1`; not released.
 
 **Decisions so far:** v1 ships **Tier 1 (human-sealed) only**; evidence is the **capture-window**
 rule, required for **every artifact in the amendment's scope** (v6); an amendment is **scoped to
@@ -12,6 +12,64 @@ artifacts** and changes the event-level effective actor only when its scope is t
 (v6); evidence is evaluated against the **final ledger** in target-seq order (v6); actor identity
 is **{type,id}** everywhere (v6); export stays render-time; no model-only amendments. Tier 2 stays
 designed, not built.
+
+
+## V7 normative changes (implementation gate #2139)
+
+This section supersedes conflicting v6 wording below. Source: Codex implementation gate
+**#2139**, `evt_4f2bb7c1480f4766b88ad309fd5a797d`, reviewing `1d24ee8`.
+The three blocking findings were B1 (eligible universe), B2 (scoped replay), and B3
+(required capture inputs). The full gate contract is preserved in
+[attribution-v7-contract.md](attribution-v7-contract.md); its scope/input, algorithm,
+interfaces, rejection precedence, and test matrix are normative for this implementation.
+
+1. **B1 — eligible contribution universe.** Scope means recorded output/invalidation
+   claims, excluding commit/event/actor references, causal links, and input-only refs.
+   Recorded `generated`/`both` roles qualify; absent roles fall back to change verbs
+   (including commit/merge file references). Role amendments never expand this universe.
+   Git units must correspond to verified changed-file transitions. Duplicate canonical
+   units collapse. Omitted scope means the nonempty eligible universe; an explicit empty
+   scope is invalid. `whole_event` requires a single amendment covering the entire
+   universe AND every Git changed-file transition. Disjoint amendments never combine
+   into a whole-event amendment. Context and input refs retain their recorded association.
+   Effective identities preserve only `{type,id}` and the target's `on_behalf_of`;
+   target model/display/version are not inferred from witnesses.
+2. **B2 — scoped prefix-state replay.** Resolve targets by target seq, then attempts by
+   amendment seq. `from` binds to every scoped artifact's effective identity immediately
+   before that attempt. Zero overlapping active predecessors requires no `supersedes`;
+   one requires that exact predecessor; multiple overlaps reject `no_supersede`.
+   Admission removes the predecessor in full, so dropped scope returns to the recorded
+   actor. Rejection changes no state. Admitted/superseded, active, rejected, and unavailable
+   are distinct. Any active amendment on an evidence event excludes that entire event;
+   another clean cited witness may still cover the artifact. Final-snapshot invalidation
+   may reverse after later amendments: reactivation is legal. `no_supersede` precedes
+   `stale_from`; withdrawn evidence precedes partial/zero coverage diagnostics.
+3. **B3 — explicit reproducible capture context.** Authoritative derivation requires a
+   verified complete project snapshot through an authenticated head plus a versioned
+   policy and Git facts (aliases, exact hook stamps, diffs/renames, and ref reachability
+   with a checkout horizon). Results name head, policy digest, and Git-facts digest.
+   Missing required context means **unavailable**, never zero effective amendments or
+   guessed history. All seals of one full commit OID share the earliest applicable
+   cutoff; their own OID is excluded from preceding touches. Ordinary repository edits
+   use those same commit boundaries. Other schemes require explicitly configured capture
+   producers; ordinary edits do not close their windows. A witness satisfies
+   `after < evidence.seq < before <= target.seq < amendment position`.
+   Preflight uses an after-head candidate position, never a fabricated server seal;
+   acceptance is advisory and the actual appended record must be re-evaluated.
+
+Git-context-free surfaces retain recorded identities and show “attribution evaluation
+unavailable” when that context is needed. Filtered views cannot infer effectiveness from
+only their visible events. Optional blob matching never determines effectiveness.
+Reconcile first computes its recorded-actor report; only a complete per-file certificate
+for the exact selected seal may downgrade a commit-level misattribution failure. A partial
+certificate leaves the original failure intact. Open producer disagreement vetoes that
+downgrade; existing per-file warnings and independent acknowledgements keep their semantics.
+
+Review clarifications for this implementation: Tier 1 human amendments accept only
+`owner` or `assert:` authority; a `pinned:` human amendment is rejected because the
+current server permits its human carve-out only for instructions. The independent
+acknowledgement path rejects the accused ID across actor types; that anti-self-ack
+rule is intentionally stricter than attribution's `{type,id}` identity comparison.
 
 ## 1. The problem, in the ledger's own words
 
@@ -382,6 +440,95 @@ context, not a replacement.
     markers; `--effective` differs only in which actor leads the display.
 
 ## 9. Rollout on our own ledger
+
+### V7 implementation coverage (review of PR #15)
+
+**Implementation is not product approval.** B1 is retained. The B2/B3 behaviors below
+are already code, and the rows marked implemented have executable regression coverage;
+whether to include those departures from v6 in v1 remains Jordan's decision. In
+particular, B2 rejects an incoming scope intersecting more than one active predecessor,
+even if it names the latest one. This is deliberately stricter than sealed v6 and must
+not be described as a v6-compatible land.
+
+The table maps the normative clauses above and the expanded contract's sections to
+what is actually earned. **Implemented (test)** names an executable test; it does not
+claim every adversarial combination in the contract's matrix has run. **Not implemented
+in full** identifies a missing behavior or verification requirement even where supporting
+code exists. Those gaps are not silently deferred to v2. Only the explicitly designed
+Tier 2 follow-up is listed as **v2**.
+
+Test references use these files and exact test-name prefixes:
+
+- **A:** [core attribution tests](../../packages/core/src/attribution.test.ts).
+- **N:** [CLI/MCP attribution tests](../../packages/mcp-server/src/attribution.test.ts).
+- **R:** [reconciliation tests](../../packages/core/src/reconcile.test.ts).
+- **S:** [status tests](../../packages/core/src/status.test.ts).
+- **Router:** [router tests](../../packages/core/src/router.test.ts).
+
+| V7 clause / expanded-contract requirement | Status | Executable evidence or missing work |
+|---|---|---|
+| B1: exact `{type,id}` identity; no model/name/version transfer; preserve target delegation | Implemented (test) | A `v7 B1 / v6 4, 5h`, `attribution rejects actor type collision`, `v6 9f`. |
+| B1: recorded outputs/invalidation claims only; inputs and commit/event/actor context excluded; no role-amendment expansion | Implemented (test) | A `v7 B1 / v6 4, 5h`, `attribution rejects input evidence`, `attribution attempts cannot also act as provenance amendments`, `Git eligible universe`. |
+| B1: canonical units retain raw reference indexes and do not rewrite event bytes | Implemented (test) | Context retains `refs`; A `v7 B1 / v6 4, 5h` and `render/status/lineage/export` assert immutable events. Dedicated duplicate-index assertions remain part of the unexecuted matrix. |
+| Canonical repository identity and explicit aliases; exact non-Git IDs; loose refs cannot become strict evidence | Implemented (test) | A `Git eligible universe` uses configured `r`/`org/r`; `attribution rejects foreign scope`; `non-Git capture policy`. R `artifactPath maps hook, alias, file: and bare ids` covers the ordinary loose-path distinction. |
+| Complete adversarial canonicalization contract: conflicting historical aliases, traversal, case/Unicode/percent paths, duplicate input/output aliases and unrepresentable names | Not implemented in full | Basic path rejection and interval mapping exist. No complete attribution-specific test set establishes these cases; no trusted historical mapping for `file:`/bare refs is implemented. They remain unavailable/loose rather than guessed. |
+| Git A/M/T/D and verified R/C destination transitions; max source/destination lower bound; no `derived_from` aliases | Not implemented in full | Context code implements these rules, but attribution regression tests currently exercise ordinary added paths only. R's rename test covers ordinary reconcile, not an earned attribution R/C/D/T matrix. |
+| Root/merge target diffs use empty-tree/first-parent facts, with unchanged merge reconciliation eligibility | Not implemented in full | Git adapter has both diff paths and reconcile still skips merges. Root Git fixture passes in N `human CLI`; merge attribution and missing-parent fixtures are not yet implemented. |
+| B1: omitted scope is eligible universe; explicit empty/foreign scope invalid; atomic partial coverage; CLI seals explicit normalized scope | Implemented (test) | A `attribution rejects empty scope`, `attribution rejects foreign scope`, `attribution rejects partial coverage`, `preflight uses an after-head position`; N `human CLI`. |
+| Full scope-normalization matrix, including duplicate canonical entries and all-ineligible/read-only targets | Not implemented in full | Normalization code exists; dedicated S3/S5/S6/S9 matrix cases and duplicate-role/index checks are missing. |
+| B1: only a single complete amendment changes event actor; disjoint partials do not combine into whole-event attribution | Implemented (test) | A `v6 4c–4e / B2`, `Git eligible universe`, `render/status/lineage/export`. |
+| B1: every verified changed-file transition remains in the whole-event denominator even when target refs omit it | Not implemented in full | `domain.complete` checks all diff rows, but the dedicated S8 omitted-file regression is not implemented. Existing partial-scope tests do not substitute for S8. |
+| B2: target-sequence then amendment-sequence replay; deterministic states and primary reasons | Implemented (test) | A `v6 7g–7i` performs 100 seeded input shuffles and compares active, superseded and rejected state/reason output. |
+| B2: per-artifact prefix `from`; zero/one intersecting predecessor; multiple intersections reject; predecessor removed in full | Implemented (test) | A `v6 4c–4e / B2`, `v6 7b`, `v6 7c, 7f, 8`; **pending B2 product decision**, not missing code. |
+| B2: rejected attempts leave state unchanged; active/superseded/rejected remain distinct | Implemented (test) | A `v6 7b`, `v6 7g–7i`, `v6 4c–4e / B2`. |
+| B2: event-wide amended-evidence exclusion, clean alternative witnesses, cascade and reactivation | Implemented (test) | A `event-wide witness exclusion`, `v6 7g–7i`, `v6 9b`. Returning an evidence actor to its recorded pair (E25) and the branch reseal case (E24) still lack dedicated tests. |
+| B2: dependency traversal terminates; no fixed-point replay or effective-actor evidence laundering | Implemented (test) | A `shared causal root walker`, `v6 7g–7i`, `v6 9b`. The root walk is shared with status/provenance; attribution additionally requires older same-project parents. |
+| Indexed/memoized complexity bound claimed by expanded contract | Not implemented in full | Current implementation repeatedly scans event/reference lists and roots. No memoized per-path binary-search index or benchmark establishes the stated asymptotic bound. |
+| B3: authenticated complete snapshot, safe sequences, exact duplicates, hash/chain/head verification, frozen raw event copy | Implemented (test) | A `snapshots: incomplete, forged, conflicting and tampered inputs`; N `human CLI` verifies signed render and refuses unsigned effective render. Existing verified-export tests exercise remote acquisition separately. |
+| Foreign-reference lookup distinguishing `wrong_project` from same-project absence | Not implemented in full | No separately authenticated foreign lookup adapter exists. Complete project-local absence is `missing_target`, as the contract permits when lookup is absent. |
+| B3: project/head/profile/policy/Git digests identify an available derivation and downgrade certificate | Implemented (test) | A `Git eligible universe`; N `human CLI` previews context and replays after append. The exact proposed serialized `ContextKey` API is covered by the interface-gap row below. |
+| B3: explicit historical repository/hook policies, full OIDs, exact producer stamps, legacy boundaries and same-SHA earliest cutoff | Implemented (test) | A `Git eligible universe`; R's authenticated-producer/legacy boundary regressions; N `human CLI`. Same-SHA cutoff is implemented, **pending B3 product decision**. |
+| Full contradictory-policy/resolution validation; retain earliest seal per producer without later claim paths expanding boundaries | Not implemented in full | Context has basic overlap and OID checks, but no complete validation of arbitrary supplied policy/Git objects. Boundary path union and duplicate-producer conflict cases lack the dedicated adversarial tests. |
+| B3: own SHA excluded from prior touches; ordinary repository events use commit windows | Implemented (test) | A `Git eligible universe`, `v6 9b`; R capture-window and abandoned-seal regressions. |
+| B3: non-Git only configured commit/merge capture producers; ordinary edits do not close windows; genesis lower bound when configured history is empty | Implemented (test) | A `non-Git capture policy` and the base non-Git fixtures. |
+| Frozen Git ref/reachability snapshot, explicit per-repository checkout horizon and reproducible exclusions | Not implemented in full | CLI computes reachability/exclusions and digests observed refs, but separate Git reads are not an atomic frozen snapshot; horizon and per-seal reachability states are not exposed in the proposed interface. N10–N12 attribution fixtures are missing. |
+| All-or-nothing required context; scoped/missing/untrusted data renders unavailable rather than zero effective amendments | Implemented (test) | A `snapshots`, `scoped lineage/report`; N `human CLI` unsigned-render assertion. Worker/UI cannot evaluate without Git and deliberately show unavailable. |
+| Human-only amendment authority; owner/assert receipts only; pinned or webhook human amendment receipts rejected | Implemented (test) | A `human amendment authority accepts owner/assert`, `attribution rejects pinned human authority`, `attribution rejects agent relay`; N MCP relay test; Router owner identity test. Human-pinned authority is unsupported by today's server, not an accepted sufficient arm. |
+| Primary evidence uses recorded actor/roles, pinned/assert receipt, strict per-unit window, and whole-scope coverage | Implemented (test) | A rejection cases, `v6 5d witness-and-notary`, `non-Git capture policy`, `v7 B1 / v6 4, 5h`. A deliberately false credential-holder claim plus human selection remains the documented authorship limit. |
+| Optional producer signatures never replace server receipts; invalid optional signatures visibly reported | Not implemented in full | Receipt-based validation does not infer authorship from signatures. The attribution result has no per-witness signature observation or invalid-signature diagnostic (E8/E10/E11 matrix not implemented). Independent export verification remains separate. |
+| One private checker for collector/preflight; public sealed checker uses final-ledger derivation rather than caller-supplied state | Implemented (test) | A `preflight uses an after-head position`, `v6 7g–7i`; N `human CLI`. Ultra finding 1 does not identify a second rules copy. |
+| Shape/root/target/authority/scope/supersession/evidence primary rejection precedence | Implemented (test) | A named `attribution rejects …` cases, `v6 7b`, `v6 7c, 7f, 8`, `v6 7g–7i`; malformed precedes root and `no_supersede` precedes `stale_from`. |
+| Complete per-artifact/per-witness diagnostics on both accepted and rejected attempts | Not implemented in full | Accepted amendments retain qualifying witness IDs per artifact. Rejections retain only a primary reason; excluded witnesses, ref indexes and detailed diagnostic reasons are not returned. |
+| Exact proposed discriminated result/interfaces and sorted machine serialization | Not implemented in full | Current API uses `effective` Map, `superseded` array, rejected event/reason pairs and global unavailable text. No exact `AmendmentResult`/`EffectiveEventAttribution` serializer, `superseded_by` field, excluded-ref explanation or typed unavailable enum is implemented. |
+| Preflight infers scalar `from`, uses an after-head position without fabricated seal fields, checks real sealed result | Implemented (test) | A `preflight uses an after-head position`; N `human CLI`. |
+| Preflight reports every downstream status change and per-artifact conflicting `from` identities; concurrent-head regression | Not implemented in full | It reruns on observed head movement and computes an `affected` ID list, but no comprehensive status-diff/identity diagnostic or concurrent-write fixture proves the full V6/preflight contract. |
+| `--seal-anyway` permits semantic failure only; distinct idempotency; durable ID printed independently of effectiveness | Implemented (test) | N `human CLI` and `MCP attribution parameter is recognized`. CLI uses a fresh attempt key and re-evaluates the appended event. |
+| Recommended exact exit 2 for every unavailable evaluation before or after write | Not implemented in full | Post-write unavailable returns 2; some pre-write acquisition/context exceptions use generic exit 1. No submission occurs on those errors. |
+| Per-path content-bound matches plus whole-scope aggregate; actual blob OID; optional observations never determine effectiveness | Implemented (test) | A `v6 5g` checks partial/absent/full match lists; N `human CLI` tests real Git blob OID, mismatching/absent callback and ambiguous multi-output scalar rejection. `flags.content_bound_artifacts` retains partial matches. |
+| Rich content observations: match/mismatch/unavailable/not-applicable with algorithm, object kind, event and context for each path | Not implemented in full | Callback exposes matched artifact IDs only. Deletion/non-blob/missing-object cases are skipped; detailed reasons and partial mismatch records are not serialized. |
+| Structured human flag is insufficient; correction-only witness-and-notary must fail despite an uncited covering edit | Implemented (test) | A `v6 5d witness-and-notary` has same-human/session correction at N and amendment at N+1; citing the edit directly is the successful control. |
+| Full human-flag identity contract: authenticated receipt, canonical target SHA, ActorRef preference, unambiguous legacy ID, source event IDs | Not implemented in full | Current flag checks human-shaped structured correction refs and ID fields. It lacks the full receipt/ambiguity/source-list contract; no effectiveness depends on this optional flag. |
+| Trailer flag comes from parsed actual target Git trailers and a cited matching sealed commit, never receipt actor or prose | Implemented (test) | N `human CLI` tests matching/mismatching trailer identity, different receipt actor and absent cited seal. Core receives this observation through the Git adapter callback. |
+| Provenance/amendment family dispatch; mixed kinds malformed; instruction/amendment targets forbidden; rejected attempts not counted twice | Implemented (test) | A `attribution attempts cannot also act as provenance amendments`, `v6 7c, 7f, 8`; N MCP mutual-exclusion test. |
+| Reconcile derives ordinary coverage and producer agreement from recorded pairs before considering amendments | Implemented (test) | A `v6 9b`, `v6 9c/9d`, `v6 9f`. System/human edits do not become ordinary agent coverage. |
+| Downgrade only original unacknowledged commit-level failure; exact selected seal, strict per-file witness, same windows and complete certificate | Implemented (test) | A `Git eligible universe`, `v6 9c/9d`. Missing scope retains original failure; amending only webhook does not clear hook failure. |
+| Disjoint beneficiaries can jointly certify all failing files; warning-level producer disagreement still vetoes | Not implemented in full | Code supports per-file amendments and vetoes any non-info producer disagreement. Dedicated S12/S13 certificate and D5 lone-warning fixtures are not yet implemented. |
+| Existing acknowledgements remain independent; every amendment attempt excluded from ACK mining; accused-id restriction across types | Implemented (test) | R `adversarial: acknowledgements must be sealed after the commit` now exercises agent/human/system with the accused ID and a distinct-human control. This anti-self-ack restriction deliberately compares bare IDs, while attribution identity still uses pairs. |
+| Detailed amended certificate matches the proposed schema and retained witness ref-index diagnostics | Not implemented in full | Current certificate retains head/digests, selected-seal ID and per-file beneficiary/amendment/witness IDs. It does not expose every field in proposed `ReconcileAmendmentMetadata`. |
+| Finding-kind counts retained; separate amended count; unrelated failures and doctor exit aggregation unchanged | Implemented (test) | A `v6 9c/9d` asserts `summary.amended`; R aggregate report test and N deployment gate regression. No blanket gate success is inferred from an amendment. |
+| Whole/partial actor counts; active/superseded/rejected separation; lineage artifact-level pairing; byte-preserving export/render | Implemented (test) | A `render/status/lineage/export`, `scoped lineage/report`; N `human CLI`. |
+| All consumers expose exact proposed structured effective-event view, aggregate partial wording and sorted map output | Not implemented in full | Text/lineage/status have derived paths; MCP history/why structured events remain recorded, and aggregate “N of N across partial amendments” wording and the full JSON view are absent. |
+| Existing inert-text rules; untrusted and scoped contexts disclosed in graph/model/report formats | Implemented (test) | A `scoped lineage/report`; existing S, lineage and MCP sanitization regressions remain in the suite. |
+| Every row/property in expanded adversarial matrix | Not implemented in full | Named tests above cover v6 required cases and selected v7 rows; this is not an assertion that all R/P/S/E/F/I/N/D/V rows or property cross-products pass. Missing groups are called out above. |
+| Tier 2 human-authorized agent relay | v2 | Designed but intentionally absent. Type remains literal `tier: "human"`; MCP rejects agent attribution relays. |
+| Model-only amendments and invented historical coverage | Not implemented in full (intentional v1 exclusion) | Model-only payloads are malformed; historical evidence is never fabricated. No v2 implementation commitment is implied. |
+
+The CI workflow's two added commands are Codex's own edit, recorded at **#2185**,
+`evt_a8730e8379f145fb971476fac4dab3a5`, before commit `50112c3`. No Cursor workflow
+hunk was taken into that commit. Worker deployment remains after the review fixes
+and NOOA Ultra review; merge remains gated on review and the requested main rebase.
+
+### Live rollout
 
 1. Land core + tests + MCP + CLI (one PR, reviewed by Codex and Grok, committed under the identity
    that wrote it — no bundling).

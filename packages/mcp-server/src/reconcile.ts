@@ -8,7 +8,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
-import { CommitFacts, CommitFile, CommitFileStatus, Event, ReconcileLevel, ReconcileOptions, ReconcileReport, reconcile, renderReconcileReport } from "@retrace-dev/core";
+import { isAttributionAmendment, CommitFacts, CommitFile, CommitFileStatus, Event, ReconcileLevel, ReconcileOptions, ReconcileReport, reconcile, renderReconcileReport } from "@retrace-dev/core";
 import { Cfg, remoteName } from "./git-hook.js";
 import { makeStore } from "./index.js";
 import { RemoteStore } from "./remote-store.js";
@@ -107,8 +107,14 @@ export async function reconcileRepo(repo: string, opts: { since?: string; limit?
   const shas = opts.refs ?? listCommits(repo, { since: opts.since, limit: opts.since ? opts.limit : opts.limit ?? 50 });
   const commits = shas.map((s) => commitFacts(repo, s));
   const { events, note } = await fetchEvents(project, opts.pubkey);
-  const report = reconcileWithGit(repo, commits, events, { ...repoNamesFor(repo, cfg), repoPath: repo, ...reconcileOptionsFrom(cfg, opts) });
-  return { report, note };
+  let attribution;
+  let attributionNote="";
+  if(events.some(isAttributionAmendment)) {
+    try { const {attributionOptionsForRepo}=await import("./attribution.js"); attribution=await attributionOptionsForRepo(repo,events,project); }
+    catch(error) { attributionNote=`; attribution evaluation unavailable: ${error instanceof Error?error.message:error}`; }
+  }
+  const report = reconcileWithGit(repo, commits, events, { ...repoNamesFor(repo, cfg), repoPath: repo, ...reconcileOptionsFrom(cfg, opts), attribution });
+  return { report, note:note+attributionNote };
 }
 
 export async function reconcileMain(flags: Record<string, string | boolean>, _pos: string[]): Promise<number> {

@@ -1,3 +1,4 @@
+import { collectAttributionAmendments, effectiveActor, type AttributionOptions } from "./attribution.js";
 import { Event } from "./schema.js";
 import { VerifyResult } from "./chain.js";
 import { EventStore, verifyProject } from "./store.js";
@@ -5,7 +6,7 @@ import { collectProvenanceAmendments, collectRejectedAmendments } from "./amendm
 import { CAUSED_BY_UNVERIFIED_TAG, SEALED_BY_PARAM, sealedByKind } from "./store.js";
 import { markUntrustedText } from "./explain.js";
 
-export type StatusActor = { type: Event["actor"]["type"]; id: string; events: number; last_seen: string; models: string[] };
+export type StatusActor = { type: Event["actor"]["type"]; id: string; events: number; last_seen: string; models: string[]; amended_from?: {type: Event["actor"]["type"]; id: string}[] };
 export type StatusIntegration = { system: string; events: number; last_seen: string };
 export type ProjectStatus = {
   project: string;
@@ -13,6 +14,7 @@ export type ProjectStatus = {
   integrity: VerifyResult;
   events: { total: number; last_event_at?: string };
   capture: {
+    attribution_amendments?: number; attribution_amended_events?: number; partially_amended_events?: number; superseded_attribution_amendments?: number; attribution_unavailable?: string; attribution_attempts?: number; ineffective_amendment_reasons?: {id:string; reason:string}[];
     artifact_refs: number;
     artifact_refs_without_role: number;
     agent_events: number;
@@ -35,24 +37,10 @@ export type ProjectStatus = {
   integrations: StatusIntegration[];
 };
 
-type RootState = "rooted" | "broken" | "unlinked";
+import { causalRootState, type RootState } from "./causality.js";
+export { causalRootState } from "./causality.js";
 
-/** Does this event's caused_by chain terminate at a human instruction root? */
-export function causalRootState(event: Event, byId: Map<string, Event>): RootState {
-  const seen = new Set<string>();
-  let cur: Event | undefined = event;
-  while (cur) {
-    if (seen.has(cur.id)) return "broken";
-    seen.add(cur.id);
-    if (cur.actor.type === "human" && cur.action === "instructed") return "rooted";
-    if (!cur.caused_by) return "unlinked";
-    cur = byId.get(cur.caused_by);
-    if (!cur) return "broken";
-  }
-  return "broken";
-}
-
-export async function buildProjectStatus(store: EventStore, project: string, now = new Date()): Promise<ProjectStatus> {
+export async function buildProjectStatus(store: EventStore, project: string, now = new Date(), attributionOptions?: AttributionOptions): Promise<ProjectStatus> {
   const events = await store.all(project);
   const integrity = await verifyProject(store, project);
   const byId = new Map(events.map((e) => [e.id, e]));
@@ -61,13 +49,17 @@ export async function buildProjectStatus(store: EventStore, project: string, now
   const roots = eligible.map((e) => causalRootState(e, byId));
   const count = (s: RootState) => roots.filter((x) => x === s).length;
 
+  const attribution=collectAttributionAmendments(events, attributionOptions);
   const actors = new Map<string, StatusActor>();
   const integrations = new Map<string, StatusIntegration>();
   for (const e of events) {
-    const ak = `${e.actor.type}:${e.actor.id}`;
-    const actor = actors.get(ak) ?? { type: e.actor.type, id: e.actor.id, events: 0, last_seen: e.timestamp, models: [] };
+    const view=effectiveActor(e,attribution.effective);
+    const a=view.actor;
+    const ak = `${a.type}:${a.id}`;
+    const actor = actors.get(ak) ?? { type: a.type, id: a.id, events: 0, last_seen: e.timestamp, models: [] };
     actor.events++; if (e.timestamp > actor.last_seen) actor.last_seen = e.timestamp;
-    if (e.actor.model && !actor.models.includes(e.actor.model)) actor.models.push(e.actor.model);
+    if (a.model && !actor.models.includes(a.model)) actor.models.push(a.model);
+    if(view.amended) { actor.amended_from ??= []; if(!actor.amended_from.some(a=>a.type===e.actor.type&&a.id===e.actor.id))actor.amended_from.push({type:e.actor.type,id:e.actor.id}); }
     actors.set(ak, actor);
     const system = e.location?.system;
     if (system) {
@@ -104,7 +96,10 @@ export async function buildProjectStatus(store: EventStore, project: string, now
       commits: commits.length,
       unlinked_commits: commits.filter((e) => causalRootState(e, byId) !== "rooted" && !attested.has(e.id)).length,
       amended_unlinked_commits: commits.filter((e) => attested.has(e.id)).length,
-      ineffective_amendments: rejectedAmendments.length,
+      ineffective_amendments: rejectedAmendments.length + attribution.rejected.length,
+      attribution_attempts: events.filter(e=>e.action_detail==="amended"&&(e.method?.params?.attribution!==undefined||e.tags?.includes("attribution"))).length,
+      ...(attribution.unavailable ? {attribution_unavailable:attribution.unavailable} : {attribution_amendments:[...attribution.effective.values()].flat().length,attribution_amended_events:[...attribution.effective.values()].filter(a=>a.some(x=>x.whole_event)).length,partially_amended_events:[...attribution.effective.values()].filter(a=>!a.some(x=>x.whole_event)).length,superseded_attribution_amendments:attribution.superseded.length}),
+      ineffective_amendment_reasons:[...rejectedAmendments,...attribution.rejected].map(r=>({id:r.event.id,reason:r.reason})),
       unverified_links: events.filter((e) => e.tags?.includes(CAUSED_BY_UNVERIFIED_TAG)).length,
       sealed_by: sealedBy,
       agent_events_not_pinned: events.filter((e) => e.actor.type === "agent" && sealedByKind(e.method?.params?.[SEALED_BY_PARAM]) !== "pinned").length,
@@ -130,6 +125,7 @@ export function projectStatusForModel(status: ProjectStatus): ProjectStatus {
       ...actor,
       id: markUntrustedText(actor.id),
       models: actor.models.map(markUntrustedText),
+    ...(actor.amended_from ? {amended_from:actor.amended_from.map(a=>({...a,id:markUntrustedText(a.id)}))} : {}),
     })),
     integrations: status.integrations.map((integration) => ({
       ...integration,
@@ -145,6 +141,7 @@ export function renderProjectStatus(s: ProjectStatus): string {
     `${s.capture.agent_events_without_model}/${s.capture.agent_events} agent events missing model · ${s.capture.instructions_without_followup}/${s.capture.instructions} instructions without follow-up · ${s.capture.artifact_refs_without_role}/${s.capture.artifact_refs} artifact refs missing role\n` +
     `append-only amendments: ${s.capture.amended_unlinked_commits} commits attested · ${s.capture.amended_artifact_refs} artifact roles supplied · ${s.capture.ineffective_amendments} rejected links\n` +
     `sealed by: ${s.capture.sealed_by.pinned} pinned · ${s.capture.sealed_by.assert} assert · ${s.capture.sealed_by.webhook} webhook · ${s.capture.sealed_by.owner} owner-asserted · ${s.capture.sealed_by.unauthenticated} unauthenticated · ${s.capture.sealed_by.unstamped} unstamped; ${s.capture.agent_events_not_pinned}/${s.capture.agent_events} agent events not pinned\n` +
+    (s.capture.attribution_unavailable ? `attribution evaluation unavailable: ${s.capture.attribution_unavailable} (${s.capture.attribution_attempts ?? 0} attempts)\n` : `attribution amendments: ${s.capture.attribution_amendments ?? 0} effective · ${s.capture.superseded_attribution_amendments ?? 0} superseded · ${s.capture.partially_amended_events ?? 0} partially amended events\n`) +
     `actors: ${s.actors.map((a) => `${a.type}/${markUntrustedText(a.id)} (${a.events})`).join(", ") || "none"}\n` +
     `integrations: ${s.integrations.map((i) => `${markUntrustedText(i.system)} (${i.events}, last ${i.last_seen})`).join(", ") || "none"}`;
 }

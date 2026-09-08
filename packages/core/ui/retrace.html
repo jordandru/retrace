@@ -350,6 +350,14 @@
       (q ? `<span>search: <span class="chip" data-clear="q" title="click to clear">${esc(q)} ✕</span></span>` : "");
   };
 
+  function attributionNotice(e) {
+    const attempts=state.events.filter(x=>x.action_detail==="amended"&&(x.method?.params?.attribution!==undefined||x.tags?.includes("attribution")));
+    const relevant=e ? attempts.filter(x=>x.method?.params?.target_event_id===e.id) : attempts;
+    const count=e ? relevant.length : Math.max(attempts.length,state.status?.capture?.attribution_attempts || 0);
+    if(!count && (e || (!state.historyTruncated && !shareId)))return "";
+    const refs=relevant.map(a=>`#${a.seq}`).join(", ");
+    return `<span class="badge" title="${esc(`Recorded identity retained. Attribution evaluation requires a verified complete snapshot and capture policy/Git facts. ${refs}`)}">attribution evaluation unavailable${count ? ` · ${count} amendment${count===1?"":"s"}` : " · incomplete context"}</span>`;
+  }
   function render() {
     localVerifyBadge();
     statusBadge();
@@ -363,7 +371,7 @@
     const agents = new Set(state.events.filter((e) => e.actor.type === "agent").map((e) => e.actor.id)).size;
     const arts = new Set(state.events.flatMap((e) => e.artifacts.map((a) => a.id))).size;
     const ft = $("#ftype").value;
-    let html = `<div class="stat"><span><b>${state.events.length}</b> events</span><span data-ftype="human" title="show only humans"><b>${humans}</b> humans</span><span data-ftype="agent" title="show only agents"><b>${agents}</b> agents</span><span><b>${arts}</b> artifacts</span>${filterChipsHtml(labels)}</div>`;
+    let html = attributionNotice() + `<div class="stat"><span><b>${state.events.length}</b> events</span><span data-ftype="human" title="show only humans"><b>${humans}</b> humans</span><span data-ftype="agent" title="show only agents"><b>${agents}</b> agents</span><span><b>${arts}</b> artifacts</span>${filterChipsHtml(labels)}</div>`;
     // Legend entries filter by actor type (and show which one is active); the same select in the header stays in sync.
     const leg = (t, extra) => `<span data-ftype="${t}" class="${ft === t ? "on" : ""}" title="${ft === t ? `showing only ${t} — click to show all` : `show only ${t}`}"><i class="dot ${t}" style="display:inline-block${extra}"></i> ${t}</span>`;
     html += `<div class="legend">${leg("human", "")}${leg("agent", ";border-radius:2px")}${leg("system", "")}<span style="margin-left:auto"><span class="chip" data-order="1" title="flip order">${state.newestFirst ? "newest first ▾" : "oldest first ▴"}</span></span></div>`;
@@ -390,7 +398,7 @@
         <div class="t">${fmtTime(e.timestamp)}<br><span class="link">#${e.seq}</span></div>
         <div class="rail"><div class="node"></div></div>
         <div>
-          <div><span class="who" data-actor="${esc(e.actor.id)}">${esc(actorName(e.actor))}</span><span class="link">${esc(actorTag(e.actor))}${e.actor.on_behalf_of ? " · for " + esc(e.actor.on_behalf_of) : ""}</span> <span class="verb">${esc(verbOf(e))}</span> <span class="art">${arts}</span> <span class="link">${where ? "@ " + esc(where) + " " : ""}${how}</span>${provenanceBadges(e)}</div>
+          <div><span class="who" data-actor="${esc(e.actor.id)}">${esc(actorName(e.actor))}</span><span class="link">${esc(actorTag(e.actor))}${e.actor.on_behalf_of ? " · for " + esc(e.actor.on_behalf_of) : ""}</span> <span class="verb">${esc(verbOf(e))}</span> <span class="art">${arts}</span> <span class="link">${where ? "@ " + esc(where) + " " : ""}${how}</span>${provenanceBadges(e)}${attributionNotice(e)}</div>
           ${e.intent ? `<div class="why">${esc(e.intent)}</div>` : ""}
           ${e.caused_by ? `<div class="link">↳ caused by ${inView.has(e.caused_by) ? `<a href="#" data-goto="${esc(e.caused_by)}" title="jump to this event">${esc(e.caused_by.slice(0, 16))}…</a>` : `<span class="mono" title="${esc(e.caused_by)} — not among the loaded events (outside this view's scope)">${esc(e.caused_by.slice(0, 16))}… <i>(not in view)</i></span>`}</div>` : ""}
         </div></div>`;
@@ -434,7 +442,7 @@
     let raw; try { raw = JSON.stringify(e, null, 2); } catch { raw = "(not serializable)"; }
     d.innerHTML = `
       <h2>Event #${e.seq}</h2>
-      <div class="link" style="margin-bottom:10px">${provenanceBadges(e)}</div>
+      <div class="link" style="margin-bottom:10px">${provenanceBadges(e)}${attributionNotice(e)}</div>
       <div class="kv">
         ${sect("Who", () => `<span class="who" data-actor="${esc(e.actor.id)}" style="color:var(--${esc(e.actor.type)});font-weight:600" title="${esc(e.actor.id)} — filter the timeline by this actor">${esc(actorName(e.actor))}</span> <span class="link">${esc(e.actor.type)}${e.actor.model ? " · " + esc(e.actor.model) : ""}${e.actor.version ? " " + esc(e.actor.version) : ""}${e.actor.on_behalf_of ? "<br>on behalf of " + esc(e.actor.on_behalf_of) : ""}</span>`)}
         ${sect("What", () => `<b>${esc(verbOf(e))}</b> ${e.artifacts.map((a) => `<span class="chip" data-art="${esc(a.id)}" title="${esc(a.id + roleTitle(a.role))}">${roleTag(a)}${esc(artLabel(a))}</span>${a.kind && a.kind !== "file" ? `<span class="link">${esc(a.kind)}</span>` : ""}${a.derived_from?.length ? `<div class="link">derived from ${a.derived_from.map((s) => `<span class="chip" data-art="${esc(s)}" title="${esc(s)} — filter by this artifact">${esc(labels.get(s) || s)}</span>`).join("")}</div>` : ""}`).join(" ")}${e.change?.summary ? `<div>${esc(e.change.summary)}</div>` : ""}${e.change?.diff ? `<pre>${esc(e.change.diff)}</pre>` : ""}${e.change?.after_hash ? `<div class="hash">after ${esc(e.change.after_hash)}</div>` : ""}`)}
@@ -476,6 +484,7 @@
       <tr><td>agent events without a model</td><td>${num(c.agent_events_without_model)} / ${esc(c.agent_events)}</td><td><span class="mono">actor.model</span> on every agent event</td></tr>
       <tr><td>instructions without follow-up</td><td>${num(c.instructions_without_followup)} / ${esc(c.instructions)}</td><td>at least one event whose caused_by is the instruction</td></tr>
       <tr><td>artifact refs without a role</td><td>${num(c.artifact_refs_without_role)} / ${esc(c.artifact_refs)}</td><td><span class="mono">role</span>: used · generated · both on each ref</td></tr>
+      <tr><td>attribution amendments</td><td>${esc(c.attribution_attempts ?? 0)} attempts</td><td>${c.attribution_unavailable ? "attribution evaluation unavailable: " + esc(c.attribution_unavailable) : esc(c.attribution_amendments ?? 0) + " effective"}</td></tr>
       <tr><td>append-only amendments</td><td>${esc(c.amended_unlinked_commits ?? 0)} commits · ${esc(c.amended_artifact_refs ?? 0)} roles</td><td>sealed originals remain unchanged; rooted amendment events supply the correction</td></tr>
       <tr><td>unverified caused_by links</td><td>${num(c.unverified_links ?? 0)}</td><td>the claimed parent exists, is older, and is in the same project — git hook / Drive keep a stale trailer and tag <span class="mono">caused_by:unverified</span></td></tr>
     </table>`;

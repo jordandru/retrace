@@ -15,6 +15,8 @@
  * Pure and portable: no git, no fetch. The CLI supplies CommitFacts from git and events from a full export.
  */
 import { Event } from "./schema.js";
+import { captureSeals, previousCaptureTouch, sameActor, actorKey } from "./capture.js";
+import { collectAttributionAmendments, type AttributionOptions } from "./attribution.js";
 
 export type CommitFileStatus = "A" | "M" | "D" | "R" | "C" | "T" | "U" | "X";
 export interface CommitFile { path: string; status: CommitFileStatus; /** rename/copy source */ from?: string }
@@ -40,12 +42,14 @@ export interface ReconcileFinding {
    *  opts.ackActors when set), that references the commit; the finding then never counts as a failure. Unsealed
    *  commits cannot be acknowledged at all — a sha is computable before the commit exists, so a pre-logged
    *  "correction" would let anyone whitelist a commit in advance. */
+  amended?: { original_level: "fail"; target_seal: string; policy_digest: string; git_facts_digest: string; head_hash: string; files: { file: string; artifact: string; beneficiary: { type: Event["actor"]["type"]; id: string }; amendment: { id: string; seq: number }; evidence: string[] }[] };
   acknowledged?: { seq: number; id: string; actor: string };
 }
 
 export interface FileCoverage {
   /** distinct actor ids on matching edit events in the window */
   actors: string[];
+  actor_refs?: { type: Event["actor"]["type"]; id: string }[];
   events: number;
   /** every matching event identified the file loosely (file:/bare path or a foreign repo alias) */
   loose: boolean;
@@ -76,12 +80,13 @@ export interface ReconcileReport {
   /** every sealed sha the ledger knows in this export (hook, webhook or legacy) with its seq — the caller checks
    *  these against git REF REACHABILITY and passes the vanished ones back as opts.unreachableShas */
   seals: { sha12: string; seq: number }[];
-  summary: Record<ReconcileFindingKind | "commits" | "sealed" | "acknowledged", number>;
+  summary: Record<ReconcileFindingKind | "commits" | "sealed" | "acknowledged", number> & {amended?:number};
   /** no unacknowledged fail-level finding */
   ok: boolean;
 }
 
 export interface ReconcileOptions {
+  attribution?: AttributionOptions;
   /** the name the git hook uses in artifact ids (`commit:<repoName>@…`, `repo:<repoName>#…`) */
   repoName: string;
   /** other names producers use for the same repo — `retrace` for `jordandru/retrace`; the basename is always accepted */
@@ -200,7 +205,7 @@ export function reconcile(commits: CommitFacts[], events: Event[], opts: Reconci
   let firstStampedSeq = Infinity;
   for (const e of evs) if (sealedByOf(e) !== undefined) { firstStampedSeq = e.seq; break; }
   // every commit event's touched paths, in seq order — the "previous touch" index
-  const commitTouches: { seq: number; paths: Set<string> }[] = [];
+  const commitTouches: { key?:string; seq: number; paths: Set<string> }[] = [];
   // edit events with the repo paths they touch
   const edits: { e: Event; paths: { path: string; loose: boolean }[] }[] = [];
   // acknowledgements: correction events → the commit shas they reference (validated per commit in ackFor)
@@ -238,7 +243,7 @@ export function reconcile(commits: CommitFacts[], events: Event[], opts: Reconci
       }
       continue;
     }
-    if (e.tags?.includes("correction")) {
+    if (e.action_detail !== "amended" && e.tags?.includes("correction")) {
       for (const a of e.artifacts) {
         const sha = a.id.startsWith("commit:") ? commitSha12(a.id) : undefined;
         if (!sha) continue;
@@ -262,16 +267,14 @@ export function reconcile(commits: CommitFacts[], events: Event[], opts: Reconci
   // Boundaries come from commits that still exist. A seal for a sha git no longer has (amended / rebased after the
   // hook ran) must not swallow the edits its replacement carried.
   const unreachable = new Set((opts.unreachableShas ?? []).map((x) => x.toLowerCase().slice(0, 12)));
-  for (const [sha, t] of seqTouches) {
-    if (unreachable.has(sha)) continue;
-    commitTouches.push({ seq: t.hook ?? t.legacy ?? t.webhook!, paths: t.paths });
+  for (const seal of captureSeals(evs,opts)) {
+    const paths = new Set<string>();
+    for (const id of seal.paths) { const p = artifactPath(id,{repoNames,repoPath:opts.repoPath}); if (p) paths.add(p.path); }
+    commitTouches.push({key:seal.key,seq:seal.seq,paths});
   }
-  commitTouches.sort((a, b) => a.seq - b.seq);
-  const prevTouchSeq = (path: string, beforeSeq: number | null): number => {
-    let seq = -1;
-    for (const t of commitTouches) { if (beforeSeq !== null && t.seq >= beforeSeq) break; if (t.paths.has(path)) seq = t.seq; }
-    return seq;
-  };
+  const prevTouchSeq = (path: string, beforeSeq: number | null) => previousCaptureTouch(commitTouches,path,beforeSeq);
+  const attribution = collectAttributionAmendments(evs, opts.attribution);
+
 
   const verdicts: CommitVerdict[] = [];
   const summary: ReconcileReport["summary"] = { commits: commits.length, sealed: 0, acknowledged: 0, missing_commit: 0, misattributed: 0, uncovered: 0, loose_match: 0, orphan_edit: 0, non_agent: 0, producer_disagreement: 0, unreachable_seal: 0 };
@@ -327,42 +330,60 @@ export function reconcile(commits: CommitFacts[], events: Event[], opts: Reconci
       verdicts.push(v); continue;
     }
     const actorId = sealedEvent.actor.id;
+    const cutoff=Math.min(sealedEvent.seq,commitTouches.find(t=>t.key===short)?.seq ?? sealedEvent.seq);
     const coveringActors = new Set<string>();
     for (const f of c.files) {
       const names = new Set([f.path, ...(f.from ? [f.from] : [])]);
-      const after = Math.max(...[...names].map((n) => prevTouchSeq(n, sealedEvent.seq)));
-      const actors = new Set<string>(); let n = 0; let allLoose = true;
+      const after = Math.max(...[...names].map((n) => previousCaptureTouch(commitTouches.filter(t=>t.key!==short), n, cutoff)));
+      const actors = new Set<string>(); const pairs = new Map<string, Event["actor"]>(); let n = 0; let allLoose = true;
       for (const ed of edits) {
-        if (ed.e.seq <= after || ed.e.seq >= sealedEvent.seq) continue;
+        if (ed.e.seq <= after || ed.e.seq >= cutoff) continue;
         const hit = ed.paths.filter((p) => names.has(p.path));
         if (!hit.length) continue;
-        n++; actors.add(ed.e.actor.id); for (const p of hit) consumed.add(`${ed.e.seq}\u0000${p.path}`);
+        n++; actors.add(ed.e.actor.id); pairs.set(actorKey(ed.e.actor), ed.e.actor); for (const p of hit) consumed.add(`${ed.e.seq}\u0000${p.path}`);
         if (hit.some((p) => !p.loose)) allLoose = false;
       }
-      const cov: FileCoverage = { actors: [...actors], events: n, loose: n > 0 && allLoose, window: { after, before: sealedEvent.seq } };
+      const cov: FileCoverage = { actors: [...actors], actor_refs:[...pairs.values()].map(({type,id}) => ({type,id})), events: n, loose: n > 0 && allLoose, window: { after, before: cutoff } };
       v.coverage[f.path] = cov;
-      for (const a of actors) coveringActors.add(a);
+      for (const a of cov.actor_refs ?? []) coveringActors.add(actorKey(a));
       if (n === 0) add("uncovered", uncoveredLevel, `${f.path}: no edit event between #${after < 0 ? "start" : after} and #${sealedEvent.seq}`, f.path);
       else if (cov.loose) add("loose_match", "info", `${f.path}: covered only by loosely-identified refs (file:/bare path or another repo name)`, f.path);
     }
     const files = Object.entries(v.coverage);
     const allCovered = files.length > 0 && files.every(([, cov]) => cov.events > 0);
-    if (allCovered && !coveringActors.has(actorId)) {
+    if (allCovered && !coveringActors.has(actorKey(sealedEvent.actor))) {
       // The ledger tells a COMPLETE, contradicting story: every file has logged edits and none are the committer's.
       // Either the committer carried another agent's work (bfe87c3) or it edited every file without logging; the
       // sealed commit claims files whose only logged edits belong to someone else either way.
-      add("misattributed", "fail", `sealed as ${actorId}, but every logged edit to its files is by ${[...coveringActors].join(", ")} — ${actorId} committed their work, or edited without logging`);
+      add("misattributed", "fail", `sealed as ${actorId}, but every logged edit to its files is by ${[...coveringActors].map(k=>(JSON.parse(k) as string[])[1]).join(", ")} — ${actorId} committed their work, or edited without logging`);
     } else {
       // Partial story: some files carry only another agent's edits (a sweep of their uncommitted work, or the
       // committer's own unlogged change on a shared file). Per file, warn — the uncovered files say the rest.
       for (const [path, cov] of files) {
-        if (cov.events && !cov.actors.includes(actorId)) add("misattributed", "warn", `${path}: edits logged only by ${cov.actors.join(", ")}, committed by ${actorId}`, path);
+        if (cov.events && !cov.actor_refs?.some(a=>sameActor(a,sealedEvent.actor))) add("misattributed", "warn", `${path}: edits logged only by ${cov.actors.join(", ")}, committed by ${actorId}`, path);
+      }
+    }
+    const failure = v.findings.find(f => f.kind === "misattributed" && f.level === "fail" && !f.file && !f.acknowledged);
+    if (failure && !attribution.unavailable && attribution.context && !v.findings.some(f => f.kind === "producer_disagreement" && !f.acknowledged)) {
+      const amendments = attribution.effective.get(sealedEvent.id) ?? [];
+      const certificate: NonNullable<ReconcileFinding["amended"]>["files"] = [];
+      for (const [path,cov] of files) {
+        const a = amendments.find(a => a.artifacts.some(id => artifactPath(id,{repoNames,repoPath:opts.repoPath})?.path === path) && cov.actor_refs?.some(actor => sameActor(actor,a.to)));
+        const artifact = a?.artifacts.find(id => artifactPath(id,{repoNames,repoPath:opts.repoPath})?.path === path);
+        const unit=attribution.context.domains.get(sealedEvent.id)?.units.find(u=>u.id===artifact);
+        if (a && artifact && unit && unit.after===cov.window.after && unit.before===cov.window.before && !artifactPath(artifact,{repoNames,repoPath:opts.repoPath})?.loose && a.matches[artifact]?.length) certificate.push({file:path,artifact,beneficiary:a.to,amendment:{id:a.amendment_id,seq:a.seq},evidence:a.matches[artifact]});
+      }
+      if (certificate.length === files.length) {
+        failure.level = "info";
+        failure.amended = {original_level:"fail",target_seal:sealedEvent.id,policy_digest:attribution.context.policy_digest,git_facts_digest:attribution.context.git_facts_digest,head_hash:attribution.context.head_hash,files:certificate};
+      } else if (certificate.length) {
+        for (const [path] of files) if (!certificate.some(f => f.file === path)) add("misattributed","warn",`${path}: no effective attribution correction covers this failing file`,path);
       }
     }
     verdicts.push(v);
   }
 
-  for (const v of verdicts) for (const f of v.findings) { summary[f.kind]++; if (f.acknowledged) summary.acknowledged++; }
+  for (const v of verdicts) for (const f of v.findings) { summary[f.kind]++; if(f.amended)summary.amended=(summary.amended ?? 0)+1; if (f.acknowledged) summary.acknowledged++; }
 
   // orphans: agent edits inside the range that no in-range commit consumed; pending: edits after the last sealed commit
   const sealedSeqs = verdicts.filter((v) => v.sealed).map((v) => v.sealed!.seq);
@@ -403,7 +424,7 @@ export function renderReconcileReport(r: ReconcileReport): string {
   const s = r.summary;
   lines.push(`reconcile ${r.repo_name}: ${s.commits} commit${s.commits === 1 ? "" : "s"}, ${s.sealed} sealed — ${s.missing_commit} missing, ${s.misattributed} misattributed, ${s.producer_disagreement} producer-disagreement, ${s.unreachable_seal} unreachable-seal, ${s.uncovered} uncovered, ${s.loose_match} loose, ${s.non_agent} non-agent, ${s.orphan_edit} orphan path${s.orphan_edit === 1 ? "" : "s"}, ${r.pending.length} pending${s.acknowledged ? `, ${s.acknowledged} acknowledged` : ""} → ${r.ok ? "OK" : "NOT OK"}`);
   for (const v of r.commits) for (const f of v.findings) {
-    lines.push(`  ${f.acknowledged ? "ACK " : f.level.toUpperCase().padEnd(4)} ${f.kind.padEnd(14)} ${f.detail}${f.acknowledged ? ` (corrected by #${f.acknowledged.seq}, ${f.acknowledged.actor})` : ""}`);
+    lines.push(`  ${f.amended ? "AMND" : f.acknowledged ? "ACK " : f.level.toUpperCase().padEnd(4)} ${f.kind.padEnd(14)} ${f.detail}${f.acknowledged ? ` (corrected by #${f.acknowledged.seq}, ${f.acknowledged.actor})` : ""}`);
   }
   for (const o of r.orphans) lines.push(`  INFO orphan_edit    ${o.path}: ${o.events} edit${o.events === 1 ? "" : "s"} by ${o.actors.join(", ")} (last #${o.last_seq}) not carried by any commit in range`);
   return lines.join("\n");

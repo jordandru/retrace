@@ -37,6 +37,7 @@ export class RemoteStore implements EventStore {
     if (!res.ok) throw new RemoteApiError(method, path, res.status, new Headers(res.headers), await res.text());
     return (await res.json()) as T;
   }
+  async humanAuthority(): Promise<{actor: {type: "human"; id: string}; sealed_by: "owner"; attribution_profile: string}> { return this.req("GET", "/identity"); }
   /** Remote appends server-side (chain sealing must happen where the head lives). */
   async append(input: EventInput): Promise<{ event: Event; deduped: boolean }> {
     return this.req("POST", "/events", input);
