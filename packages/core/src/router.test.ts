@@ -66,6 +66,26 @@ test("GET /projects/:p/status exposes the canonical transparency model", async (
   assert.equal(body.integrity.ok, true);
   assert.equal(body.causality.coverage_pct, 100);
   assert.deepEqual(body.actors.map((a: any) => a.id), ["gemini", "jordan@example.com"]);
+  assert.equal(body.capture.attribution_attempts, 0);
+  assert.equal(body.capture.attribution, "unavailable: no_git_context");
+  assert.equal("attribution_amendments" in body.capture, false);
+});
+
+test("status without Git context counts attribution attempts without claiming effective counters", async () => {
+  const store = new MemStore();
+  for (const extra of [
+    {action: "other", action_detail: "amended", method: {params: {attribution: {}}}},
+    {action: "other", action_detail: "amended", tags: ["attribution"]},
+    {action: "other", action_detail: "amended", tags: ["amendment"]},
+    {action: "read", action_detail: "amended", tags: ["attribution"]},
+  ] as Partial<EventInput>[]) await appendEvent(store, ev({project: "p", ...extra}));
+  const res = await get(createHandler(store, {token: "tok"}), "/projects/p/status", "tok");
+  assert.equal(res.status, 200);
+  const {capture} = await res.json();
+  assert.equal(capture.attribution_attempts, 2);
+  assert.equal(capture.attribution, "unavailable: no_git_context");
+  assert.equal(capture.attribution_unavailable, "no_git_context");
+  for (const counter of ["attribution_amendments", "attribution_amended_events", "partially_amended_events", "superseded_attribution_amendments"]) assert.equal(counter in capture, false);
 });
 
 test("DELETE /projects/:p requires auth and deletes nothing without it", async () => {

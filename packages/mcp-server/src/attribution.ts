@@ -114,7 +114,12 @@ export async function amendAttributionMain(flags: Record<string,string|boolean>)
   const read=async()=>store instanceof RemoteStore ? (await fetchVerifiedRemoteEvents(store,project,flags.pubkey)).events : await store.all(project);
   const evaluate=async()=> {const events=await read();const options=await attributionOptionsForRepo(repo,events,project,[request.target_event_id],typeof flags.policy==="string"?flags.policy:undefined);return {options,preflight:preflightAttributionAmendment(request,authority,options)};};
   let {options,preflight}=await evaluate();
-  const preview=()=>({recorded:false,advisory:true,head:options.snapshot!.head,policy_digest:options.context!.policy_digest,git_facts_digest:options.context!.git_facts_digest,diagnostics:options.context!.diagnostics,result:preflight.result,affected:preflight.affected,input:preflight.input});
+  const preview=()=> {
+    const diagnostics=options.context!.diagnostics;
+    const by_reason:Record<string,number>={};
+    for(const diagnostic of diagnostics)by_reason[diagnostic.reason]=(by_reason[diagnostic.reason]??0)+1;
+    return {recorded:false,advisory:true,head:options.snapshot!.head,policy_digest:options.context!.policy_digest,git_facts_digest:options.context!.git_facts_digest,diagnostics_summary:{total:diagnostics.length,by_reason},...(flags.verbose?{diagnostics}:{}),result:preflight.result,affected:preflight.affected,input:preflight.input};
+  };
   if(flags["dry-run"]){console.log(JSON.stringify(preview(),null,2));return preflight.result.ok?0:1;}
   if(!preflight.result.ok && (!flags["seal-anyway"] || ["malformed","relay_disabled","untrusted_authority"].includes(preflight.result.reason)))throw new Error(`amendment rejected: ${preflight.result.reason}`);
   // Recheck immediately before submission. Acceptance remains advisory under concurrent writes.

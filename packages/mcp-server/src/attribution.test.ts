@@ -34,12 +34,22 @@ test("human CLI: seq 123-shaped push with a mistyped commit ref reports diagnost
     const bad="commit:jordandru/retrace@f29f2071a1b1";
     const push=(await appendEvent(store,{project:"retrace",actor:{type:"agent",id:"claude-code"},action:"sent",artifacts:[{id:bad,kind:"commit"},{id:cid,kind:"commit"}],method:{tool:"git push"}})).event;
     assert.equal(push.seq,123);
+    for(let i=0;i<125;i++)await appendEvent(store,{project:"retrace",actor:human,action:"sent",artifacts:[{id:`commit:jordandru/retrace@malformed-${i}`}]});
     const before=JSON.stringify(await store.all("retrace")),refs=git("show-ref"),status=git("status","--porcelain");
-    const result=spawnSync(process.execPath,[fileURLToPath(new URL("./export-cli.js",import.meta.url)),"amend-attribution","--target",seal.id,"--to","agent/B","--artifacts",artifact,"--evidence",edit.id,"--reason","scoped fixture review","--caused-by",root.id,"--human",human.id,"--dry-run"],{cwd:dir,env,encoding:"utf8"});
+    const args=[fileURLToPath(new URL("./export-cli.js",import.meta.url)),"amend-attribution","--target",seal.id,"--to","agent/B","--artifacts",artifact,"--evidence",edit.id,"--reason","scoped fixture review","--caused-by",root.id,"--human",human.id,"--dry-run"];
+    const result=spawnSync(process.execPath,args,{cwd:dir,env,encoding:"utf8"});
     assert.equal(result.status,0,result.stderr);
     const preview=JSON.parse(result.stdout);
     assert.equal(preview.recorded,false);assert.equal(preview.result.ok,true);assert.equal(preview.result.whole_event,false);
-    assert.deepEqual(preview.diagnostics,[{event_id:push.id,seq:123,artifact_id:bad,status:"ignored",reason:"unavailable_commit_ref"}]);
+    assert.deepEqual(preview.diagnostics_summary,{total:126,by_reason:{unavailable_commit_ref:1,malformed_commit_ref:125}});
+    assert.equal("diagnostics" in preview,false);
+    const verbose=spawnSync(process.execPath,[...args,"--verbose"],{cwd:dir,env,encoding:"utf8"});
+    assert.equal(verbose.status,0,verbose.stderr);
+    const {diagnostics,...rest}=JSON.parse(verbose.stdout);
+    assert.deepEqual(rest,preview,"verbose changes only diagnostic detail");
+    assert.equal(diagnostics.length,126);
+    assert.deepEqual(diagnostics[0],{event_id:push.id,seq:123,artifact_id:bad,status:"ignored",reason:"unavailable_commit_ref"});
+    assert.equal(diagnostics.filter((d:any)=>d.reason==="malformed_commit_ref").length,125);
     assert.equal(JSON.stringify(await store.all("retrace")),before,"dry run must not append or rewrite any ledger event");
     assert.equal(git("show-ref"),refs);assert.equal(git("status","--porcelain"),status);
   } finally {rmSync(dir,{recursive:true,force:true});}

@@ -5,7 +5,7 @@ import { computeHash } from "./chain.js";
 import { collectAttributionAmendments, effectiveActor, preflightAttributionAmendment, AttributionOptions } from "./attribution.js";
 import { verifiedAttributionSnapshot, prepareAttributionContext, AttributionGitFacts, AttributionPolicy } from "./attribution-context.js";
 import { collectProvenanceAmendments, collectRejectedAmendments } from "./amendment.js";
-import { reconcile } from "./reconcile.js";
+import { reconcile, renderReconcileReport } from "./reconcile.js";
 import { renderTimeline, renderWhyChain } from "./explain.js";
 import { buildProjectStatus, causalRootState } from "./status.js";
 import { buildLineage, renderLineageDot, renderLineageMermaid, lineageForModel } from "./lineage.js";
@@ -173,7 +173,8 @@ test("Git eligible universe, same-SHA cutoff and reconcile per-file certificate"
   let r=await prepare(x,facts);assert.equal(active(r)[0].whole_event,true);assert.deepEqual(active(r)[0].artifacts,["repo:org/r#a","repo:org/r#b"]);
   const commits=[{sha:oid,parents:[],files:[{path:"a",status:"A" as const},{path:"b",status:"A" as const}]}];
   const report=reconcile(commits,r.events,{repoName:"org/r",hookSealedBy:["assert:hook"],attribution:r.options});
-  assert.equal(report.ok,true);assert.equal(report.commits[0].findings.find(f=>f.kind==="misattributed")?.amended?.files.length,2);
+  assert.equal(report.ok,true);const certificate=report.commits[0].findings.find(f=>f.kind==="misattributed")?.amended;
+  assert.ok(certificate && "files" in certificate);assert.equal(certificate.files.length,2);
   x[4]=amendment("A","T",O,B,["repo:org/r#a"]);r=await prepare(x,facts);
   const partial=reconcile(commits,r.events,{repoName:"org/r",hookSealedBy:["assert:hook"],attribution:r.options});assert.equal(partial.ok,false);
   x[4]=amendment("A","W",O,B);r=await prepare(x,facts);assert.equal(active(r,"W")[0].whole_event,true);
@@ -181,6 +182,47 @@ test("Git eligible universe, same-SHA cutoff and reconcile per-file certificate"
   assert.equal(reconcile(commits,r.events,{repoName:"org/r",hookSealedBy:["assert:hook"],attribution:r.options}).ok,false,"amending webhook cannot clear the selected hook failure");
   x[3].actor=C;x[4]=amendment("A");r=await prepare(x,facts);
   const disagreement=reconcile(commits,r.events,{repoName:"org/r",hookSealedBy:["assert:hook"],attribution:r.options});assert.equal(disagreement.ok,false);assert.equal(disagreement.commits[0].findings.some(f=>f.amended),false);
+});
+
+test("reconcile annotates only per-file warnings covered by the selected seal's effective amendment and window",async()=>{
+  const oid="a".repeat(40),previous="b".repeat(40),cid=`commit:org/r@${oid}`,pid=`commit:org/r@${previous}`;
+  const paths=["own",...Array.from({length:7},(_,i)=>`cursor-${i}.ts`),"uncorrected"];
+  const corrected=paths.slice(1,-1).map(p=>`repo:org/r#${p}`);
+  const seal=(id:string,commit:string,files:string[])=>({...ev(id,O,ids(commit,...files),"committed"),method:{tool:"git",params:{sealed_by:"assert:hook"}}});
+  const x=[root(),seal("P",pid,["repo:org/r#source"]),ev("G",O,ids("repo:org/r#own")),ev("E",B,ids(...corrected,"repo:org/r#uncorrected")),seal("T",cid,paths.map(p=>`repo:org/r#${p}`)),amendment("A","T",O,B,corrected)];
+  const commits=[{sha:previous,parents:[],files:[{path:"source",status:"A" as const}]},{sha:oid,parents:[previous],files:paths.map(path=>({path,status:"M" as const}))}];
+  const facts:AttributionGitFacts={...noGit(),resolutions:{[cid]:{repo:"org/r",oid},[pid]:{repo:"org/r",oid:previous}},commits:commits.map(c=>({repo:"org/r",oid:c.sha,parents:c.parents,files:c.files,diff_profile:"first-parent-M-C/1"}))};
+  const r=await prepare(x,facts);
+  assert.equal(active(r).length,1);
+  const opts={repoName:"org/r",hookSealedBy:["assert:hook"],attribution:r.options};
+  const report=reconcile(commits,r.events,opts),findings=report.commits[1].findings;
+  const before=JSON.stringify(r.events);
+  assert.equal(report.summary.amended,7);
+  for(const path of paths.slice(1,-1)) {
+    const finding=findings.find(f=>f.file===path && f.kind==="misattributed")!;
+    assert.equal(finding.level,"info");
+    assert.deepEqual(finding.amended,{seq:5,id:"A",to:B});
+    assert.deepEqual(report.commits[1].coverage[path].actors,["B"]);
+  }
+  assert.equal(findings.find(f=>f.file==="uncorrected")?.level,"warn");
+  assert.equal(findings.find(f=>f.file==="uncorrected")?.amended,undefined);
+  assert.equal(report.commits[1].sealed?.actor.id,"O");
+  assert.match(renderReconcileReport(report),/AMND misattributed.*cursor-0.ts.*attribution amended to agent\/B by #5, A/);
+  assert.equal(JSON.stringify(r.events),before);
+  const unavailable=reconcile(commits,r.events,{...opts,attribution:undefined});
+  assert.equal(unavailable.commits[1].findings.filter(f=>f.level==="warn"&&f.kind==="misattributed").length,8);
+  // A rename source changes reconcile's previous-touch window; a certificate for the old facts cannot apply.
+  const mismatched=reconcile([commits[0],{...commits[1],files:commits[1].files.map(f=>f.path==="cursor-0.ts"?{...f,status:"R" as const,from:"source"}:f)}],r.events,opts);
+  const mismatch=mismatched.commits[1].findings.find(f=>f.file==="cursor-0.ts"&&f.kind==="misattributed")!;
+  assert.notEqual(mismatched.commits[1].coverage["cursor-0.ts"].window.after,r.options.context!.domains.get("T")!.units.find(u=>u.id===corrected[0])!.after);
+  assert.equal(mismatch.level,"warn");assert.equal(mismatch.amended,undefined);
+  const witness={...seal("W",cid,paths.map(p=>`repo:org/r#${p}`)),tags:["push"],method:{params:{sealed_by:"webhook:github"}}};
+  const other=await prepare([...x.slice(0,5),witness,amendment("A","W",O,B,corrected)],facts);
+  assert.equal(active(other,"W").length,1);
+  assert.equal(reconcile(commits,other.events,{...opts,attribution:other.options}).summary.amended??0,0,"amending a different seal does not annotate the hook's warnings");
+  const disagreed=await prepare([...x.slice(0,5),{...witness,actor:C},x[5]],facts);
+  const disagreement=reconcile(commits,disagreed.events,{...opts,attribution:disagreed.options});
+  assert.equal(disagreement.summary.amended??0,0);assert.equal(disagreement.ok,false);
 });
 
 test("v6 7c, 7f, 8: amendment target, rejected predecessor, and pre-planted attempt",async()=>{
@@ -234,6 +276,9 @@ test("render/status/lineage/export: default banner, effective header, partial co
   assert.match(renderTimeline(r.events,{attribution:r.result,banner:true,effective:true}),/^effective view — recorded actors in parentheses/);
   const store={all:async()=>r.events,head:async()=>({seq:r.events.length-1,hash:r.events.at(-1)!.hash}),get:async(id:string)=>r.events.find(e=>e.id===id)??null} as any;
   const status=await buildProjectStatus(store,"p",new Date(),r.options);assert.equal(status.capture.partially_amended_events,1);assert.equal(status.capture.attribution_amended_events,0);
+  assert.equal(status.capture.attribution,"available");assert.equal(status.capture.attribution_attempts,1);
+  const unavailable=await buildProjectStatus(store,"p",new Date(),{context:r.options.context});
+  assert.equal(unavailable.capture.attribution,"unavailable: untrusted_snapshot");assert.equal(unavailable.capture.attribution_amendments,undefined);
   const graph=buildLineage(r.events,{includeActors:true,attribution:r.result});assert.ok(graph.edges.some(e=>e.type==="recorded-as"&&e.from==="u:agent/B"&&e.to==="u:agent/O"));assert.match(renderLineageDot(graph),/recorded-as/);
   const bundle=await buildExportBundle(store,{project:"p"});const bytes=JSON.stringify(bundle.events);
   assert.match(renderReportHtml(bundle,undefined,{attribution:r.result}),/1 of 2 artifacts/);assert.equal(JSON.stringify(bundle.events),bytes);
