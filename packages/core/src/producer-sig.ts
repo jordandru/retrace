@@ -26,31 +26,90 @@
  * producer process/key, while the event actor may be a relayed or on-behalf-of principal resolved by the adapter.
  * The Worker verifies the signed, post-resolution event against the credential that presented the key.
  */
-import { Event, EventInput } from "./schema.js";
+import { resolveCommitActor } from "./commit-actor.js";
+import { Actor, Event, EventInput } from "./schema.js";
 import { keyId, publicFromPrivate, signCanonical, verifyCanonical } from "./signing.js";
 
 export const PRODUCER_SIG_FORMAT = "retrace-producer-sig/1";
+export const PRODUCER_SIG_FORMAT_V2 = "retrace-producer-sig/2";
+export type ProducerSigFormat = typeof PRODUCER_SIG_FORMAT | typeof PRODUCER_SIG_FORMAT_V2;
+/** CLI that signs git commit seals as /2. Worker 426 / doctor min_cli_version name this string. */
+export const PRODUCER_SIG_V2_MIN_CLI_VERSION = "0.1.8";
 /** method.params key for the server's verdict — the `sealed_by` precedent: server wins, hash-covered. */
 export const PRODUCER_SIG_VERDICT_PARAM = "producer_sig_verdict";
+/** /2 server annotation: the actor the verifier actually checked, never a client-supplied echo. */
+export const PRODUCER_SIGNED_ACTOR_PARAM = "producer_signed_actor";
+/** Classifier observation (hash-covered, not producer-authenticated). Reserved on /2; not written in this step. */
+export const CLAIM_DECISION_PARAM = "claim_decision";
 
-export interface ProducerSig { kid: string; sig: string }
+export type TrailerPolicy = "off" | "shadow" | "enforce";
+/** RETRACE_TRAILER_POLICY. Unknown / unset → off (safe default; no 426, no classifier). */
+export function parseTrailerPolicy(raw?: string | null): TrailerPolicy {
+  if (raw === "shadow" || raw === "enforce") return raw;
+  return "off";
+}
+
+export interface ProducerSig { kid: string; sig: string; format?: string }
 export type ProducerSigVerdict = "verified" | "invalid" | "unknown_kid" | "none";
 /** A registered producer public key — lives on the credential (server) and in export bundles (offline verify). */
 export interface ProducerKey { kid: string; public_key: JsonWebKey; actor_id?: string; name?: string }
+/** Actor {type, id, on_behalf_of} derived from verified bytes — never read from a stored annotation. */
+export type ProducerSignedActor = Pick<Actor, "type" | "id"> & { on_behalf_of?: string };
 
 /** The server's annotation surface — everything a seal may add that the signature therefore cannot cover. */
 export const RESERVED_TAG_PREFIX = "caused_by:";
 export const RESERVED_METHOD_PARAMS = ["sealed_by", "producer_sig_verdict", "relayed_by", "caused_by_problem"] as const;
+/**
+ * Complete /2 server-annotation surface. Adding a name later is retrace-producer-sig/3
+ * (docs/design/commit-trailer-consistency.md §6 rule 1). /1 keeps RESERVED_METHOD_PARAMS unchanged.
+ */
+export const RESERVED_METHOD_PARAMS_V2 = [
+  "sealed_by",
+  "producer_sig_verdict",
+  "relayed_by",
+  "claim_decision",
+  "producer_signed_actor",
+] as const;
+
+// TODO(T32): §6 rule 3 withheld-verification substitution is not in this step. A hostile store that
+// rewrites a /2 commit actor is verified against the stored actor and lands `invalid` until the
+// classifier lands the strict reconstruct-with-signed_actor path
+// (docs/design/commit-trailer-consistency.md §6 rule 3, T32).
 
 type Signable = EventInput | Event;
+
+export function reservedMethodParams(format: ProducerSigFormat): readonly string[] {
+  return format === PRODUCER_SIG_FORMAT_V2 ? RESERVED_METHOD_PARAMS_V2 : RESERVED_METHOD_PARAMS;
+}
+
+/** Absent producer_sig.format means /1. Unknown format is not a ProducerSigFormat. */
+export function producerSigFormatOf(e: { producer_sig?: ProducerSig | null }): ProducerSigFormat | "unknown" | undefined {
+  if (!e.producer_sig) return undefined;
+  const f = e.producer_sig.format;
+  if (f === undefined || f === PRODUCER_SIG_FORMAT) return PRODUCER_SIG_FORMAT;
+  if (f === PRODUCER_SIG_FORMAT_V2) return PRODUCER_SIG_FORMAT_V2;
+  return "unknown";
+}
+
+export function isGitCommitSeal(e: { action: string; method?: { tool?: string } }): boolean {
+  return (e.action === "committed" || e.action === "merged") && e.method?.tool === "git";
+}
+
+/** /1-signed git commit seal (absent format = /1). Unsigned seals are not legacy-client. */
+export function isLegacyClientCommitSeal(e: { action: string; method?: { tool?: string }; producer_sig?: ProducerSig | null }): boolean {
+  if (!e.producer_sig || !isGitCommitSeal(e)) return false;
+  const f = producerSigFormatOf(e);
+  return f === PRODUCER_SIG_FORMAT;
+}
 
 function signableTags(tags: string[] | undefined): string[] | undefined {
   const t = tags?.filter((x) => !x.startsWith(RESERVED_TAG_PREFIX));
   return t && t.length ? t : undefined;
 }
-function signableMethod(m: EventInput["method"]): EventInput["method"] {
+function signableMethod(m: EventInput["method"], format: ProducerSigFormat): EventInput["method"] {
   if (!m) return undefined;
-  const params = m.params ? Object.fromEntries(Object.entries(m.params).filter(([k]) => !(RESERVED_METHOD_PARAMS as readonly string[]).includes(k))) : undefined;
+  const reserved = reservedMethodParams(format);
+  const params = m.params ? Object.fromEntries(Object.entries(m.params).filter(([k]) => !reserved.includes(k))) : undefined;
   const out: NonNullable<EventInput["method"]> = { ...m, ...(params && Object.keys(params).length ? { params } : {}) };
   if (params !== undefined && Object.keys(params).length === 0) delete (out as { params?: unknown }).params;
   return Object.keys(out).length ? out : undefined;
@@ -61,10 +120,13 @@ function signableLocation(l: EventInput["location"]): EventInput["location"] {
   return Object.keys(rest).length ? rest : undefined;
 }
 
-/** The exact bytes-source both sides sign/verify: built the same way from a submitted input or a stored event. */
-export function producerSignedPayload(e: Signable): Record<string, unknown> {
+/** The exact bytes-source both sides sign/verify: built the same way from a submitted input or a stored event.
+ *  `format` selects the signed `v` field and the reserved method.params list. Omit it to dispatch from
+ *  `producer_sig.format` (absent = /1). */
+export function producerSignedPayload(e: Signable, format?: ProducerSigFormat): Record<string, unknown> {
+  const fmt = format ?? (producerSigFormatOf(e) === PRODUCER_SIG_FORMAT_V2 ? PRODUCER_SIG_FORMAT_V2 : PRODUCER_SIG_FORMAT);
   const p: Record<string, unknown> = {
-    v: PRODUCER_SIG_FORMAT,
+    v: fmt,
     project: e.project,
     actor: { type: e.actor.type, id: e.actor.id, ...(e.actor.on_behalf_of !== undefined ? { on_behalf_of: e.actor.on_behalf_of } : {}) },
     action: e.action,
@@ -74,29 +136,79 @@ export function producerSignedPayload(e: Signable): Record<string, unknown> {
     if (v !== undefined) p[k] = v;
   }
   const tags = signableTags(e.tags); if (tags) p.tags = tags;
-  const method = signableMethod(e.method); if (method) p.method = method;
+  const method = signableMethod(e.method, fmt); if (method) p.method = method;
   const location = signableLocation(e.location); if (location) p.location = location;
   return p;
 }
 
-/** Attach a signature to an input about to be submitted. Throws without `timestamp` or `idempotency_key`, and when
- *  the input carries server stamps (reserved tags / method params). `location.client` is fine to send — it is merely
- *  unsigned. See the module doc. */
-export async function signProducer<T extends EventInput>(input: T, privateJwk: JsonWebKey): Promise<T & { producer_sig: ProducerSig }> {
-  if (!input.timestamp) throw new Error("a signing producer must set timestamp itself; the server would fill it and the signature could never be re-verified");
-  if (!input.idempotency_key) throw new Error("a signing producer must set idempotency_key: it makes the signed bytes unique, which is what lets offline verification catch a store sealing one signed event twice");
-  if (input.tags?.some((t) => t.startsWith(RESERVED_TAG_PREFIX))) throw new Error(`tags starting "${RESERVED_TAG_PREFIX}" are the server's annotation surface; a producer must not set them`);
-  const trespass = input.method?.params ? (RESERVED_METHOD_PARAMS as readonly string[]).filter((k) => input.method!.params![k] !== undefined) : [];
-  if (trespass.length) throw new Error(`method.params ${trespass.join(", ")} are server stamps; a producer must not set them`);
-  const pub = publicFromPrivate(privateJwk);
-  return { ...input, producer_sig: { kid: await keyId(pub), sig: await signCanonical(privateJwk, producerSignedPayload(input)) } };
+function parseSignedAuthor(params: Record<string, unknown> | undefined): { name: string; email: string } | undefined {
+  const a = params?.author;
+  if (!a || typeof a !== "object" || Array.isArray(a)) return undefined;
+  const name = (a as { name?: unknown }).name;
+  const email = (a as { email?: unknown }).email;
+  if (typeof name !== "string" || typeof email !== "string") return undefined;
+  return { name, email };
 }
+
+/**
+ * Actor the verifier actually checked, from verified bytes. /2 git commit seals re-derive from signed
+ * `raw_message` + `author` (and parents). Missing those inputs → undefined (caller treats as invalid).
+ * Stored `method.params.producer_signed_actor` is never read.
+ */
+export function deriveProducerSignedActor(e: Signable, format: ProducerSigFormat): ProducerSignedActor | undefined {
+  if (format === PRODUCER_SIG_FORMAT_V2 && isGitCommitSeal(e)) {
+    const params = (signableMethod(e.method, format)?.params ?? {}) as Record<string, unknown>;
+    const author = parseSignedAuthor(params);
+    const raw = params.raw_message;
+    if (!author || typeof raw !== "string") return undefined;
+    const parents = Array.isArray(params.parents) ? params.parents.filter((p): p is string => typeof p === "string") : [];
+    const resolved = resolveCommitActor({ message: raw, authorName: author.name, authorEmail: author.email, parents });
+    const signed: ProducerSignedActor = { type: resolved.actor.type, id: resolved.actor.id };
+    let obo = resolved.actor.on_behalf_of;
+    if (resolved.actor.type === "agent" && !obo && author.email) obo = author.email;
+    if (obo) signed.on_behalf_of = obo;
+    return signed;
+  }
+  return {
+    type: e.actor.type,
+    id: e.actor.id,
+    ...(e.actor.on_behalf_of !== undefined ? { on_behalf_of: e.actor.on_behalf_of } : {}),
+  };
+}
+
+export type ProducerVerifyResult = {
+  ok: boolean;
+  format?: ProducerSigFormat | "unknown";
+  signed_actor?: ProducerSignedActor;
+};
 
 /** Does this event's signature verify with this public key? Pure; no registry. */
 export async function verifyProducerSig(e: Signable, publicJwk: JsonWebKey): Promise<boolean> {
-  if (!e.producer_sig || !e.timestamp) return false;
-  return verifyCanonical(publicJwk, producerSignedPayload(e), e.producer_sig.sig);
+  return (await verifyProducerSigResult(e, publicJwk)).ok;
 }
+
+/**
+ * Offline / Worker verification. Unknown `producer_sig.format` fails closed. A /2 git commit seal whose
+ * signed params omit `author` or `raw_message` is `invalid` even if the Ed25519 bytes check (T39).
+ * `signed_actor` is recomputed from verified bytes; a stored `producer_signed_actor` annotation is ignored.
+ */
+export async function verifyProducerSigResult(e: Signable, publicJwk: JsonWebKey): Promise<ProducerVerifyResult> {
+  if (!e.producer_sig || !e.timestamp) return { ok: false };
+  const format = producerSigFormatOf(e);
+  if (format === "unknown") return { ok: false, format: "unknown" };
+  const fmt = format ?? PRODUCER_SIG_FORMAT;
+  const bytesOk = await verifyCanonical(publicJwk, producerSignedPayload(e, fmt), e.producer_sig.sig);
+  if (!bytesOk) return { ok: false, format: fmt };
+  const signed_actor = deriveProducerSignedActor(e, fmt);
+  if (fmt === PRODUCER_SIG_FORMAT_V2 && isGitCommitSeal(e) && !signed_actor) return { ok: false, format: fmt };
+  return { ok: true, format: fmt, signed_actor };
+}
+
+export type ProducerSigCheck = {
+  verdict: ProducerSigVerdict;
+  format?: ProducerSigFormat | "unknown";
+  signed_actor?: ProducerSignedActor;
+};
 
 /**
  * The server-side rule, pure so the POST /events hunk stays three lines. Called AFTER actor resolution — the payload
@@ -105,15 +217,44 @@ export async function verifyProducerSig(e: Signable, publicJwk: JsonWebKey): Pro
  * submitting on someone else's credential is not a verified event.
  *   none         no signature presented
  *   unknown_kid  a signature, but no key registered on the credential, or a kid that is not that key's
- *   invalid      the signature does not verify over the resolved payload (or timestamp is missing)
+ *   invalid      the signature does not verify over the resolved payload (or timestamp is missing, or format unknown)
  *   verified     everything checks
  */
+export async function producerSigCheck(input: Signable, registered?: JsonWebKey | null): Promise<ProducerSigCheck> {
+  if (!input.producer_sig) return { verdict: "none" };
+  const format = producerSigFormatOf(input);
+  if (format === "unknown") return { verdict: "invalid", format: "unknown" };
+  if (!registered) return { verdict: "unknown_kid", format: format ?? PRODUCER_SIG_FORMAT };
+  if (input.producer_sig.kid !== (await keyId(registered))) return { verdict: "unknown_kid", format: format ?? PRODUCER_SIG_FORMAT };
+  if (!input.timestamp) return { verdict: "invalid", format: format ?? PRODUCER_SIG_FORMAT };
+  const result = await verifyProducerSigResult(input, registered);
+  if (!result.ok) return { verdict: "invalid", format: result.format ?? format ?? PRODUCER_SIG_FORMAT };
+  return { verdict: "verified", format: result.format, signed_actor: result.signed_actor };
+}
+
 export async function producerSigVerdict(input: Signable, registered?: JsonWebKey | null): Promise<ProducerSigVerdict> {
-  if (!input.producer_sig) return "none";
-  if (!registered) return "unknown_kid";
-  if (input.producer_sig.kid !== (await keyId(registered))) return "unknown_kid";
-  if (!input.timestamp) return "invalid";
-  return (await verifyProducerSig(input, registered)) ? "verified" : "invalid";
+  return (await producerSigCheck(input, registered)).verdict;
+}
+
+/** Attach a signature to an input about to be submitted. Throws without `timestamp` or `idempotency_key`, and when
+ *  the input carries server stamps (reserved tags / method params). `location.client` is fine to send — it is merely
+ *  unsigned. See the module doc. Default format is /1 so MCP and existing tests stay byte-compatible; the git hook
+ *  opts into /2. */
+export async function signProducer<T extends EventInput>(
+  input: T,
+  privateJwk: JsonWebKey,
+  opts?: { format?: ProducerSigFormat },
+): Promise<T & { producer_sig: ProducerSig }> {
+  const format = opts?.format ?? PRODUCER_SIG_FORMAT;
+  if (!input.timestamp) throw new Error("a signing producer must set timestamp itself; the server would fill it and the signature could never be re-verified");
+  if (!input.idempotency_key) throw new Error("a signing producer must set idempotency_key: it makes the signed bytes unique, which is what lets offline verification catch a store sealing one signed event twice");
+  if (input.tags?.some((t) => t.startsWith(RESERVED_TAG_PREFIX))) throw new Error(`tags starting "${RESERVED_TAG_PREFIX}" are the server's annotation surface; a producer must not set them`);
+  const trespass = input.method?.params ? reservedMethodParams(format).filter((k) => input.method!.params![k] !== undefined) : [];
+  if (trespass.length) throw new Error(`method.params ${trespass.join(", ")} are server stamps; a producer must not set them`);
+  const pub = publicFromPrivate(privateJwk);
+  const producer_sig: ProducerSig = { kid: await keyId(pub), sig: await signCanonical(privateJwk, producerSignedPayload(input, format)) };
+  if (format !== PRODUCER_SIG_FORMAT) producer_sig.format = format;
+  return { ...input, producer_sig };
 }
 
 export interface ProducerSigCounts {

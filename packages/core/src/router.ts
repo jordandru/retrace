@@ -38,7 +38,11 @@ import { EventStore, appendEvent, AdapterIdempotencyError, CausedByError, verify
 import { sealEvent } from "./chain.js";
 import { buildExportBundle, verifyExportBundle } from "./export.js";
 import { ExportCacheStore } from "./export-cache.js";
-import { PRODUCER_SIG_VERDICT_PARAM, ProducerKey, ProducerSigVerdict, producerSigVerdict } from "./producer-sig.js";
+import {
+  CLAIM_DECISION_PARAM, PRODUCER_SIGNED_ACTOR_PARAM, PRODUCER_SIG_FORMAT_V2,
+  PRODUCER_SIG_V2_MIN_CLI_VERSION, PRODUCER_SIG_VERDICT_PARAM, ProducerKey, ProducerSigVerdict,
+  TrailerPolicy, isLegacyClientCommitSeal, parseTrailerPolicy, producerSigCheck,
+} from "./producer-sig.js";
 import { renderReportHtml } from "./report.js";
 import { collectAttributionAmendments } from "./attribution.js";
 import { buildLineage, renderLineageDot, renderLineageMermaid } from "./lineage.js";
@@ -162,6 +166,8 @@ export interface RouterOptions {
    *  since the last cron pass (the cached bundle is still a complete signed export as of its own generated_at).
    *  `?fresh=1` forces the live build. Scoped exports (artifact_id) always build live. */
   exportCache?: ExportCacheStore;
+  /** RETRACE_TRAILER_POLICY: off (default) | shadow | enforce. Step 1 uses this only for /1 commit-seal ingress. */
+  trailerPolicy?: TrailerPolicy;
 }
 
 const CORS = { "access-control-allow-origin": "*", "access-control-allow-headers": "authorization,content-type", "access-control-allow-methods": "GET,POST,DELETE,OPTIONS" };
@@ -385,7 +391,20 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
     // fields silently stripped by EventInput.safeParse below. Public, like the rest of this probe — the field NAMES
     // are already in the README, and being readable without a token is the point (you can check a deployment you
     // hold no credential for). See schemaSurface() and scripts/check-deploy.mjs.
-    if (parts[0] === "api" && parts.length === 1) return json({ name: "retrace-api", version: "0.1.0", ok: true, auth: !!token || credentials.length > 0, credentials: credentials.length, signing: !!opts.signingKey, capabilities: ["attribution-v7"], schema: schemaSurface() });
+    if (parts[0] === "api" && parts.length === 1) {
+      const trailerPolicy = parseTrailerPolicy(opts.trailerPolicy);
+      return json({
+        name: "retrace-api",
+        version: "0.1.0",
+        ok: true,
+        auth: !!token || credentials.length > 0,
+        credentials: credentials.length,
+        signing: !!opts.signingKey,
+        capabilities: ["attribution-v7", "producer-sig/2"],
+        ...(trailerPolicy === "enforce" ? { min_cli_version: PRODUCER_SIG_V2_MIN_CLI_VERSION } : {}),
+        schema: schemaSurface(),
+      });
+    }
     if (parts[0] === ".well-known" && parts[1] === "retrace-pubkey") {
       if (!opts.signingKey) return json({ error: "no signing key configured" }, 404);
       const pub = publicFromPrivate(opts.signingKey);
@@ -537,13 +556,32 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
         delete params.relayed_by;
         delete params[SEALED_BY_PARAM];
         delete params[PRODUCER_SIG_VERDICT_PARAM];
+        delete params[CLAIM_DECISION_PARAM];
+        delete params[PRODUCER_SIGNED_ACTOR_PARAM];
         // Rung 5: verify over the POST-RESOLVE shape — byte-identical to the offline recompute, which also collapses
         // sign-as-yourself-submit-on-another's-credential into a plain signature failure (producer-sig.ts).
         const credential = principal?.kind === "credential" ? principal.credential : undefined;
-        const producerVerdict = await producerSigVerdict({ ...parsed.data, actor: resolved.actor }, credential?.public_key ?? null);
+        const resolvedInput = { ...parsed.data, actor: resolved.actor, method: parsed.data.method ? { ...parsed.data.method, params } : parsed.data.method };
+        const producerCheck = await producerSigCheck(resolvedInput, credential?.public_key ?? null);
+        const producerVerdict = producerCheck.verdict;
         if (credential?.require_signature && producerVerdict !== "verified")
           // the verdict word only — never echo the signature or any kid
           return json({ error: `producer signature required by this credential (verdict: ${producerVerdict})` }, 401);
+        const trailerPolicy = parseTrailerPolicy(opts.trailerPolicy);
+        if (
+          trailerPolicy === "enforce"
+          && principal?.kind === "credential"
+          && principal.credential.trust === "assert"
+          && isLegacyClientCommitSeal(resolvedInput)
+        ) {
+          return json({
+            error: "upgrade required: git commit seals must be retrace-producer-sig/2",
+            min_cli_version: PRODUCER_SIG_V2_MIN_CLI_VERSION,
+            format: PRODUCER_SIG_FORMAT_V2,
+          }, 426);
+        }
+        if (producerVerdict === "verified" && producerCheck.format === PRODUCER_SIG_FORMAT_V2 && producerCheck.signed_actor)
+          params[PRODUCER_SIGNED_ACTOR_PARAM] = producerCheck.signed_actor;
         const location = parsed.data.location ? { ...parsed.data.location } : undefined;
         if (location && !resolved.relayed) delete location.client;
         let input = stampSealedBy({

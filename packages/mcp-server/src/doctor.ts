@@ -341,6 +341,29 @@ export function attributionDeployment(api: { capabilities?: unknown }, gate: boo
     : result(gate ? "fail" : "warn", "attribution deployment", "Worker predates this build's attribution profile (attribution-v7); deploy the Worker from this build first");
 }
 
+export function compareCliVersions(running: string, minimum: string): number {
+  const pa = running.split(".").map((x) => Number.parseInt(x, 10) || 0);
+  const pb = minimum.split(".").map((x) => Number.parseInt(x, 10) || 0);
+  const n = Math.max(pa.length, pb.length, 3);
+  for (let i = 0; i < n; i++) {
+    const da = pa[i] ?? 0, db = pb[i] ?? 0;
+    if (da !== db) return da - db;
+  }
+  return 0;
+}
+
+/** When the Worker advertises min_cli_version above the running CLI, doctor fails the version gap (T38). */
+export function cliVersionGap(api: { min_cli_version?: unknown }, running: string): Finding | undefined {
+  if (typeof api.min_cli_version !== "string" || !api.min_cli_version.trim()) return undefined;
+  if (compareCliVersions(running, api.min_cli_version) >= 0)
+    return result("pass", "CLI version", `this CLI ${running} meets Worker minimum ${api.min_cli_version}`);
+  return result("fail", "CLI version", `Worker requires CLI ${api.min_cli_version} (producer-sig/2); this CLI is ${running}`);
+}
+
+function runningCliVersion(): string {
+  return JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version as string;
+}
+
 export function missingSchema(remote: Record<string, unknown>, local = schemaSurface()): string[] {
   return Object.entries(local).flatMap(([group, keys]) => {
     const seen = Array.isArray(remote[group]) ? remote[group] as unknown[] : [];
@@ -437,6 +460,8 @@ async function main() {
       const res = await fetch(`${url}/api`, { headers: retraceHeaders() }); if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const api: any = await res.json(); const missing = missingSchema(api.schema ?? {});
       findings.push(attributionDeployment(api, gate));
+      const gap = cliVersionGap(api, runningCliVersion());
+      if (gap) findings.push(gap);
       findings.push(missing.length ? result("fail", "deployment schema", `would drop: ${missing.join(", ")}; deploy this build first`) : result("pass", "deployment schema", `${url} understands this build`));
     } catch (e: any) { findings.push(result("fail", "deployment", `${url}/api is unreachable: ${e.message}`)); }
     try {

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Credential, Event, EventInput, EventStore, Share, appendEvent, buildExportBundle, generateSigningKey, pageHistoryNewest, schemaSurface, signCanonical } from "@retrace-dev/core";
-import { attributionFinding, credentialAuthorization, doctorHistoryEvents, gateRemoteAuthorization, headDelivery, instructRootFinding, missingSchema, parseDoctorArgs, pendingSealsFinding, pinSessionFinding, remoteCaptureCoverage, sealedCommitEvent, sealedLooksAgent } from "./doctor.js";
+import { attributionFinding, cliVersionGap, credentialAuthorization, doctorHistoryEvents, gateRemoteAuthorization, headDelivery, instructRootFinding, missingSchema, parseDoctorArgs, pendingSealsFinding, pinSessionFinding, remoteCaptureCoverage, sealedCommitEvent, sealedLooksAgent } from "./doctor.js";
 import { RemoteStore } from "./remote-store.js";
 import { SqliteStore } from "./sqlite-store.js";
 
@@ -18,6 +18,15 @@ test("doctor: schema comparison names only fields the deployment would drop", ()
   remote.location = remote.location.filter((k) => k !== "workspace");
   assert.deepEqual(missingSchema(remote), ["location.workspace"]);
   assert.deepEqual(missingSchema({ ...local, future: ["x"] }), []);
+});
+
+test("doctor: CLI version gap when Worker advertises min_cli_version above the running CLI", () => {
+  assert.equal(cliVersionGap({}, "0.1.7"), undefined);
+  assert.equal(cliVersionGap({ min_cli_version: "0.1.8" }, "0.1.8")?.level, "pass");
+  const fail = cliVersionGap({ min_cli_version: "0.1.8" }, "0.1.7")!;
+  assert.equal(fail.level, "fail");
+  assert.match(fail.detail, /0\.1\.8/);
+  assert.match(fail.detail, /0\.1\.7/);
 });
 
 test("doctor: assert credentials authorize the exact actor type/id pair", () => {

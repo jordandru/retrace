@@ -11,7 +11,7 @@
  *   GET /projects/:p/export|report|lineage · POST /projects/:p/share · GET /.well-known/retrace-pubkey
  *   POST /hooks/github  (GitHub webhook; HMAC-verified with RETRACE_GITHUB_SECRET; project from repo via RETRACE_GITHUB_PROJECTS)
  */
-import { createHandler, parseCheckpointProjectAllowlist, parseCredentials, parseGithubRepoProjects, parseSigningKey, runCheckpointCron, refreshExportCache, exportBuilder, keyId } from "@retrace-dev/core";
+import { createHandler, parseCheckpointProjectAllowlist, parseCredentials, parseGithubRepoProjects, parseSigningKey, parseTrailerPolicy, runCheckpointCron, refreshExportCache, exportBuilder, keyId } from "@retrace-dev/core";
 import { D1Store } from "./d1-store.js";
 import { D1CheckpointLog } from "./checkpoint-log.js";
 import { D1ExportCache } from "./export-cache-d1.js";
@@ -42,6 +42,8 @@ export interface Env {
   RETRACE_OPS_PROJECT?: string;
   /** Email/name of the person who holds RETRACE_TOKEN; owner-only actions (DELETE) are audited as this human */
   RETRACE_OWNER?: string;
+  /** off (default) | shadow | enforce. Step 1: /1 commit-seal ingress only. Do not set enforce until every hook is /2. */
+  RETRACE_TRAILER_POLICY?: string;
 }
 
 /** All per-actor credentials the Worker honours: the main secret plus the optional overflow secret. The main secret
@@ -77,6 +79,7 @@ export default {
       opsProject: env.RETRACE_OPS_PROJECT,
       ownerActor: env.RETRACE_OWNER ? { type: "human", id: env.RETRACE_OWNER } : undefined,
       exportCache: new D1ExportCache(env.DB),
+      trailerPolicy: parseTrailerPolicy(env.RETRACE_TRAILER_POLICY),
     });
     if (new URL(req.url).pathname === "/mcp") return handleRemoteMcp(req, env, store, api);
     return api(req);

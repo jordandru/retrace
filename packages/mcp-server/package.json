@@ -1,6 +1,6 @@
 {
   "name": "@retrace-dev/cli",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "CLI, MCP server, Git adapter, and local UI for verifiable AI-assisted development provenance",
   "type": "module",
   "bin": {

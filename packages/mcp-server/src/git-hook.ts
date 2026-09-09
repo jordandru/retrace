@@ -17,7 +17,9 @@
  *   credentials-file entry (a path, never key material — the mirror stays Worker-uploadable). Missing both → unsigned.
  * Failures of `commit` (the hook path) are appended to <git-dir>/retrace-hook.log. Retryable remote failures are also
  *   queued in <git-dir>/retrace-pending-seal and print one stderr line through the non-blocking hook; credential
- *   rejections remain log-only and are not queued. Re-log a dropped commit with `retrace-git commit <sha>` or `backfill`.
+ *   rejections remain log-only and are not queued. HTTP 426 (old-client /1 commit seal under enforce) is an explicit
+ *   exception to the 4xx-is-not-retryable rule: upgrading the CLI fixes it, so the sha is queued loudly. Re-log a
+ *   dropped commit with `retrace-git commit <sha>` or `backfill`.
  *
  * Mapping a commit → event
  *   WHO    author (human) — or an AGENT if the commit has a trailer `Retrace-Actor: <id>` (optionally
@@ -33,13 +35,13 @@
  *          human's own `git commit` — see below), ide/workspace when an IDE names itself (Orca), surface=tty|agent
  *   WHY    intent = commit subject (+ body); caused_by = trailer `Retrace-Caused-By: evt_…`, else env RETRACE_CAUSED_BY,
  *          else contents of .git/retrace-caused-by (a scratch file agents/MCP can write)
- *   HOW    tool=git, params { branch, parents, files, insertions, deletions }, automated = agent commit
+ *   HOW    tool=git, params { branch, parents, files, insertions, deletions, sha, raw_message, author }, automated = agent commit
  */
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync, appendFileSync, chmodSync, unlinkSync, mkdirSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { basename, join, resolve } from "node:path";
-import { EventInput, appendEvent, describeEvent, Event, resolveCommitActor } from "@retrace-dev/core";
+import { EventInput, appendEvent, describeEvent, Event, PRODUCER_SIG_FORMAT_V2, resolveCommitActor } from "@retrace-dev/core";
 import { makeStore, detectIde, harnessSession } from "./index.js";
 import { RemoteApiError, RemoteStore } from "./remote-store.js";
 import { loadProducerPrivateKeyFromFile, sealForAppend } from "./producer-key.js";
@@ -121,7 +123,7 @@ export function removePendingSeal(gitDir: string, sha: string): void {
 }
 
 export function retryableHookFailure(error: unknown): boolean {
-  if (error instanceof RemoteApiError) return error.status >= 500;
+  if (error instanceof RemoteApiError) return error.status === 426 || error.status >= 500;
   if (!(error instanceof Error)) return false;
   return error.name === "AbortError" || error.name === "TimeoutError" || error instanceof TypeError;
 }
@@ -218,7 +220,7 @@ export function commitToEvent(repo: string, sha: string, cfg: Cfg, live = false)
     },
     intent: resolved.intent, // prose "Key: value" lines survive (backlog #12)
     caused_by: causedBy,
-    method: { tool: "git", automated: actor.type !== "human", params: { branch, parents: parentList, files: files.length, insertions: ins, deletions: del, sha: fullSha } },
+    method: { tool: "git", automated: actor.type !== "human", params: { branch, parents: parentList, files: files.length, insertions: ins, deletions: del, sha: fullSha, raw_message: message, author: { name: an, email: ae } } },
     idempotency_key: `git:${fullSha}`,
     tags: ["git", ...(isMerge ? ["merge"] : [])],
   };
@@ -284,7 +286,7 @@ async function logCommit(repo: string, sha: string, cfg: Cfg, live = false): Pro
   guardRemoteWrite(repo, cfg);
   let input = commitToEvent(repo, sha, cfg, live);
   const keyFile = resolveHookProducerKeyFile({ credential: cfg.credential });
-  if (keyFile) input = await sealForAppend(input, { privateKey: loadProducerPrivateKeyFromFile(keyFile) });
+  if (keyFile) input = await sealForAppend(input, { privateKey: loadProducerPrivateKeyFromFile(keyFile), format: PRODUCER_SIG_FORMAT_V2 });
   const store = cfg.url ? new RemoteStore(cfg.url, cfg.token, { deadlineMs: hookDeadlineMs() }) : makeStore();
   return store instanceof RemoteStore ? store.append(input) : appendEvent(store, input);
 }

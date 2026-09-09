@@ -8,7 +8,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync } from "n
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
-import { EventInput, generateSigningKey, publicFromPrivate, keyId, signProducer, schemaSurface } from "@retrace-dev/core";
+import { EventInput, generateSigningKey, publicFromPrivate, keyId, signProducer, schemaSurface, type ProducerSigFormat } from "@retrace-dev/core";
 import { keyPath } from "./keys.js";
 
 export function defaultProducerKeysDir(env: NodeJS.ProcessEnv = process.env): string {
@@ -113,6 +113,8 @@ export type SealOpts = {
   privateKey?: JsonWebKey | null;
   remoteUrl?: string | null;
   fetchApi?: typeof fetch;
+  /** Git hook signs /2 from this release; MCP and other callers keep the /1 default. */
+  format?: ProducerSigFormat;
 };
 
 /**
@@ -128,5 +130,5 @@ export async function sealForAppend<T extends EventInput>(input: T, opts: SealOp
     timestamp: input.timestamp ?? new Date().toISOString(),
     idempotency_key: input.idempotency_key ?? randomUUID(),
   };
-  return signProducer(ready, key);
+  return signProducer(ready, key, opts.format ? { format: opts.format } : undefined);
 }

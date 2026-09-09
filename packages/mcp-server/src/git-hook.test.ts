@@ -9,8 +9,9 @@ import { fileURLToPath } from "node:url";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { SqliteStore } from "./sqlite-store.js";
-import { appendEvent, generateSigningKey, publicFromPrivate, verifyProducerSig, verifyProject } from "@retrace-dev/core";
-import { hookScript, parseTrailers, resolveHookToken, resolveHookProducerKeyFile, ttySurface, guardRemoteWrite, validCausedById, validActorId } from "./git-hook.js";
+import { appendEvent, generateSigningKey, PRODUCER_SIG_FORMAT_V2, publicFromPrivate, verifyProducerSig, verifyProject } from "@retrace-dev/core";
+import { hookScript, parseTrailers, resolveHookToken, resolveHookProducerKeyFile, retryableHookFailure, ttySurface, guardRemoteWrite, validCausedById, validActorId } from "./git-hook.js";
+import { RemoteApiError } from "./remote-store.js";
 import { writeProducerPrivateKey } from "./producer-key.js";
 
 async function seedInstruct(db: string, project = "rpg"): Promise<string> {
@@ -153,6 +154,10 @@ test("hook signs committed events when RETRACE_HOOK_KEY_FILE is set", async () =
   const events = await new SqliteStore(db).all("rpg");
   const commit = events.find((e) => e.action === "committed");
   assert.ok(commit?.producer_sig, "hook write should be producer-signed");
+  assert.equal(commit!.producer_sig!.format, PRODUCER_SIG_FORMAT_V2);
+  assert.equal(typeof commit!.method?.params?.raw_message, "string");
+  assert.deepEqual(commit!.method?.params?.author, { name: "Jordan", email: "jordan@slcwitit.com" });
+  assert.ok(Array.isArray(commit!.method?.params?.parents));
   assert.equal(await verifyProducerSig(commit!, publicFromPrivate(kp.privateKey)), true);
 });
 
@@ -211,6 +216,47 @@ test("hook end to end: the named credential is the bearer the server sees; a rej
     await shAsync(dir, "git", ["commit", "-qam", "unresolvable credential"], env);
     assert.match(readFileSync(join(dir, ".git", "retrace-hook.log"), "utf8"), /NOT logged: credential "does-not-exist" not found/);
     assert.equal(seen.length, 3, "nothing was sent for the unresolvable credential");
+  } finally {
+    server.close();
+  }
+});
+
+test("HTTP 426 is retryable like 5xx; 403 is not", () => {
+  assert.equal(retryableHookFailure(new RemoteApiError("POST", "/events", 426, new Headers(), "upgrade required")), true);
+  assert.equal(retryableHookFailure(new RemoteApiError("POST", "/events", 403, new Headers(), "forbidden")), false);
+  assert.equal(retryableHookFailure(new RemoteApiError("POST", "/events", 503, new Headers(), "unavailable")), true);
+});
+
+test("hook 426 queues the sha in retrace-pending-seal, prints stderr, and exits non-zero", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "retrace-git-426-"));
+  const server = createServer((_req, res) => {
+    res.writeHead(426, { "content-type": "application/json" });
+    res.end(JSON.stringify({ error: "upgrade required", min_cli_version: "0.1.8", format: "retrace-producer-sig/2" }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const env = { RETRACE_URL: url, RETRACE_TOKEN: "owner-token" };
+    sh(dir, "git", ["init", "-q", "-b", "main"]);
+    writeFileSync(join(dir, ".retrace.json"), JSON.stringify({ project: "rpg", url }));
+    writeFileSync(join(dir, "a.ts"), "1\n");
+    sh(dir, "git", ["add", "."]);
+    sh(dir, "git", ["commit", "-qm", "initial"]);
+    const sha = sh(dir, "git", ["rev-parse", "HEAD"]).trim();
+    await assert.rejects(
+      promisify(execFile)("node", [bin, "commit", "--hook", "--repo", dir], {
+        cwd: dir,
+        encoding: "utf8",
+        env: { ...baseEnv, ...env },
+      }),
+      (error: any) => {
+        assert.equal(error.code, 1);
+        const retraceLines = error.stderr.trim().split("\n").filter((line: string) => line.startsWith("retrace:"));
+        assert.deepEqual(retraceLines, [`retrace: commit ${sha} pending seal; details: ${join(dir, ".git", "retrace-hook.log")}`]);
+        return true;
+      },
+    );
+    assert.equal(readFileSync(join(dir, ".git", "retrace-pending-seal"), "utf8"), `${sha}\n`);
   } finally {
     server.close();
   }

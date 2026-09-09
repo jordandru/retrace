@@ -3,6 +3,7 @@ import { Event } from "./schema.js";
 import { VerifyResult } from "./chain.js";
 import { EventStore, verifyProject } from "./store.js";
 import { collectProvenanceAmendments, collectRejectedAmendments } from "./amendment.js";
+import { isLegacyClientCommitSeal } from "./producer-sig.js";
 import { CAUSED_BY_UNVERIFIED_TAG, SEALED_BY_PARAM, sealedByKind } from "./store.js";
 import { markUntrustedText } from "./explain.js";
 
@@ -33,6 +34,8 @@ export type ProjectStatus = {
     sealed_by: { pinned: number; assert: number; webhook: number; owner: number; unauthenticated: number; unstamped: number };
     /** agent events whose actor was NOT fixed by a pinned credential (owner-asserted, unauthenticated, or unstamped): WHO is producer testimony there */
     agent_events_not_pinned: number;
+    /** /1-signed git commit seals (absent format = /1). Unsigned commit seals are not counted. */
+    legacy_client: number;
   };
   causality: { eligible_events: number; rooted_in_human_instruction: number; attested_events: number; broken_links: number; unlinked: number; coverage_pct: number };
   actors: StatusActor[];
@@ -108,6 +111,7 @@ export async function buildProjectStatus(store: EventStore, project: string, now
       unverified_links: events.filter((e) => e.tags?.includes(CAUSED_BY_UNVERIFIED_TAG)).length,
       sealed_by: sealedBy,
       agent_events_not_pinned: events.filter((e) => e.actor.type === "agent" && sealedByKind(e.method?.params?.[SEALED_BY_PARAM]) !== "pinned").length,
+      legacy_client: commits.filter(isLegacyClientCommitSeal).length,
     },
     causality: {
       eligible_events: eligible.length,
@@ -142,7 +146,7 @@ export function projectStatusForModel(status: ProjectStatus): ProjectStatus {
 export function renderProjectStatus(s: ProjectStatus): string {
   const health = s.integrity.ok ? "VERIFIED" : "BROKEN";
   return `${markUntrustedText(s.project)} — ${health}\n` +
-    `${s.events.total} events · ${s.causality.coverage_pct}% causal coverage · ${s.capture.unlinked_commits}/${s.capture.commits} unlinked commits · ${s.capture.unverified_links} unverified links\n` +
+    `${s.events.total} events · ${s.causality.coverage_pct}% causal coverage · ${s.capture.unlinked_commits}/${s.capture.commits} unlinked commits · ${s.capture.unverified_links} unverified links · ${s.capture.legacy_client} legacy-client seals\n` +
     `${s.capture.agent_events_without_model}/${s.capture.agent_events} agent events missing model · ${s.capture.instructions_without_followup}/${s.capture.instructions} instructions without follow-up · ${s.capture.artifact_refs_without_role}/${s.capture.artifact_refs} artifact refs missing role\n` +
     `append-only amendments: ${s.capture.amended_unlinked_commits} commits attested · ${s.capture.amended_artifact_refs} artifact roles supplied · ${s.capture.ineffective_amendments} rejected links\n` +
     `sealed by: ${s.capture.sealed_by.pinned} pinned · ${s.capture.sealed_by.assert} assert · ${s.capture.sealed_by.webhook} webhook · ${s.capture.sealed_by.owner} owner-asserted · ${s.capture.sealed_by.unauthenticated} unauthenticated · ${s.capture.sealed_by.unstamped} unstamped; ${s.capture.agent_events_not_pinned}/${s.capture.agent_events} agent events not pinned\n` +

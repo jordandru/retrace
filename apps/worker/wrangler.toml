@@ -15,6 +15,8 @@ database_id = "ae8ebc52-9784-4109-b421-f63676972dfe"
 [vars]
 # Who holds RETRACE_TOKEN; owner-only actions (DELETE /projects/:p) are audited as this human instead of system/worker
 RETRACE_OWNER = "jordansboxing@gmail.com"
+# RETRACE_TRAILER_POLICY is unset here on purpose (defaults to off in the Worker). Do not set enforce
+# until every git hook is retrace-producer-sig/2; Jordan deploys after this PR merges.
 # HMAC-covered repository.full_name → Retrace project. Query ?project= is ignored (audit 2026-08-30).
 RETRACE_GITHUB_PROJECTS = "{\"jordandru/retrace\":\"retrace\",\"jordandru/slc-wit-it\":\"boxing-rpg\"}"
 # Explicit opt-in: checkpoint contents include project metadata and are published to the public Rekor log.
