@@ -94,20 +94,26 @@ test("producer-keygen writes a 0600 private JWK, prints public only, and refuses
   }
 });
 
-test("trustedHookStampsFor returns the list only for this repo's project (or basename alias)", () => {
+test("trustedHookStampsFor uses basename only when cfg.project is absent", () => {
   const dir = mkdtempSync(join(tmpdir(), "retrace-stamps-bind-"));
-  const named = join(dir, "checkout");
+  const named = join(dir, "projectB");
+  const unnamed = join(dir, "fallbackB");
   try {
     mkdirSync(named);
+    mkdirSync(unnamed);
     writeFileSync(join(named, ".retrace.json"), JSON.stringify({
       project: "projectA",
       reconcile: { hook_sealed_by: ["assert:git hook (assert)"] },
     }));
+    writeFileSync(join(unnamed, ".retrace.json"), JSON.stringify({
+      reconcile: { hook_sealed_by: ["assert:release-recorder"] },
+    }));
     assert.deepEqual(trustedHookStampsFor(named, "projectA"), ["assert:git hook (assert)"]);
-    assert.equal(trustedHookStampsFor(named, "projectB"), undefined);
-    assert.deepEqual(trustedHookStampsFor(named, "checkout"), ["assert:git hook (assert)"], "basename(repo) is the same alias doctor/reconcile already use");
+    assert.equal(trustedHookStampsFor(named, "projectB"), undefined, "a directory named projectB does not widen declared projectA");
     assert.equal(producerVerifyOptsFor(named, "projectB").trustedHookStamps, undefined);
     assert.equal(producerVerifyOptsFor(named, "projectB").project, "projectB");
+    assert.deepEqual(trustedHookStampsFor(unnamed, "fallbackB"), ["assert:release-recorder"], "basename fallback when cfg.project is absent");
+    assert.equal(trustedHookStampsFor(unnamed, "projectA"), undefined);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -190,6 +196,155 @@ test("verify binds hook stamps to bundle.scope.project, not cwd (two-project, de
     assert.match(fromA.stdout, /producer sigs: 0 verified · 1 INVALID/, fromA.stdout + fromA.stderr);
     const fromB = verifyFrom(repoB);
     assert.match(fromB.stdout, /producer sigs: 1 verified · 0 INVALID/, fromB.stdout + fromB.stderr);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("verify basename collision: projectA config in a directory named projectB fails closed", async () => {
+  const root = mkdtempSync(join(tmpdir(), "retrace-basename-collision-"));
+  const colliding = join(root, "projectB");
+  try {
+    mkdirSync(colliding);
+    writeFileSync(join(colliding, ".retrace.json"), JSON.stringify({
+      project: "projectA",
+      reconcile: { hook_sealed_by: ["assert:git hook (assert)"] },
+    }));
+
+    const producer = await generateSigningKey();
+    const issuer = await generateSigningKey();
+    const claimed = { type: "agent" as const, id: "codex", on_behalf_of: "jordan@example.com" };
+    const signed = await signProducer({
+      project: "projectB",
+      actor: claimed,
+      action: "committed",
+      artifacts: [{ id: "commit:projectB@abc1234abc12", kind: "commit", role: "generated" }],
+      timestamp: "2026-09-09T12:00:00.000Z",
+      idempotency_key: "git:basename-collision",
+      intent: "signed bump",
+      method: {
+        tool: "git",
+        automated: true,
+        params: {
+          branch: "main",
+          parents: ["defdefdefdefdefdefdefdefdefdefdefdefdefd"],
+          files: 1,
+          insertions: 1,
+          deletions: 0,
+          sha: "abcabcabcabcabcabcabcabcabcabcabcabcabca",
+          raw_message: "signed bump\n\nRetrace-Actor: codex\n",
+          author: { name: "Jordan", email: "jordan@example.com" },
+        },
+      },
+    }, producer.privateKey, { format: PRODUCER_SIG_FORMAT_V2 });
+    const withheld = {
+      ...signed,
+      actor: { ...PRODUCER_HOOK_SYSTEM_ACTOR },
+      method: {
+        ...signed.method,
+        params: {
+          ...signed.method!.params,
+          [SEALED_BY_PARAM]: "assert:git hook (assert)",
+          [CLAIM_DECISION_PARAM]: {
+            policy: "trailer-consistency/1",
+            decision: { actor_written: "withheld" },
+            signed_actor: { ...claimed },
+            claim: { type: claimed.type, id: claimed.id },
+          },
+        },
+      },
+    };
+    const store = new SqliteStore(join(root, "ledger.db"));
+    await appendEvent(store, withheld);
+    const bundle = await buildExportBundle(store, { project: "projectB" }, {
+      signingKey: issuer.privateKey,
+      producers: [{ kid: await keyId(producer.publicKey), public_key: producer.publicKey }],
+    });
+    const bundleFile = join(root, "bundle.json");
+    const issuerPub = join(root, "issuer-pub.json");
+    writeFileSync(bundleFile, JSON.stringify(bundle));
+    writeFileSync(issuerPub, JSON.stringify(issuer.publicKey));
+
+    const fromCollision = spawnSync(process.execPath, [bin, "verify", bundleFile, "--pubkey", issuerPub], {
+      encoding: "utf8",
+      env: baseEnv,
+      cwd: colliding,
+    });
+    assert.match(fromCollision.stdout, /producer sigs: 0 verified · 1 INVALID/, fromCollision.stdout + fromCollision.stderr);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("verify basename fallback: no cfg.project, directory named projectB, B's withheld bundle is 1 verified", async () => {
+  const root = mkdtempSync(join(tmpdir(), "retrace-basename-fallback-"));
+  const repo = join(root, "projectB");
+  try {
+    mkdirSync(repo);
+    writeFileSync(join(repo, ".retrace.json"), JSON.stringify({
+      reconcile: { hook_sealed_by: ["assert:release-recorder"] },
+    }));
+
+    const producer = await generateSigningKey();
+    const issuer = await generateSigningKey();
+    const claimed = { type: "agent" as const, id: "codex", on_behalf_of: "jordan@example.com" };
+    const signed = await signProducer({
+      project: "projectB",
+      actor: claimed,
+      action: "committed",
+      artifacts: [{ id: "commit:projectB@abc1234abc12", kind: "commit", role: "generated" }],
+      timestamp: "2026-09-09T12:00:00.000Z",
+      idempotency_key: "git:basename-fallback",
+      intent: "signed bump",
+      method: {
+        tool: "git",
+        automated: true,
+        params: {
+          branch: "main",
+          parents: ["defdefdefdefdefdefdefdefdefdefdefdefdefd"],
+          files: 1,
+          insertions: 1,
+          deletions: 0,
+          sha: "abcabcabcabcabcabcabcabcabcabcabcabcabca",
+          raw_message: "signed bump\n\nRetrace-Actor: codex\n",
+          author: { name: "Jordan", email: "jordan@example.com" },
+        },
+      },
+    }, producer.privateKey, { format: PRODUCER_SIG_FORMAT_V2 });
+    const withheld = {
+      ...signed,
+      actor: { ...PRODUCER_HOOK_SYSTEM_ACTOR },
+      method: {
+        ...signed.method,
+        params: {
+          ...signed.method!.params,
+          [SEALED_BY_PARAM]: "assert:release-recorder",
+          [CLAIM_DECISION_PARAM]: {
+            policy: "trailer-consistency/1",
+            decision: { actor_written: "withheld" },
+            signed_actor: { ...claimed },
+            claim: { type: claimed.type, id: claimed.id },
+          },
+        },
+      },
+    };
+    const store = new SqliteStore(join(root, "ledger.db"));
+    await appendEvent(store, withheld);
+    const bundle = await buildExportBundle(store, { project: "projectB" }, {
+      signingKey: issuer.privateKey,
+      producers: [{ kid: await keyId(producer.publicKey), public_key: producer.publicKey }],
+    });
+    const bundleFile = join(root, "bundle.json");
+    const issuerPub = join(root, "issuer-pub.json");
+    writeFileSync(bundleFile, JSON.stringify(bundle));
+    writeFileSync(issuerPub, JSON.stringify(issuer.publicKey));
+
+    const fromFallback = spawnSync(process.execPath, [bin, "verify", bundleFile, "--pubkey", issuerPub], {
+      encoding: "utf8",
+      env: baseEnv,
+      cwd: repo,
+    });
+    assert.match(fromFallback.stdout, /producer sigs: 1 verified · 0 INVALID/, fromFallback.stdout + fromFallback.stderr);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
