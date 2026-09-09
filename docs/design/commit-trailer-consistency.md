@@ -755,7 +755,8 @@ Grok's review of v2.4 (from 2026-09-11) is welcome and may reopen this section; 
    `conflicting_claim`, `facts_disagreement`, `facts_mismatch`/`facts_unknown`, three-way comparison with
    inputs compared first, ACK rules, audit alignment; gate `pending seals` already landed (PR 26).
 5. **Phase A measurement** ≥ 7 days (Grok): status histogram on `retrace` and `boxing-rpg`; every
-   `conflicting` case read by hand; `legacy_client` count must be zero before step 6.
+   `conflicting` case read by hand; `legacy_client` count must be zero before step 6; **cost profile**
+   published (tracked note below).
 6. **Enforce** (`RETRACE_TRAILER_POLICY=enforce`): withhold on `conflicting`; 426 for `/1` commit seals;
    `unresolved` stays `record` (Jordan's decision) with the per-project `withhold` switch.
 
@@ -767,4 +768,14 @@ Grok's review of v2.4 (from 2026-09-11) is welcome and may reopen this section; 
 - Reconcile's hook-first primary selection migrates to earliest-trusted in the step-4 PR, with a test on an existing repo export.
 - §14b–d are historical; a builder who finds prose contradicting §3–§7 follows §3–§7 and files the discrepancy.
 - Known, accepted limits (not defects): the A-edits/B-commits gap (§4); hook-selected facts until an independent comparison (§5.1); `record` writes labelled, unsupported testimony (§4); local ledgers are always `unresolved` (§5.4).
+- **Cost profile (added 2026-09-09, from outside review; measured in step 5, Grok).** The scheme is
+  unmeasured on what it costs the agents that feed it, and "log every changed file" raises granularity.
+  Report, per project over the Phase A window: `retrace_log` calls per commit (from the ledger:
+  agent events between consecutive commit seals, by actor); tokens per call (tool input bytes at the
+  MCP boundary, counted not estimated, plus the `retrace` tool-schema bytes each harness loads at
+  handshake — a fixed per-session context cost); hook wall-clock p50/p95 from commit to sealed
+  response, and the pending-seal retry count; Worker classification time per seal (§5.3 deadline
+  budget). Publish the numbers with the histogram even if they are unflattering; a cost we cannot state
+  is a claim we cannot make. No target is set here — Jordan reads the numbers before step 6, like the
+  `unresolved` policy (§9 Phase C).
 - v3 candidates, out of scope: authenticated commit assertion (§2.7); harness-native trailers as named claim sources (`Agent-Logs-Url`, `Made with Cursor`, `Claude-Session`, `Assisted-by:`) — verified to exist at scale on 2026-09-08 (see ledger #2777).
