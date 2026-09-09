@@ -1,6 +1,10 @@
 # Commit trailer consistency — design note
 
-**Status:** draft v2.3, 2026-09-08 (late). Author: claude-code. Not built. v2.2 (6908d5d) closure review by
+**Status:** **v2.4 — ACCEPTED WITH NOTES, 2026-09-09** (coordinator, on Jordan's instruction; build order and tracked
+notes in §15). Author: claude-code. Not built. v2.3 (f68823e) closure review by Codex (#2801,
+evt_bffde560cfab4a46bb4fe106b8ace24b): R1, R4, R7, N1, N2, N3 CLOSED; R2, R5, R8 PARTIAL; four new findings
+(V23-1 High, V23-2..4 Medium), all folded here (§14e); Codex asked for no further broad redesign and named the
+signed-format/old-client contract as the one prerequisite before shadow — it is §15 step 1. v2.2 (6908d5d) closure review by
 Codex (#2737, evt_2a74375e7ec34c51877b5843654e00e1): R3, R6 CLOSED; R1, R2, R4, R5, R7, R8 PARTIAL; two new
 Highs (N1 signature selector, N2 context overwrites testimony) — dispositions in §14d. Phase 0 prerequisites
 landed as PR 27 (9c3156b). v2 (ee9c889) was reviewed by
@@ -106,7 +110,14 @@ effective amendments; touches of this same sha are excluded from the lower-bound
 classification of the same sha (the other producer, a pending retry, an offline re-derivation) reuses
 exactly that context and **never the first seal's seq**: an edit that lands between the first read and
 the first append is outside the window for everyone (Codex v2.1 R1; #2737 R1; T11, T26). Two concurrent
-first classifiers race on the insert; the loser re-reads the winner's context and recomputes.
+first classifiers race on the insert; the loser re-reads the winner's context and recomputes. A retry of any
+kind — the other producer, a pending drain, a re-run after a timed-out synchronous query — **reuses an
+existing context and never resets it**; "the drain creates the context" applies only when none exists
+(#2801 R1). **Paths the first producer did not submit** (#2801 V23-4): if a later producer's `F` contains a
+path `b` with no saved `lower(b)`, the classifier derives it deterministically as `previousCaptureTouch(b,
+before = U)` evaluated on the ledger **at the snapshot head `U`** (that prefix is immutable, so the answer
+is the same for everyone), caches it into the context row, and proceeds; it never defaults to the project
+start, never uses today's head, and never strands the second seal. T37.
 
 The context does **not** replace any producer's testimony (Codex #2737 R8/N2). Each producer's own
 submitted `F`, parents, raw message and claim stay in that producer's own signed event, and each producer
@@ -140,10 +151,11 @@ An event `E` witnesses path `p` for actor `A` iff all hold:
 `W(p)` = set of witnessing actors for `p`; `Wits` = all witness event ids; `Wall` = ∪ W(p).
 Note the asymmetry with v7 (Codex R5): v7 accepts `pinned:` **or** `assert:` edit evidence for an
 amendment; the classifier admits `pinned:` only, because an `assert:` edit's actor is the relaying
-credential's claim. A witness set here is therefore a *subset* of what an amendment may cite, never a
-superset — and it is a set of **candidates**: v7's final-ledger evaluation is authoritative for
-corrections, a recorded witness can be disqualified by a later amendment, and an edit sealed in
-`(U, first seal]` is outside the classifier's window yet inside v7's correction window (#2737 R5).
+credential's claim. A witness set here is therefore, *at the evaluation head*, a subset of what an amendment may cite —
+and it is a set of **candidates**: v7's final-ledger evaluation is authoritative for corrections, a
+recorded witness can be disqualified by a later amendment (so the subset relation can stop holding
+later), and an edit sealed in the open interval `(U, firstSeal.seq)` is outside the classifier's window
+yet inside v7's correction window (#2737 R5; #2801 cleanup).
 
 ### 3.4 What the causal chain is for
 
@@ -278,7 +290,9 @@ of the classifier. The threat model for v2 is an unmodified hook.
   one project's failures penalise another — #2737 R7). After 3 consecutive `deadline`/`store_error`
   outcomes within 5 min for a project, deliveries for that project skip synchronous classification and go
   straight to `202 pending` for 5 min; the first delivery after that is a half-open probe — success closes
-  the breaker, failure re-opens it. A breaker cannot force
+  the breaker, failure re-opens it. The probe is **claimed atomically** (compare-and-set on the breaker
+  row) so simultaneous deliveries do not all probe; an abandoned probe expires with the lease window; the
+  failure-window timestamps live in the row, not in process memory (#2801 R7 notes). A breaker cannot force
   a `conflicting` or an `unresolved` outcome — those require a completed read (NOOA 1: latency must
   never be a catch-all). While the breaker is open the hook path is unaffected (it is a different route
   and budget), so a commit made on a hooked machine is still classified synchronously; only the webhook's
@@ -326,30 +340,46 @@ caller values discarded):
 #2672), and the signed payload covers `actor.{type,id,on_behalf_of}` and `method.params` minus the
 reserved server stamps. Rules:
 
-1. **Format bump.** `retrace-producer-sig/2` excludes `claim_decision` from the signed params;
-   `retrace-producer-sig/1` verification is unchanged, so no historical payload is re-canonicalised
-   (a `/1` event that happened to carry a `claim_decision` key would still verify under `/1`). The
-   hook signs `/2` from this release; the verifier selects the rule from the event's recorded
-   `producer_sig.format`, which is hash-covered.
-2. **The producer signs its claim.** The hook's signed actor is always its claim `C`. The raw commit
-   message travels in `method.params.raw_message`, which **is** signed, so the claim is re-derivable
-   from signed input.
-3. **Strict withheld-verification rule** (the only transformation the verifier accepts). Reconstruct the
-   payload with `claim_decision.signed_actor` in place of the stored `actor` **only if all hold**:
-   the event is a commit seal (`action ∈ {committed, merged}`, `method.tool = "git"`) with a trusted
-   stamp (`sealed_by` in the project's trusted hook stamps, or `webhook:github`); the stored `actor`
-   equals **exactly** the producer system actor for that stamp (`system/retrace-git` for the hook stamp,
-   `system/webhook:github` for the webhook); `claim_decision.actor_written = "withheld"`;
-   `signed_actor` equals the claim re-derived by the verifier from the signed `raw_message`; and
-   `claim_decision.claim.{type,id}` equals `signed_actor`. Any other combination is verified against the
-   stored `actor` as today, and a mismatch is `invalid`. A hostile store therefore cannot re-point a
-   signed event for A at an arbitrary B: B must be the exact system actor, and the stored decision must be
-   consistent with the signed message (N1 negative cases, T32).
-4. **What the verdict says.** `producer_sig_verdict` gains a sibling `producer_signed_actor: {type,id}`
-   so a reader sees "signed by the producer as A; actor withheld by the server", never an implied
-   authentication of the rewritten actor. Server observations (`claim_decision`) are server-authored,
-   hash-chain-covered, and not producer-authenticated; tampering with them is detected by the chain, not
-   by the producer signature (T27 corrected). `intent` keeps the commit subject/body verbatim; nothing about the trailer is
+1. **Format bump, bound in the signed bytes.** `retrace-producer-sig/2` puts its version inside the
+   signed canonical payload (the existing `v` field), so a different format selects different signed
+   bytes and no unsigned selector can pick a verifier (#2801 R2). `/2` excludes from the signed params
+   exactly the **server annotation surface**: `sealed_by`, `producer_sig_verdict`, `relayed_by`,
+   `claim_decision`, and `producer_signed_actor` — the complete list is a named constant
+   (`RESERVED_METHOD_PARAMS_V2`) and adding to it later is a `/3`. `/1` keeps its exact old exclusions and
+   **no** substitution rule; an absent `producer_sig.format` means `/1`; an unknown format fails closed.
+2. **The producer signs its claim, with the inputs needed to re-derive it.** The hook's signed actor is
+   always its claim `C` **including `on_behalf_of`**. The signed params carry `raw_message` **and**
+   `author: { name, email }` (the inputs `resolveCommitActor` uses), so the verifier can re-derive the
+   full signed actor deterministically — including the human-fallback and `on_behalf_of = author.email`
+   cases (#2801 V23-2).
+3. **Strict withheld-verification rule** (the only transformation a `/2` verifier accepts). Reconstruct
+   the payload with `claim_decision.signed_actor` in place of the stored `actor` **only if all hold**: the
+   event is a commit seal (`action ∈ {committed, merged}`, `method.tool = "git"`) with a trusted stamp
+   (`sealed_by` in the project's trusted hook stamps, or `webhook:github`); the stored `actor` equals
+   **exactly** the producer system actor for that stamp (`system/retrace-git` for the hook stamp,
+   `system/webhook:github` for the webhook); **`claim_decision.decision.actor_written = "withheld"`** (one
+   path; the verifier never accepts a second selector field — #2801 N1); `signed_actor` equals, field for
+   field (`type`, `id`, `on_behalf_of`), the actor re-derived from the signed `raw_message` + `author`;
+   and `claim_decision.claim.{type,id}` equals `signed_actor.{type,id}`. Any other combination is
+   verified against the stored `actor` as today, and a mismatch is `invalid`. A hostile store therefore
+   cannot re-point a signed event for A at an arbitrary B (T32).
+4. **What the verdict says.** `producer_signed_actor` is a **derived verification result**, computed by
+   the verifier from the verified bytes — never a client-supplied echo. The Worker may persist it as a
+   `/2` server annotation (it is in the reserved list above, so it is outside the signed bytes); offline
+   verifiers recompute it and ignore the stored copy. A reader sees "signed by the producer as A; actor
+   withheld by the server", never an implied authentication of the rewritten actor. Server observations
+   (`claim_decision`) are hash-chain-covered and not producer-authenticated; tampering with them is
+   detected by the chain, not by the producer signature (T27).
+5. **Old-client ingress (#2801 V23-1 — the prerequisite before shadow).** A `/1`-signed commit seal
+   cannot receive any new annotation without breaking its signature. Rule: in **shadow** the Worker
+   seals a `/1` commit seal **byte-for-byte as submitted** (no `claim_decision`, actor unchanged) and
+   stores the computed decision only in the classification-context row for reporting; `/status`
+   counts such seals as `legacy_client`. In **enforce**, a `/1` commit seal from an assert credential is
+   refused with `426 Upgrade Required` naming the minimum CLI version; the hook treats 426 as **queued
+   and loud** (pending-seal file + stderr + non-zero exit — an explicit exception to the 4xx-is-not-
+   retryable rule, because upgrading fixes it) and `retrace doctor` reports the version gap. Unsigned
+   commit seals (no `producer_sig`) are annotated freely in both phases. Acceptance: T27 covers `/1`
+   ingress in shadow and enforce, and online + offline round trips for **every** `/2` server annotation. `intent` keeps the commit subject/body verbatim; nothing about the trailer is
 removed from the record. Older seals have no `claim_decision` block and are `legacy` to every consumer.
 
 ## 7. Consumers
@@ -364,21 +394,29 @@ what every consumer reads (Codex #2737 R5 asked for the narrower meaning to be e
   witness list) cover **every** file of the commit's canonical Git scope on the **primary seal**;
   otherwise the recorded status with `residual_files`. Missing Git context → `unavailable`, never
   inferred success.
-- **`may_downgrade`** — the mandatory veto, applied by *every* consumer before any green: `resolved_status
-  = supported` **and** no open `producer_disagreement` for the sha (unacknowledged, including
-  warning-level lone-producer findings — reconcile rule 4 unchanged) **and** no `facts_disagreement` or
-  `facts_mismatch` **and** the exact selected seal, matching canonical Git domain and windows, per-file
-  certificate as v7 §6 defines. A fully amended webhook-primary seal whose hook seal is still missing is
-  `resolved_status = supported`, `may_downgrade = false`: the gate stays red until the second producer
-  arrives or the disagreement is acknowledged.
+- **`may_downgrade`** — applies **only** to amendment-based transformations (#2801 V23-3): it decides
+  whether an effective amendment is allowed to downgrade a recorded `conflicting`/`unresolved` finding.
+  An ordinary commit — recorded `supported`, two agreeing producers, no amendment — is evaluated by the
+  recorded-report rules exactly as today and needs no certificate. When an amendment is present,
+  `may_downgrade = true` requires: `resolved_status = supported` **and** no open `producer_disagreement`
+  for the sha (unacknowledged, including warning-level lone-producer findings — reconcile rule 4
+  unchanged; **acknowledging that disagreement does lift this clause**, as rule 4 already allows) **and**
+  no `facts_disagreement`, no `facts_mismatch`, and **no `facts_unknown`** (unknown facts veto promotion
+  and leave a mandatory WARN; they are never treated as clean) **and** the exact selected seal, matching
+  canonical Git domain and windows, per-file certificate as v7 §6 defines. Independent failures
+  (`facts_*`, `missing_commit`, …) are aggregated after the transformation, never hidden by it. A fully
+  amended webhook-primary seal whose hook seal is still missing is `resolved_status = supported`,
+  `may_downgrade = false`: red until the second producer arrives or the disagreement is acknowledged.
 
 The primary seal of a sha is the **earliest trusted seal by seq** — a seal carrying a trusted hook stamp
 or `webhook:github`, never a pinned client commit claim — whichever producer made it, and it never
 changes when a later producer's seal arrives (T30). Reconcile's current hook-first selection migrates to
-this rule in the same change. An acknowledgement (`correction` tag) downgrades a `conflicting` verdict to
-*acknowledged* for reconcile's exit code exactly as for other kinds; it changes neither predicate, and the
-gate treats an acknowledged `conflicting` head as WARN, not PASS. Gate, reconcile and the NOOA audit read
-both predicates; none re-implements them.
+this rule in the same change. Two acknowledgements are different things (#2801 R5): acknowledging a **producer disagreement** satisfies
+rule 4 and can therefore flip `may_downgrade`; acknowledging a **`conflicting_claim`** changes neither
+predicate — it downgrades that finding to *acknowledged* (WARN) for reconcile's exit code, the gate's
+`HEAD delivery`, **and** the NOOA audit alike, so a raw `conflicting` never fails forever once a human has
+acknowledged it. Gate, reconcile and the audit read the same two predicates and the same ACK rules; none
+re-implements them.
 
 ### 7.1 Gate (`retrace doctor --gate`)
 
@@ -401,12 +439,16 @@ both predicates; none re-implements them.
   are compared on `claim` (must be equal — otherwise the pushed commit differs from the committed one:
   `producer_disagreement`, fail, as today), then on `decision.status`. Two `conflicting` seals whose
   actors are both system producers are **not** `producer_disagreement`; they are one `conflicting_claim`
-  with two observers. A `supported` vs `unresolved` pair can only arise if the second producer read a
-  different context — which §3.2's stored context prevents; if it happens anyway it is reported as
-  `producer_disagreement` with `reason: decision_divergence` and both contexts. A `shadow`/`enforce` or
-  `record`/`withhold` transition between the two seals is `reason: policy_divergence` (the digests differ),
-  informational, and the primary seal's decision governs (Codex R8). A legacy seal paired with a new one
-  is compared on claim only.
+  with two observers. Order of comparison (#2801 R8): **first** normalise and compare the two producers' submitted
+  facts and claims — different `F`/parents → `facts_disagreement`, different claim → `producer_disagreement`
+  on claim, and in either case the computed outcomes are **not** compared (a `supported` vs `unresolved`
+  pair with different `F` is a legitimate consequence of different facts, not a reproducibility failure).
+  **Only** when inputs and context match are outcomes compared, and a mismatch there is
+  `producer_disagreement` with `reason: decision_divergence` and both contexts — which §3.2's stored
+  context should make unreachable. One policy governs a sha (the policy frozen in its context, §3.2); a
+  change of the stored policy document between the two seals is reported as **current-policy drift**, a
+  separate observation, never as a second effective policy. A legacy seal paired with a new one is
+  compared on claim only.
 - Coverage for a withheld seal is evaluated against **the claim**, not the system actor, so `uncovered`
   and `misattributed` keep working when a team chooses `withhold` (otherwise all such commits would
   collapse into `non_agent`).
@@ -568,6 +610,17 @@ offline; a digest alone is not enough.
 36. Breaker: three failures for project X open X's breaker only; project Y deliveries still classify
     synchronously; after 5 min one X delivery probes half-open. Counters are read from the shared row, not
     process memory. (#2737 R7)
+37. First producer submits `F = {a}`; second submits `F = {a, b}` → `lower(b)` derived at the snapshot head
+    `U` and cached in the context; a pinned edit to `b` sealed after `U` is outside the window; a
+    pre-`U` edit to `b` after its previous touch is inside. Both orders. (#2801 V23-4)
+38. Old client: a `/1`-signed commit seal in shadow is stored byte-identical with no annotation and
+    counted `legacy_client`; in enforce it is refused with 426, the hook queues it loudly, doctor reports
+    the version gap; an unsigned commit seal is annotated in both phases. (#2801 V23-1)
+39. Signed-actor derivation: agent trailer with author email → `signed_actor.on_behalf_of` re-derived
+    from signed `author.email`; malformed trailer with human fallback → re-derived human actor; both
+    verify; dropping `author` from the signed params → `invalid`. (#2801 V23-2)
+40. Clean commit, two agreeing producers, `supported`, no amendment → passes the recorded-report rules
+    without any certificate; `may_downgrade` is never consulted. (#2801 V23-3)
 
 ## 12. Open questions for v2 review
 
@@ -615,6 +668,10 @@ instruction-precedence fix. The two onboarding defects Codex found remain separa
 
 ## 14b. v2 review disposition (NOOA/Nemotron 3 Ultra, run review_trailer_v2_20260909T035317Z)
 
+*Historical record of how earlier findings were answered at the time. Where an answer below describes a
+mechanism that later changed (e.g. "U = first seal's seq", "the context freezes F and the claim"), §3.2,
+§5–§7 as currently written govern; the tables are not alternative implementation instructions.*
+
 | Finding | Answer |
 |---|---|
 | H1 principal binding collapse | Accepted as a build prerequisite: issuance refuses duplicate `{project,type,id}`; `shared_actor_id` status/gate finding (§10; T21). Credential id is deliberately **not** part of actor equality. |
@@ -661,3 +718,53 @@ instruction-precedence fix. The two onboarding defects Codex found remain separa
 | N3 LOW — stale `attribution.*` names, legacy definition | Accepted: fixed (§4, §10). |
 | v3 note | Refined per review: tree for intent, full OID + principal/session + replay for completion, execution observer for "executed" (§2.7). |
 | Owner policy | `record` kept; rationale rewritten to the compatibility/presentation trade-off (§4). |
+
+## 14e. v2.3 closure review disposition (Codex, #2801)
+
+| Finding | Answer |
+|---|---|
+| R1, R4, R7, N1, N2, N3 CLOSED | Implementation notes carried into §3.2 (retry reuses context), §5.3 (atomic probe, expiring leases), §15. |
+| R2 PARTIAL / V23-1 HIGH — annotation surface and old-client rollout | Accepted: complete `/2` reserved annotation list; version bound in signed bytes; `producer_signed_actor` derived, not echoed; `/1` old-client ingress defined for shadow (byte-preserving, `legacy_client`) and enforce (426, queued loudly) (§6 rules 1, 4, 5; T27, T38). Prerequisite before shadow (§15 step 1). |
+| V23-2 MEDIUM — derivation inputs; selector path | Accepted: signed `author` + `raw_message`; full-actor comparison incl. `on_behalf_of`; single selector path `claim_decision.decision.actor_written` (§6 rules 2–3; T39). |
+| R5 PARTIAL / V23-3 MEDIUM — predicate scope, `facts_unknown`, ACK | Accepted: `may_downgrade` limited to amendment transformations; `facts_unknown` vetoes promotion with mandatory WARN; two ACK kinds distinguished, audit outcome defined (§7.0; T40). |
+| V23-4 MEDIUM — new path without saved lower bound | Accepted: deterministic derivation at snapshot head `U`, cached in context (§3.2; T37). |
+| R8 PARTIAL — comparison order, policy drift | Accepted: inputs compared first, outcomes only on matching inputs+context; one policy-used per sha, drift separate (§7.2). |
+| Cleanup | Open interval `(U, firstSeal.seq)`; subset qualified by evaluation head; §14b–d marked historical. |
+| Buildability | Codex: bounded implementation PR is supported; not approved for live shadow *unchanged* because of V23-1. v2.4 folds V23-1..4; §15 orders the build so the signed-format contract lands and is round-trip-tested before the shadow flag is ever on. |
+
+## 15. Acceptance, build order and tracked notes
+
+**Accepted with notes (2026-09-09).** Reviewed across four rounds by Codex (v1, v2.1, v2.2, v2.3), NOOA/Nemotron
+3 Ultra (v1, v2) and Grok (v1). No reviewer requests further redesign; the remaining items are
+implementation contracts and fixtures, listed here so the builder and the reviewer of the code share one list.
+Grok's review of v2.4 (from 2026-09-11) is welcome and may reopen this section; it does not block step 1.
+
+**Build order (each step is its own PR, Codex reviews the code, Claude reviews last):**
+
+1. **Signed-format contract** (§6): `retrace-producer-sig/2` with the reserved annotation constant and
+   version-in-payload; hook signs `/2` with `raw_message` + `author` + parents; verifier dispatch (`/1`
+   unchanged, absent = `/1`, unknown = fail closed); `producer_signed_actor` derived; old-client ingress
+   for shadow and enforce; T27, T32, T38, T39 as tests. **Must merge and deploy before step 3.**
+2. **Credential `principal`** and never-reissue rule (§10; PR 27 follow-up); `RETRACE_GITHUB_PROJECTS`
+   → stored project policy document with digest (§9); `npm run migrate` switched to the query endpoint.
+3. **Classifier in shadow** (§3–§6, `RETRACE_TRAILER_POLICY=shadow`): classification-context table with
+   insert-if-absent and lower-bound derivation (T26, T37); evidence read via `eventsReferencingArtifacts`;
+   `claim_decision` on `/2`-signed and unsigned commit seals only; `/1` seals byte-preserved and counted.
+   Webhook pending path and per-project breaker (§5.3; T18, T19, T36). No actor rewriting.
+4. **Consumers** (§7): `resolved_status`, `may_downgrade`, `claim_status` on every verdict,
+   `conflicting_claim`, `facts_disagreement`, `facts_mismatch`/`facts_unknown`, three-way comparison with
+   inputs compared first, ACK rules, audit alignment; gate `pending seals` already landed (PR 26).
+5. **Phase A measurement** ≥ 7 days (Grok): status histogram on `retrace` and `boxing-rpg`; every
+   `conflicting` case read by hand; `legacy_client` count must be zero before step 6.
+6. **Enforce** (`RETRACE_TRAILER_POLICY=enforce`): withhold on `conflicting`; 426 for `/1` commit seals;
+   `unresolved` stays `record` (Jordan's decision) with the per-project `withhold` switch.
+
+**Tracked notes (not blocking acceptance; each must be closed by the PR that touches its area):**
+
+- Breaker: atomic half-open claim, lease expiry, failure-window persistence, drain/breaker interaction (§5.3).
+- `facts_mismatch` diff profile: root commits, copies/renames, first-parent merges, incomplete webhook parent data (§5.1).
+- Fixture set: T35 different-`F` in both orders; T37 boundary for the new path; T11 both orders under one context.
+- Reconcile's hook-first primary selection migrates to earliest-trusted in the step-4 PR, with a test on an existing repo export.
+- §14b–d are historical; a builder who finds prose contradicting §3–§7 follows §3–§7 and files the discrepancy.
+- Known, accepted limits (not defects): the A-edits/B-commits gap (§4); hook-selected facts until an independent comparison (§5.1); `record` writes labelled, unsupported testimony (§4); local ledgers are always `unresolved` (§5.4).
+- v3 candidates, out of scope: authenticated commit assertion (§2.7); harness-native trailers as named claim sources (`Agent-Logs-Url`, `Made with Cursor`, `Claude-Session`, `Assisted-by:`) — verified to exist at scale on 2026-09-08 (see ledger #2777).
