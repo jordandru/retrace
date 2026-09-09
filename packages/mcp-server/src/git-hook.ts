@@ -286,7 +286,7 @@ async function logCommit(repo: string, sha: string, cfg: Cfg, live = false): Pro
   guardRemoteWrite(repo, cfg);
   let input = commitToEvent(repo, sha, cfg, live);
   const keyFile = resolveHookProducerKeyFile({ credential: cfg.credential });
-  if (keyFile) input = await sealForAppend(input, { privateKey: loadProducerPrivateKeyFromFile(keyFile), format: PRODUCER_SIG_FORMAT_V2 });
+  if (keyFile) input = await sealForAppend(input, { privateKey: loadProducerPrivateKeyFromFile(keyFile), remoteUrl: cfg.url, format: PRODUCER_SIG_FORMAT_V2 });
   const store = cfg.url ? new RemoteStore(cfg.url, cfg.token, { deadlineMs: hookDeadlineMs() }) : makeStore();
   return store instanceof RemoteStore ? store.append(input) : appendEvent(store, input);
 }

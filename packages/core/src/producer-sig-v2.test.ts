@@ -78,9 +78,9 @@ test("parseTrailerPolicy defaults to off", () => {
   assert.equal(parseTrailerPolicy("enforce"), "enforce");
 });
 
-test("RESERVED_METHOD_PARAMS_V2 is the complete /2 annotation surface; /1 exclusions are unchanged", () => {
+test("RESERVED_METHOD_PARAMS_V2 is /1's four plus claim_decision and producer_signed_actor", () => {
   assert.deepEqual([...RESERVED_METHOD_PARAMS_V2], [
-    "sealed_by", "producer_sig_verdict", "relayed_by", "claim_decision", "producer_signed_actor",
+    "sealed_by", "producer_sig_verdict", "relayed_by", "caused_by_problem", "claim_decision", "producer_signed_actor",
   ]);
   assert.deepEqual([...RESERVED_METHOD_PARAMS], ["sealed_by", "producer_sig_verdict", "relayed_by", "caused_by_problem"]);
 });
@@ -101,7 +101,8 @@ test("T27: /2 round trip — version is inside signed bytes; /2 annotations leav
         ...signed.method!.params,
         [SEALED_BY_PARAM]: "assert:git hook (assert)",
         [PRODUCER_SIG_VERDICT_PARAM]: "verified",
-        [CLAIM_DECISION_PARAM]: { policy: "trailer-consistency/1", shadow: true },
+        caused_by_problem: "missing",
+        [CLAIM_DECISION_PARAM]: { policy: "trailer-consistency/1", shadow: true, signed_actor: { type: "agent", id: "claude-code", on_behalf_of: "jordan@example.com" } },
         [PRODUCER_SIGNED_ACTOR_PARAM]: { type: "human", id: "forged@example.com" },
       },
     },
@@ -112,6 +113,15 @@ test("T27: /2 round trip — version is inside signed bytes; /2 annotations leav
   assert.notEqual(result.signed_actor?.id, "forged@example.com", "stored producer_signed_actor is ignored");
   const { event } = await appendEvent(new MemStore(), annotated);
   assert.equal(await verifyProducerSig(event, key.publicKey), true, "offline recompute ignores stored producer_signed_actor");
+});
+
+test("/2 event that receives a caused_by_problem stamp still verifies", async () => {
+  const key = await generateSigningKey();
+  const signed = await signProducer(commitInput({ caused_by: "evt_" + "a".repeat(32) }), key.privateKey, { format: PRODUCER_SIG_FORMAT_V2 });
+  const { event } = await appendEvent(new MemStore(), signed);
+  assert.ok((event.method?.params as Record<string, unknown>)?.caused_by_problem, "precondition: appendEvent stamped caused_by_problem");
+  assert.ok(event.tags?.includes("caused_by:unverified"));
+  assert.equal(await verifyProducerSig(event, key.publicKey), true);
 });
 
 test("T27: /2 tampered signed field is invalid; /1 legacy commit verifies under the /1 rule", async () => {

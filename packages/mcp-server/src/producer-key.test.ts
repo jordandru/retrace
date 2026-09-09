@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { EventInput, generateSigningKey, publicFromPrivate, verifyProducerSig } from "@retrace-dev/core";
+import { EventInput, generateSigningKey, PRODUCER_SIG_FORMAT_V2, publicFromPrivate, verifyProducerSig } from "@retrace-dev/core";
 import { keyPath } from "./keys.js";
 import {
   defaultProducerKeyPath, ensureProducerKey, isExportIssuerKeyPath,
@@ -88,6 +88,22 @@ test("sealForAppend refuses a remote whose GET /api schema lacks producer_sig", 
   const okFetch = (async () => ({ ok: true, json: async () => ({ schema: { event: ["producer_sig"] } }) })) as unknown as typeof fetch;
   const signed = await sealForAppend(sample, { privateKey: kp.privateKey, remoteUrl: "https://new.example.workers.dev", fetchApi: okFetch });
   assert.ok(signed.producer_sig);
+  assert.equal(signed.producer_sig?.format, undefined, "a Worker that does not advertise producer-sig/2 stays on /1");
+});
+
+test("sealForAppend signs /2 only when the Worker advertises producer-sig/2; otherwise falls back to /1", async () => {
+  const kp = await generateSigningKey();
+  resetProducerSigSchemaCheck();
+  const v1Fetch = (async () => ({ ok: true, json: async () => ({ schema: { event: ["producer_sig"] }, capabilities: ["attribution-v7"] }) })) as unknown as typeof fetch;
+  const v1 = await sealForAppend(sample, { privateKey: kp.privateKey, remoteUrl: "https://pre-v2.example.workers.dev", fetchApi: v1Fetch, format: PRODUCER_SIG_FORMAT_V2 });
+  assert.equal(v1.producer_sig?.format, undefined);
+  assert.equal(await verifyProducerSig(v1, publicFromPrivate(kp.privateKey)), true);
+
+  resetProducerSigSchemaCheck();
+  const v2Fetch = (async () => ({ ok: true, json: async () => ({ schema: { event: ["producer_sig"] }, capabilities: ["attribution-v7", "producer-sig/2"] }) })) as unknown as typeof fetch;
+  const v2 = await sealForAppend(sample, { privateKey: kp.privateKey, remoteUrl: "https://v2.example.workers.dev", fetchApi: v2Fetch, format: PRODUCER_SIG_FORMAT_V2 });
+  assert.equal(v2.producer_sig?.format, PRODUCER_SIG_FORMAT_V2);
+  assert.equal(await verifyProducerSig(v2, publicFromPrivate(kp.privateKey)), true);
 });
 
 test("defaultProducerKeyPath is under producer-keys, not signing-key.json", () => {

@@ -39,7 +39,10 @@ export const PRODUCER_SIG_V2_MIN_CLI_VERSION = "0.1.8";
 export const PRODUCER_SIG_VERDICT_PARAM = "producer_sig_verdict";
 /** /2 server annotation: the actor the verifier actually checked, never a client-supplied echo. */
 export const PRODUCER_SIGNED_ACTOR_PARAM = "producer_signed_actor";
-/** Classifier observation (hash-covered, not producer-authenticated). Reserved on /2; not written in this step. */
+/** Classifier observation (hash-covered, not producer-authenticated). Reserved on /2; not written in this step.
+ *  Rule 3 will reconstruct the payload from `claim_decision.signed_actor: { type, id, on_behalf_of? }` — that
+ *  field is not in §6's claim_decision block listing; the PR flags the documented shape rather than silently
+ *  rewriting the design note. Distinct from `producer_signed_actor` (a derived method.params annotation). */
 export const CLAIM_DECISION_PARAM = "claim_decision";
 
 export type TrailerPolicy = "off" | "shadow" | "enforce";
@@ -60,13 +63,14 @@ export type ProducerSignedActor = Pick<Actor, "type" | "id"> & { on_behalf_of?: 
 export const RESERVED_TAG_PREFIX = "caused_by:";
 export const RESERVED_METHOD_PARAMS = ["sealed_by", "producer_sig_verdict", "relayed_by", "caused_by_problem"] as const;
 /**
- * Complete /2 server-annotation surface. Adding a name later is retrace-producer-sig/3
- * (docs/design/commit-trailer-consistency.md §6 rule 1). /1 keeps RESERVED_METHOD_PARAMS unchanged.
+ * Complete /2 server-annotation surface: /1's four stamps plus `claim_decision` and
+ * `producer_signed_actor`. `caused_by_problem` is still stamped by appendEvent (store.ts) and MUST stay
+ * unsigned or every /2 event with a caused_by problem verifies invalid. §6 rule 1 omitted it — flagged
+ * in the PR for design-text correction; this constant is the superset, not a silent rewrite of the note.
+ * Adding a name later is retrace-producer-sig/3.
  */
 export const RESERVED_METHOD_PARAMS_V2 = [
-  "sealed_by",
-  "producer_sig_verdict",
-  "relayed_by",
+  ...RESERVED_METHOD_PARAMS,
   "claim_decision",
   "producer_signed_actor",
 ] as const;
@@ -82,7 +86,7 @@ export function reservedMethodParams(format: ProducerSigFormat): readonly string
   return format === PRODUCER_SIG_FORMAT_V2 ? RESERVED_METHOD_PARAMS_V2 : RESERVED_METHOD_PARAMS;
 }
 
-/** Absent producer_sig.format means /1. Unknown format is not a ProducerSigFormat. */
+/** Absent producer_sig.format means /1. Unknown format fails closed as invalid — never a /1 fallback. */
 export function producerSigFormatOf(e: { producer_sig?: ProducerSig | null }): ProducerSigFormat | "unknown" | undefined {
   if (!e.producer_sig) return undefined;
   const f = e.producer_sig.format;
