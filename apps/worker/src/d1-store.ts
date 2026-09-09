@@ -1,4 +1,4 @@
-import { ChainHead, Event, EventStore, HeadMovedError, HistoryQuery, HistoryPage, Share, clampHistoryLimit, historyPageFromNewestFirst, likeContains } from "@retrace-dev/core";
+import { ArtifactIndexQuery, ArtifactIndexResult, ChainHead, Event, EventStore, HeadMovedError, HistoryQuery, HistoryPage, PendingDelivery, Share, artifactIndexRows, clampHistoryLimit, eventsReferencingArtifactsSql, historyPageFromNewestFirst, likeContains } from "@retrace-dev/core";
 
 export class D1Store implements EventStore {
   constructor(private db: D1Database) {}
@@ -21,6 +21,11 @@ export class D1Store implements EventStore {
         )
         .bind(e.id, e.project, e.seq, e.timestamp, e.received_at, e.actor.type, e.actor.id, e.action, e.caused_by ?? null, e.idempotency_key ?? null, e.prev_hash, e.hash, JSON.stringify(e), ...gp),
       ...e.artifacts.map((a) => this.db.prepare(`INSERT OR IGNORE INTO event_artifacts (event_id, project, artifact_id) SELECT ?, ?, ?${where}`).bind(e.id, e.project, a.id, ...gp)),
+      ...artifactIndexRows(e).map((r) =>
+        this.db
+          .prepare(`INSERT OR IGNORE INTO event_artifact_index (project, artifact_key, seq, actor_type, actor_id, role, sealed_by) SELECT ?, ?, ?, ?, ?, ?, ?${where}`)
+          .bind(r.project, r.artifact_key, r.seq, r.actor_type, r.actor_id, r.role, r.sealed_by, ...gp),
+      ),
     ];
   }
 
@@ -36,7 +41,7 @@ export class D1Store implements EventStore {
     if (audit.project === project) throw new Error("audit event must not live in the project being deleted");
     // Keep every project-owned row in this guarded transaction. In particular, leaving export_cache behind would
     // retain the deleted ledger bytes and could serve them as a stale bundle if the project name were recreated.
-    const tables = ["events", "event_artifacts", "shares", "checkpoints", "export_cache"];
+    const tables = ["events", "event_artifacts", "event_artifact_index", "pending_deliveries", "shares", "checkpoints", "export_cache"];
     const headMatches = {
       sql: "EXISTS (SELECT 1 FROM events WHERE project = ? AND seq = ? AND hash = ?) AND NOT EXISTS (SELECT 1 FROM events WHERE project = ? AND seq > ?)",
       params: [project, expectedHead.seq, expectedHead.hash, project, expectedHead.seq],
@@ -104,5 +109,45 @@ export class D1Store implements EventStore {
     const sql = `SELECT DISTINCT e.body, e.seq FROM events e ${join} WHERE ${where.join(" AND ")} ORDER BY e.seq DESC LIMIT ?`;
     const { results } = await this.db.prepare(sql).bind(...params, limit + 1).all<{ body: string }>();
     return historyPageFromNewestFirst(results.map((r) => JSON.parse(r.body) as Event), limit);
+  }
+
+  async eventsReferencingArtifacts(q: ArtifactIndexQuery, now: () => number = Date.now): Promise<ArtifactIndexResult> {
+    if (now() >= q.deadline) return { ok: false, reason: "deadline" };
+    if (!q.artifact_keys.length) return { ok: true, events: [] };
+    try {
+      const { sql, params } = eventsReferencingArtifactsSql(q);
+      const { results } = await this.db.prepare(sql).bind(...params).all<{ body: string }>();
+      if (now() >= q.deadline) return { ok: false, reason: "deadline" };
+      if (results.length > q.row_cap) return { ok: false, reason: "budget" };
+      const seen = new Set<string>();
+      const events: Event[] = [];
+      for (const r of results) {
+        const e = JSON.parse(r.body) as Event;
+        if (seen.has(e.id)) continue;
+        seen.add(e.id);
+        events.push(e);
+      }
+      return { ok: true, events };
+    } catch {
+      return { ok: false, reason: "store_error" };
+    }
+  }
+
+  async insertPendingDelivery(row: PendingDelivery) {
+    await this.db.prepare(
+      "INSERT OR REPLACE INTO pending_deliveries (delivery_id, project, raw_body, received_at) VALUES (?, ?, ?, ?)",
+    ).bind(row.delivery_id, row.project, row.raw_body, row.received_at).run();
+  }
+
+  async listPendingDeliveriesOlderThan(received_at: string): Promise<PendingDelivery[]> {
+    const { results } = await this.db.prepare(
+      "SELECT delivery_id, project, raw_body, received_at FROM pending_deliveries WHERE received_at < ? ORDER BY received_at ASC",
+    ).bind(received_at).all<PendingDelivery>();
+    return results;
+  }
+
+  async deletePendingDelivery(delivery_id: string): Promise<boolean> {
+    const r = await this.db.prepare("DELETE FROM pending_deliveries WHERE delivery_id = ?").bind(delivery_id).run();
+    return (r.meta.changes ?? 0) > 0;
   }
 }

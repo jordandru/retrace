@@ -4,7 +4,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, 
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseCredentials } from "@retrace-dev/core";
-import { DEFAULT_HARNESSES, planAgentCredential, renderAgentOnboarding, planTeam, planCredentials, validateSpec, teamsIn, appendCredentials, writeSecretFile, readCredentialsFile, gitHookActorId, ciActorId, containingGitTree, defaultOnboardingFile, main, mintProducerKeys, producerKeyFileName, shouldMintProducerKey, TeamSpec } from "./admin.js";
+import { DEFAULT_HARNESSES, planAgentCredential, renderAgentOnboarding, planTeam, planCredentials, validateSpec, teamsIn, appendCredentials, writeSecretFile, readCredentialsFile, gitHookActorId, ciActorId, containingGitTree, defaultOnboardingFile, main, mintProducerKeys, producerKeyFileName, shouldMintProducerKey, findLivePinned, retireLivePinned, duplicateLivePinnedError, TeamSpec } from "./admin.js";
 
 /** deterministic "randomness": counter-filled buffers, distinct per call */
 const fakeRand = () => { let n = 0; return (len: number) => Buffer.alloc(len, ++n); };
@@ -243,7 +243,7 @@ test("add-agent appends one pinned OpenClaw credential and emits NemoClaw manage
   assert.match(doc, /does not claim producer signatures/);
   assert.equal(statSync(onboarding).mode & 0o777, 0o600);
   assert.match(lines.join("\n"), /wrangler secret put RETRACE_CREDENTIALS/);
-  await assert.rejects(() => main(argv, {}, () => {}), /already holds an agent\/openclaw credential/);
+  await assert.rejects(() => main(argv, {}, () => {}), /refusing to mint a second live pinned agent\/openclaw/);
 });
 
 test("add-agent nooa: unlike openclaw, gets a producer key and a stdio retrace-mcp entry that signs", async () => {
@@ -279,4 +279,55 @@ test("add-agent validates a single member/harness and requires an existing proje
   assert.throws(() => planAgentCredential({ project: "acme-app", member: "alice@acme.dev", harness: "unknown" as any, url: "https://retrace.example" }), /unknown harness/);
   const cred = planAgentCredential({ project: "acme-app", member: "alice@acme.dev", harness: "openclaw", url: "https://retrace.example" }, fakeRand());
   assert.match(renderAgentOnboarding({ project: "acme-app", member: "alice@acme.dev", harness: "openclaw", url: "https://retrace.example" }, cred), /RETRACE_MCP_ENABLED=1/);
+});
+
+test("issuance guard: a second live pinned credential for the same {project, type, id} is refused even for another member", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "retrace-admin-dup-pin-"));
+  const file = join(dir, "creds.json");
+  const keysDir = join(dir, "producer-keys");
+  appendCredentials(file, [], planCredentials(spec, fakeRand()));
+  const live = findLivePinned(readCredentialsFile(file), "acme-app", { type: "agent", id: "codex" });
+  assert.ok(live);
+  assert.match(duplicateLivePinnedError("acme-app", { type: "agent", id: "codex" }, live!), /second live pinned agent\/codex/);
+  await assert.rejects(
+    () => main(["add-agent", "acme-app", "--member", "carol@acme.dev", "--harness", "codex", "--url", "https://retrace.example", "--credentials-file", file, "--producer-keys-dir", keysDir], {}, () => {}),
+    /refusing to mint a second live pinned agent\/codex/,
+  );
+  assert.equal(readCredentialsFile(file).filter((c) => c.actor.id === "codex" && !c.retired_at).length, 2, "alice+bob from new-team unchanged");
+});
+
+test("issuance guard: retire-agent then add-agent mints a replacement for the same {project, type, id}", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "retrace-admin-retire-"));
+  const file = join(dir, "creds.json");
+  const keysDir = join(dir, "producer-keys");
+  const onboarding = join(dir, "nooa.md");
+  appendCredentials(file, [], planCredentials(spec, fakeRand()));
+  const before = readCredentialsFile(file).filter((c) => c.actor.id === "openclaw");
+  assert.equal(before.length, 0);
+
+  await assert.rejects(
+    () => main(["add-agent", "acme-app", "--member", "alice@acme.dev", "--harness", "codex", "--url", "https://retrace.example", "--credentials-file", file, "--producer-keys-dir", keysDir], {}, () => {}),
+    /refusing to mint a second live pinned agent\/codex/,
+  );
+
+  const dry: string[] = [];
+  assert.equal(await main(["retire-agent", "acme-app", "--harness", "codex", "--credentials-file", file, "--dry-run"], {}, (s) => dry.push(s)), 0);
+  assert.match(dry.join("\n"), /would retire/);
+  assert.ok(findLivePinned(readCredentialsFile(file), "acme-app", { type: "agent", id: "codex" }), "dry-run does not retire");
+
+  const lines: string[] = [];
+  assert.equal(await main(["retire-agent", "acme-app", "--harness", "codex", "--credentials-file", file], {}, (s) => lines.push(s)), 0);
+  assert.match(lines.join("\n"), /retired 2 live pinned agent\/codex/);
+  assert.equal(findLivePinned(readCredentialsFile(file), "acme-app", { type: "agent", id: "codex" }), undefined);
+  assert.ok(readCredentialsFile(file).some((c) => c.actor.id === "codex" && c.retired_at));
+
+  assert.equal(await main(["add-agent", "acme-app", "--member", "carol@acme.dev", "--harness", "codex", "--url", "https://retrace.example", "--credentials-file", file, "--producer-keys-dir", keysDir, "--out", onboarding], {}, () => {}), 0);
+  const added = readCredentialsFile(file).at(-1)!;
+  assert.deepEqual(added.actor, { type: "agent", id: "codex", on_behalf_of: "carol@acme.dev" });
+  assert.equal(added.retired_at, undefined);
+  assert.ok(findLivePinned(readCredentialsFile(file), "acme-app", { type: "agent", id: "codex" }));
+});
+
+test("retireLivePinned throws when nothing live covers the project", () => {
+  assert.throws(() => retireLivePinned([], "acme-app", { type: "agent", id: "codex" }, "2026-09-08T00:00:00.000Z"), /no live pinned agent\/codex/);
 });

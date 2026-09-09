@@ -1,6 +1,10 @@
 /** Local SQLite store using Node's built-in node:sqlite (Node >= 22.13). No native deps. */
 import { DatabaseSync } from "node:sqlite";
-import { ChainHead, Event, EventStore, HeadMovedError, HistoryQuery, HistoryPage, SCHEMA_SQL, Share, clampHistoryLimit, historyPageFromNewestFirst, likeContains } from "@retrace-dev/core";
+import {
+  ArtifactIndexQuery, ArtifactIndexResult, BACKFILL_ARTIFACT_INDEX_SQL, ChainHead, Event, EventStore, HeadMovedError,
+  HistoryQuery, HistoryPage, PendingDelivery, SCHEMA_SQL, Share, artifactIndexRows, clampHistoryLimit,
+  eventsReferencingArtifactsSql, historyPageFromNewestFirst, likeContains,
+} from "@retrace-dev/core";
 
 export class SqliteStore implements EventStore {
   private db: DatabaseSync;
@@ -8,6 +12,15 @@ export class SqliteStore implements EventStore {
     this.db = new DatabaseSync(path);
     this.db.exec("PRAGMA journal_mode = WAL;");
     this.db.exec(SCHEMA_SQL);
+    this.backfillArtifactIndexOnce();
+  }
+
+  /** One-time: if events exist and the §3.5 index is empty, populate it from stored bodies. */
+  private backfillArtifactIndexOnce() {
+    const events = Number((this.db.prepare("SELECT COUNT(*) AS n FROM events").get() as { n: number }).n);
+    const indexed = Number((this.db.prepare("SELECT COUNT(*) AS n FROM event_artifact_index").get() as { n: number }).n);
+    if (events === 0 || indexed > 0) return;
+    this.db.exec(BACKFILL_ARTIFACT_INDEX_SQL);
   }
 
   private headSync(project: string): ChainHead | null {
@@ -26,8 +39,12 @@ export class SqliteStore implements EventStore {
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     const insArt = this.db.prepare("INSERT OR IGNORE INTO event_artifacts (event_id, project, artifact_id) VALUES (?, ?, ?)");
+    const insIdx = this.db.prepare(
+      "INSERT OR IGNORE INTO event_artifact_index (project, artifact_key, seq, actor_type, actor_id, role, sealed_by) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    );
     ins.run(e.id, e.project, e.seq, e.timestamp, e.received_at, e.actor.type, e.actor.id, e.action, e.caused_by ?? null, e.idempotency_key ?? null, e.prev_hash, e.hash, JSON.stringify(e));
     for (const a of e.artifacts) insArt.run(e.id, e.project, a.id);
+    for (const r of artifactIndexRows(e)) insIdx.run(r.project, r.artifact_key, r.seq, r.actor_type, r.actor_id, r.role, r.sealed_by);
   }
 
   async insert(e: Event) {
@@ -44,7 +61,7 @@ export class SqliteStore implements EventStore {
   /** Deletes + audit insert in one transaction (B3); the local server's DELETE /projects/:p needs this. The head
    *  check runs inside the same transaction, so the audit can only ever commit against the head it describes. */
   async deleteProject(project: string, audit: Event, expectedHead: ChainHead) {
-    const tables = ["events", "event_artifacts", "shares"];
+    const tables = ["events", "event_artifacts", "event_artifact_index", "pending_deliveries", "shares"];
     this.db.exec("BEGIN");
     try {
       const head = this.headSync(project); // synchronous: the transaction never yields between check and deletes
@@ -113,5 +130,43 @@ export class SqliteStore implements EventStore {
     const sql = `SELECT DISTINCT e.body, e.seq FROM events e ${join} WHERE ${where.join(" AND ")} ORDER BY e.seq DESC LIMIT ?`;
     const rows = this.db.prepare(sql).all(...params, limit + 1) as { body: string }[];
     return historyPageFromNewestFirst(rows.map((r) => JSON.parse(r.body) as Event), limit);
+  }
+
+  async eventsReferencingArtifacts(q: ArtifactIndexQuery, now: () => number = Date.now): Promise<ArtifactIndexResult> {
+    if (now() >= q.deadline) return { ok: false, reason: "deadline" };
+    if (!q.artifact_keys.length) return { ok: true, events: [] };
+    try {
+      const { sql, params } = eventsReferencingArtifactsSql(q);
+      const rows = this.db.prepare(sql).all(...params) as { body: string }[];
+      if (now() >= q.deadline) return { ok: false, reason: "deadline" };
+      if (rows.length > q.row_cap) return { ok: false, reason: "budget" };
+      const seen = new Set<string>();
+      const events: Event[] = [];
+      for (const r of rows) {
+        const e = JSON.parse(r.body) as Event;
+        if (seen.has(e.id)) continue;
+        seen.add(e.id);
+        events.push(e);
+      }
+      return { ok: true, events };
+    } catch {
+      return { ok: false, reason: "store_error" };
+    }
+  }
+
+  async insertPendingDelivery(row: PendingDelivery) {
+    this.db.prepare(
+      "INSERT OR REPLACE INTO pending_deliveries (delivery_id, project, raw_body, received_at) VALUES (?, ?, ?, ?)",
+    ).run(row.delivery_id, row.project, row.raw_body, row.received_at);
+  }
+
+  async listPendingDeliveriesOlderThan(received_at: string): Promise<PendingDelivery[]> {
+    return this.db.prepare(
+      "SELECT delivery_id, project, raw_body, received_at FROM pending_deliveries WHERE received_at < ? ORDER BY received_at ASC",
+    ).all(received_at) as unknown as PendingDelivery[];
+  }
+
+  async deletePendingDelivery(delivery_id: string): Promise<boolean> {
+    return this.db.prepare("DELETE FROM pending_deliveries WHERE delivery_id = ?").run(delivery_id).changes > 0;
   }
 }
