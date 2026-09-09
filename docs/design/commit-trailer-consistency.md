@@ -135,13 +135,13 @@ reproducible offline from an export.
   trailer, uncorroborated at read head N". Consumers show it as a claim (§7).
 - `"withhold"` — write the producer system actor; the claim is preserved in `attribution.claim`.
 
-Recommendation and why: ship **`record`** as the default for the first release. Today most Boxing-RPG
+**Decided (Jordan, 2026-09-08): `record` is the default for the first release.** Why: Today most Boxing-RPG
 commits and a fair share of retrace commits are `unresolved` (their agents logged no file edits); a
 silent flip to system seals would erase `uncovered` and `misattributed` from reconcile for all of them
 unless every consumer is changed in the same release. `record` keeps every existing finding, adds the
 truthful label everywhere the seal is shown, and the `withhold` switch exists from day one for a team
-that wants it. This is the one v2 decision that is Jordan's to make (§12 Q1); either value is
-implementable with the same code. `contradicted` is **always** withheld; there is no policy to write a
+that wants it. Either value is implementable with the same code; to overrule, set
+`attribution.unresolved_claims: "withhold"` per project, or change this default in a later release. `contradicted` is **always** withheld; there is no policy to write a
 WHO the ledger itself refutes.
 
 ## 5. Where it runs
@@ -358,7 +358,7 @@ the per-project `attribution.unresolved_claims` lives in `.retrace.json` beside 
 
 ## 12. Open questions for v2 review
 
-- **Q1 (Jordan's call):** default for `unresolved` — `record` (recommended, §4) or `withhold`?
+- **Q1 — closed.** Default for `unresolved` is `record` (Jordan, 2026-09-08, §4); `withhold` stays a per-project switch.
 - **Q2:** window upper bound `U` = first existing seal of the sha (§3.2). Any case where the webhook
   legitimately sees a *different* commit under the same sha? (None known — sha binds content.)
 - **Q3:** pending-drain cadence: reuse the hourly cron, or a dedicated 5-minute cron for
