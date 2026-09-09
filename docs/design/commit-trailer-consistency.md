@@ -343,8 +343,11 @@ caller values discarded):
 `actor` is `C` or the producer system actor per §4. `sealed_by` is unchanged (`assert:git hook (assert)`
 / `webhook:github`).
 
-**Producer signatures (Codex v2.1 R2; #2737 R2/N1).** Hook seals are producer-signed (95 of 144 at
-#2672), and the signed payload covers `actor.{type,id,on_behalf_of}` and `method.params` minus the
+**Producer signatures (Codex v2.1 R2; #2737 R2/N1).** Correction (v2.5.1, 2026-09-09): hook seals were **never**
+producer-signed before 2026-09-09 — 0 of 164 at #2913; the `retrace-git` credential had no registered key, so the
+"95 of 144 at #2672" stated in v2.2–v2.5 was wrong (it counted pinned MCP events). The hook key was provisioned on
+2026-09-09 (kid `39d71efbae046dcc`, public key on the credential, `RETRACE_CREDENTIALS` updated); hook seals sign
+from that point, and step 5's histogram must report the signed/unsigned split for hook seals. The signed payload covers `actor.{type,id,on_behalf_of}` and `method.params` minus the
 reserved server stamps. Rules:
 
 1. **Format bump, bound in the signed bytes.** `retrace-producer-sig/2` puts its version inside the
