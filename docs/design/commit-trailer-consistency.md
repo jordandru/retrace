@@ -811,4 +811,10 @@ Grok's review of v2.4 (from 2026-09-11) is welcome and may reopen this section; 
   budget). Publish the numbers with the histogram even if they are unflattering; a cost we cannot state
   is a claim we cannot make. No target is set here — Jordan reads the numbers before step 6, like the
   `unresolved` policy (§9 Phase C).
+- **Operational (found 2026-09-09, aeab15b drop):** git runs hooks from the *common* `.git/hooks`, so every linked
+  worktree's commits are sealed by the **main checkout's built `dist`**, not the worktree's build. Main's dist was
+  built four minutes before PR 26 merged, so all worktrees ran a hook without the pending-seal queue for ~8 hours.
+  Rule: after merging any hook change, rebuild the main checkout's dist; for this repo, step 1's "re-run
+  `retrace-git install`" means exactly that. The hook script also discards stderr, so the queue's loud line is
+  only visible in `.git/retrace-hook.log` and `retrace doctor`.
 - v3 candidates, out of scope: authenticated commit assertion (§2.7); harness-native trailers as named claim sources (`Agent-Logs-Url`, `Made with Cursor`, `Claude-Session`, `Assisted-by:`) — verified to exist at scale on 2026-09-08 (see ledger #2777).
