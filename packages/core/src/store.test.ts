@@ -4,6 +4,8 @@ import {
   adapterIdempotencyError, AdapterIdempotencyError, CAUSED_BY_UNVERIFIED_TAG, appendEvent,
   EventInput, Event, EventStore, Share, likeContains, clampHistoryLimit, HISTORY_LIMIT_MAX,
   pageHistoryNewest, collectHistory, asHistoryPage, explainEvent,
+  artifactIndexRows, eventsReferencingArtifactKeys, artifactKeyMatchSql, BACKFILL_ARTIFACT_INDEX_SQL,
+  ARTIFACT_INDEX_DEFAULT_ROW_CAP,
 } from "./index.js";
 
 class MemStore implements EventStore {
@@ -158,4 +160,62 @@ test("explainEvent never follows an unverified caused_by link into another proje
 
   assert.ok(local.tags?.includes(CAUSED_BY_UNVERIFIED_TAG), "fixture retains the rejected cross-project claim");
   assert.deepEqual((await explainEvent(store, local.id)).map((event) => event.id), [local.id]);
+});
+
+test("artifactIndexRows uses artifactKey and records sealed_by + role", () => {
+  const e: Event = {
+    id: "evt_1", project: "p", seq: 3, timestamp: "2026-09-08T00:00:00.000Z", received_at: "2026-09-08T00:00:00.000Z",
+    actor: { type: "agent", id: "codex" }, action: "edited",
+    artifacts: [{ id: "repo:jordandru/retrace#a.ts", role: "both" }, { id: "repo:jordandru/retrace#a.ts", role: "used" }, { id: "task:1" }],
+    method: { params: { sealed_by: "pinned:codex" } },
+    prev_hash: "0", hash: "h",
+  };
+  const rows = artifactIndexRows(e);
+  assert.equal(rows.length, 2, "duplicate artifactKey collapsed");
+  assert.deepEqual(rows[0], {
+    project: "p", artifact_key: "repo:jordandru/retrace#a.ts", seq: 3,
+    actor_type: "agent", actor_id: "codex", role: "both", sealed_by: "pinned:codex",
+  });
+  assert.equal(rows[1].artifact_key, "task:1");
+  assert.equal(rows[1].role, null);
+});
+
+test("eventsReferencingArtifactKeys: sameArtifact aliases, seq window, budget and deadline", () => {
+  const evAt = (seq: number, ids: string[], project = "p"): Event => ({
+    id: `evt_${seq}`, project, seq, timestamp: "2026-09-08T00:00:00.000Z", received_at: "2026-09-08T00:00:00.000Z",
+    actor: { type: "agent", id: "codex" }, action: "edited", artifacts: ids.map((id) => ({ id })),
+    prev_hash: "0", hash: `h${seq}`,
+  });
+  const events = [
+    evAt(1, ["repo:jordandru/retrace#a.ts"]),
+    evAt(2, ["repo:retrace#a.ts"]),
+    evAt(3, ["repo:otherorg/retrace#a.ts"]),
+    evAt(4, ["repo:jordandru/retrace#b.ts"]),
+    evAt(5, ["repo:jordandru/retrace#a.ts"], "other"),
+  ];
+  const q = { project: "p", artifact_keys: ["repo:jordandru/retrace#a.ts"], after_seq: 0, through_seq: 10, row_cap: 20_000, deadline: 1 };
+  const hit = eventsReferencingArtifactKeys(events, q, 0);
+  assert.equal(hit.ok, true);
+  if (hit.ok) assert.deepEqual(hit.events.map((e) => e.seq), [1, 2], "full name matches basename alias; other owner/repo does not");
+
+  const windowed = eventsReferencingArtifactKeys(events, { ...q, after_seq: 1, through_seq: 2 }, 0);
+  assert.equal(windowed.ok, true);
+  if (windowed.ok) assert.deepEqual(windowed.events.map((e) => e.seq), [2]);
+
+  assert.deepEqual(eventsReferencingArtifactKeys(events, { ...q, deadline: 0 }, 0), { ok: false, reason: "deadline" });
+  assert.deepEqual(eventsReferencingArtifactKeys(events, { ...q, row_cap: 1 }, 0), { ok: false, reason: "budget" });
+  assert.equal(ARTIFACT_INDEX_DEFAULT_ROW_CAP, 20_000);
+  const empty = eventsReferencingArtifactKeys(events, { ...q, artifact_keys: [] }, 0);
+  assert.deepEqual(empty, { ok: true, events: [] });
+});
+
+test("artifactKeyMatchSql and backfill SQL are bound, not interpolated; backfill reads json artifact ids", () => {
+  const match = artifactKeyMatchSql(["repo:jordandru/retrace#a.ts", "repo:retrace#b.ts"]);
+  assert.match(match.sql, /i\.artifact_key IN \(\?(,\?)+\)/);
+  assert.match(match.sql, /GLOB \?/);
+  assert.ok(match.params.includes("repo:jordandru/retrace#a.ts"));
+  assert.ok(match.params.includes("repo:retrace#a.ts"), "full name also looks up the basename alias");
+  assert.ok(match.params.includes("repo:*/retrace#b.ts"));
+  assert.match(BACKFILL_ARTIFACT_INDEX_SQL, /INSERT OR IGNORE INTO event_artifact_index/);
+  assert.match(BACKFILL_ARTIFACT_INDEX_SQL, /json_extract\(a\.value, '\$\.id'\)/);
 });

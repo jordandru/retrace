@@ -123,6 +123,8 @@ export const Credential = z.object({
   public_key: z.custom<JsonWebKey>((v) => !!v && typeof v === "object" && (v as JsonWebKey).kty === "OKP" && (v as JsonWebKey).crv === "Ed25519" && typeof (v as JsonWebKey).x === "string", "must be an Ed25519 public JWK").optional(),
   /** Rung 5 enforcement: anything but a `verified` producer signature on POST /events is a 401. */
   require_signature: z.boolean().optional(),
+  /** ISO timestamp. A retired credential must not authenticate and does not block a replacement mint. */
+  retired_at: z.string().min(1).optional(),
 });
 export type Credential = z.infer<typeof Credential>;
 /** Parse the RETRACE_CREDENTIALS secret (JSON array). Throws on malformed config so a bad deploy fails loudly. */
@@ -251,6 +253,7 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
     }
     if (bearer) {
       for (const c of credentials) {
+        if (c.retired_at) continue;
         if (await tokenEquals(bearer, c.token)) return { kind: "credential", credential: c };
       }
     }

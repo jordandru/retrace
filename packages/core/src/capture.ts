@@ -16,11 +16,39 @@ export function generatesArtifact(e: Event, a: Event["artifacts"][number]): bool
 export function actorKey(a: { type: string; id: string }): string { return JSON.stringify([a.type, a.id]); }
 export function sameActor(a: { type: string; id: string }, b: { type: string; id: string }): boolean { return a.type === b.type && a.id === b.id; }
 
+const REPO_ARTIFACT = /^repo:([^#]+)#(.+)$/;
+
+/** Canonical comparison key for an artifact id — the identity `sameArtifact` compares.
+ *  Attribution's `canonicalArtifact` may further map aliases via policy at evidence time; the
+ *  store index records *this* key so SQL lookups reuse the same rule instead of a second normalizer. */
+export function artifactKey(id: string): string {
+  return id;
+}
+
 /** Exact ids, plus the project's conventional owner/repo and basename aliases. Foreign repos never match. */
 export function sameArtifact(a: string, b: string): boolean {
-  if (a === b) return true;
-  const x = /^repo:([^#]+)#(.+)$/.exec(a), y = /^repo:([^#]+)#(.+)$/.exec(b);
+  if (artifactKey(a) === artifactKey(b)) return true;
+  const x = REPO_ARTIFACT.exec(artifactKey(a)), y = REPO_ARTIFACT.exec(artifactKey(b));
   return !!(x && y && x[2] === y[2] && (x[1] === y[1] || (!x[1].includes("/") && y[1].endsWith("/" + x[1])) || (!y[1].includes("/") && x[1].endsWith("/" + y[1]))));
+}
+
+/** Escape a literal for SQLite/D1 GLOB (no ESCAPE clause). */
+export function escapeGlobLiteral(s: string): string {
+  return s.replace(/[*?[\]]/g, (ch) => `[${ch}]`);
+}
+
+/** SQL lookup for a query key so the artifact index hits every row `sameArtifact` would accept.
+ *  Rows store the exact `artifactKey`; owner/repo ↔ basename expansion lives here, next to `sameArtifact`. */
+export function artifactLookup(queryKey: string): { equals: string[]; glob?: string } {
+  const id = artifactKey(queryKey);
+  const m = REPO_ARTIFACT.exec(id);
+  if (!m) return { equals: [id] };
+  const repo = m[1], path = m[2];
+  if (repo.includes("/")) {
+    const base = repo.slice(repo.lastIndexOf("/") + 1);
+    return { equals: [id, `repo:${base}#${path}`] };
+  }
+  return { equals: [id], glob: `repo:*/${escapeGlobLiteral(repo)}#${escapeGlobLiteral(path)}` };
 }
 
 export interface CapturePolicy {

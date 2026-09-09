@@ -5,6 +5,7 @@
 import { Event, EventInput } from "./schema.js";
 import { sealEvent, verifyChain, VerifyResult } from "./chain.js";
 import { markUntrustedText } from "./explain.js";
+import { artifactKey, artifactLookup, sameArtifact } from "./capture.js";
 
 export interface HistoryQuery {
   project: string;
@@ -131,7 +132,139 @@ export interface EventStore {
    *  event count other than the one actually deleted. Returns per-table deleted counts. Optional — stores without it
    *  don't serve DELETE /projects/:p. */
   deleteProject?(project: string, audit: Event, expectedHead: ChainHead): Promise<Record<string, number>>;
+  /** Bounded artifact-index read (§3.5). Over budget / deadline / store error is a typed result, never a throw. */
+  eventsReferencingArtifacts?(q: ArtifactIndexQuery, now?: () => number): Promise<ArtifactIndexResult>;
+  insertPendingDelivery?(row: PendingDelivery): Promise<void>;
+  listPendingDeliveriesOlderThan?(received_at: string): Promise<PendingDelivery[]>;
+  deletePendingDelivery?(delivery_id: string): Promise<boolean>;
 }
+
+/** One row of the §3.5 artifact index. `event_artifacts` remains the history join table (event_id, artifact_id). */
+export interface ArtifactIndexRow {
+  project: string;
+  artifact_key: string;
+  seq: number;
+  actor_type: string;
+  actor_id: string;
+  role: string | null;
+  sealed_by: string | null;
+}
+
+export interface ArtifactIndexQuery {
+  project: string;
+  artifact_keys: string[];
+  /** Exclusive lower bound. */
+  after_seq: number;
+  /** Inclusive upper bound U. */
+  through_seq: number;
+  row_cap: number;
+  /** Absolute epoch ms. Reaching it yields `{ ok: false, reason: "deadline" }`. */
+  deadline: number;
+}
+
+export const ARTIFACT_INDEX_DEFAULT_ROW_CAP = 20_000;
+
+/** Typed result for the bounded artifact-index read. Never thrown. */
+export type ArtifactIndexResult =
+  | { ok: true; events: Event[] }
+  | { ok: false; reason: "budget" | "deadline" | "store_error" };
+
+export interface PendingDelivery {
+  delivery_id: string;
+  project: string;
+  raw_body: string;
+  received_at: string;
+}
+
+/** Index rows for one event, keyed by `artifactKey` (same comparison identity as `sameArtifact`). */
+export function artifactIndexRows(e: Event): ArtifactIndexRow[] {
+  const sealed = e.method?.params?.[SEALED_BY_PARAM];
+  const sealed_by = typeof sealed === "string" ? sealed : null;
+  const seen = new Set<string>();
+  const rows: ArtifactIndexRow[] = [];
+  for (const a of e.artifacts) {
+    const key = artifactKey(a.id);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    rows.push({
+      project: e.project,
+      artifact_key: key,
+      seq: e.seq,
+      actor_type: e.actor.type,
+      actor_id: e.actor.id,
+      role: a.role ?? null,
+      sealed_by,
+    });
+  }
+  return rows;
+}
+
+/** In-memory spec the SQL stores must match: sameArtifact matching, row cap on matching index rows. */
+export function eventsReferencingArtifactKeys(events: Event[], q: ArtifactIndexQuery, nowMs: number): ArtifactIndexResult {
+  if (nowMs >= q.deadline) return { ok: false, reason: "deadline" };
+  if (!q.artifact_keys.length) return { ok: true, events: [] };
+  const matched: Event[] = [];
+  let rows = 0;
+  const windowed = events
+    .filter((e) => e.project === q.project && e.seq > q.after_seq && e.seq <= q.through_seq)
+    .sort((a, b) => a.seq - b.seq);
+  for (const e of windowed) {
+    const hitKeys = new Set(
+      e.artifacts.filter((a) => q.artifact_keys.some((k) => sameArtifact(artifactKey(a.id), k))).map((a) => artifactKey(a.id)),
+    );
+    if (!hitKeys.size) continue;
+    rows += hitKeys.size;
+    if (rows > q.row_cap) return { ok: false, reason: "budget" };
+    matched.push(e);
+  }
+  return { ok: true, events: matched };
+}
+
+/** SQL predicate over `event_artifact_index` alias `i` that implements `artifactLookup` / `sameArtifact`. */
+export function artifactKeyMatchSql(keys: string[]): { sql: string; params: string[] } {
+  const equals = new Set<string>();
+  const globs = new Set<string>();
+  for (const k of keys) {
+    const look = artifactLookup(k);
+    for (const eq of look.equals) equals.add(eq);
+    if (look.glob) globs.add(look.glob);
+  }
+  const parts: string[] = [];
+  const params: string[] = [];
+  if (equals.size) {
+    parts.push(`i.artifact_key IN (${[...equals].map(() => "?").join(",")})`);
+    params.push(...equals);
+  }
+  for (const g of globs) {
+    parts.push("i.artifact_key GLOB ?");
+    params.push(g);
+  }
+  if (!parts.length) return { sql: "0", params: [] };
+  return { sql: `(${parts.join(" OR ")})`, params };
+}
+
+export function eventsReferencingArtifactsSql(q: ArtifactIndexQuery): { sql: string; params: (string | number)[] } {
+  const match = artifactKeyMatchSql(q.artifact_keys);
+  return {
+    sql: `SELECT e.body FROM events e JOIN event_artifact_index i ON i.project = e.project AND i.seq = e.seq WHERE e.project = ? AND i.seq > ? AND i.seq <= ? AND ${match.sql} ORDER BY e.seq ASC LIMIT ?`,
+    params: [q.project, q.after_seq, q.through_seq, ...match.params, q.row_cap + 1],
+  };
+}
+
+/** One-time D1 backfill. `artifact_key` is the stored artifact id (`artifactKey` is that identity). Idempotent. */
+export const BACKFILL_ARTIFACT_INDEX_SQL = `
+INSERT OR IGNORE INTO event_artifact_index (project, artifact_key, seq, actor_type, actor_id, role, sealed_by)
+SELECT
+  e.project,
+  json_extract(a.value, '$.id'),
+  e.seq,
+  e.actor_type,
+  e.actor_id,
+  json_extract(a.value, '$.role'),
+  json_extract(e.body, '$.method.params.sealed_by')
+FROM events e, json_each(COALESCE(json_extract(e.body, '$.artifacts'), '[]')) AS a
+WHERE json_extract(a.value, '$.id') IS NOT NULL;
+`;
 
 export type ChainHead = { seq: number; hash: string };
 
@@ -175,6 +308,25 @@ CREATE TABLE IF NOT EXISTS event_artifacts (
   PRIMARY KEY (event_id, artifact_id)
 );
 CREATE INDEX IF NOT EXISTS idx_ea_artifact ON event_artifacts(project, artifact_id);
+CREATE TABLE IF NOT EXISTS event_artifact_index (
+  project TEXT NOT NULL,
+  artifact_key TEXT NOT NULL,
+  seq INTEGER NOT NULL,
+  actor_type TEXT NOT NULL,
+  actor_id TEXT NOT NULL,
+  role TEXT,
+  sealed_by TEXT,
+  PRIMARY KEY (project, artifact_key, seq)
+);
+CREATE INDEX IF NOT EXISTS idx_eai_project_key_seq ON event_artifact_index(project, artifact_key, seq);
+CREATE INDEX IF NOT EXISTS idx_eai_project_seq ON event_artifact_index(project, seq);
+CREATE TABLE IF NOT EXISTS pending_deliveries (
+  delivery_id TEXT PRIMARY KEY,
+  project TEXT NOT NULL,
+  raw_body TEXT NOT NULL,
+  received_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_pending_deliveries_received ON pending_deliveries(received_at);
 CREATE TABLE IF NOT EXISTS shares (
   id TEXT PRIMARY KEY,
   project TEXT NOT NULL,

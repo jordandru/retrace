@@ -71,7 +71,7 @@ export interface AgentSpec {
 }
 
 /** Local mirror may carry `producer_key_file` (a path). The Worker Credential schema must not grow this field. */
-export type LocalCredential = Credential & { producer_key_file?: string };
+export type LocalCredential = Credential & { producer_key_file?: string; retired_at?: string };
 
 /** OpenClaw is remote HTTP MCP (Worker must not hold the private key). CI is a read-only assert credential. Everyone else who writes, signs. */
 export function shouldMintProducerKey(c: Credential): boolean {
@@ -334,10 +334,57 @@ export function teamsIn(credentials: Credential[]): Record<string, Credential[]>
 
 /** Append atomically, mode 0600, without ever leaving a partially written credentials file behind. Extra local fields such as `producer_key_file` are preserved; the Worker schema strips unknown keys on upload. */
 export function appendCredentials(path: string, existing: LocalCredential[], added: LocalCredential[]): void {
+  writeCredentialsFile(path, [...existing, ...added]);
+}
+
+/** Atomically replace the credentials mirror (mode 0600). */
+export function writeCredentialsFile(path: string, credentials: LocalCredential[]): void {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const tmp = `${path}.${process.pid}.tmp`;
-  writeFileSync(tmp, JSON.stringify([...existing, ...added], null, 2) + "\n", { mode: 0o600 });
+  writeFileSync(tmp, JSON.stringify(credentials, null, 2) + "\n", { mode: 0o600 });
   renameSync(tmp, path);
+}
+
+export function credentialCoversProject(c: { projects?: string[] }, project: string): boolean {
+  if (!c.projects || c.projects.includes("*")) return true;
+  return c.projects.includes(project);
+}
+
+export function isLivePinned(c: LocalCredential): boolean {
+  return (c.trust ?? "pinned") === "pinned" && !c.retired_at;
+}
+
+/** A live pinned credential for the same {project, actor type, actor id} — the §10 issuance guard. */
+export function findLivePinned(
+  credentials: LocalCredential[],
+  project: string,
+  actor: { type: string; id: string },
+): LocalCredential | undefined {
+  return credentials.find(
+    (c) => isLivePinned(c) && c.actor.type === actor.type && c.actor.id === actor.id && credentialCoversProject(c, project),
+  );
+}
+
+export function duplicateLivePinnedError(project: string, actor: { type: string; id: string }, existing: LocalCredential): string {
+  const who = existing.name ?? `${existing.actor.type}/${existing.actor.id}`;
+  return `refusing to mint a second live pinned ${actor.type}/${actor.id} credential for project "${project}" — ${who} is still live. Retire it first (retrace-admin retire-agent ${project} --harness ${actor.id}).`;
+}
+
+export function retireLivePinned(
+  credentials: LocalCredential[],
+  project: string,
+  actor: { type: string; id: string },
+  at: string,
+): { credentials: LocalCredential[]; retired: LocalCredential[] } {
+  const retired: LocalCredential[] = [];
+  const next = credentials.map((c) => {
+    if (!isLivePinned(c) || c.actor.type !== actor.type || c.actor.id !== actor.id || !credentialCoversProject(c, project)) return c;
+    const updated = { ...c, retired_at: at };
+    retired.push(updated);
+    return updated;
+  });
+  if (!retired.length) throw new Error(`no live pinned ${actor.type}/${actor.id} credential covers project "${project}"`);
+  return { credentials: next, retired };
 }
 
 /** Atomically replace a secret-bearing file with a freshly created 0600 inode, even when the destination exists. */
@@ -402,6 +449,10 @@ export async function main(argv = process.argv.slice(2), env = process.env, out:
     const existing = readCredentialsFile(credentialsFile);
     if (existing.some((c) => c.projects?.includes(project))) throw new Error(`${credentialsFile} already holds credentials scoped to "${project}" — refusing to mint a second set (remove them first, or pick another project name)`);
     const plan = planTeam(spec);
+    for (const c of plan.credentials.filter((x) => (x.trust ?? "pinned") === "pinned")) {
+      const live = findLivePinned(existing, spec.project, c.actor);
+      if (live) throw new Error(duplicateLivePinnedError(spec.project, c.actor, live));
+    }
     const onboardingPath = resolve(String(flags.out ?? defaultOnboardingFile(`onboarding-${project}.md`)));
     const keysDir = resolve(String(flags["producer-keys-dir"] ?? env.RETRACE_PRODUCER_KEYS_DIR ?? defaultProducerKeysDir(env)));
     warnIfOnboardingInGitTree(onboardingPath, out);
@@ -439,8 +490,8 @@ export async function main(argv = process.argv.slice(2), env = process.env, out:
     const existing = readCredentialsFile(credentialsFile);
     if (!existing.some((c) => c.projects?.includes(project)))
       throw new Error(`${credentialsFile} has no credentials scoped to "${project}" — use new-team first`);
-    if (existing.some((c) => c.projects?.includes(project) && c.actor.type === "agent" && c.actor.id === spec.harness && c.actor.on_behalf_of === spec.member))
-      throw new Error(`${credentialsFile} already holds an agent/${spec.harness} credential for ${spec.member} in "${project}"`);
+    const live = findLivePinned(existing, spec.project, { type: "agent", id: spec.harness });
+    if (live) throw new Error(duplicateLivePinnedError(spec.project, { type: "agent", id: spec.harness }, live));
     const onboardingPath = resolve(String(flags.out ?? defaultOnboardingFile(`onboarding-${project}-${spec.harness}.md`)));
     const keysDir = resolve(String(flags["producer-keys-dir"] ?? env.RETRACE_PRODUCER_KEYS_DIR ?? defaultProducerKeysDir(env)));
     warnIfOnboardingInGitTree(onboardingPath, out);
@@ -456,7 +507,24 @@ export async function main(argv = process.argv.slice(2), env = process.env, out:
     out(`upload the updated secret: npx wrangler secret put RETRACE_CREDENTIALS < ${credentialsFile}`);
     return 0;
   }
-  out("retrace-admin <new-team <project> --member a@x.com[,…] [--harness …] | add-agent <project> --member a@x.com --harness openclaw | list-teams> [--url https://…] [--credentials-file …] [--out file.md (default: ~/.retrace/onboarding-*.md)] [--producer-keys-dir ~/.retrace/producer-keys] [--dry-run]");
+  if (cmd === "retire-agent") {
+    const project = pos[1];
+    const harnesses = list(flags.harness);
+    if (!project || harnesses.length !== 1)
+      throw new Error("usage: retrace-admin retire-agent <project> --harness codex [--credentials-file …]");
+    const actor = { type: "agent" as const, id: harnesses[0] };
+    const existing = readCredentialsFile(credentialsFile);
+    const { credentials, retired } = retireLivePinned(existing, project, actor, new Date().toISOString());
+    if (flags["dry-run"]) {
+      out(`dry run — would retire ${retired.length} live pinned ${actor.type}/${actor.id} credential(s) covering "${project}" in ${credentialsFile}`);
+      return 0;
+    }
+    writeCredentialsFile(credentialsFile, credentials);
+    out(`retired ${retired.length} live pinned ${actor.type}/${actor.id} credential(s) covering "${project}" in ${credentialsFile}`);
+    out(`upload the updated secret: npx wrangler secret put RETRACE_CREDENTIALS < ${credentialsFile}`);
+    return 0;
+  }
+  out("retrace-admin <new-team <project> --member a@x.com[,…] [--harness …] | add-agent <project> --member a@x.com --harness openclaw | retire-agent <project> --harness codex | list-teams> [--url https://…] [--credentials-file …] [--out file.md (default: ~/.retrace/onboarding-*.md)] [--producer-keys-dir ~/.retrace/producer-keys] [--dry-run]");
   return cmd ? 1 : 0;
 }
 

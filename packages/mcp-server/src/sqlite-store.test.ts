@@ -1,5 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { appendEvent, sealEvent, verifyProject, EventInput, HeadMovedError } from "@retrace-dev/core";
 import { SqliteStore } from "./sqlite-store.js";
 
@@ -49,7 +52,7 @@ test("SqliteStore.deleteProject: deletes + audit insert commit together", async 
   await appendEvent(store, ev({ project: "keep" }));
   await store.createShare({ id: "sh_1", project: "junk", created_at: "2026-08-20T00:00:00Z" });
   const counts = await store.deleteProject("junk", await audit(store), (await store.head("junk"))!);
-  assert.deepEqual(counts, { events: 2, event_artifacts: 3, shares: 1 });
+  assert.deepEqual(counts, { events: 2, event_artifacts: 3, event_artifact_index: 3, pending_deliveries: 0, shares: 1 });
   assert.deepEqual(await store.projects(), ["keep", "ops"]);
   assert.equal((await store.all("ops")).length, 1);
   assert.equal((await verifyProject(store, "ops")).ok, true);
@@ -80,6 +83,73 @@ test("SqliteStore.deleteProject: a head that moved since the audit was sealed th
   assert.equal((await store.all("ops")).length, 0);
   // retry with the fresh head succeeds
   const counts = await store.deleteProject("junk", await audit(store), (await store.head("junk"))!);
-  assert.deepEqual(counts, { events: 2, event_artifacts: 2, shares: 1 });
+  assert.deepEqual(counts, { events: 2, event_artifacts: 2, event_artifact_index: 2, pending_deliveries: 0, shares: 1 });
   assert.equal((await store.all("ops")).length, 1);
+});
+
+test("SqliteStore writes event_artifact_index on insert and matches sameArtifact aliases within a seq window", async () => {
+  const store = new SqliteStore(":memory:");
+  await appendEvent(store, ev({ artifacts: [{ id: "repo:jordandru/retrace#a.ts", role: "both" }], method: { params: { sealed_by: "pinned:codex" } } }));
+  await appendEvent(store, ev({ artifacts: [{ id: "repo:retrace#a.ts" }] }));
+  await appendEvent(store, ev({ artifacts: [{ id: "repo:otherorg/retrace#a.ts" }] }));
+  await appendEvent(store, ev({ artifacts: [{ id: "repo:jordandru/retrace#b.ts" }] }));
+  const cols = (store as any).db.prepare("PRAGMA table_info(event_artifact_index)").all().map((c: any) => c.name);
+  assert.deepEqual(cols, ["project", "artifact_key", "seq", "actor_type", "actor_id", "role", "sealed_by"]);
+  const hit = await store.eventsReferencingArtifacts({
+    project: "junk", artifact_keys: ["repo:jordandru/retrace#a.ts"], after_seq: -1, through_seq: 10, row_cap: 100, deadline: Date.now() + 5_000,
+  });
+  assert.equal(hit.ok, true);
+  if (hit.ok) assert.deepEqual(hit.events.map((e) => e.seq), [0, 1]);
+
+  const shortQuery = await store.eventsReferencingArtifacts({
+    project: "junk", artifact_keys: ["repo:retrace#a.ts"], after_seq: -1, through_seq: 10, row_cap: 100, deadline: Date.now() + 5_000,
+  });
+  assert.equal(shortQuery.ok, true);
+  if (shortQuery.ok) assert.deepEqual(shortQuery.events.map((e) => e.seq), [0, 1, 2], "short name matches every owner/retrace#a.ts");
+
+  const windowed = await store.eventsReferencingArtifacts({
+    project: "junk", artifact_keys: ["repo:jordandru/retrace#a.ts"], after_seq: 0, through_seq: 1, row_cap: 100, deadline: Date.now() + 5_000,
+  });
+  assert.equal(windowed.ok, true);
+  if (windowed.ok) assert.deepEqual(windowed.events.map((e) => e.seq), [1]);
+
+  const budget = await store.eventsReferencingArtifacts({
+    project: "junk", artifact_keys: ["repo:jordandru/retrace#a.ts", "repo:jordandru/retrace#b.ts"], after_seq: -1, through_seq: 10, row_cap: 1, deadline: Date.now() + 5_000,
+  });
+  assert.deepEqual(budget, { ok: false, reason: "budget" });
+  const deadline = await store.eventsReferencingArtifacts({
+    project: "junk", artifact_keys: ["a"], after_seq: -1, through_seq: 10, row_cap: 100, deadline: 0,
+  }, () => 1);
+  assert.deepEqual(deadline, { ok: false, reason: "deadline" });
+});
+
+test("SqliteStore backfills event_artifact_index once from existing events", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "retrace-sqlite-index-"));
+  const file = join(dir, "ledger.db");
+  const store = new SqliteStore(file);
+  await appendEvent(store, ev({ artifacts: [{ id: "repo:jordandru/retrace#a.ts", role: "generated" }], method: { params: { sealed_by: "pinned:x" } } }));
+  (store as any).db.exec("DELETE FROM event_artifact_index");
+  assert.equal((store as any).db.prepare("SELECT COUNT(*) AS n FROM event_artifact_index").get().n, 0);
+  const reopened = new SqliteStore(file);
+  const rows = (reopened as any).db.prepare("SELECT project, artifact_key, seq, actor_type, actor_id, role, sealed_by FROM event_artifact_index").all();
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].artifact_key, "repo:jordandru/retrace#a.ts");
+  assert.equal(rows[0].role, "generated");
+  assert.equal(rows[0].sealed_by, "pinned:x");
+  const hit = await reopened.eventsReferencingArtifacts({
+    project: "junk", artifact_keys: ["repo:retrace#a.ts"], after_seq: -1, through_seq: 10, row_cap: 10, deadline: Date.now() + 5_000,
+  });
+  assert.equal(hit.ok, true);
+  if (hit.ok) assert.equal(hit.events.length, 1);
+});
+
+test("SqliteStore pending_deliveries insert, list-older-than, delete", async () => {
+  const store = new SqliteStore(":memory:");
+  await store.insertPendingDelivery({ delivery_id: "d1", project: "retrace", raw_body: "a", received_at: "2026-09-01T00:00:00.000Z" });
+  await store.insertPendingDelivery({ delivery_id: "d2", project: "retrace", raw_body: "b", received_at: "2026-09-08T00:00:00.000Z" });
+  const old = await store.listPendingDeliveriesOlderThan("2026-09-05T00:00:00.000Z");
+  assert.deepEqual(old.map((r) => r.delivery_id), ["d1"]);
+  assert.equal(await store.deletePendingDelivery("d1"), true);
+  assert.deepEqual((await store.listPendingDeliveriesOlderThan("2026-09-10T00:00:00.000Z")).map((r) => r.delivery_id), ["d2"]);
+  assert.equal(await store.deletePendingDelivery("missing"), false);
 });

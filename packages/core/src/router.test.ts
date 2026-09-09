@@ -451,6 +451,18 @@ test("credentials: parseCredentials validates the secret and defaults trust to p
   assert.throws(() => parseCredentials("{not json"));
 });
 
+test("credentials: a retired pinned token does not authenticate; a live replacement for the same actor does", async () => {
+  const store = new MemStore();
+  const retired = Credential.parse({ ...CLAUDE, retired_at: "2026-09-08T00:00:00.000Z" });
+  const live = Credential.parse({ ...CLAUDE, token: "claude-code-token-replacement1" });
+  const h = createHandler(store, { token: "tok", credentials: [retired, live] });
+  assert.equal((await get(h, "/projects", CLAUDE.token)).status, 401);
+  assert.equal((await get(h, "/projects", live.token)).status, 200);
+  const written = await post(h, "/events", ev({ actor: { type: "agent", id: "ignored" } }), live.token);
+  assert.equal(written.status, 201);
+  assert.equal((await written.json()).event.actor.id, "claude-code");
+});
+
 // ---- schema probe: the only defence against a silently-stale deployment ----
 
 test("POST /hooks/gdrive: optional caused_by is stored; empty/absent stays a root", async () => {
