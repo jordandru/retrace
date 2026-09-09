@@ -324,9 +324,11 @@ async function main() {
   if (cmd === "commit") {
     const sha = pos[1] ?? "HEAD";
     let failedSha = sha;
+    let currentSha: string | undefined;
     let cfg: Cfg | undefined;
     try {
       cfg = loadCfg(repo, flags);
+      currentSha = git(repo, ["rev-parse", sha]);
       if (flags.hook === true) {
         const pending = readPendingSeals(gitDir);
         for (const pendingSha of pending) {
@@ -335,7 +337,7 @@ async function main() {
           removePendingSeal(gitDir, pendingSha);
         }
       }
-      failedSha = git(repo, ["rev-parse", sha]);
+      failedSha = currentSha;
       const r = await logCommit(repo, failedSha, cfg, flags.hook === true);
       console.log(`${r.deduped ? "(already logged) " : "logged "}${r.event.id}\n${describeEvent(r.event)}`);
     } catch (e: any) {
@@ -345,6 +347,7 @@ async function main() {
       appendHookLog(gitDir, `commit ${fullSha.slice(0, 12)} in ${repo} NOT logged: ${e?.message ?? e}`);
       if (flags.hook === true && cfg?.url && retryableHookFailure(e)) {
         appendPendingSeal(gitDir, fullSha);
+        if (currentSha) appendPendingSeal(gitDir, currentSha);
         console.error(`retrace: commit ${fullSha} pending seal; details: ${logPath}`);
         process.exitCode = 1;
         return;

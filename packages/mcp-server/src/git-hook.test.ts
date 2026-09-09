@@ -216,7 +216,7 @@ test("hook end to end: the named credential is the bearer the server sees; a rej
   }
 });
 
-test("hook 5xx is visible and pending, then the next hook run drains it before the current sha", async () => {
+test("two hook commits during a 5xx are queued, then the next run drains them before the current sha", async () => {
   const dir = mkdtempSync(join(tmpdir(), "retrace-git-pending-"));
   let status = 503;
   const seen: string[] = [];
@@ -264,10 +264,34 @@ test("hook 5xx is visible and pending, then the next hook run drains it before t
     );
     assert.equal(readFileSync(join(dir, ".git", "retrace-pending-seal"), "utf8"), `${sha}\n`);
 
+    writeFileSync(join(dir, "a.ts"), "2\n");
+    sh(dir, "git", ["commit", "-qam", "second"]);
+    const secondSha = sh(dir, "git", ["rev-parse", "HEAD"]).trim();
+    await assert.rejects(
+      promisify(execFile)("node", [bin, "commit", "--hook", "--repo", dir], {
+        cwd: dir,
+        encoding: "utf8",
+        env: { ...baseEnv, ...env },
+      }),
+      (error: any) => {
+        assert.equal(error.code, 1);
+        return true;
+      },
+    );
+    assert.equal(
+      readFileSync(join(dir, ".git", "retrace-pending-seal"), "utf8"),
+      `${sha}\n${secondSha}\n`,
+      "the current commit is queued even when retrying the older pending seal fails first",
+    );
+
     status = 201;
     await shAsync(dir, "node", [bin, "commit", "--hook", "--repo", dir], env);
     assert.equal(readFileSync(join(dir, ".git", "retrace-pending-seal"), "utf8"), "");
-    assert.deepEqual(seen, [sha, sha, sha], "retry is attempted before the current sha, which then dedupes");
+    assert.deepEqual(
+      seen,
+      [sha, sha, sha, secondSha, secondSha],
+      "both pending commits are retried first, then the current sha dedupes",
+    );
   } finally {
     server.close();
   }
