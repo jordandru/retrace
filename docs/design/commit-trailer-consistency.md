@@ -1,6 +1,8 @@
 # Commit trailer consistency — design note
 
-**Status:** draft v2, 2026-09-08. Author: claude-code. Not built.
+**Status:** draft v2.1, 2026-09-08. Author: claude-code. Not built. v2 (ee9c889) was reviewed by NOOA/Nemotron
+3 Ultra (evt_f787df612d0d413ba13f1b887f160fc5, run review_trailer_v2_20260909T035317Z): needs changes, 3 High / 3 Medium / 4 Low — dispositions in
+§14b. Codex and Grok reviews of v2 pending.
 v1 (9b6ef05, 2026-09-07) was reviewed by Codex (#2514, 4 High / 3 Medium), Grok (#2515) and NOOA on
 Nemotron 3 Ultra (#2517, 6 findings). All three said *needs changes*. v2 answers every finding; §14 maps
 each one to the section that answers it. Reviewers for v2: the same three. Builder once accepted:
@@ -75,7 +77,9 @@ For each path `p ∈ F`: lower bound = `previousCaptureTouch(p)` (the last **tru
 that touched `p`, exactly as reconcile and attribution v7 define it — `capture.ts`), exclusive; upper
 bound = `U` = the seq of the **earliest existing seal of this sha in the project** if one exists,
 else the read head at classification time. Fixing `U` to the first seal makes the second producer's
-decision reproduce the first's (§7.2). Merge commits are classified on their own files only if the
+decision reproduce the first's (§7.2), in either order: if the webhook classifies first, its seal becomes
+`U` for the hook's later classification, so evidence appended between the two read heads is outside both
+windows (NOOA v2 M6; T11a/T11b). Merge commits are classified on their own files only if the
 producer emitted them; otherwise status `merge_unclassified` (info).
 
 ### 3.3 Eligible witnesses
@@ -120,7 +124,7 @@ reproducible offline from an export.
 |---|---|---|---|
 | `Cs` agent trailer/co-author, `C ∈ Wall` | `corroborated` | — | `C` |
 | `Cs` agent, `Wall ≠ ∅`, `C ∉ Wall` | `contradicted` | `no_match` | **withheld** → producer system actor (`system/retrace-git` or `system/webhook:github`) |
-| `Cs` agent, `Wall = ∅`, `loose_hints > 0` | `unresolved` | `loose_evidence_only` | policy (below) |
+| `Cs` agent, `Wall = ∅`, `loose_hints > 0` | `unresolved` | `loose_evidence_only` | policy (below) — `loose_hints` never changes the actor written; the reason is diagnostic only (NOOA v2 M4) |
 | `Cs` agent, `Wall = ∅`, root resolves | `unresolved` | `root_only` | policy |
 | `Cs` agent, `Wall = ∅`, no root / unverified `caused_by` | `unresolved` | `unrooted` | policy |
 | `Cs` = `malformed`, `Wall ≠ ∅` | `contradicted` | `malformed_claim` | withheld |
@@ -162,12 +166,11 @@ claims do not become hook seals"); unchanged.
 
 - Sends what it sends today plus `attribution_claim_source` and `caused_by_source` (both derived locally;
   the Worker re-derives the claim from the message and treats a mismatch as `malformed`).
-- **Local pre-check (NOOA Q4), evidence-cheap:** if a known harness marker in the environment maps to a
-  pinned actor id (`OPENCODE=1` → `opencode`, `CLAUDE_CODE_SESSION_ID` → `claude-code`, …, table in
-  `git-hook.ts`) and the claim names a *different* agent, do not call the Worker: write one line to
-  `retrace-hook.log`, print one line to stderr, exit non-zero, and leave `.git/retrace-pending-seal`
-  with the sha. The Worker remains the authority; the pre-check only refuses to *send* an obviously
-  copied trailer.
+- **No local pre-check.** v2 proposed refusing to send when an environment marker named a different
+  harness than the trailer (NOOA Q4). NOOA's v2 review (H3) is right that a check an agent can defeat by
+  unsetting a variable adds confidence without adding evidence, and a hook that *decides* locally would
+  reintroduce the client-side trust boundary §5.1 removes. Dropped. Environment markers stay evidence on
+  the seal (§6 `harness.marker`), nothing more.
 - **Visibility (NOOA 2):** on any Worker 5xx, deadline, or `unavailable`, the hook prints a single
   stderr line naming the sha and the log path, exits non-zero, and appends the sha to
   `.git/retrace-pending-seal`. The commit itself is never blocked (post-commit cannot block it). The next
@@ -188,7 +191,9 @@ claims do not become hook seals"); unchanged.
 - **Circuit breaker:** after 3 consecutive `deadline`/`store_error` outcomes within 5 min the webhook
   skips synchronous classification and goes straight to `202 pending` for 5 min. A breaker cannot force
   a `contradicted` or an `unresolved` outcome — those require a completed read (NOOA 1: latency must
-  never be a catch-all).
+  never be a catch-all). While the breaker is open the hook path is unaffected (it is a different route
+  and budget), so a commit made on a hooked machine is still classified synchronously; only the webhook's
+  second seal is delayed (NOOA v2 L7).
 - Idempotency: `gh:push:<repo>:<sha>` unchanged; a pending row re-processed after a concurrent hook seal
   simply uses `U` = the hook seal's seq (§3.2) and dedups on its own key.
 
@@ -296,10 +301,14 @@ the per-project `attribution.unresolved_claims` lives in `.retrace.json` beside 
 
 ## 10. Scope and limits (stated, not solved here)
 
-- **Principal binding (Codex M3):** two humans holding `agent/codex` credentials in one project collapse
-  to one `{type,id}`. That is a credential-issuance policy (`retrace-admin`: one project per principal, or
-  distinct ids); the classifier records each witness's `sealed_by` and `producer_sig_verdict` so the
-  binding can be audited, and never uses git author email, model, session or client name as identity.
+- **Principal binding (Codex M3; NOOA v2 H1):** two humans holding `agent/codex` credentials in one
+  project collapse to one `{type,id}`. v2.1 makes the issuance rule a **build prerequisite** rather than a
+  note: `retrace-admin` refuses to mint a second pinned credential for the same `{project, type, id}`
+  unless the existing one is retired, and `/status` reports any project where two live pinned credentials
+  share an actor id (`shared_actor_id`, fail-level for the gate). The classifier keeps `{type,id}` as
+  actor equality (a credential id in the actor key would make every rotation a new identity) and records
+  each witness's `sealed_by` and `producer_sig_verdict` so a binding dispute can be audited. It never uses
+  git author email, model, session or client name as identity.
 - **Compromised or wrong-identity MCP credential:** out of scope (the rollout and admin tool own it).
 - **Human commits:** never withheld; agent evidence in their window is recorded, not judged.
 - **Legacy seals:** untouched; every consumer treats a seal without `attribution` as `legacy`.
@@ -331,8 +340,9 @@ the per-project `attribution.unresolved_claims` lives in `.retrace.json` beside 
 9. Literal `\n` trailer block, no edits → `unresolved/malformed_claim`; `claim.source = malformed`. (M2)
 10. Same `agent/codex` id from two credentials in one project → both witness; test documents that the
     classifier cannot distinguish them and that `sealed_by` differs in `witnesses[]`. (Codex M3)
-11. Hook then webhook, same commit, evidence appended between them → identical decisions because `U` is
-    the hook seal's seq; reconcile reports no disagreement. (Codex H4; §3.2)
+11. (a) Hook then webhook, evidence appended between them → identical decisions because `U` is the hook
+    seal's seq. (b) Webhook then hook, evidence appended between them → identical decisions because `U`
+    is the webhook seal's seq. Reconcile reports no disagreement in either order. (Codex H4; NOOA v2 M6, L10)
 12. Hook and webhook both `contradicted` → one `contradicted_claim`, no `producer_disagreement`. (H4)
 13. Pushed commit differs from committed (amended after hook) → claims differ → `producer_disagreement`
     as today. (H4)
@@ -348,7 +358,8 @@ the per-project `attribution.unresolved_claims` lives in `.retrace.json` beside 
     be produced while the breaker is open. (NOOA 1)
 20. Hook: Worker 503 → stderr line, non-zero exit, sha in `.git/retrace-pending-seal`; next hook run
     seals it first; doctor FAIL while pending. (NOOA 2)
-21. Hook pre-check: `OPENCODE=1` with `Retrace-Actor: codex` → refused locally, no network call. (NOOA Q4)
+21. Two live pinned credentials for one `{project, agent id}` → `retrace-admin` refuses the mint; `/status`
+    reports `shared_actor_id`; gate FAIL. (NOOA v2 H1)
 22. Harness: witnesses' clients all `cursor@…`, claim `opencode` corroborated by a pinned `opencode`
     credential → `harness.mismatch = true`, informational only. (NOOA 3)
 23. Duplicate webhook delivery of a sealed push → dedup on `gh:push:` key, no second classification.
@@ -361,10 +372,9 @@ the per-project `attribution.unresolved_claims` lives in `.retrace.json` beside 
 - **Q1 — closed.** Default for `unresolved` is `record` (Jordan, 2026-09-08, §4); `withhold` stays a per-project switch.
 - **Q2:** window upper bound `U` = first existing seal of the sha (§3.2). Any case where the webhook
   legitimately sees a *different* commit under the same sha? (None known — sha binds content.)
-- **Q3:** pending-drain cadence: reuse the hourly cron, or a dedicated 5-minute cron for
-  `pending_deliveries`? Cost is trivial on Workers Paid; the question is only how long a `202` may stand.
-- **Q4:** who owns the harness marker → actor table (§5.2)? Proposal: `git-hook.ts`, one line per
-  harness, changed only with a ledger-logged review.
+- **Q3 — closed:** dedicated `*/5 * * * *` drain for `pending_deliveries` (NOOA v2 answer; cost trivial on
+  Workers Paid).
+- **Q4 — moot:** the local pre-check and its marker table were removed in v2.1 (§5.2).
 
 ## 13. PR 19 (OpenCode)
 
@@ -399,3 +409,22 @@ instruction-precedence fix. The two onboarding defects Codex found remain separa
 | NOOA 5 harness trailer | declined, §10 (witness `location.client` covers the webhook) |
 | NOOA 6 amendment round-trip | §8; T14–T16 |
 | NOOA Q4 local pre-check | §5.2; T21 |
+
+## 14b. v2 review disposition (NOOA/Nemotron 3 Ultra, run review_trailer_v2_20260909T035317Z)
+
+| Finding | Answer |
+|---|---|
+| H1 principal binding collapse | Accepted as a build prerequisite: issuance refuses duplicate `{project,type,id}`; `shared_actor_id` status/gate finding (§10; T21). Credential id is deliberately **not** part of actor equality. |
+| H2 default `record` writes an uncorroborated WHO | **Owner decision, not folded.** Jordan chose `record` (§4, 2026-09-08) after the trade-off was put to him; NOOA's argument (consumers that read only `actor` see the claim) and the coordinator's (withholding erases coverage findings until every consumer changes) are both recorded here. Re-open only by Jordan. Mitigation kept: `attribution.decision` is hash-covered and every first-party consumer renders it (§7). |
+| H3 local pre-check bypassable | Accepted: pre-check removed (§5.2). Markers remain evidence only. |
+| M4 `loose_hints` under `record` | Accepted: clarified that `loose_hints` is diagnostic and never changes the actor written (§4). |
+| M5 human commit with agent evidence → write the agent | **Declined.** A `committed` event's WHO is who performed the commit act; content authorship is what attribution amendments and reconcile express (v7 contract; precedent 0905a8e, Jordan committing cursor-agent's docs). Writing the witnessing agent as the committer would be a new falsehood. The evidence is recorded on the seal and surfaces as a reconcile finding. |
+| M6 webhook-first race | Accepted as clarification: `U` = earliest existing seal in either order (§3.2); T11b added. |
+| L7 breaker delays detection | Accepted as clarification: hook path unaffected; only the webhook's second seal is delayed (§5.3). Synchronous fallback under an open breaker declined (it re-creates the latency path the breaker exists to cut). |
+| L8 merge commits unclassified | Partly accepted: both producers already emit the merge's changed files (first-parent diff), so merges are classified; `merge_unclassified` applies only when a producer emits no files, and is info-level. No change to §3.2. |
+| L9 Tier-2 agent amendment for `unresolved` | **Declined.** v7 amendments are human-sealed by design (Tier 1 authority); an in-window witness that "arrives later" is by definition outside the window, which closed at the seal. The truthful record of a late log is a late log, linked by `caused_by`, not a re-attribution. |
+| L10 T11 order assumption | Accepted: T11 split into (a)/(b). |
+| Q1 → `withhold` | See H2. |
+| Q2 → no | Agreed. |
+| Q3 → 5-minute drain | Accepted: dedicated `*/5 * * * *` drain for `pending_deliveries` (§12 Q3 closed). |
+| Q4 → hook owns the table | Moot: the pre-check and its table are removed; markers are evidence only. |
