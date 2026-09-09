@@ -31,7 +31,7 @@ import { amendAttributionMain, attributionOptionsForRepo } from "./attribution.j
 import { collectAttributionAmendments, attributionSummary, renderTimeline } from "@retrace-dev/core";
 import { reconcileMain } from "./reconcile.js";
 import { loadPublicKey, resolveTrustedKey } from "./trusted-key.js";
-import { producerVerifyOptsForRepo } from "./hook-stamps.js";
+import { trustedHookStampsFor } from "./hook-stamps.js";
 
 /** Checkpoint witnesses use a separate signing key, so never silently reuse the export issuer key. */
 async function resolveCheckpointTrustedKey(flag: unknown): Promise<{ key: JsonWebKey; from: string } | undefined> {
@@ -49,10 +49,14 @@ function parseArgs(argv: string[]) {
   return { flags, pos };
 }
 
-function bundleVerifyOpts(flags: Record<string, string | boolean>, producers?: ProducerKey[]) {
-  const stamps = producerVerifyOptsForRepo(String(flags.repo ?? process.cwd()));
-  if (!producers && !stamps) return undefined;
-  return { ...(producers ? { producers } : {}), ...stamps };
+function bundleVerifyOpts(flags: Record<string, string | boolean>, bundle: ExportBundle, producers?: ProducerKey[]) {
+  const project = bundle.scope.project;
+  const trustedHookStamps = trustedHookStampsFor(String(flags.repo ?? process.cwd()), project);
+  return {
+    project,
+    ...(trustedHookStamps ? { trustedHookStamps } : {}),
+    ...(producers ? { producers } : {}),
+  };
 }
 
 async function main() {
@@ -63,7 +67,7 @@ async function main() {
     if (!pos[1]) throw new Error("usage: retrace-export render <bundle.json> [--effective] [--repo . --policy policy.json]");
     const bundle = JSON.parse(readFileSync(pos[1],"utf8")) as ExportBundle;
     const trusted=await resolveTrustedKey(flags.pubkey);
-    const verdict=await verifyExportBundle(bundle,trusted?.key, bundleVerifyOpts(flags));
+    const verdict=await verifyExportBundle(bundle,trusted?.key, bundleVerifyOpts(flags, bundle));
     let attribution=collectAttributionAmendments(bundle.events);
     if (exportVerdictOk(verdict) && !bundle.scope.artifact_id) {
       try { attribution=collectAttributionAmendments(bundle.events, await attributionOptionsForRepo(String(flags.repo ?? process.cwd()),bundle.events,bundle.scope.project,[],typeof flags.policy === "string" ? flags.policy : undefined)); } catch(error) { attribution.unavailable=error instanceof Error?error.message:String(error); }
@@ -99,7 +103,7 @@ async function main() {
     const out = (flags.out as string) ?? `retrace-${project}${flags.artifact ? "-" + String(flags.artifact).replace(/[^\w.-]+/g, "_") : ""}.json`;
     writeFileSync(out, JSON.stringify(bundle, null, 2));
     console.log(`wrote ${out} — ${bundle.events.length} events, chain ${bundle.chain.ok ? "intact" : "BROKEN"}, ${bundle.signature ? "signed kid " + bundle.issuer!.kid : "UNSIGNED"}`);
-    if (flags.report) { writeFileSync(flags.report as string, renderReportHtml(bundle, await verifyExportBundle(bundle, undefined, bundleVerifyOpts(flags)))); console.log(`wrote ${flags.report}`); }
+    if (flags.report) { writeFileSync(flags.report as string, renderReportHtml(bundle, await verifyExportBundle(bundle, undefined, bundleVerifyOpts(flags, bundle)))); console.log(`wrote ${flags.report}`); }
     return;
   }
   if (cmd === "verify") {
@@ -117,7 +121,7 @@ async function main() {
         return { ...e, kid };
       }));
     }
-    const v = await verifyExportBundle(bundle, trusted?.key, bundleVerifyOpts(flags, producers));
+    const v = await verifyExportBundle(bundle, trusted?.key, bundleVerifyOpts(flags, bundle, producers));
     let ok = exportVerdictOk(v);
     // Self-attested = the bundle verified against the key it carries. Anyone can produce that. Fail closed unless asked.
     if (v.signature === "self_attested" && flags["allow-self-attested"] && v.events_intact && v.links_consistent && v.chain_ok_at_export && v.coverage.complete !== false) ok = true;
@@ -190,7 +194,7 @@ async function main() {
     // A checkpoint attests a head; it must never be derived from a bundle whose issuer could not be established.
     const trusted = await resolveTrustedKey(flags.pubkey);
     if (!trusted) throw new Error("no trusted issuer key: pass --pubkey <jwk.json|https-url>, set RETRACE_PUBKEY, or set RETRACE_URL to an https Retrace server (its /.well-known/retrace-pubkey is used)");
-    const v = await verifyExportBundle(bundle, trusted.key, bundleVerifyOpts(flags));
+    const v = await verifyExportBundle(bundle, trusted.key, bundleVerifyOpts(flags, bundle));
     if (!exportVerdictOk(v)) { for (const p of v.problems) console.error("  - " + p); throw new Error("refusing to checkpoint a bundle that does not verify as a complete full export signed by the trusted key"); }
     if (v.legacy_hash_events) console.error(`  note: ${v.legacy_hash_events} event(s) are under the legacy hash rule (received_at not provably covered)`);
     const key = parseSigningKey(process.env.RETRACE_SIGNING_KEY) ?? (await ensureSigningKey()).privateKey;

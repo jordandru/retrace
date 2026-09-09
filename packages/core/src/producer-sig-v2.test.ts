@@ -338,7 +338,7 @@ function asWithheld(
 
 /** The exact stamp this fixture project's hook writes — same string captureSeals/reconcile would take from .retrace.json. */
 const PROJECT_HOOK_STAMPS = ["assert:git hook (assert)"] as const;
-const hookTrust = { trustedHookStamps: PROJECT_HOOK_STAMPS };
+const hookTrust = { trustedHookStamps: PROJECT_HOOK_STAMPS, project: "p" };
 
 test("T32: valid withheld T27 fixture reconstructs; every rule-3 guard fails closed", async () => {
   const key = await generateSigningKey();
@@ -400,13 +400,13 @@ test("T32: valid withheld T27 fixture reconstructs; every rule-3 guard fails clo
   assert.equal((await verifyProducerSigResult(legacyWithheld, key.publicKey, hookTrust)).ok, false, "/1 never substitutes");
 });
 
-test("T32: trusted hook stamps are exact membership, not a name heuristic", async () => {
+test("T32: trusted hook stamps are exact list membership (same event project)", async () => {
   const key = await generateSigningKey();
   const signed = await signClaimed(key.privateKey);
   const valid = asWithheld(signed);
 
   assert.equal((await verifyProducerSigResult(valid, key.publicKey)).ok, false, "no list supplied → fail closed");
-  assert.equal((await verifyProducerSigResult(valid, key.publicKey, { trustedHookStamps: [] })).ok, false, "empty list → fail closed");
+  assert.equal((await verifyProducerSigResult(valid, key.publicKey, { trustedHookStamps: [], project: "p" })).ok, false, "empty list → fail closed");
 
   for (const lookalike of ["assert:not a git hook", "assert:untrusted retrace-git observer"]) {
     const fixture = asWithheld(signed, { sealedBy: lookalike });
@@ -419,18 +419,28 @@ test("T32: trusted hook stamps are exact membership, not a name heuristic", asyn
   }
 
   const custom = asWithheld(signed, { sealedBy: "assert:release-recorder" });
-  assert.equal((await verifyProducerSigResult(custom, key.publicKey, hookTrust)).ok, false, "custom stamp is not in project A's list");
+  assert.equal((await verifyProducerSigResult(custom, key.publicKey, hookTrust)).ok, false, "custom stamp is not in this project's list");
   assert.equal(
-    (await verifyProducerSigResult(custom, key.publicKey, { trustedHookStamps: ["assert:release-recorder"] })).ok,
+    (await verifyProducerSigResult(custom, key.publicKey, { trustedHookStamps: ["assert:release-recorder"], project: "p" })).ok,
     true,
-    "configured custom stamp substitutes",
+    "configured custom stamp substitutes when project matches",
   );
 
   assert.equal(
-    (await verifyProducerSigResult(valid, key.publicKey, { trustedHookStamps: ["assert:release-recorder"] })).ok,
+    (await verifyProducerSigResult(valid, key.publicKey, { trustedHookStamps: ["assert:release-recorder"], project: "p" })).ok,
     false,
-    "cross-project: project A's stamps supplied while verifying project B's event",
+    "list membership: a different project's stamp string does not authorize this event",
   );
+});
+
+test("T32: hook substitution requires opts.project === event.project", async () => {
+  const key = await generateSigningKey();
+  const signed = await signClaimed(key.privateKey);
+  const valid = asWithheld(signed);
+  const stamps = { trustedHookStamps: PROJECT_HOOK_STAMPS };
+  assert.equal((await verifyProducerSigResult(valid, key.publicKey, { ...stamps, project: "other" })).ok, false, "foreign project identity");
+  assert.equal((await verifyProducerSigResult(valid, key.publicKey, { ...stamps, project: "p" })).ok, true, "matching project");
+  assert.equal((await verifyProducerSigResult(valid, key.publicKey, stamps)).ok, false, "stamps without project → fail closed");
 });
 
 test("finding 2: signed_actor is the verified payload actor, not the re-derived claim", async () => {

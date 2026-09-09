@@ -13,6 +13,7 @@ import { Cfg, remoteName } from "./git-hook.js";
 import { makeStore } from "./index.js";
 import { RemoteStore } from "./remote-store.js";
 import { fetchVerifiedRemoteEvents, verifiedExportEvents } from "./verified-events.js";
+import { producerVerifyOptsFor } from "./hook-stamps.js";
 
 export type ReconcileCfg = Cfg & { reconcile?: { uncovered?: ReconcileLevel; ack_actors?: string[]; /** exact `assert:<credential name>` stamps of this repo's git hook credential */ hook_sealed_by?: string[]; owner_seals?: boolean; dual_witness?: "fail" | "warn" } };
 export { verifiedExportEvents } from "./verified-events.js";
@@ -92,10 +93,10 @@ export function readRepoConfig(repo: string): ReconcileCfg {
   return existsSync(p) ? (JSON.parse(readFileSync(p, "utf8")) as ReconcileCfg) : {};
 }
 
-async function fetchEvents(project: string, pubkeyFlag?: unknown, trustedHookStamps?: readonly string[]): Promise<{ events: Event[]; note: string }> {
+async function fetchEvents(project: string, pubkeyFlag: unknown | undefined, repo: string): Promise<{ events: Event[]; note: string }> {
   const store = makeStore();
   if (store instanceof RemoteStore) {
-    return fetchVerifiedRemoteEvents(store, project, pubkeyFlag, undefined, trustedHookStamps ? { trustedHookStamps } : undefined);
+    return fetchVerifiedRemoteEvents(store, project, pubkeyFlag, undefined, producerVerifyOptsFor(repo, project));
   }
   const events = await store.all(project);
   return { events, note: `${events.length} events from the local store` };
@@ -107,7 +108,7 @@ export async function reconcileRepo(repo: string, opts: { since?: string; limit?
   const shas = opts.refs ?? listCommits(repo, { since: opts.since, limit: opts.since ? opts.limit : opts.limit ?? 50 });
   const commits = shas.map((s) => commitFacts(repo, s));
   const reconcileOpts = reconcileOptionsFrom(cfg, opts);
-  const { events, note } = await fetchEvents(project, opts.pubkey, reconcileOpts.hookSealedBy);
+  const { events, note } = await fetchEvents(project, opts.pubkey, repo);
   let attribution;
   let attributionNote="";
   if(events.some(isAttributionAmendment)) {

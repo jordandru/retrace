@@ -220,23 +220,27 @@ function competingWithheldSelectors(cd: Record<string, unknown>): boolean {
 /**
  * Exact trusted-stamp membership for rule 3. Equality only — no substring, no case folding.
  * `webhook:github` is the one built-in exception (SEALED_BY_GITHUB_WEBHOOK). Hook stamps come from
- * the caller (`trustedHookStamps`); when that list is omitted, hook substitution is not attempted
- * (fail closed → verify the stored actor → invalid for a withheld rewrite).
+ * the caller (`trustedHookStamps`) and apply only when `opts.project === e.project`; missing
+ * project or a mismatch fails closed (no substitution — verify the stored actor).
  *
  * The Worker does not read `.retrace.json` (design §9) and the step-2 policy document does not
  * exist yet, so it passes no list in step 1 and never substitutes online. That is acceptable:
  * no withheld seal can exist before step 3, and step 2 wires the stored policy document into
- * both the Worker and the export bundle. Offline CLI callers pass the same `hook_sealed_by`
- * list captureSeals and reconcile already consume, so the two never disagree on one stored event.
+ * both the Worker and the export bundle. Offline CLI callers pass stamps only for the project
+ * they are actually verifying (`trustedHookStampsFor(repo, bundle.scope.project)`), so repo A's
+ * `hook_sealed_by` cannot authorize reconstruction of repo B's event.
  */
 export type ProducerVerifyOpts = {
   trustedHookStamps?: readonly string[];
+  /** Ledger project these stamps were resolved for. Hook substitution requires `opts.project === e.project`. */
+  project?: string;
 };
 
-function trustedStampKind(sealedBy: unknown, trustedHookStamps?: readonly string[]): "hook" | "webhook" | undefined {
+function trustedStampKind(sealedBy: unknown, opts: ProducerVerifyOpts | undefined, eventProject: string): "hook" | "webhook" | undefined {
   if (typeof sealedBy !== "string" || sealedBy === "") return undefined;
   if (sealedBy === SEALED_BY_GITHUB_WEBHOOK) return "webhook";
-  if (trustedHookStamps?.includes(sealedBy)) return "hook";
+  if (opts?.project !== eventProject) return undefined;
+  if (opts.trustedHookStamps?.includes(sealedBy)) return "hook";
   return undefined;
 }
 
@@ -246,7 +250,7 @@ function trustedStampKind(sealedBy: unknown, trustedHookStamps?: readonly string
  */
 export function reconstructWithheldPayload(e: Signable, opts?: ProducerVerifyOpts): Signable | undefined {
   if (!isGitCommitSeal(e)) return undefined;
-  const stamp = trustedStampKind(e.method?.params?.[SEALED_BY_PARAM], opts?.trustedHookStamps);
+  const stamp = trustedStampKind(e.method?.params?.[SEALED_BY_PARAM], opts, e.project);
   if (!stamp) return undefined;
   const expected = stamp === "webhook" ? PRODUCER_WEBHOOK_SYSTEM_ACTOR : PRODUCER_HOOK_SYSTEM_ACTOR;
   if (!isExactSystemActor(e.actor, expected)) return undefined;

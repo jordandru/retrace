@@ -10,7 +10,7 @@ import { ReconcileCfg, commitFacts, reconcileOptionsFrom, reconcileWithGit, repo
 import { RemoteStore, retraceHeaders } from "./remote-store.js";
 import { fetchVerifiedRemoteEvents } from "./verified-events.js";
 import { isMainModule } from "./is-main.js";
-import { producerVerifyOptsForRepo } from "./hook-stamps.js";
+import { producerVerifyOptsFor } from "./hook-stamps.js";
 
 type Level = "pass" | "warn" | "fail";
 export type Finding = { level: Level; label: string; detail: string };
@@ -300,7 +300,7 @@ export async function gateRemoteAuthorization(
   project: string,
   pubkeyFlag?: unknown,
   baseUrl?: string,
-  opts?: { trustedHookStamps?: readonly string[] },
+  opts?: { trustedHookStamps?: readonly string[]; project?: string },
 ): Promise<{ findings: Finding[]; verified: { events: Event[]; note: string } }> {
   const verified = await fetchVerifiedRemoteEvents(store, project, pubkeyFlag, baseUrl, opts);
   return { findings: verifiedHeadFindings(true, commitId, verified), verified };
@@ -316,7 +316,7 @@ export async function remoteCaptureCoverage(
   baseUrl?: string,
   prefetched?: { events: Event[]; note: string },
 ): Promise<Finding> {
-  const { events, note } = prefetched ?? await fetchVerifiedRemoteEvents(store, project, pubkeyFlag, baseUrl, producerVerifyOptsForRepo(repo) ?? (cfg.reconcile?.hook_sealed_by ? { trustedHookStamps: cfg.reconcile.hook_sealed_by } : undefined));
+  const { events, note } = prefetched ?? await fetchVerifiedRemoteEvents(store, project, pubkeyFlag, baseUrl, producerVerifyOptsFor(repo, project));
   let attribution: import("@retrace-dev/core").AttributionOptions | undefined;
   let attributionNote = "";
   if (events.some(isAttributionAmendment)) {
@@ -479,7 +479,7 @@ async function main() {
         // /events and /why must not decide delivery, actor, pin/session, or instruct-root.
         try {
           const remote = new RemoteStore(url, auth.token);
-          const { findings: authFindings, verified } = await gateRemoteAuthorization(commit, remote, project, undefined, url, producerVerifyOptsForRepo(repo));
+          const { findings: authFindings, verified } = await gateRemoteAuthorization(commit, remote, project, undefined, url, producerVerifyOptsFor(repo, project));
           findings.push(...authFindings);
           try {
             findings.push(await remoteCaptureCoverage(repo, project, remote, cfg, args, undefined, url, verified));
