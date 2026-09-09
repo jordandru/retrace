@@ -1,7 +1,12 @@
 # Commit trailer consistency — design note
 
-**Status:** **v2.4 — ACCEPTED WITH NOTES, 2026-09-09** (coordinator, on Jordan's instruction; build order and tracked
-notes in §15). Author: claude-code. Not built. v2.3 (f68823e) closure review by Codex (#2801,
+**Status:** **v2.5 — ACCEPTED WITH NOTES** (acceptance was v2.4, 2026-09-09; coordinator, on Jordan's instruction;
+build order and tracked notes in §15). v2.5 (2026-09-09) changes no rule: it folds the corrections surfaced by the
+step-1 build (PR 29) and Codex's code review of it (#2856) — `caused_by_problem` restored to the `/2` reserved list
+(rule 1), `claim_decision.signed_actor` added to the §6 block, the verifier binds `producer_signed_actor` to the
+verified payload (rule 3), `/1`-signed seals exempted from §5.1's stamping language and preserved at ingress (rule 5),
+T27 qualified for withheld seals, `off` added to the policy flag (§9), core publication added to the step-1 release
+sequence (§15). Dispositions in §14f. Author: claude-code. Not built. v2.3 (f68823e) closure review by Codex (#2801,
 evt_bffde560cfab4a46bb4fe106b8ace24b): R1, R4, R7, N1, N2, N3 CLOSED; R2, R5, R8 PARTIAL; four new findings
 (V23-1 High, V23-2..4 Medium), all folded here (§14e); Codex asked for no further broad redesign and named the
 signed-format/old-client contract as the one prerequisite before shadow — it is §15 step 1. v2.2 (6908d5d) closure review by
@@ -225,7 +230,8 @@ WHO the ledger itself refutes.
 `POST /events` from an **assert** credential with a commit-shaped input (`action ∈ {committed, merged}`,
 a `commit:` artifact, `method.tool = "git"`), and every `push` commit in `POST /hooks/github`, go through
 `classifyCommitClaim` before `appendEvent`. The Worker overwrites `actor` per §4 and writes
-`method.params.claim_decision` (§6). This is a server stamp like `sealed_by`: the assert allow-list is
+`method.params.claim_decision` (§6) — except on a `/1`-signed commit seal, which is stored byte-for-byte with no
+annotation (§6 rule 5; v2.5). This is a server stamp like `sealed_by`: the assert allow-list is
 applied to the **claim** (`body.actor`), and the server-derived system actor is not a client assertion,
 so the hook credential's `allowed_actors` need no `system/*` entry. A caller-supplied `claim_decision` is
 discarded (server wins, hash-covered — Codex H3: markers are derived server-side, never trusted from the
@@ -317,6 +323,7 @@ caller values discarded):
   observer: { producer: "git-hook" | "github-push", sealed_by: "<sealed_by value>" },
   claim: { type, id, source, model?, raw_trailers: { "retrace-actor"?: string, "co-authored-by"?: string[] } },
   caused_by: { id?, source: "trailer" | "env" | "file" | "none", root?: { id, action, actor: {type,id} }, problem? },
+  signed_actor?: { type, id, on_behalf_of? },   // the actor the producer signed — present on /2-signed seals; rule 3 reads it
   decision: {
     status: "supported" | "conflicting" | "unresolved" | "human_claim_with_agent_evidence" | "no_agent_evidence" | "merge_unclassified",
     reason?: "no_match" | "malformed_claim" | "loose_evidence_only" | "root_only" | "unrooted" | "no_authenticated_ingress",
@@ -344,7 +351,8 @@ reserved server stamps. Rules:
    signed canonical payload (the existing `v` field), so a different format selects different signed
    bytes and no unsigned selector can pick a verifier (#2801 R2). `/2` excludes from the signed params
    exactly the **server annotation surface**: `sealed_by`, `producer_sig_verdict`, `relayed_by`,
-   `claim_decision`, and `producer_signed_actor` — the complete list is a named constant
+   `caused_by_problem` (stamped by `appendEvent`; omitted in v2.4, restored in v2.5 — without it every `/2` event
+   with a `caused_by` problem verifies `invalid`), `claim_decision`, and `producer_signed_actor` — the complete list is a named constant
    (`RESERVED_METHOD_PARAMS_V2`) and adding to it later is a `/3`. `/1` keeps its exact old exclusions and
    **no** substitution rule; an absent `producer_sig.format` means `/1`; an unknown format fails closed.
 2. **The producer signs its claim, with the inputs needed to re-derive it.** The hook's signed actor is
@@ -361,7 +369,10 @@ reserved server stamps. Rules:
    path; the verifier never accepts a second selector field — #2801 N1); `signed_actor` equals, field for
    field (`type`, `id`, `on_behalf_of`), the actor re-derived from the signed `raw_message` + `author`;
    and `claim_decision.claim.{type,id}` equals `signed_actor.{type,id}`. Any other combination is
-   verified against the stored `actor` as today, and a mismatch is `invalid`. A hostile store therefore
+   verified against the stored `actor` as today, and a mismatch is `invalid`. In every case the verifier reports as
+   `producer_signed_actor` the actor that occupied the signed `actor` field of the payload that **verified** — never
+   the claim parsed from `raw_message`; a `/2` event signed as A whose trailer names B verifies as A or not at all
+   (v2.5; Codex PR 29 finding 2). A hostile store therefore
    cannot re-point a signed event for A at an arbitrary B (T32).
 4. **What the verdict says.** `producer_signed_actor` is a **derived verification result**, computed by
    the verifier from the verified bytes — never a client-supplied echo. The Worker may persist it as a
@@ -378,7 +389,10 @@ reserved server stamps. Rules:
    refused with `426 Upgrade Required` naming the minimum CLI version; the hook treats 426 as **queued
    and loud** (pending-seal file + stderr + non-zero exit — an explicit exception to the 4xx-is-not-
    retryable rule, because upgrading fixes it) and `retrace doctor` reports the version gap. Unsigned
-   commit seals (no `producer_sig`) are annotated freely in both phases. Acceptance: T27 covers `/1`
+   commit seals (no `producer_sig`) are annotated freely in both phases. Ingress sanitisation is format-aware: on a
+   `/1`-signed event, client-supplied `claim_decision` / `producer_signed_actor` are ordinary signed params and are
+   preserved as submitted (and never read as a server decision or verification result); on `/2` and unsigned events
+   they are discarded and re-derived (v2.5; Codex PR 29 finding 4). Acceptance: T27 covers `/1`
    ingress in shadow and enforce, and online + offline round trips for **every** `/2` server annotation. `intent` keeps the commit subject/body verbatim; nothing about the trailer is
 removed from the record. Older seals have no `claim_decision` block and are `legacy` to every consumer.
 
@@ -491,7 +505,8 @@ the audit never reads the raw status alone).
 3. **Phase C — `unresolved` policy.** `record` by default; `withhold` available. Jordan decides per
    project after seeing Phase A numbers.
 
-Overrule path: each phase is a Worker config flag (`RETRACE_TRAILER_POLICY = shadow | enforce`), and
+Overrule path: each phase is a Worker config flag (`RETRACE_TRAILER_POLICY = off | shadow | enforce`; `off`, the default added by the step-1 build, runs no classifier
+and applies only §6 rule 5's `/1` ingress rules — v2.5), and
 the per-project `attribution.unresolved_claims` lives in `.retrace.json` beside the existing
 `attribution` block. **Policy distribution (Codex R8):** the Worker does not read `.retrace.json`. The
 effective per-project policy (unresolved policy, repository aliases, trusted hook stamps) is a stored
@@ -585,7 +600,8 @@ offline; a digest alone is not enough.
 27. Producer-signature round trip (`/2`): signed hook input → record/supported, record/unresolved,
     withheld, shadow → online and offline `verified` with `producer_signed_actor` = the claim; a `/1`
     legacy event verifies under the `/1` rule unchanged; a tampered `signed_actor` → `invalid`; a tampered
-    `claim_decision.claim` → hash-chain failure (not a signature failure). (Codex R2, #2737 R2)
+    `claim_decision.claim` → hash-chain failure on a recorded seal; on a **withheld** seal it also disables the
+    rule-3 substitution, so the signature verdict is `invalid` as well (v2.5). (Codex R2, #2737 R2)
 28. Hook payload with a chosen `F` omitting a disputed path → classification stands on the submitted
     facts; webhook seal of the same sha carries GitHub's `F` → `facts_disagreement` (fail). (Codex R4)
 29. Retire `agent/codex` credential of principal Alice, request mint of `agent/codex` for principal Bob
@@ -732,6 +748,16 @@ mechanism that later changed (e.g. "U = first seal's seq", "the context freezes 
 | Cleanup | Open interval `(U, firstSeal.seq)`; subset qualified by evaluation head; §14b–d marked historical. |
 | Buildability | Codex: bounded implementation PR is supported; not approved for live shadow *unchanged* because of V23-1. v2.4 folds V23-1..4; §15 orders the build so the signed-format contract lands and is round-trip-tested before the shadow flag is ever on. |
 
+## 14f. Step-1 code review disposition (Codex, #2856, PR 29 at aeab15b)
+
+Verdict *request changes*. Code findings, all owned by PR 29 (cursor-agent): **F1 (P1)** rule 3 / T32 deferred —
+merge blocker (§15 step 1); **F2 (P1)** verifier returned the parsed-trailer actor, not the verified payload's actor
+— rule 3 text now binds it (v2.5); **F3 (P1)** CLI 0.1.8 depended on an unpublished core — release sequence added to
+§15; **F4 (P2)** ingress deleted `/1`-signed params — rule 5 now states format-aware preservation; **F5 (P2)** the
+new capability probe escaped the hook's deadline/retry contract. Codex's two readiness-pass prose findings were
+doc-only and are folded: §5.1's stamping language carries rule 5's `/1` exception; T27 qualified for withheld seals.
+Codex found no classifier, context-table or actor-rewrite scope creep. This section is historical once PR 29 merges.
+
 ## 15. Acceptance, build order and tracked notes
 
 **Accepted with notes (2026-09-09).** Reviewed across four rounds by Codex (v1, v2.1, v2.2, v2.3), NOOA/Nemotron
@@ -744,7 +770,11 @@ Grok's review of v2.4 (from 2026-09-11) is welcome and may reopen this section; 
 1. **Signed-format contract** (§6): `retrace-producer-sig/2` with the reserved annotation constant and
    version-in-payload; hook signs `/2` with `raw_message` + `author` + parents; verifier dispatch (`/1`
    unchanged, absent = `/1`, unknown = fail closed); `producer_signed_actor` derived; old-client ingress
-   for shadow and enforce; T27, T32, T38, T39 as tests. **Must merge and deploy before step 3.**
+   for shadow and enforce; T27, T32, T38, T39 as tests. **Must merge and deploy before step 3.** Release sequence
+   (v2.5; Codex PR 29 finding 3): Worker → publish `@retrace-dev/core` → publish `@retrace-dev/cli` → re-run
+   `retrace-git install` in hooked repos; the packed CLI is validated against its declared core dependency, not the
+   workspace link. T32's verifier half ships here because the published offline verifier must know rule 3 before
+   step 3 writes the first withheld seal.
 2. **Credential `principal`** and never-reissue rule (§10; PR 27 follow-up); `RETRACE_GITHUB_PROJECTS`
    → stored project policy document with digest (§9); `npm run migrate` switched to the query endpoint.
 3. **Classifier in shadow** (§3–§6, `RETRACE_TRAILER_POLICY=shadow`): classification-context table with
