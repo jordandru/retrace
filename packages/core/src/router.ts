@@ -566,6 +566,10 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
         // sign-as-yourself-submit-on-another's-credential into a plain signature failure (producer-sig.ts).
         const credential = principal?.kind === "credential" ? principal.credential : undefined;
         const resolvedInput = { ...parsed.data, actor: resolved.actor, method: parsed.data.method ? { ...parsed.data.method, params } : parsed.data.method };
+        // Step 1: the Worker does not read `.retrace.json` (design §9) and the step-2 policy document
+        // does not exist yet, so producerSigCheck is called without trustedHookStamps and never
+        // substitutes online. Acceptable: no withheld seal can exist before step 3; step 2 wires
+        // the stored policy document into both the Worker and the export bundle.
         const producerCheck = await producerSigCheck(resolvedInput, credential?.public_key ?? null);
         const producerVerdict = producerCheck.verdict;
         if (credential?.require_signature && producerVerdict !== "verified")

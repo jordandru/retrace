@@ -24,10 +24,11 @@ export async function verifiedExportEvents(
   pubkeyFlag?: unknown,
   baseUrl?: string,
   trustedKey?: TrustedIssuer,
+  opts?: { trustedHookStamps?: readonly string[] },
 ): Promise<{ events: Event[]; note: string }> {
   const trusted = trustedKey ?? await resolveTrustedKey(pubkeyFlag, baseUrl);
   if (!trusted) throw new Error(NO_TRUSTED_KEY);
-  const verdict = await verifyExportBundle(bundle, trusted.key);
+  const verdict = await verifyExportBundle(bundle, trusted.key, opts?.trustedHookStamps ? { trustedHookStamps: opts.trustedHookStamps } : undefined);
   if (!exportVerdictOk(verdict)) {
     throw new Error(`refusing to reconcile against an export that does not verify (signature ${verdict.signature}, events intact ${verdict.events_intact}, chain ${verdict.chain_ok_at_export}, coverage ${verdict.coverage.complete})${verdict.problems.length ? ": " + verdict.problems.join("; ") : ""}`);
   }
@@ -185,6 +186,7 @@ export async function fetchVerifiedRemoteEvents(
   project: string,
   pubkeyFlag?: unknown,
   baseUrl?: string,
+  opts?: { trustedHookStamps?: readonly string[] },
 ): Promise<{ events: Event[]; note: string }> {
   let resolved: TrustedIssuer | undefined;
   const issuer = async (): Promise<TrustedIssuer> => {
@@ -204,6 +206,6 @@ export async function fetchVerifiedRemoteEvents(
   }
 
   const trusted = await issuer();
-  const verified = await verifiedExportEvents(bundle, pubkeyFlag, baseUrl, trusted);
+  const verified = await verifiedExportEvents(bundle, pubkeyFlag, baseUrl, trusted, opts);
   return extendVerifiedExportToLiveHead(store, project, bundle, verified, trusted, origin);
 }

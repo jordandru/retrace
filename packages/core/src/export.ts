@@ -166,7 +166,7 @@ function checkCoverage(bundle: ExportBundle, sorted: Event[], problems: string[]
 }
 
 /** Offline verification: signature + per-event content hashes + adjacency links + omission (coverage). */
-export async function verifyExportBundle(bundle: ExportBundle, trustedPublicKey?: JsonWebKey, vopts?: { producers?: ProducerKey[] }): Promise<ExportVerdict> {
+export async function verifyExportBundle(bundle: ExportBundle, trustedPublicKey?: JsonWebKey, vopts?: { producers?: ProducerKey[]; trustedHookStamps?: readonly string[] }): Promise<ExportVerdict> {
   const problems: string[] = [];
   let signature: ExportVerdict["signature"] = "unsigned";
   if (bundle.signature && bundle.issuer) {
@@ -200,7 +200,7 @@ export async function verifyExportBundle(bundle: ExportBundle, trustedPublicKey?
   // Producer signatures (rung 5): a supplied trusted list REPLACES the bundle's own (which is self-attested, like the
   // issuer key); with neither, signed events are uncheckable and only the unsigned-agent count is meaningful.
   const producerKeys = vopts?.producers ?? bundle.producers ?? [];
-  const ps = await countProducerSigs(sorted, producerKeys);
+  const ps = await countProducerSigs(sorted, producerKeys, { trustedHookStamps: vopts?.trustedHookStamps });
   problems.push(...ps.problems);
   return { signature, events_intact, links_consistent, chain_ok_at_export: !!bundle.chain?.ok, coverage, legacy_hash_events, producer_signed: ps.producer_signed, producer_invalid: ps.producer_invalid, producer_unsigned_agent_events: ps.producer_unsigned_agent_events, kid: bundle.issuer?.kid, problems };
 }

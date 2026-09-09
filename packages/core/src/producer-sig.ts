@@ -217,13 +217,26 @@ function competingWithheldSelectors(cd: Record<string, unknown>): boolean {
   return "actor_written" in cd || "withheld" in cd || "actorWritten" in cd;
 }
 
-function trustedHookOrWebhookStamp(sealedBy: unknown): "hook" | "webhook" | undefined {
-  if (typeof sealedBy !== "string" || !sealedBy.trim()) return undefined;
+/**
+ * Exact trusted-stamp membership for rule 3. Equality only — no substring, no case folding.
+ * `webhook:github` is the one built-in exception (SEALED_BY_GITHUB_WEBHOOK). Hook stamps come from
+ * the caller (`trustedHookStamps`); when that list is omitted, hook substitution is not attempted
+ * (fail closed → verify the stored actor → invalid for a withheld rewrite).
+ *
+ * The Worker does not read `.retrace.json` (design §9) and the step-2 policy document does not
+ * exist yet, so it passes no list in step 1 and never substitutes online. That is acceptable:
+ * no withheld seal can exist before step 3, and step 2 wires the stored policy document into
+ * both the Worker and the export bundle. Offline CLI callers pass the same `hook_sealed_by`
+ * list captureSeals and reconcile already consume, so the two never disagree on one stored event.
+ */
+export type ProducerVerifyOpts = {
+  trustedHookStamps?: readonly string[];
+};
+
+function trustedStampKind(sealedBy: unknown, trustedHookStamps?: readonly string[]): "hook" | "webhook" | undefined {
+  if (typeof sealedBy !== "string" || sealedBy === "") return undefined;
   if (sealedBy === SEALED_BY_GITHUB_WEBHOOK) return "webhook";
-  const lower = sealedBy.toLowerCase();
-  if (sealedBy.startsWith("assert:") && (lower.includes("retrace-git") || lower.includes("git hook"))) {
-    return "hook";
-  }
+  if (trustedHookStamps?.includes(sealedBy)) return "hook";
   return undefined;
 }
 
@@ -231,9 +244,9 @@ function trustedHookOrWebhookStamp(sealedBy: unknown): "hook" | "webhook" | unde
  * Strict §6 rule 3 reconstruction: clone the event with `actor = claim_decision.signed_actor`
  * (type/id/on_behalf_of only) iff every guard holds. Otherwise undefined (verify stored actor).
  */
-export function reconstructWithheldPayload(e: Signable): Signable | undefined {
+export function reconstructWithheldPayload(e: Signable, opts?: ProducerVerifyOpts): Signable | undefined {
   if (!isGitCommitSeal(e)) return undefined;
-  const stamp = trustedHookOrWebhookStamp(e.method?.params?.[SEALED_BY_PARAM]);
+  const stamp = trustedStampKind(e.method?.params?.[SEALED_BY_PARAM], opts?.trustedHookStamps);
   if (!stamp) return undefined;
   const expected = stamp === "webhook" ? PRODUCER_WEBHOOK_SYSTEM_ACTOR : PRODUCER_HOOK_SYSTEM_ACTOR;
   if (!isExactSystemActor(e.actor, expected)) return undefined;
@@ -278,8 +291,8 @@ export type ProducerVerifyResult = {
 };
 
 /** Does this event's signature verify with this public key? Pure; no registry. */
-export async function verifyProducerSig(e: Signable, publicJwk: JsonWebKey): Promise<boolean> {
-  return (await verifyProducerSigResult(e, publicJwk)).ok;
+export async function verifyProducerSig(e: Signable, publicJwk: JsonWebKey, opts?: ProducerVerifyOpts): Promise<boolean> {
+  return (await verifyProducerSigResult(e, publicJwk, opts)).ok;
 }
 
 /**
@@ -288,7 +301,7 @@ export async function verifyProducerSig(e: Signable, publicJwk: JsonWebKey): Pro
  * `signed_actor` is the actor inside the verified payload (rule 3 may reconstruct it); a stored
  * `producer_signed_actor` annotation is ignored. /1 never substitutes.
  */
-export async function verifyProducerSigResult(e: Signable, publicJwk: JsonWebKey): Promise<ProducerVerifyResult> {
+export async function verifyProducerSigResult(e: Signable, publicJwk: JsonWebKey, opts?: ProducerVerifyOpts): Promise<ProducerVerifyResult> {
   if (!e.producer_sig || !e.timestamp) return { ok: false };
   const format = producerSigFormatOf(e);
   if (format === "unknown") return { ok: false, format: "unknown" };
@@ -299,7 +312,7 @@ export async function verifyProducerSigResult(e: Signable, publicJwk: JsonWebKey
   let verified: Signable | undefined;
   if (await tryBytes(e)) verified = e;
   else if (fmt === PRODUCER_SIG_FORMAT_V2) {
-    const reconstructed = reconstructWithheldPayload(e);
+    const reconstructed = reconstructWithheldPayload(e, opts);
     if (reconstructed && await tryBytes(reconstructed)) verified = reconstructed;
   }
   if (!verified) return { ok: false, format: fmt };
@@ -326,20 +339,20 @@ export type ProducerSigCheck = {
  *   invalid      the signature does not verify over the resolved payload (or timestamp is missing, or format unknown)
  *   verified     everything checks
  */
-export async function producerSigCheck(input: Signable, registered?: JsonWebKey | null): Promise<ProducerSigCheck> {
+export async function producerSigCheck(input: Signable, registered?: JsonWebKey | null, opts?: ProducerVerifyOpts): Promise<ProducerSigCheck> {
   if (!input.producer_sig) return { verdict: "none" };
   const format = producerSigFormatOf(input);
   if (format === "unknown") return { verdict: "invalid", format: "unknown" };
   if (!registered) return { verdict: "unknown_kid", format: format ?? PRODUCER_SIG_FORMAT };
   if (input.producer_sig.kid !== (await keyId(registered))) return { verdict: "unknown_kid", format: format ?? PRODUCER_SIG_FORMAT };
   if (!input.timestamp) return { verdict: "invalid", format: format ?? PRODUCER_SIG_FORMAT };
-  const result = await verifyProducerSigResult(input, registered);
+  const result = await verifyProducerSigResult(input, registered, opts);
   if (!result.ok) return { verdict: "invalid", format: result.format ?? format ?? PRODUCER_SIG_FORMAT };
   return { verdict: "verified", format: result.format, signed_actor: result.signed_actor };
 }
 
-export async function producerSigVerdict(input: Signable, registered?: JsonWebKey | null): Promise<ProducerSigVerdict> {
-  return (await producerSigCheck(input, registered)).verdict;
+export async function producerSigVerdict(input: Signable, registered?: JsonWebKey | null, opts?: ProducerVerifyOpts): Promise<ProducerSigVerdict> {
+  return (await producerSigCheck(input, registered, opts)).verdict;
 }
 
 /** Attach a signature to an input about to be submitted. Throws without `timestamp` or `idempotency_key`, and when
@@ -380,7 +393,7 @@ export interface ProducerSigCounts {
  * signatures are uncheckable (an old bundle with no producers and no --producers file): signed events are neither
  * counted nor flagged; only the unsigned-agent count is meaningful then.
  */
-export async function countProducerSigs(events: Event[], keys: ProducerKey[]): Promise<ProducerSigCounts> {
+export async function countProducerSigs(events: Event[], keys: ProducerKey[], opts?: ProducerVerifyOpts): Promise<ProducerSigCounts> {
   const byKid = new Map(keys.map((k) => [k.kid, k]));
   const seenSigs = new Map<string, number>();
   const c: ProducerSigCounts = { producer_signed: 0, producer_invalid: 0, producer_unsigned_agent_events: 0, problems: [] };
@@ -396,7 +409,7 @@ export async function countProducerSigs(events: Event[], keys: ProducerKey[]): P
       c.problems.push(`event #${e.seq}: producer_sig kid ${e.producer_sig.kid.slice(0, 12)} is not a registered producer key`);
       continue;
     }
-    if (!(await verifyProducerSig(e, key.public_key))) {
+    if (!(await verifyProducerSig(e, key.public_key, opts))) {
       c.producer_invalid++; c.problems.push(`event #${e.seq}: producer signature does not verify — signed fields altered, or the wrong key`);
       continue;
     }

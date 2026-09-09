@@ -8,6 +8,7 @@ import {
   producerSigVerdict, rederiveCommitClaim, signProducer, verifyProducerSig, verifyProducerSigResult,
 } from "./producer-sig.js";
 import { SEALED_BY_PARAM } from "./store.js";
+import { captureSeals } from "./capture.js";
 
 class MemStore implements EventStore {
   events: Event[] = []; shares = new Map<string, Share>();
@@ -335,22 +336,30 @@ function asWithheld(
   };
 }
 
+/** The exact stamp this fixture project's hook writes — same string captureSeals/reconcile would take from .retrace.json. */
+const PROJECT_HOOK_STAMPS = ["assert:git hook (assert)"] as const;
+const hookTrust = { trustedHookStamps: PROJECT_HOOK_STAMPS };
+
 test("T32: valid withheld T27 fixture reconstructs; every rule-3 guard fails closed", async () => {
   const key = await generateSigningKey();
   const signed = await signClaimed(key.privateKey);
   const valid = asWithheld(signed);
-  const ok = await verifyProducerSigResult(valid, key.publicKey);
+  const ok = await verifyProducerSigResult(valid, key.publicKey, hookTrust);
   assert.equal(ok.ok, true);
   assert.deepEqual(ok.signed_actor, claimedCodex);
   const { event } = await appendEvent(new MemStore(), valid);
-  assert.equal(await verifyProducerSig(event, key.publicKey), true);
-  assert.deepEqual((await verifyProducerSigResult(event, key.publicKey)).signed_actor, claimedCodex);
+  assert.equal(await verifyProducerSig(event, key.publicKey, hookTrust), true);
+  assert.deepEqual((await verifyProducerSigResult(event, key.publicKey, hookTrust)).signed_actor, claimedCodex);
+  const counted = await countProducerSigs([event], [{ kid: signed.producer_sig.kid, public_key: key.publicKey }], hookTrust);
+  assert.equal(counted.producer_signed, 1);
+  assert.equal(counted.producer_invalid, 0);
 
   const webhook = asWithheld(signed, {
     actor: { ...PRODUCER_WEBHOOK_SYSTEM_ACTOR },
     sealedBy: "webhook:github",
   });
-  assert.equal((await verifyProducerSigResult(webhook, key.publicKey)).ok, true);
+  assert.equal((await verifyProducerSigResult(webhook, key.publicKey)).ok, true, "webhook:github is trusted without a hook list");
+  assert.equal((await verifyProducerSigResult(webhook, key.publicKey, hookTrust)).ok, true);
 
   const guards: [string, Awaited<ReturnType<typeof asWithheld>>][] = [
     ["competing top-level actor_written", asWithheld(signed, { claimDecision: withheldClaim({ actor_written: "withheld" }) })],
@@ -363,14 +372,14 @@ test("T32: valid withheld T27 fixture reconstructs; every rule-3 guard fails clo
     ["missing nested selector", asWithheld(signed, { claimDecision: withheldClaim({ decision: { policy: "trailer-consistency/1" } }) })],
   ];
   for (const [name, fixture] of guards) {
-    assert.equal((await verifyProducerSigResult(fixture, key.publicKey)).ok, false, name);
+    assert.equal((await verifyProducerSigResult(fixture, key.publicKey, hookTrust)).ok, false, name);
   }
 
   const nonCommit = { ...valid, action: "edited" as const };
-  assert.equal((await verifyProducerSigResult(nonCommit, key.publicKey)).ok, false, "non-commit");
+  assert.equal((await verifyProducerSigResult(nonCommit, key.publicKey, hookTrust)).ok, false, "non-commit");
 
   const idMismatchSigned = await signClaimed(key.privateKey, { params: { raw_message: "signed bump\n\nRetrace-Actor: claude-code\n" } });
-  assert.equal((await verifyProducerSigResult(asWithheld(idMismatchSigned), key.publicKey)).ok, false, "withheld actor-id mismatch");
+  assert.equal((await verifyProducerSigResult(asWithheld(idMismatchSigned), key.publicKey, hookTrust)).ok, false, "withheld actor-id mismatch");
 
   const oboMismatchSigned = await signClaimed(key.privateKey, {
     actor: { type: "agent", id: "codex", on_behalf_of: "payload@example.com" },
@@ -378,7 +387,7 @@ test("T32: valid withheld T27 fixture reconstructs; every rule-3 guard fails clo
   assert.equal(
     (await verifyProducerSigResult(asWithheld(oboMismatchSigned, {
       claimDecision: withheldClaim({ signed_actor: { type: "agent", id: "codex", on_behalf_of: "payload@example.com" } }),
-    }), key.publicKey)).ok,
+    }), key.publicKey, hookTrust)).ok,
     false,
     "withheld on_behalf_of mismatch vs re-derived author email",
   );
@@ -388,7 +397,40 @@ test("T32: valid withheld T27 fixture reconstructs; every rule-3 guard fails clo
     params: { [CLAIM_DECISION_PARAM]: withheldClaim() },
   });
   const legacyWithheld = asWithheld(legacy);
-  assert.equal((await verifyProducerSigResult(legacyWithheld, key.publicKey)).ok, false, "/1 never substitutes");
+  assert.equal((await verifyProducerSigResult(legacyWithheld, key.publicKey, hookTrust)).ok, false, "/1 never substitutes");
+});
+
+test("T32: trusted hook stamps are exact membership, not a name heuristic", async () => {
+  const key = await generateSigningKey();
+  const signed = await signClaimed(key.privateKey);
+  const valid = asWithheld(signed);
+
+  assert.equal((await verifyProducerSigResult(valid, key.publicKey)).ok, false, "no list supplied → fail closed");
+  assert.equal((await verifyProducerSigResult(valid, key.publicKey, { trustedHookStamps: [] })).ok, false, "empty list → fail closed");
+
+  for (const lookalike of ["assert:not a git hook", "assert:untrusted retrace-git observer"]) {
+    const fixture = asWithheld(signed, { sealedBy: lookalike });
+    assert.equal((await verifyProducerSigResult(fixture, key.publicKey, hookTrust)).ok, false, lookalike);
+    const captured = captureSeals([{ ...fixture, id: "evt_lookalike", seq: 0, hash: "0", prev_hash: "0", received_at: fixture.timestamp!, timestamp: fixture.timestamp! }], {
+      repoName: "p",
+      hookSealedBy: [...PROJECT_HOOK_STAMPS],
+    });
+    assert.equal(captured.length, 0, `${lookalike} is not a captureSeals hook seal`);
+  }
+
+  const custom = asWithheld(signed, { sealedBy: "assert:release-recorder" });
+  assert.equal((await verifyProducerSigResult(custom, key.publicKey, hookTrust)).ok, false, "custom stamp is not in project A's list");
+  assert.equal(
+    (await verifyProducerSigResult(custom, key.publicKey, { trustedHookStamps: ["assert:release-recorder"] })).ok,
+    true,
+    "configured custom stamp substitutes",
+  );
+
+  assert.equal(
+    (await verifyProducerSigResult(valid, key.publicKey, { trustedHookStamps: ["assert:release-recorder"] })).ok,
+    false,
+    "cross-project: project A's stamps supplied while verifying project B's event",
+  );
 });
 
 test("finding 2: signed_actor is the verified payload actor, not the re-derived claim", async () => {
