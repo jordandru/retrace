@@ -96,6 +96,15 @@ export function hookFindings(repo: string): Finding[] {
   ];
 }
 
+export function pendingSealsFinding(repo: string): Finding {
+  const gitDir = resolve(repo, git(repo, ["rev-parse", "--git-dir"]));
+  const path = join(gitDir, "retrace-pending-seal");
+  const shas = existsSync(path) ? [...new Set(readFileSync(path, "utf8").split(/\s+/).filter(Boolean))] : [];
+  return shas.length
+    ? result("fail", "pending seals", `${path}: ${shas.join(", ")}`)
+    : result("pass", "pending seals", `${path} is empty`);
+}
+
 export function parseDoctorArgs(argv: string[]): DoctorArgs {
   const flags = new Set(argv.filter((a) => a.startsWith("--")));
   const pos = argv.filter((a) => !a.startsWith("--"));
@@ -387,7 +396,7 @@ async function main() {
   try { repo = resolve(git(resolve(args.repo ?? process.cwd()), ["rev-parse", "--show-toplevel"])); }
   catch { console.error("FAIL  repository — not inside a Git repository (or pass its path)"); process.exit(1); return; }
   const findings: Finding[] = [];
-  if (command === "doctor") findings.push(objectStoreFinding(repo));
+  if (command === "doctor") findings.push(objectStoreFinding(repo), pendingSealsFinding(repo));
   const cfgPath = join(repo, ".retrace.json");
   let cfg: RepoConfig = {};
   if (!existsSync(cfgPath)) findings.push(result("fail", "repository wiring", `${cfgPath} is missing; run retrace-git install --repo ${repo}`));

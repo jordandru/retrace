@@ -77,6 +77,7 @@ export function coauthorActor(coauthor: string, ae: string): EventInput["actor"]
 
 export interface CommitActorResolution {
   actor: EventInput["actor"];
+  claimSource: "retrace-actor" | "co-authored-by" | "bot-author" | "human-author" | "malformed";
   /** valid Retrace-Caused-By trailer, if any */
   causedBy?: string;
   trailers: Record<string, string[]>;
@@ -95,14 +96,24 @@ export function resolveCommitActor(input: { message: string; authorName?: string
   const body = nl < 0 ? "" : norm.slice(nl + 1);
   const an = input.authorName ?? "", ae = input.authorEmail ?? "";
   const coauthors = trailers["co-authored-by"] ?? [];
-  const agentId = validActorId(trailers["retrace-actor"]?.[0]);
+  const rawAgentId = trailers["retrace-actor"]?.[0];
+  const agentId = validActorId(rawAgentId);
   const agentCo = coauthors.find((c) => AGENT_COAUTHOR.test(c));
   const isBot = /\[bot\]/i.test(an);
+  const literalNewlineTrailerBlock =
+    !/[\r\n]/.test(message) &&
+    /\\n(?:\\n)?(?:Retrace-Actor|Retrace-Model|Retrace-Caused-By|Co-Authored-By):\s*\S/i.test(message);
   let actor: EventInput["actor"];
   if (agentId) actor = { type: "agent", id: agentId, model: trailers["retrace-model"]?.[0], on_behalf_of: ae || undefined };
   else if (agentCo) actor = coauthorActor(agentCo, ae);
   else if (isBot) actor = { type: "system", id: ae || an, display_name: an };
   else actor = { type: "human", id: ae || an, display_name: an };
+  const claimSource: CommitActorResolution["claimSource"] =
+    literalNewlineTrailerBlock || (rawAgentId !== undefined && !agentId) ? "malformed"
+      : agentId ? "retrace-actor"
+      : agentCo ? "co-authored-by"
+      : isBot ? "bot-author"
+      : "human-author";
   const cleanBody = stripTrailers(body, trailerText.length);
-  return { actor, causedBy: validCausedById(trailers["retrace-caused-by"]?.[0]), trailers, intent: cleanBody ? `${subject}\n\n${cleanBody}` : subject, isMerge: (input.parents?.length ?? 0) > 1 };
+  return { actor, claimSource, causedBy: validCausedById(trailers["retrace-caused-by"]?.[0]), trailers, intent: cleanBody ? `${subject}\n\n${cleanBody}` : subject, isMerge: (input.parents?.length ?? 0) > 1 };
 }

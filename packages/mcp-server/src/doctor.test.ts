@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Credential, Event, EventInput, EventStore, Share, appendEvent, buildExportBundle, generateSigningKey, pageHistoryNewest, schemaSurface, signCanonical } from "@retrace-dev/core";
-import { attributionFinding, credentialAuthorization, doctorHistoryEvents, gateRemoteAuthorization, headDelivery, instructRootFinding, missingSchema, parseDoctorArgs, pinSessionFinding, remoteCaptureCoverage, sealedCommitEvent, sealedLooksAgent } from "./doctor.js";
+import { attributionFinding, credentialAuthorization, doctorHistoryEvents, gateRemoteAuthorization, headDelivery, instructRootFinding, missingSchema, parseDoctorArgs, pendingSealsFinding, pinSessionFinding, remoteCaptureCoverage, sealedCommitEvent, sealedLooksAgent } from "./doctor.js";
 import { RemoteStore } from "./remote-store.js";
 import { SqliteStore } from "./sqlite-store.js";
 
@@ -45,6 +45,21 @@ test("doctor: --gate is a flag, not a repo path", () => {
   assert.deepEqual(parseDoctorArgs(["--gate", "/tmp/repo"]), { command: "doctor", gate: true, json: false, local: false, repo: "/tmp/repo" });
   assert.deepEqual(parseDoctorArgs(["status", "retrace", "--json"]), { command: "status", gate: false, json: true, local: false, statusProject: "retrace" });
   assert.equal(parseDoctorArgs(["doctor", "."]).gate, false);
+});
+
+test("doctor: pending seals fail while the file is non-empty and pass when drained", () => {
+  const fixture = objectStoreRepo();
+  fixture.commit("pending\n");
+  const pending = joinP(fixture.repo, ".git", "retrace-pending-seal");
+  const first = "a".repeat(40);
+  const second = "b".repeat(40);
+  writeF(pending, `${first}\n${second}\n`);
+  const failed = pendingSealsFinding(fixture.repo);
+  assert.equal(failed.level, "fail");
+  assert.match(failed.detail, new RegExp(first));
+  assert.match(failed.detail, new RegExp(second));
+  writeF(pending, "");
+  assert.equal(pendingSealsFinding(fixture.repo).level, "pass");
 });
 
 test("doctor: missing HEAD delivery is warn locally and fail in --gate", () => {
