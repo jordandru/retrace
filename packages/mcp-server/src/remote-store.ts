@@ -25,7 +25,7 @@ export function retraceHeaders(token?: string): Record<string, string> {
 }
 
 export class RemoteStore implements EventStore {
-  constructor(private baseUrl: string, private token?: string) {
+  constructor(private baseUrl: string, private token?: string, private options: { deadlineMs?: number } = {}) {
     this.baseUrl = baseUrl.replace(/\/$/, "");
   }
   private async req<T>(method: string, path: string, body?: unknown): Promise<T> {
@@ -33,6 +33,7 @@ export class RemoteStore implements EventStore {
       method,
       headers: retraceHeaders(this.token),
       body: body ? JSON.stringify(body) : undefined,
+      signal: this.options.deadlineMs === undefined ? undefined : AbortSignal.timeout(this.options.deadlineMs),
     });
     if (!res.ok) throw new RemoteApiError(method, path, res.status, new Headers(res.headers), await res.text());
     return (await res.json()) as T;

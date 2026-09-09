@@ -10,7 +10,7 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { SqliteStore } from "./sqlite-store.js";
 import { appendEvent, generateSigningKey, publicFromPrivate, verifyProducerSig, verifyProject } from "@retrace-dev/core";
-import { parseTrailers, resolveHookToken, resolveHookProducerKeyFile, ttySurface, guardRemoteWrite, validCausedById, validActorId } from "./git-hook.js";
+import { hookScript, parseTrailers, resolveHookToken, resolveHookProducerKeyFile, ttySurface, guardRemoteWrite, validCausedById, validActorId } from "./git-hook.js";
 import { writeProducerPrivateKey } from "./producer-key.js";
 
 async function seedInstruct(db: string, project = "rpg"): Promise<string> {
@@ -204,6 +204,7 @@ test("hook end to end: the named credential is the bearer the server sees; a rej
     const log = readFileSync(join(dir, ".git", "retrace-hook.log"), "utf8");
     assert.match(log, /^\d{4}-\d\d-\d\dT\S+ commit [0-9a-f]{12} in \S+ NOT logged: Retrace API POST \/events → 403: .*allowed_actors/m);
     assert.doesNotMatch(log, /tok-git-hook-assert|owner-token/);
+    assert.ok(!existsSync(join(dir, ".git", "retrace-pending-seal")), "credential rejection is not retryable");
     // 4) a credential that cannot be resolved is a config error — also logged, still non-fatal to git
     writeFileSync(join(dir, ".retrace.json"), JSON.stringify({ project: "rpg", credential: "does-not-exist" }));
     writeFileSync(join(dir, "a.ts"), "5\n");
@@ -213,6 +214,69 @@ test("hook end to end: the named credential is the bearer the server sees; a rej
   } finally {
     server.close();
   }
+});
+
+test("hook 5xx is visible and pending, then the next hook run drains it before the current sha", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "retrace-git-pending-"));
+  let status = 503;
+  const seen: string[] = [];
+  const server = createServer((req, res) => {
+    let body = "";
+    req.on("data", (chunk) => (body += chunk));
+    req.on("end", () => {
+      const input = JSON.parse(body);
+      seen.push(input.change.after_hash);
+      if (status === 503) {
+        res.writeHead(503, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "temporarily unavailable" }));
+        return;
+      }
+      res.writeHead(201, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        event: { ...input, id: `evt_${seen.length}`, seq: seen.length, prev_hash: "0", hash: "0", received_at: new Date().toISOString() },
+        deduped: seen.slice(0, -1).includes(input.change.after_hash),
+      }));
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const env = { RETRACE_URL: url, RETRACE_TOKEN: "owner-token" };
+    sh(dir, "git", ["init", "-q", "-b", "main"]);
+    writeFileSync(join(dir, ".retrace.json"), JSON.stringify({ project: "rpg", url }));
+    writeFileSync(join(dir, "a.ts"), "1\n");
+    sh(dir, "git", ["add", "."]);
+    sh(dir, "git", ["commit", "-qm", "initial"]);
+    const sha = sh(dir, "git", ["rev-parse", "HEAD"]).trim();
+
+    await assert.rejects(
+      promisify(execFile)("node", [bin, "commit", "--hook", "--repo", dir], {
+        cwd: dir,
+        encoding: "utf8",
+        env: { ...baseEnv, ...env },
+      }),
+      (error: any) => {
+        assert.equal(error.code, 1);
+        const retraceLines = error.stderr.trim().split("\n").filter((line: string) => line.startsWith("retrace:"));
+        assert.deepEqual(retraceLines, [`retrace: commit ${sha} pending seal; details: ${join(dir, ".git", "retrace-hook.log")}`]);
+        return true;
+      },
+    );
+    assert.equal(readFileSync(join(dir, ".git", "retrace-pending-seal"), "utf8"), `${sha}\n`);
+
+    status = 201;
+    await shAsync(dir, "node", [bin, "commit", "--hook", "--repo", dir], env);
+    assert.equal(readFileSync(join(dir, ".git", "retrace-pending-seal"), "utf8"), "");
+    assert.deepEqual(seen, [sha, sha, sha], "retry is attempted before the current sha, which then dedupes");
+  } finally {
+    server.close();
+  }
+});
+
+test("hook script preserves retrace-git stderr but never propagates its failure to git", () => {
+  const script = hookScript();
+  assert.match(script, />\/dev\/null \|\| :/);
+  assert.doesNotMatch(script, /2>&1/);
 });
 
 // Backlog #12 (dogfood log 2026-08-20): 68c343f carried `Retrace-*` in one paragraph and `Co-Authored-By` in the next;

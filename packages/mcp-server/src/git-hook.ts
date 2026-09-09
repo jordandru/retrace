@@ -15,9 +15,9 @@
  *   field = the owner-token behaviour, unchanged. A named-but-missing credential is an error, never a silent fallback.
  * Producer key (resolveHookProducerKeyFile): env RETRACE_HOOK_KEY_FILE > `producer_key_file` path on that same
  *   credentials-file entry (a path, never key material — the mirror stays Worker-uploadable). Missing both → unsigned.
- * Failures of `commit` (the hook path) are appended to <git-dir>/retrace-hook.log: the post-commit script discards
- *   stdout/stderr, and with a fail-closed assert credential a 401/403 would otherwise be an invisible drop (owner-token
- *   migration 2026-08-23). Re-log a dropped commit with `retrace-git commit <sha>` or `backfill`.
+ * Failures of `commit` (the hook path) are appended to <git-dir>/retrace-hook.log. Retryable remote failures are also
+ *   queued in <git-dir>/retrace-pending-seal and print one stderr line through the non-blocking hook; credential
+ *   rejections remain log-only and are not queued. Re-log a dropped commit with `retrace-git commit <sha>` or `backfill`.
  *
  * Mapping a commit → event
  *   WHO    author (human) — or an AGENT if the commit has a trailer `Retrace-Actor: <id>` (optionally
@@ -41,7 +41,7 @@ import { homedir, hostname } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { EventInput, appendEvent, describeEvent, Event, resolveCommitActor } from "@retrace-dev/core";
 import { makeStore, detectIde, harnessSession } from "./index.js";
-import { RemoteStore } from "./remote-store.js";
+import { RemoteApiError, RemoteStore } from "./remote-store.js";
 import { loadProducerPrivateKeyFromFile, sealForAppend } from "./producer-key.js";
 import { isMainModule } from "./is-main.js";
 
@@ -98,6 +98,32 @@ export function resolveHookProducerKeyFile(
  *  messages that reach it (HTTP status + body, config errors) carry no token. */
 export function appendHookLog(gitDir: string, line: string): void {
   try { appendFileSync(join(gitDir, "retrace-hook.log"), `${new Date().toISOString()} ${line}\n`); } catch {}
+}
+
+export function pendingSealPath(gitDir: string): string {
+  return join(gitDir, "retrace-pending-seal");
+}
+
+export function readPendingSeals(gitDir: string): string[] {
+  const path = pendingSealPath(gitDir);
+  if (!existsSync(path)) return [];
+  return [...new Set(readFileSync(path, "utf8").split(/\s+/).filter(Boolean))];
+}
+
+export function appendPendingSeal(gitDir: string, sha: string): void {
+  const pending = readPendingSeals(gitDir);
+  if (!pending.includes(sha)) appendFileSync(pendingSealPath(gitDir), `${sha}\n`);
+}
+
+export function removePendingSeal(gitDir: string, sha: string): void {
+  const remaining = readPendingSeals(gitDir).filter((pending) => pending !== sha);
+  writeFileSync(pendingSealPath(gitDir), remaining.length ? `${remaining.join("\n")}\n` : "");
+}
+
+export function retryableHookFailure(error: unknown): boolean {
+  if (error instanceof RemoteApiError) return error.status >= 500;
+  if (!(error instanceof Error)) return false;
+  return error.name === "AbortError" || error.name === "TimeoutError" || error instanceof TypeError;
 }
 
 function git(repo: string, args: string[]): string {
@@ -199,9 +225,9 @@ export function commitToEvent(repo: string, sha: string, cfg: Cfg, live = false)
 }
 
 /** Did this hook run under a controlling terminal? "tty" = a human typed `git commit`; "agent" = a harness ran it.
- *  Read from /proc/self/stat field 7 (tty_nr), NOT from tty.isatty(): the installed post-commit script redirects its
- *  own stdout AND stderr to /dev/null (see hookScript), which destroys every file-descriptor signal while leaving the
- *  controlling terminal itself intact. Measured 2026-08-27: agent-spawned tty_nr=0, real pty tty_nr=34819.
+ *  Read from /proc/self/stat field 7 (tty_nr), NOT from tty.isatty(): the installed post-commit script redirects stdout
+ *  and stderr may be piped by Git or its caller, so file-descriptor signals do not reliably describe the controlling
+ *  terminal. Measured 2026-08-27: agent-spawned tty_nr=0, real pty tty_nr=34819.
  *  Linux-only by construction — with no /proc the field is simply absent, which is a legal permanent state
  *  ("absence is information", schema.ts). It is EVIDENCE only and never decides WHO: authorship does that. */
 export function ttySurface(procStat = "/proc/self/stat"): "tty" | "agent" | undefined {
@@ -245,14 +271,29 @@ export function guardRemoteWrite(repo: string, cfg: Cfg): void {
   );
 }
 
+function hookDeadlineMs(): number {
+  const raw = process.env.RETRACE_HOOK_DEADLINE_MS;
+  if (raw === undefined) return 10_000;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value <= 0) throw new Error(`RETRACE_HOOK_DEADLINE_MS must be a positive number, got ${raw}`);
+  return value;
+}
+
 async function logCommit(repo: string, sha: string, cfg: Cfg, live = false): Promise<{ event: Event; deduped: boolean }> {
   // The single choke point for every write path (hook, `commit <sha>`, backfill) — so a new caller cannot forget it.
   guardRemoteWrite(repo, cfg);
   let input = commitToEvent(repo, sha, cfg, live);
   const keyFile = resolveHookProducerKeyFile({ credential: cfg.credential });
   if (keyFile) input = await sealForAppend(input, { privateKey: loadProducerPrivateKeyFromFile(keyFile) });
-  const store = cfg.url ? new RemoteStore(cfg.url, cfg.token) : makeStore();
+  const store = cfg.url ? new RemoteStore(cfg.url, cfg.token, { deadlineMs: hookDeadlineMs() }) : makeStore();
   return store instanceof RemoteStore ? store.append(input) : appendEvent(store, input);
+}
+
+async function drainPendingSeals(repo: string, gitDir: string, cfg: Cfg): Promise<void> {
+  for (const sha of readPendingSeals(gitDir)) {
+    await logCommit(repo, sha, cfg);
+    removePendingSeal(gitDir, sha);
+  }
 }
 
 const HOOK_MARK = "# retrace-git hook";
@@ -271,7 +312,7 @@ export type HookKind = (typeof HOOK_KINDS)[number];
 export function hookScript(kind: HookKind = "post-commit"): string {
   const self = new URL(import.meta.url).pathname;
   const merge = kind === "post-merge" ? `case "$(git reflog -1 --format=%gs 2>/dev/null)" in *"Merge made by"*) ;; *) exit 0 ;; esac # seal only a merge this invocation made; a fast-forward (even onto someone else's merge commit) produced nothing here\n` : "";
-  return `#!/bin/sh\n${HOOK_MARK}\n${merge}node "${self}" commit --hook --repo "$(git rev-parse --show-toplevel)" >/dev/null 2>&1 || echo "retrace: failed to log commit (non-fatal; reason appended to $(git rev-parse --git-dir)/retrace-hook.log)" >&2\n`;
+  return `#!/bin/sh\n${HOOK_MARK}\n${merge}node "${self}" commit --hook --repo "$(git rev-parse --show-toplevel)" >/dev/null || :\n`;
 }
 
 async function main() {
@@ -281,16 +322,33 @@ async function main() {
   const gitDir = resolve(repo, git(repo, ["rev-parse", "--git-dir"]));
 
   if (cmd === "commit") {
-    // The hook path. Config errors (a credential that can't be resolved) and server rejections (401/403 from a
-    // fail-closed assert credential, 5xx) both land in retrace-hook.log, because the hook script discards our output.
     const sha = pos[1] ?? "HEAD";
+    let failedSha = sha;
+    let cfg: Cfg | undefined;
     try {
-      const r = await logCommit(repo, sha, loadCfg(repo, flags), flags.hook === true);
+      cfg = loadCfg(repo, flags);
+      if (flags.hook === true) {
+        const pending = readPendingSeals(gitDir);
+        for (const pendingSha of pending) {
+          failedSha = pendingSha;
+          await logCommit(repo, pendingSha, cfg);
+          removePendingSeal(gitDir, pendingSha);
+        }
+      }
+      failedSha = git(repo, ["rev-parse", sha]);
+      const r = await logCommit(repo, failedSha, cfg, flags.hook === true);
       console.log(`${r.deduped ? "(already logged) " : "logged "}${r.event.id}\n${describeEvent(r.event)}`);
     } catch (e: any) {
-      let id = sha;
-      try { id = git(repo, ["rev-parse", "--short=12", sha]); } catch {}
-      appendHookLog(gitDir, `commit ${id} in ${repo} NOT logged: ${e?.message ?? e}`);
+      let fullSha = failedSha;
+      try { fullSha = git(repo, ["rev-parse", failedSha]); } catch {}
+      const logPath = join(gitDir, "retrace-hook.log");
+      appendHookLog(gitDir, `commit ${fullSha.slice(0, 12)} in ${repo} NOT logged: ${e?.message ?? e}`);
+      if (flags.hook === true && cfg?.url && retryableHookFailure(e)) {
+        appendPendingSeal(gitDir, fullSha);
+        console.error(`retrace: commit ${fullSha} pending seal; details: ${logPath}`);
+        process.exitCode = 1;
+        return;
+      }
       throw e;
     }
     return;
@@ -327,6 +385,7 @@ async function main() {
     return;
   }
   if (cmd === "backfill") {
+    await drainPendingSeals(repo, gitDir, cfg);
     const range = flags.since ? `${flags.since}..HEAD` : "HEAD";
     const max = flags.max ? ["-n", String(flags.max)] : [];
     const shas = git(repo, ["rev-list", "--reverse", ...max, range]).split("\n").filter(Boolean);
