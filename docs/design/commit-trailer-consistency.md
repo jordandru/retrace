@@ -1,8 +1,10 @@
 # Commit trailer consistency — design note
 
-**Status:** draft v2.1, 2026-09-08. Author: claude-code. Not built. v2 (ee9c889) was reviewed by NOOA/Nemotron
-3 Ultra (evt_f787df612d0d413ba13f1b887f160fc5, run review_trailer_v2_20260909T035317Z): needs changes, 3 High / 3 Medium / 4 Low — dispositions in
-§14b. Codex and Grok reviews of v2 pending.
+**Status:** draft v2.2, 2026-09-08 (late). Author: claude-code. Not built. v2 (ee9c889) was reviewed by
+NOOA/Nemotron 3 Ultra (evt_f787df612d0d413ba13f1b887f160fc5): needs changes — dispositions in §14b. v2.1
+(2a9abc2) was reviewed by Codex (#2716, evt_d88568a1185741a68bcc1e3709e1aa43): needs changes, 5 High /
+3 Medium — dispositions in §14c. v2.2 renames the statuses to say what they actually judge (§2.7, §4).
+Grok review pending (budget resets 2026-09-11).
 v1 (9b6ef05, 2026-09-07) was reviewed by Codex (#2514, 4 High / 3 Medium), Grok (#2515) and NOOA on
 Nemotron 3 Ultra (#2517, 6 findings). All three said *needs changes*. v2 answers every finding; §14 maps
 each one to the section that answers it. Reviewers for v2: the same three. Builder once accepted:
@@ -19,7 +21,7 @@ cursor-agent or github-copilot (reviewer ≠ builder, `docs/team-roles.md`). PR 
 | Any matching ancestor → seal as claimed. | Only a witness **by the claimed actor on this commit's files** corroborates. Presence in a chain is not authorization. | Codex H2 |
 | Check runs in the hook (GET `/why`) and in the webhook. | The check runs **once, in Worker ingestion**, for both producers: the hook's POST and the webhook's push both land there. The hook cannot stamp a system actor anyway (its assert allow-list has no `system/*`). Local-only ledgers run the same core function. | Codex H3; Grok (assert allow-list) |
 | Lookup failure → hook seals nothing; webhook seals `chain_unavailable`. | Unavailable is a **pending** state, never an event. Webhook: durable pending table + drain; hook: visible non-zero exit + retry file. Deadline and breaker specified. | NOOA 1, 2; Codex Q1 |
-| System seal + `attribution_conflict` marker. | Every commit seal carries `method.params.attribution` = **observer / claim / decision**, with `status`, `reason`, witnesses, read head and policy version. Contradicted claims get no agent WHO. | Codex H4; NOOA 4 |
+| System seal + `attribution_conflict` marker. | Every commit seal carries `method.params.claim_decision` = **observer / claim / decision**, with `status`, `reason`, witnesses, read head and policy version. Conflicting claims get no agent WHO. | Codex H4; NOOA 4 |
 | Conflicts are corrected by amendment; acks reused. | Exact-seal, per-scope human amendment; both producers' decisions compared as decisions, so matching withholds are not `producer_disagreement`; the ack rule treats the **claimed** actor as the accused. | Codex H4 |
 | Human fallback bypasses the guard. | Claim source is recorded (`retrace-actor` / `co-authored-by` / `bot-author` / `human-author` / `malformed`); a human or malformed claim with agent evidence in window is recorded as such and never becomes a silent human seal. | Codex M2 |
 | `{type,id}` is identity. | `{type,id}` is actor equality; principal binding is credential issuance, out of scope here and stated so. Witness credential/key provenance is recorded. | Codex M3 |
@@ -52,12 +54,24 @@ is not the same as never writing the false record.
    from the owner token are not independent witnesses of WHO.
 4. **Evidence is commit-specific.** A witness must name one of this commit's files as an output, in this
    commit's capture window. Membership in a caller-selected causal chain proves nothing about this commit.
-5. **Never write a contradicted WHO. Never write an unavailable one.** Contradicted → withheld.
+5. **Never write a conflicting WHO. Never write an unavailable one.** Conflicting → withheld.
    Unavailable → pending, not sealed. `unresolved` is a recorded observation, not a failure and not
    agreement.
 6. **One decision function, one place.** The classifier is a pure core function over (commit facts,
    claim, evidence rows, policy). The Worker runs it at ingestion for both producers. The gate, reconcile
    and the local hook path call the same function.
+7. **The classifier judges the contribution claim, not the commit act (Codex v2.1 R3).** A trailer says
+   "agent X made this commit". The only thing the ledger can test is whether X has authenticated, logged
+   work on this commit's files. So the statuses are `supported` / `conflicting` / `unresolved` **of the
+   contribution claim**; none of them authenticates who ran `git commit`. The seal's `actor` remains
+   producer testimony about the commit act, bounded by the assert allow-list, and is labelled so.
+   Withholding on `conflicting` is a *policy* response (the team rule is "commit only your own work", so
+   a claimant with no logged work while others have some is what reconcile already calls
+   `misattributed`), not an authentication result. The case this design **cannot** catch is stated in §4:
+   agent A logs the edits, agent B commits them with A's trailer — the claim is `supported` and the
+   wrong committer is written. Authenticating the commit act needs a separate, pinned-ingress
+   **commit assertion** by the committing agent's own session (a `commit-intent`/`commit-ack` event naming
+   the tree or sha); that is v3 and is out of scope here, but nothing in v2 forecloses it.
 
 ## 3. Evidence model
 
@@ -75,11 +89,17 @@ is not the same as never writing the false record.
 
 For each path `p ∈ F`: lower bound = `previousCaptureTouch(p)` (the last **trusted** seal in this project
 that touched `p`, exactly as reconcile and attribution v7 define it — `capture.ts`), exclusive; upper
-bound = `U` = the seq of the **earliest existing seal of this sha in the project** if one exists,
-else the read head at classification time. Fixing `U` to the first seal makes the second producer's
-decision reproduce the first's (§7.2), in either order: if the webhook classifies first, its seal becomes
-`U` for the hook's later classification, so evidence appended between the two read heads is outside both
-windows (NOOA v2 M6; T11a/T11b). Merge commits are classified on their own files only if the
+bound = `U` = the read head at the moment the **first** classification of this sha reads evidence.
+That first read is persisted as a **classification context** row keyed `(project, canonical repo, full
+sha)` — `{read_head_seq, read_head_hash, per_path_lower, F_digest, claim_digest, policy_digest}` — with an
+insert-if-absent unique constraint, *before* the first seal is appended. Every later classification of
+the same sha (the other producer, a pending retry, a re-derivation offline) **reuses that stored window**,
+not the first seal's own seq: a matching edit that lands between the first read and the first append is
+outside the window for everyone, so the decisions agree in either producer order (Codex v2.1 R1;
+NOOA v2 M6; T11a/T11b, T26). Two concurrent first classifiers race on the insert; the loser re-reads the
+winner's context and recomputes. The context row also freezes `F`, the claim and the policy digest, so
+"same decision" means the same inputs, not merely the same status (Codex R8). Merge commits are classified
+on the files the producer emitted; a merge with no emitted files is `merge_unclassified` (info). Merge commits are classified on their own files only if the
 producer emitted them; otherwise status `merge_unclassified` (info).
 
 ### 3.3 Eligible witnesses
@@ -97,7 +117,14 @@ An event `E` witnesses path `p` for actor `A` iff all hold:
   deleted, renamed, moved}` (`generatesArtifact`, `sameArtifact`). Bare paths and `file:` references are
   **loose** and never corroborate (Grok); they are counted and reported as `loose_hints`.
 
+- `E` is not itself the target of an effective attribution amendment at the read head (v7 rejects such
+  evidence; the classifier must not admit what the corrector would refuse — Codex v2.1 R5).
+
 `W(p)` = set of witnessing actors for `p`; `Wits` = all witness event ids; `Wall` = ∪ W(p).
+Note the asymmetry with v7 (Codex R5): v7 accepts `pinned:` **or** `assert:` edit evidence for an
+amendment; the classifier admits `pinned:` only, because an `assert:` edit's actor is the relaying
+credential's claim. A witness set here is therefore a *subset* of what an amendment may cite, never a
+superset.
 
 ### 3.4 What the causal chain is for
 
@@ -118,16 +145,25 @@ reproducible offline from an export.
 
 ## 4. Decision table
 
-`C` = claimed actor, `Cs` = claim source, `Wall` = witnessing actors over this commit's files.
+`C` = claimed actor, `Cs` = claim source, `Wall` = witnessing actors over this commit's files. The table
+classifies the **contribution claim** (§2.7). Two consequences are stated up front:
+
+- **Known gap:** agent A logs pinned edits to the files, agent B commits them carrying A's trailer → the
+  claim is `supported` and `actor = A` is written. This guard cannot see B. Only a pinned-ingress commit
+  assertion by the committing session (v3, §2.7) can. Reconcile's `misattributed` cannot see it either.
+- **Meaning of `conflicting`:** other agents have authenticated work on these files and the claimant has
+  none. Under the team rule "commit only your own paths" that is a policy violation and a false
+  contribution claim; the WHO is withheld on that ground. An agent that truly committed another agent's
+  work is `conflicting` too, and the human corrects it by amendment to the agent whose evidence exists.
 
 | Case | `status` | `reason` | Recorded `actor` |
 |---|---|---|---|
-| `Cs` agent trailer/co-author, `C ∈ Wall` | `corroborated` | — | `C` |
-| `Cs` agent, `Wall ≠ ∅`, `C ∉ Wall` | `contradicted` | `no_match` | **withheld** → producer system actor (`system/retrace-git` or `system/webhook:github`) |
+| `Cs` agent trailer/co-author, `C ∈ Wall` | `supported` | — | `C` |
+| `Cs` agent, `Wall ≠ ∅`, `C ∉ Wall` | `conflicting` | `no_match` | **withheld** → producer system actor (`system/retrace-git` or `system/webhook:github`) |
 | `Cs` agent, `Wall = ∅`, `loose_hints > 0` | `unresolved` | `loose_evidence_only` | policy (below) — `loose_hints` never changes the actor written; the reason is diagnostic only (NOOA v2 M4) |
 | `Cs` agent, `Wall = ∅`, root resolves | `unresolved` | `root_only` | policy |
 | `Cs` agent, `Wall = ∅`, no root / unverified `caused_by` | `unresolved` | `unrooted` | policy |
-| `Cs` = `malformed`, `Wall ≠ ∅` | `contradicted` | `malformed_claim` | withheld |
+| `Cs` = `malformed`, `Wall ≠ ∅` | `conflicting` | `malformed_claim` | withheld |
 | `Cs` = `malformed`, `Wall = ∅` | `unresolved` | `malformed_claim` | policy (fallback human is **not** written as agreement) |
 | `Cs` human/bot author, `Wall ≠ ∅` | `human_claim_with_agent_evidence` | — | `C` (a human may commit an agent's work; coverage is a reconcile matter) |
 | `Cs` human/bot author, `Wall = ∅` | `no_agent_evidence` | — | `C` |
@@ -136,7 +172,7 @@ reproducible offline from an export.
 **Policy for `unresolved` (`.retrace.json` → `attribution.unresolved_claims`):**
 
 - `"record"` — write `actor = C` **and** the status. The seal says, in hash-covered fields, "claimed by
-  trailer, uncorroborated at read head N". Consumers show it as a claim (§7).
+  trailer, unsupported at read head N". Consumers show it as a claim (§7).
 - `"withhold"` — write the producer system actor; the claim is preserved in `attribution.claim`.
 
 **Decided (Jordan, 2026-09-08): `record` is the default for the first release.** Why: Today most Boxing-RPG
@@ -145,7 +181,7 @@ silent flip to system seals would erase `uncovered` and `misattributed` from rec
 unless every consumer is changed in the same release. `record` keeps every existing finding, adds the
 truthful label everywhere the seal is shown, and the `withhold` switch exists from day one for a team
 that wants it. Either value is implementable with the same code; to overrule, set
-`attribution.unresolved_claims: "withhold"` per project, or change this default in a later release. `contradicted` is **always** withheld; there is no policy to write a
+`attribution.unresolved_claims: "withhold"` per project, or change this default in a later release. `conflicting` is **always** withheld; there is no policy to write a
 WHO the ledger itself refutes.
 
 ## 5. Where it runs
@@ -155,12 +191,25 @@ WHO the ledger itself refutes.
 `POST /events` from an **assert** credential with a commit-shaped input (`action ∈ {committed, merged}`,
 a `commit:` artifact, `method.tool = "git"`), and every `push` commit in `POST /hooks/github`, go through
 `classifyCommitClaim` before `appendEvent`. The Worker overwrites `actor` per §4 and writes
-`method.params.attribution` (§6). This is a server stamp like `sealed_by`: the assert allow-list is
+`method.params.claim_decision` (§6). This is a server stamp like `sealed_by`: the assert allow-list is
 applied to the **claim** (`body.actor`), and the server-derived system actor is not a client assertion,
-so the hook credential's `allowed_actors` need no `system/*` entry. A caller-supplied `attribution` is
+so the hook credential's `allowed_actors` need no `system/*` entry. A caller-supplied `claim_decision` is
 discarded (server wins, hash-covered — Codex H3: markers are derived server-side, never trusted from the
 caller). Pinned credentials cannot record commit-shaped events as seals today (v7: "pinned client commit
 claims do not become hook seals"); unchanged.
+
+**What the Worker can and cannot bind (Codex v2.1 R4).** The hook supplies `F`, the parents and the
+message; the Worker has no repository and cannot check them against Git. v2.2 therefore: (a) has the hook
+send the **full raw commit message** (today it sends the trailer-stripped intent) and the parent shas, and
+the Worker re-derives the claim itself — a claim the hook asserts that differs from the re-derived one is
+`malformed`; (b) takes the webhook's `F` from GitHub's `added/modified/removed`, an independent
+producer's facts; (c) adds reconcile kind `facts_disagreement` (fail) when the two producers' `F` or
+parents for one sha differ, and keeps reconcile's existing comparison of every seal against local
+`git show --name-status` as the authoritative check. What remains **unbound** and is stated as a limit:
+a holder of the hook's assert credential can submit a chosen `F` for a sha and, until the webhook or a
+local reconcile disagrees, the classification stands on those facts. The threat model for v2 is an
+unmodified hook; a forged hook payload is caught by the second producer or by reconcile, not by the
+classifier.
 
 ### 5.2 Hook (`retrace-git commit --hook`)
 
@@ -185,12 +234,18 @@ claims do not become hook seals"); unchanged.
   table** (delivery id, project, raw body, received_at). Then each commit is classified and sealed; on
   success the pending row is deleted; the response is `201` with the sealed ids.
 - On `unavailable` for any commit, or deadline: seal nothing further, keep the pending row, return
-  **`202 {pending: [shas]}`**. The hourly cron (`7 * * * *`, already present for the export cache)
-  drains pending rows; a row older than 24 h raises the Worker's audit finding `pending_deliveries`
-  (NOOA audit already reads `/status`).
+  **`202 {pending: [shas]}`**. A dedicated `*/5 * * * *` cron drains pending rows (NOOA v2 Q3; Codex R7
+  asked for one consistent figure — it is five minutes everywhere in this document).
+- **Pending state machine (Codex R7):** row states `received → leased(worker, expires_at) → done |
+  budget_failed`. Per-commit progress is persisted inside the row (`sealed: [sha…]`) so a crash after an
+  append and before cleanup resumes idempotently (the `gh:push:` key dedups). Leases expire after 60 s; a
+  drain takes only unleased or expired rows. A commit whose evidence query exceeds the row budget on
+  three drains is marked `budget_failed`, sealed **as nothing**, and surfaced as an audit finding with the
+  sha — it is not retried forever and it does not block later commits in the same delivery. A row older
+  than 24 h in any non-`done` state raises the audit finding `pending_deliveries`.
 - **Circuit breaker:** after 3 consecutive `deadline`/`store_error` outcomes within 5 min the webhook
   skips synchronous classification and goes straight to `202 pending` for 5 min. A breaker cannot force
-  a `contradicted` or an `unresolved` outcome — those require a completed read (NOOA 1: latency must
+  a `conflicting` or an `unresolved` outcome — those require a completed read (NOOA 1: latency must
   never be a catch-all). While the breaker is open the hook path is unaffected (it is a different route
   and budget), so a commit made on a hooked machine is still classified synchronously; only the webhook's
   second seal is delayed (NOOA v2 L7).
@@ -205,7 +260,7 @@ ledger has no pinned ingress, so `Wall` is always empty there and every agent cl
 
 ## 6. Seal record
 
-`method.params.attribution` on every commit seal produced after this ships (hash-covered; server-derived;
+`method.params.claim_decision` on every commit seal produced after this ships (hash-covered; server-derived;
 caller values discarded):
 
 ```
@@ -215,7 +270,7 @@ caller values discarded):
   claim: { type, id, source, model?, raw_trailers: { "retrace-actor"?: string, "co-authored-by"?: string[] } },
   caused_by: { id?, source: "trailer" | "env" | "file" | "none", root?: { id, action, actor: {type,id} }, problem? },
   decision: {
-    status: "corroborated" | "contradicted" | "unresolved" | "human_claim_with_agent_evidence" | "no_agent_evidence" | "merge_unclassified",
+    status: "supported" | "conflicting" | "unresolved" | "human_claim_with_agent_evidence" | "no_agent_evidence" | "merge_unclassified",
     reason?: "no_match" | "malformed_claim" | "loose_evidence_only" | "root_only" | "unrooted" | "no_authenticated_ingress",
     actor_written: "claim" | "withheld",
     unresolved_policy: "record" | "withhold",
@@ -229,83 +284,120 @@ caller values discarded):
 ```
 
 `actor` is `C` or the producer system actor per §4. `sealed_by` is unchanged (`assert:git hook (assert)`
-/ `webhook:github`). `intent` keeps the commit subject/body verbatim; nothing about the trailer is
-removed from the record. Older seals have no `attribution` block and are `legacy` to every consumer.
+/ `webhook:github`).
+
+**Producer signatures (Codex v2.1 R2).** Hook seals are producer-signed (95 of 144 at #2672), and the
+signed payload covers `actor.{type,id,on_behalf_of}` and `method.params` minus the reserved server
+stamps. Two rules keep those signatures valid: (1) `claim_decision` is added to `RESERVED_METHOD_PARAMS`
+— it is a server stamp like `sealed_by`, never signed by a producer, and it is a different key from the
+amendment machinery's params so nothing signed by a human amendment is excluded; (2) when the actor is
+withheld, the block records `signed_actor` = the producer's claimed `actor.{type,id,on_behalf_of}` exactly
+as submitted, and both the online verdict and the offline verifier reconstruct the signed payload with
+`signed_actor` in place of the stored `actor` when `actor_written = "withheld"`. `PRODUCER_SIG_FORMAT`
+stays `retrace-producer-sig/1`; the substitution rule is part of the `trailer-consistency/1` policy and
+is exercised by round-trip tests for record, withhold, shadow and legacy, including a tampered
+`signed_actor` (T27). `intent` keeps the commit subject/body verbatim; nothing about the trailer is
+removed from the record. Older seals have no `claim_decision` block and are `legacy` to every consumer.
 
 ## 7. Consumers
 
+### 7.0 One resolution predicate for every consumer (Codex v2.1 R5)
+
+The sealed `claim_decision` never changes. Every consumer derives **`resolved_status`** from it with one
+shared core function: `resolved_status = supported` if the recorded status is `supported`, or if an
+effective v7 amendment (or set of disjoint amendments) covers **every** file of the commit on the
+**primary seal**; otherwise the recorded status, with `residual_files` listing what no amendment covers.
+The primary seal of a sha is the **earliest seal by seq**, whichever producer made it, and it never
+changes when a later producer's seal arrives — so a correction made against a webhook-primary seal is not
+undone by a delayed hook seal (T30). An acknowledgement (`correction` tag) downgrades a `conflicting`
+verdict to *acknowledged* for reconcile's exit code exactly as for other kinds; it never changes
+`resolved_status`, and the gate treats an acknowledged `conflicting` head as WARN, not PASS. Gate,
+reconcile and the NOOA audit all read `resolved_status`; none re-implements the rule.
+
 ### 7.1 Gate (`retrace doctor --gate`)
 
-- `HEAD delivery`: FAIL when the head seal's `decision.status = contradicted`; WARN when `unresolved`
+- `HEAD delivery`: FAIL when the head seal's `resolved_status = conflicting`; WARN when `unresolved`
   under `record` (message names the missing evidence: "no pinned edit by agent/X names any of these N
   files between #a and #b"); FAIL when `pending seals` file is non-empty; INFO for
   `human_claim_with_agent_evidence`.
-- `pin/session` keeps comparing against the verified ledger; it now uses `decision.witnesses`
+- `pin/session` keeps comparing against the verified ledger; it now uses `claim_decision.decision.witnesses`
   when present (same function), and reports `harness.mismatch` as a non-blocking finding.
 
 ### 7.2 Reconcile
 
-- New kind `contradicted_claim` (fail): a seal with `status = contradicted`. Correction only by
+- New kind `conflicting_claim` (fail): a seal with `status = conflicting`. Correction only by
   amendment (§8); an acknowledgement downgrades to acknowledged, never to attributed.
-- `unresolved` is **not** a new kind: it annotates the existing `uncovered` findings (`CLAIM` prefix in
-  the text output) so nothing is double-counted.
+- `unresolved` is **not** a new kind: it is attached to **every commit verdict** as `claim_status`
+  (rendered as a `CLAIM` line even when the commit has no other finding — a locally covered commit can
+  still be `unresolved` here because `assert:`/local edits satisfy coverage but are not witnesses; Codex
+  R8), so nothing is double-counted and nothing disappears.
 - **Producer comparison becomes a three-way comparison** (Codex H4): hook and webhook seals of one sha
   are compared on `claim` (must be equal — otherwise the pushed commit differs from the committed one:
-  `producer_disagreement`, fail, as today), then on `decision.status`. Two `contradicted` seals whose
-  actors are both system producers are **not** `producer_disagreement`; they are one `contradicted_claim`
-  with two observers. A `corroborated` vs `unresolved` pair can only arise if the second producer read a
-  different window — which §3.2's fixed `U` prevents; if it happens anyway it is reported as
-  `producer_disagreement` with `reason: decision_divergence` and both read heads.
+  `producer_disagreement`, fail, as today), then on `decision.status`. Two `conflicting` seals whose
+  actors are both system producers are **not** `producer_disagreement`; they are one `conflicting_claim`
+  with two observers. A `supported` vs `unresolved` pair can only arise if the second producer read a
+  different context — which §3.2's stored context prevents; if it happens anyway it is reported as
+  `producer_disagreement` with `reason: decision_divergence` and both contexts. A `shadow`/`enforce` or
+  `record`/`withhold` transition between the two seals is `reason: policy_divergence` (the digests differ),
+  informational, and the primary seal's decision governs (Codex R8). A legacy seal paired with a new one
+  is compared on claim only.
 - Coverage for a withheld seal is evaluated against **the claim**, not the system actor, so `uncovered`
   and `misattributed` keep working when a team chooses `withhold` (otherwise all such commits would
   collapse into `non_agent`).
 - `ackFor`: the accused is the **claimed** actor when a claim exists, plus the producer; a claimed agent
-  cannot acknowledge its own contradicted or unresolved commit (Codex H4).
+  cannot acknowledge its own conflicting or unresolved commit (Codex H4).
 
 ### 7.3 `status`, `why`, export UI, audit
 
 `retrace_status`/`/status` count seals by `decision.status` for the last N commits (the number Grok
 measures, §9). `why` and the export UI render `claim → decision` on commit seals ("claimed codex;
-contradicted: pinned edits by opencode on 3/3 files"). The NOOA hourly audit fails on any
-`contradicted_claim` in the window and on `pending_deliveries` older than 24 h.
+conflicting: pinned edits by opencode on 3/3 files"). The NOOA hourly audit fails on any
+`conflicting_claim` in the window and on `pending_deliveries` older than 24 h.
 
 ## 8. Correction lifecycle
 
-- A `contradicted` or `unresolved` seal is corrected only by a **Tier-1 human attribution amendment**
+- A `conflicting` or `unresolved` seal is corrected only by a **Tier-1 human attribution amendment**
   targeting **that exact seal event** (v7), per scope (files), with a beneficiary that has a clean,
-  strictly identified, in-window witness for every file in scope. The classifier's `decision.witnesses`
+  strictly identified, in-window witness for every file in scope. The classifier's `claim_decision.decision.witnesses`
   are exactly the candidate evidence; the CLI pre-fills them (`amend-attribution --from-seal <evt>`),
   and the v7 evaluator still decides. Fabricated or out-of-window evidence is rejected by v7 as today.
-- Two producers, two seals: the amendment targets the **primary** seal (hook if present, else webhook)
-  and reconcile's downgrade rule 4 (no open `producer_disagreement`) is satisfied because matching
-  decisions are not disagreements (§7.2). A second amendment on the other seal is permitted but not
-  required.
+- Two producers, two seals: the amendment targets the **primary** seal (earliest by seq, §7.0) and
+  reconcile's downgrade rule 4 (no open `producer_disagreement`) is satisfied because matching decisions
+  are not disagreements (§7.2). A second amendment on the other seal is permitted but not required, and a
+  later-arriving seal never becomes primary.
 - If no witness exists for the claimed agent (a copied trailer and *no* logged work), there is nothing
-  to amend to: the truthful end state is the withheld seal with an acknowledged `contradicted_claim` or a
+  to amend to: the truthful end state is the withheld seal with an acknowledged `conflicting_claim` or a
   labelled `unresolved`. The design does not invent a WHO to make the row green.
 - Amendments never change `decision.*` on the original seal; consumers show "recorded → effective" as
   they do for every amendment.
 
 ## 9. Rollout and measurement
 
-1. **Phase A — shadow.** Classify and record `attribution` on every seal; `actor` unchanged even for
-   `contradicted` (`actor_written: "claim"`, `shadow: true`). Run ≥ 7 days on `retrace` and
-   `boxing-rpg`. Grok reports the status histogram and every `contradicted` case by hand.
-2. **Phase B — withhold contradicted.** Default on. Gate/reconcile/audit consumers live.
+1. **Phase A — shadow.** Classify and record `claim_decision` on every seal; `actor` unchanged even for
+   `conflicting` (`actor_written: "claim"`, `shadow: true`). Run ≥ 7 days on `retrace` and
+   `boxing-rpg`. Grok reports the status histogram and every `conflicting` case by hand.
+2. **Phase B — withhold conflicting.** Default on. Gate/reconcile/audit consumers live.
 3. **Phase C — `unresolved` policy.** `record` by default; `withhold` available. Jordan decides per
    project after seeing Phase A numbers.
 
 Overrule path: each phase is a Worker config flag (`RETRACE_TRAILER_POLICY = shadow | enforce`), and
 the per-project `attribution.unresolved_claims` lives in `.retrace.json` beside the existing
-`attribution` block.
+`attribution` block. **Policy distribution (Codex R8):** the Worker does not read `.retrace.json`. The
+effective per-project policy (unresolved policy, repository aliases, trusted hook stamps) is a stored
+**project policy document** on the Worker, set by the owner (`PUT /projects/:p/policy`, owner token),
+and its `policy_digest` is recorded in every classification context and seal; `retrace doctor` fails
+when the repository's `.retrace.json` digest differs from the Worker's stored policy.
 
 ## 10. Scope and limits (stated, not solved here)
 
 - **Principal binding (Codex M3; NOOA v2 H1):** two humans holding `agent/codex` credentials in one
   project collapse to one `{type,id}`. v2.1 makes the issuance rule a **build prerequisite** rather than a
   note: `retrace-admin` refuses to mint a second pinned credential for the same `{project, type, id}`
-  unless the existing one is retired, and `/status` reports any project where two live pinned credentials
-  share an actor id (`shared_actor_id`, fail-level for the gate). The classifier keeps `{type,id}` as
+  unless the existing one is retired, **and** every credential carries an immutable `principal` (the
+  human or team it was issued to); an actor id, once bound to a principal in a project, is **never
+  re-issued to a different principal** — a new person gets a new id (Codex v2.1 R6: retire-then-reissue
+  would let the second principal consume the first's in-window witnesses). `/status` reports any project
+  where two live pinned credentials share an actor id (`shared_actor_id`, fail-level for the gate). The classifier keeps `{type,id}` as
   actor equality (a credential id in the actor key would make every rotation a new identity) and records
   each witness's `sealed_by` and `producer_sig_verdict` so a binding dispute can be audited. It never uses
   git author email, model, session or client name as identity.
@@ -320,22 +412,22 @@ the per-project `attribution.unresolved_claims` lives in `.retrace.json` beside 
 
 ## 11. Acceptance tests (adversarial first; each names the finding it closes)
 
-1. Trailer `codex`, pinned `opencode` edits name all files → `contradicted/no_match`, withheld;
-   gate FAIL; reconcile `contradicted_claim`. (v1 T1; Grok scenario)
+1. Trailer `codex`, pinned `opencode` edits name all files → `conflicting/no_match`, withheld;
+   gate FAIL; reconcile `conflicting_claim`. (v1 T1; Grok scenario)
 2. Trailer `codex`, root-only chain, no edits anywhere → `unresolved/root_only`; under `record` actor
    = codex **with** status; under `withhold` system actor; reconcile still reports `uncovered`. (Codex H1)
 3. Trailer `codex`, sibling `opencode` edits under the same instruct root (not ancestors) →
-   `contradicted`. (Codex H1, Grok)
+   `conflicting`. (Codex H1, Grok)
 4. Trailer `codex`, chain contains an old codex event that names none of this commit's files, pinned
-   `opencode` edits name them → `contradicted`. (Codex H2)
+   `opencode` edits name them → `conflicting`. (Codex H2)
 5. Trailer `codex`, the only "codex" event in window is a prior **git seal** (trailer-derived,
-   `assert:` stamp) → not a witness → `unresolved`, never `corroborated`. (Codex H3)
+   `assert:` stamp) → not a witness → `unresolved`, never `supported`. (Codex H3)
 6. Trailer `codex`, one pinned codex edit names one of three files, opencode names the other two →
-   `corroborated` (actor equality is per commit, not per file); reconcile's per-file `misattributed`
+   `supported` (actor equality is per commit, not per file); reconcile's per-file `misattributed`
    WARNs still fire for the two files. (v1 T2 refined)
 7. Foreign-project, missing, newer, or cyclic `caused_by` → `caused_by.problem` recorded; status is
    decided by witnesses alone. (Codex M1)
-8. `Retrace-Actor:` present but invalid, pinned copilot edits in window → `contradicted/malformed_claim`,
+8. `Retrace-Actor:` present but invalid, pinned copilot edits in window → `conflicting/malformed_claim`,
    withheld; the #2030 shape never seals as a human. (Codex M2)
 9. Literal `\n` trailer block, no edits → `unresolved/malformed_claim`; `claim.source = malformed`. (M2)
 10. Same `agent/codex` id from two credentials in one project → both witness; test documents that the
@@ -343,35 +435,53 @@ the per-project `attribution.unresolved_claims` lives in `.retrace.json` beside 
 11. (a) Hook then webhook, evidence appended between them → identical decisions because `U` is the hook
     seal's seq. (b) Webhook then hook, evidence appended between them → identical decisions because `U`
     is the webhook seal's seq. Reconcile reports no disagreement in either order. (Codex H4; NOOA v2 M6, L10)
-12. Hook and webhook both `contradicted` → one `contradicted_claim`, no `producer_disagreement`. (H4)
-13. Pushed commit differs from committed (amended after hook) → claims differ → `producer_disagreement`
-    as today. (H4)
-14. Human-sealed amendment citing `decision.witnesses` for all files → effective; reconcile AMND;
+12. Hook and webhook both `conflicting` → one `conflicting_claim`, no `producer_disagreement`. (H4)
+13. Commit amended after the hook sealed it → a **different sha** is pushed: the hook's seal becomes
+    `unreachable_seal`, the webhook's is a lone-producer `producer_disagreement`, as today. (Codex R8
+    corrected v2.1's wording: an amend is never a same-sha pair.) A same-sha pair whose submitted `F` or
+    parents differ is `facts_disagreement`. (R4)
+14. Human-sealed amendment citing `claim_decision.decision.witnesses` for all files → effective; reconcile AMND;
     gate passes. (NOOA 6a)
 15. Amendment citing an out-of-window or non-pinned event → rejected by v7. (NOOA 6b)
-16. Claimed agent posts a `correction` on its own contradicted commit → not an acknowledgement. (H4)
-17. Assert credential POSTs a commit-shaped event with `attribution` pre-filled → discarded and
+16. Claimed agent posts a `correction` on its own conflicting commit → not an acknowledgement. (H4)
+17. Assert credential POSTs a commit-shaped event with `claim_decision` pre-filled → discarded and
     re-derived server-side. (H3)
 18. Webhook store read exceeds 500 ms → `202 pending`, nothing sealed, row drained by cron, final seal
     identical to the synchronous one. (NOOA 1; Codex Q1)
-19. Three consecutive deadlines → breaker open → immediate `202 pending`; a `contradicted` outcome cannot
+19. Three consecutive deadlines → breaker open → immediate `202 pending`; a `conflicting` outcome cannot
     be produced while the breaker is open. (NOOA 1)
 20. Hook: Worker 503 → stderr line, non-zero exit, sha in `.git/retrace-pending-seal`; next hook run
     seals it first; doctor FAIL while pending. (NOOA 2)
 21. Two live pinned credentials for one `{project, agent id}` → `retrace-admin` refuses the mint; `/status`
     reports `shared_actor_id`; gate FAIL. (NOOA v2 H1)
-22. Harness: witnesses' clients all `cursor@…`, claim `opencode` corroborated by a pinned `opencode`
+22. Harness: witnesses' clients all `cursor@…`, claim `opencode` supported by a pinned `opencode`
     credential → `harness.mismatch = true`, informational only. (NOOA 3)
 23. Duplicate webhook delivery of a sealed push → dedup on `gh:push:` key, no second classification.
 24. Local ledger (`RETRACE_DB`) → `unresolved/no_authenticated_ingress` for every agent claim.
-25. Shadow mode: `contradicted` computed, actor still written, `shadow: true`; consumers report but do
+25. Shadow mode: `conflicting` computed, actor still written, `shadow: true`; consumers report but do
     not fail. (§9 A)
+26. Read-before-append race: first classifier reads head 100, a matching pinned edit lands at 101, first
+    seal appends at 102; second producer reuses the stored context (U = 100) → identical decisions; two
+    concurrent first classifiers → one context row wins, the other recomputes from it. (Codex R1)
+27. Producer-signature round trip: signed hook input → record/supported, record/unresolved, withheld,
+    shadow, legacy → online verdict `verified` and offline verifier `verified`; tampered `signed_actor`
+    or tampered `claim_decision.claim` → `invalid`. (Codex R2)
+28. Hook payload with a chosen `F` omitting a disputed path → classification stands on the submitted
+    facts; webhook seal of the same sha carries GitHub's `F` → `facts_disagreement` (fail). (Codex R4)
+29. Retire `agent/codex` credential of principal Alice, request mint of `agent/codex` for principal Bob
+    in the same project → refused; same principal → allowed. (Codex R6)
+30. Webhook seals first (primary), human amends it to the evidenced agent, hook seal arrives later →
+    primary unchanged, `resolved_status = supported` on every consumer without a second amendment.
+    (Codex R5)
+31. Agent A's pinned edits, agent B commits with A's trailer → `supported`, `actor = A` written; test
+    documents this as the known gap (§4) and asserts nothing else claims to catch it. (Codex R3)
 
 ## 12. Open questions for v2 review
 
 - **Q1 — closed.** Default for `unresolved` is `record` (Jordan, 2026-09-08, §4); `withhold` stays a per-project switch.
-- **Q2:** window upper bound `U` = first existing seal of the sha (§3.2). Any case where the webhook
-  legitimately sees a *different* commit under the same sha? (None known — sha binds content.)
+- **Q2 — closed:** a sha binds the immutable Git object, so two producers can never see different
+  *commits* under one sha; they can, however, **submit different facts** (`F`, parents, message) about it,
+  which is why §3.2 freezes the facts in the classification context and §5.1 adds `facts_disagreement`.
 - **Q3 — closed:** dedicated `*/5 * * * *` drain for `pending_deliveries` (NOOA v2 answer; cost trivial on
   Workers Paid).
 - **Q4 — moot:** the local pre-check and its marker table were removed in v2.1 (§5.2).
@@ -379,7 +489,7 @@ the per-project `attribution.unresolved_claims` lives in `.retrace.json` beside 
 ## 13. PR 19 (OpenCode)
 
 Unchanged in effect: this design does not unblock PR 19. With v2 built, an OpenCode commit carrying a
-copied `Retrace-Actor: codex` becomes `contradicted` **only if** OpenCode logged its edits through its
+copied `Retrace-Actor: codex` becomes `conflicting` **only if** OpenCode logged its edits through its
 pinned credential; if it logged nothing, the copied trailer is `unresolved`, and under `record` the false
 WHO is still written (labelled). So PR 19 needs both: Phase B live, and a measured run (Grok) showing the
 OpenCode harness logs file edits for its commits at a coverage Jordan accepts — or the upstream
@@ -415,7 +525,7 @@ instruction-precedence fix. The two onboarding defects Codex found remain separa
 | Finding | Answer |
 |---|---|
 | H1 principal binding collapse | Accepted as a build prerequisite: issuance refuses duplicate `{project,type,id}`; `shared_actor_id` status/gate finding (§10; T21). Credential id is deliberately **not** part of actor equality. |
-| H2 default `record` writes an uncorroborated WHO | **Owner decision, not folded.** Jordan chose `record` (§4, 2026-09-08) after the trade-off was put to him; NOOA's argument (consumers that read only `actor` see the claim) and the coordinator's (withholding erases coverage findings until every consumer changes) are both recorded here. Re-open only by Jordan. Mitigation kept: `attribution.decision` is hash-covered and every first-party consumer renders it (§7). |
+| H2 default `record` writes an unsupported WHO | **Owner decision, not folded.** Jordan chose `record` (§4, 2026-09-08) after the trade-off was put to him; NOOA's argument (consumers that read only `actor` see the claim) and the coordinator's (withholding erases coverage findings until every consumer changes) are both recorded here. Re-open only by Jordan. Mitigation kept: `claim_decision.decision` is hash-covered and every first-party consumer renders it (§7). |
 | H3 local pre-check bypassable | Accepted: pre-check removed (§5.2). Markers remain evidence only. |
 | M4 `loose_hints` under `record` | Accepted: clarified that `loose_hints` is diagnostic and never changes the actor written (§4). |
 | M5 human commit with agent evidence → write the agent | **Declined.** A `committed` event's WHO is who performed the commit act; content authorship is what attribution amendments and reconcile express (v7 contract; precedent 0905a8e, Jordan committing cursor-agent's docs). Writing the witnessing agent as the committer would be a new falsehood. The evidence is recorded on the seal and surfaces as a reconcile finding. |
@@ -428,3 +538,17 @@ instruction-precedence fix. The two onboarding defects Codex found remain separa
 | Q2 → no | Agreed. |
 | Q3 → 5-minute drain | Accepted: dedicated `*/5 * * * *` drain for `pending_deliveries` (§12 Q3 closed). |
 | Q4 → hook owns the table | Moot: the pre-check and its table are removed; markers are evidence only. |
+
+## 14c. v2.1 review disposition (Codex, #2716)
+
+| Finding | Answer |
+|---|---|
+| R1 fixed `U` does not fix the first snapshot | Accepted: persisted classification context keyed by (project, repo, full sha), insert-if-absent, reused by every later classification; freezes `U`, per-path lowers, `F`, claim and policy digests (§3.2; T26). |
+| R2 classification invalidates producer signatures | Accepted: `claim_decision` is a reserved server stamp (unsigned, distinct key from amendment params); withheld seals keep `signed_actor` and both verifiers substitute it (§6; T27). |
+| R3 contribution evidence ≠ commit actor | Accepted, and it reframes the document: statuses renamed `supported` / `conflicting` / `unresolved` **of the contribution claim** (§2.7); the seal's `actor` is labelled producer testimony; the A-edits/B-commits gap is stated in §4 with T31; authenticated commit assertion named as v3. Withholding on `conflicting` is kept as a policy response and justified as such. |
+| R4 Worker does not authenticate hook-selected facts | Accepted with a stated limit: hook sends the raw message + parents and the Worker re-derives the claim; webhook `F` is GitHub's; new `facts_disagreement`; a forged hook payload is caught by the second producer or reconcile, not the classifier (§5.1; T13, T28). |
+| R5 no consistent amendment discharge rule | Accepted: shared `resolved_status` predicate for gate/reconcile/audit; primary = earliest seal by seq, never displaced; ACK distinguished from resolution; classifier excludes amended witnesses; v7's pinned-or-assert evidence rule stated correctly (§3.3, §7.0; T30). v2.1's T15 claim about v7 was wrong and is withdrawn. |
+| R6 sequential principal reassignment | Accepted: immutable `principal` on credentials; an actor id is never re-issued to a different principal (§10; T29). |
+| R7 pending/breaker recovery semantics | Accepted: five minutes everywhere; `received → leased → done | budget_failed` state machine, leases, per-commit progress, bounded retries, no starvation (§5.3). |
+| R8 comparison matrix, T13, unresolved rendering, policy distribution | Accepted: context digests make "same decision" mean same inputs; `policy_divergence`; legacy pairing; T13 rewritten; `claim_status` on every verdict; stored project policy document with digest (§3.2, §7.2, §9). |
+| H1 residual under `record` | Acknowledged as Jordan's accepted residual; unchanged. |
