@@ -10,6 +10,7 @@ import { dirname, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { EventInput, generateSigningKey, publicFromPrivate, keyId, signProducer, schemaSurface, PRODUCER_SIG_FORMAT, PRODUCER_SIG_FORMAT_V2, type ProducerSigFormat } from "@retrace-dev/core";
 import { keyPath } from "./keys.js";
+import { RemoteApiError } from "./remote-store.js";
 
 export function defaultProducerKeysDir(env: NodeJS.ProcessEnv = process.env): string {
   return env.RETRACE_PRODUCER_KEYS_DIR ?? join(homedir(), ".retrace", "producer-keys");
@@ -100,12 +101,18 @@ export function resetProducerSigSchemaCheck(): void {
  * re-run `retrace-git install`. This probe returns `/2` only when the Worker advertises `producer-sig/2`;
  * otherwise `/1`, so a new CLI talking to an undeployed Worker cannot seal unverifiable /2 bytes.
  */
-export async function assertRemoteAcceptsProducerSig(url: string, fetchApi: typeof fetch = fetch): Promise<ProducerSigFormat> {
+export async function assertRemoteAcceptsProducerSig(
+  url: string,
+  fetchApi: typeof fetch = fetch,
+  opts: { deadlineMs?: number } = {},
+): Promise<ProducerSigFormat> {
   const base = url.replace(/\/+$/, "");
   const cached = checkedRemotes.get(base);
   if (cached) return cached;
-  const res = await fetchApi(base + "/api");
-  if (!res.ok) throw new Error(`refusing to sign: GET ${base}/api returned ${res.status}`);
+  const res = await fetchApi(base + "/api", {
+    signal: opts.deadlineMs === undefined ? undefined : AbortSignal.timeout(opts.deadlineMs),
+  });
+  if (!res.ok) throw new RemoteApiError("GET", "/api", res.status, new Headers(res.headers), await res.text());
   const api = await res.json() as { schema?: Record<string, unknown>; capabilities?: unknown };
   const eventKeys = Array.isArray(api.schema?.event) ? api.schema!.event as unknown[] : [];
   if (!eventKeys.includes("producer_sig") && schemaSurface().event.includes("producer_sig")) {
@@ -124,6 +131,8 @@ export type SealOpts = {
   /** Requested format. The git hook asks for /2; against a remote that does not advertise producer-sig/2 the
    *  probe falls back to /1 so an undeployed Worker is not sent unverifiable bytes. */
   format?: ProducerSigFormat;
+  /** Bound the GET /api probe the same way RemoteStore bounds POST /events (hook deadline). */
+  deadlineMs?: number;
 };
 
 /**
@@ -136,7 +145,7 @@ export async function sealForAppend<T extends EventInput>(input: T, opts: SealOp
   if (!key) return input;
   let format = opts.format ?? PRODUCER_SIG_FORMAT;
   if (opts.remoteUrl) {
-    const advertised = await assertRemoteAcceptsProducerSig(opts.remoteUrl, opts.fetchApi ?? fetch);
+    const advertised = await assertRemoteAcceptsProducerSig(opts.remoteUrl, opts.fetchApi ?? fetch, { deadlineMs: opts.deadlineMs });
     if (format === PRODUCER_SIG_FORMAT_V2 && advertised !== PRODUCER_SIG_FORMAT_V2) format = PRODUCER_SIG_FORMAT;
   }
   const ready = {

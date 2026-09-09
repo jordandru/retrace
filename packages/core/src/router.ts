@@ -39,9 +39,9 @@ import { sealEvent } from "./chain.js";
 import { buildExportBundle, verifyExportBundle } from "./export.js";
 import { ExportCacheStore } from "./export-cache.js";
 import {
-  CLAIM_DECISION_PARAM, PRODUCER_SIGNED_ACTOR_PARAM, PRODUCER_SIG_FORMAT_V2,
+  CLAIM_DECISION_PARAM, PRODUCER_SIGNED_ACTOR_PARAM, PRODUCER_SIG_FORMAT, PRODUCER_SIG_FORMAT_V2,
   PRODUCER_SIG_V2_MIN_CLI_VERSION, PRODUCER_SIG_VERDICT_PARAM, ProducerKey, ProducerSigVerdict,
-  TrailerPolicy, isLegacyClientCommitSeal, parseTrailerPolicy, producerSigCheck,
+  TrailerPolicy, isLegacyClientCommitSeal, parseTrailerPolicy, producerSigCheck, producerSigFormatOf,
 } from "./producer-sig.js";
 import { renderReportHtml } from "./report.js";
 import { collectAttributionAmendments } from "./attribution.js";
@@ -556,8 +556,12 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
         delete params.relayed_by;
         delete params[SEALED_BY_PARAM];
         delete params[PRODUCER_SIG_VERDICT_PARAM];
-        delete params[CLAIM_DECISION_PARAM];
-        delete params[PRODUCER_SIGNED_ACTOR_PARAM];
+        // /1: claim_decision and producer_signed_actor are ordinary signed params — preserve as submitted,
+        // never treat them as a server decision. /2 and unsigned: strip so a client cannot plant stamps.
+        if (producerSigFormatOf(parsed.data) !== PRODUCER_SIG_FORMAT) {
+          delete params[CLAIM_DECISION_PARAM];
+          delete params[PRODUCER_SIGNED_ACTOR_PARAM];
+        }
         // Rung 5: verify over the POST-RESOLVE shape — byte-identical to the offline recompute, which also collapses
         // sign-as-yourself-submit-on-another's-credential into a plain signature failure (producer-sig.ts).
         const credential = principal?.kind === "credential" ? principal.credential : undefined;

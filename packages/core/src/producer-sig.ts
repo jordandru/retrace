@@ -29,6 +29,7 @@
 import { resolveCommitActor } from "./commit-actor.js";
 import { Actor, Event, EventInput } from "./schema.js";
 import { keyId, publicFromPrivate, signCanonical, verifyCanonical } from "./signing.js";
+import { SEALED_BY_GITHUB_WEBHOOK, SEALED_BY_PARAM } from "./store.js";
 
 export const PRODUCER_SIG_FORMAT = "retrace-producer-sig/1";
 export const PRODUCER_SIG_FORMAT_V2 = "retrace-producer-sig/2";
@@ -39,11 +40,13 @@ export const PRODUCER_SIG_V2_MIN_CLI_VERSION = "0.1.8";
 export const PRODUCER_SIG_VERDICT_PARAM = "producer_sig_verdict";
 /** /2 server annotation: the actor the verifier actually checked, never a client-supplied echo. */
 export const PRODUCER_SIGNED_ACTOR_PARAM = "producer_signed_actor";
-/** Classifier observation (hash-covered, not producer-authenticated). Reserved on /2; not written in this step.
- *  Rule 3 will reconstruct the payload from `claim_decision.signed_actor: { type, id, on_behalf_of? }` — that
- *  field is not in §6's claim_decision block listing; the PR flags the documented shape rather than silently
- *  rewriting the design note. Distinct from `producer_signed_actor` (a derived method.params annotation). */
+/** Classifier observation (hash-covered, not producer-authenticated). Reserved on /2.
+ *  Rule 3 reconstructs from `claim_decision.signed_actor: { type, id, on_behalf_of? }` when
+ *  `claim_decision.decision.actor_written === "withheld"` (the only selector). Distinct from
+ *  `producer_signed_actor` (a derived method.params annotation). */
 export const CLAIM_DECISION_PARAM = "claim_decision";
+export const PRODUCER_HOOK_SYSTEM_ACTOR = { type: "system" as const, id: "retrace-git" };
+export const PRODUCER_WEBHOOK_SYSTEM_ACTOR = { type: "system" as const, id: "webhook:github" };
 
 export type TrailerPolicy = "off" | "shadow" | "enforce";
 /** RETRACE_TRAILER_POLICY. Unknown / unset → off (safe default; no 426, no classifier). */
@@ -74,11 +77,6 @@ export const RESERVED_METHOD_PARAMS_V2 = [
   "claim_decision",
   "producer_signed_actor",
 ] as const;
-
-// TODO(T32): §6 rule 3 withheld-verification substitution is not in this step. A hostile store that
-// rewrites a /2 commit actor is verified against the stored actor and lands `invalid` until the
-// classifier lands the strict reconstruct-with-signed_actor path
-// (docs/design/commit-trailer-consistency.md §6 rule 3, T32).
 
 type Signable = EventInput | Event;
 
@@ -154,29 +152,122 @@ function parseSignedAuthor(params: Record<string, unknown> | undefined): { name:
   return { name, email };
 }
 
-/**
- * Actor the verifier actually checked, from verified bytes. /2 git commit seals re-derive from signed
- * `raw_message` + `author` (and parents). Missing those inputs → undefined (caller treats as invalid).
- * Stored `method.params.producer_signed_actor` is never read.
- */
-export function deriveProducerSignedActor(e: Signable, format: ProducerSigFormat): ProducerSignedActor | undefined {
-  if (format === PRODUCER_SIG_FORMAT_V2 && isGitCommitSeal(e)) {
-    const params = (signableMethod(e.method, format)?.params ?? {}) as Record<string, unknown>;
-    const author = parseSignedAuthor(params);
-    const raw = params.raw_message;
-    if (!author || typeof raw !== "string") return undefined;
-    const parents = Array.isArray(params.parents) ? params.parents.filter((p): p is string => typeof p === "string") : [];
-    const resolved = resolveCommitActor({ message: raw, authorName: author.name, authorEmail: author.email, parents });
-    const signed: ProducerSignedActor = { type: resolved.actor.type, id: resolved.actor.id };
-    let obo = resolved.actor.on_behalf_of;
-    if (resolved.actor.type === "agent" && !obo && author.email) obo = author.email;
-    if (obo) signed.on_behalf_of = obo;
-    return signed;
-  }
+/** Actor bytes inside the (reconstructed) payload — the identity a successful verify actually covered. */
+export function payloadSignedActor(e: Signable): ProducerSignedActor | undefined {
+  if (!e.actor) return undefined;
+  return compactActor(e.actor);
+}
+
+function compactActor(actor: { type: string; id: string; on_behalf_of?: string }): ProducerSignedActor {
   return {
-    type: e.actor.type,
-    id: e.actor.id,
-    ...(e.actor.on_behalf_of !== undefined ? { on_behalf_of: e.actor.on_behalf_of } : {}),
+    type: actor.type as ProducerSignedActor["type"],
+    id: actor.id,
+    ...(actor.on_behalf_of !== undefined ? { on_behalf_of: actor.on_behalf_of } : {}),
+  };
+}
+
+export function sameSignedActor(a: ProducerSignedActor | undefined, b: ProducerSignedActor | undefined): boolean {
+  if (!a || !b) return false;
+  return a.type === b.type && a.id === b.id && a.on_behalf_of === b.on_behalf_of;
+}
+
+function isExactSystemActor(
+  actor: { type: string; id: string; on_behalf_of?: string } | undefined,
+  expected: { type: string; id: string },
+): boolean {
+  return !!actor && actor.type === expected.type && actor.id === expected.id && actor.on_behalf_of === undefined;
+}
+
+/** Re-derive the commit claim from signed `raw_message` + `author` (not from stored actor). */
+export function rederiveCommitClaim(e: Signable): ProducerSignedActor | undefined {
+  if (!isGitCommitSeal(e) || !e.method?.params) return undefined;
+  const params = e.method.params as Record<string, unknown>;
+  const author = parseSignedAuthor(params);
+  const raw = params.raw_message;
+  if (!author || typeof raw !== "string") return undefined;
+  const parents = Array.isArray(params.parents) ? params.parents.filter((p): p is string => typeof p === "string") : [];
+  const resolved = resolveCommitActor({
+    message: raw,
+    authorName: author.name,
+    authorEmail: author.email,
+    parents,
+  });
+  return compactActor(resolved.actor);
+}
+
+/**
+ * Actor the verifier actually checked: the actor field inside the verified payload.
+ * Stored `method.params.producer_signed_actor` is never read. For the trailer/author claim see
+ * {@link rederiveCommitClaim}; rule 3 requires those two to be fully equal before substitution.
+ */
+export function deriveProducerSignedActor(e: Signable, _format?: ProducerSigFormat): ProducerSignedActor | undefined {
+  return payloadSignedActor(e);
+}
+
+const WITHHELD_ACTOR_WRITTEN = "withheld";
+
+function claimDecisionObject(e: Signable): Record<string, unknown> | undefined {
+  const raw = e.method?.params?.[CLAIM_DECISION_PARAM];
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  return raw as Record<string, unknown>;
+}
+
+/** Competing selectors (top-level `actor_written`, `withheld`, …) disable substitution. */
+function competingWithheldSelectors(cd: Record<string, unknown>): boolean {
+  return "actor_written" in cd || "withheld" in cd || "actorWritten" in cd;
+}
+
+function trustedHookOrWebhookStamp(sealedBy: unknown): "hook" | "webhook" | undefined {
+  if (typeof sealedBy !== "string" || !sealedBy.trim()) return undefined;
+  if (sealedBy === SEALED_BY_GITHUB_WEBHOOK) return "webhook";
+  const lower = sealedBy.toLowerCase();
+  if (sealedBy.startsWith("assert:") && (lower.includes("retrace-git") || lower.includes("git hook"))) {
+    return "hook";
+  }
+  return undefined;
+}
+
+/**
+ * Strict §6 rule 3 reconstruction: clone the event with `actor = claim_decision.signed_actor`
+ * (type/id/on_behalf_of only) iff every guard holds. Otherwise undefined (verify stored actor).
+ */
+export function reconstructWithheldPayload(e: Signable): Signable | undefined {
+  if (!isGitCommitSeal(e)) return undefined;
+  const stamp = trustedHookOrWebhookStamp(e.method?.params?.[SEALED_BY_PARAM]);
+  if (!stamp) return undefined;
+  const expected = stamp === "webhook" ? PRODUCER_WEBHOOK_SYSTEM_ACTOR : PRODUCER_HOOK_SYSTEM_ACTOR;
+  if (!isExactSystemActor(e.actor, expected)) return undefined;
+
+  const cd = claimDecisionObject(e);
+  if (!cd || competingWithheldSelectors(cd)) return undefined;
+  const decision = cd.decision;
+  if (!decision || typeof decision !== "object" || Array.isArray(decision)) return undefined;
+  if ((decision as { actor_written?: unknown }).actor_written !== WITHHELD_ACTOR_WRITTEN) return undefined;
+
+  const signedActorRaw = cd.signed_actor;
+  if (!signedActorRaw || typeof signedActorRaw !== "object" || Array.isArray(signedActorRaw)) return undefined;
+  const sa = signedActorRaw as { type?: unknown; id?: unknown; on_behalf_of?: unknown };
+  if (typeof sa.type !== "string" || typeof sa.id !== "string") return undefined;
+  if (sa.on_behalf_of !== undefined && typeof sa.on_behalf_of !== "string") return undefined;
+  const signedActor = compactActor({
+    type: sa.type,
+    id: sa.id,
+    ...(typeof sa.on_behalf_of === "string" ? { on_behalf_of: sa.on_behalf_of } : {}),
+  });
+
+  const claim = cd.claim;
+  if (!claim || typeof claim !== "object" || Array.isArray(claim)) return undefined;
+  const cl = claim as { type?: unknown; id?: unknown };
+  if (typeof cl.type !== "string" || typeof cl.id !== "string") return undefined;
+  if (cl.type !== signedActor.type || cl.id !== signedActor.id) return undefined;
+
+  const rederived = rederiveCommitClaim(e);
+  if (!sameSignedActor(signedActor, rederived)) return undefined;
+
+  return {
+    ...e,
+    actor: signedActor,
+    method: e.method ? { ...e.method, params: { ...e.method.params } } : e.method,
   };
 }
 
@@ -194,18 +285,29 @@ export async function verifyProducerSig(e: Signable, publicJwk: JsonWebKey): Pro
 /**
  * Offline / Worker verification. Unknown `producer_sig.format` fails closed. A /2 git commit seal whose
  * signed params omit `author` or `raw_message` is `invalid` even if the Ed25519 bytes check (T39).
- * `signed_actor` is recomputed from verified bytes; a stored `producer_signed_actor` annotation is ignored.
+ * `signed_actor` is the actor inside the verified payload (rule 3 may reconstruct it); a stored
+ * `producer_signed_actor` annotation is ignored. /1 never substitutes.
  */
 export async function verifyProducerSigResult(e: Signable, publicJwk: JsonWebKey): Promise<ProducerVerifyResult> {
   if (!e.producer_sig || !e.timestamp) return { ok: false };
   const format = producerSigFormatOf(e);
   if (format === "unknown") return { ok: false, format: "unknown" };
   const fmt = format ?? PRODUCER_SIG_FORMAT;
-  const bytesOk = await verifyCanonical(publicJwk, producerSignedPayload(e, fmt), e.producer_sig.sig);
-  if (!bytesOk) return { ok: false, format: fmt };
-  const signed_actor = deriveProducerSignedActor(e, fmt);
-  if (fmt === PRODUCER_SIG_FORMAT_V2 && isGitCommitSeal(e) && !signed_actor) return { ok: false, format: fmt };
-  return { ok: true, format: fmt, signed_actor };
+  const tryBytes = (candidate: Signable) =>
+    verifyCanonical(publicJwk, producerSignedPayload(candidate, fmt), e.producer_sig!.sig);
+
+  let verified: Signable | undefined;
+  if (await tryBytes(e)) verified = e;
+  else if (fmt === PRODUCER_SIG_FORMAT_V2) {
+    const reconstructed = reconstructWithheldPayload(e);
+    if (reconstructed && await tryBytes(reconstructed)) verified = reconstructed;
+  }
+  if (!verified) return { ok: false, format: fmt };
+  if (fmt === PRODUCER_SIG_FORMAT_V2 && isGitCommitSeal(e)) {
+    const params = (e.method?.params ?? {}) as Record<string, unknown>;
+    if (!parseSignedAuthor(params) || typeof params.raw_message !== "string") return { ok: false, format: fmt };
+  }
+  return { ok: true, format: fmt, signed_actor: payloadSignedActor(verified) };
 }
 
 export type ProducerSigCheck = {

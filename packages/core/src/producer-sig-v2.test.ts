@@ -2,10 +2,10 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Event, EventInput, EventStore, Share, appendEvent, canonicalize, createHandler, generateSigningKey, pageHistoryNewest } from "./index.js";
 import {
-  CLAIM_DECISION_PARAM, PRODUCER_SIG_FORMAT, PRODUCER_SIG_FORMAT_V2, PRODUCER_SIG_V2_MIN_CLI_VERSION,
-  PRODUCER_SIG_VERDICT_PARAM, PRODUCER_SIGNED_ACTOR_PARAM, RESERVED_METHOD_PARAMS, RESERVED_METHOD_PARAMS_V2,
-  countProducerSigs, deriveProducerSignedActor, parseTrailerPolicy, producerSigCheck, producerSignedPayload,
-  producerSigVerdict, signProducer, verifyProducerSig, verifyProducerSigResult,
+  CLAIM_DECISION_PARAM, PRODUCER_HOOK_SYSTEM_ACTOR, PRODUCER_SIG_FORMAT, PRODUCER_SIG_FORMAT_V2, PRODUCER_SIG_V2_MIN_CLI_VERSION,
+  PRODUCER_SIG_VERDICT_PARAM, PRODUCER_SIGNED_ACTOR_PARAM, PRODUCER_WEBHOOK_SYSTEM_ACTOR, RESERVED_METHOD_PARAMS, RESERVED_METHOD_PARAMS_V2,
+  countProducerSigs, deriveProducerSignedActor, parseTrailerPolicy, payloadSignedActor, producerSigCheck, producerSignedPayload,
+  producerSigVerdict, rederiveCommitClaim, signProducer, verifyProducerSig, verifyProducerSigResult,
 } from "./producer-sig.js";
 import { SEALED_BY_PARAM } from "./store.js";
 
@@ -54,7 +54,11 @@ function commitInput(over: Partial<EventInput> = {}): EventInput {
   };
 }
 
-async function hookHandler(trailerPolicy: "off" | "shadow" | "enforce", publicKey: JsonWebKey) {
+async function hookHandler(
+  trailerPolicy: "off" | "shadow" | "enforce",
+  publicKey: JsonWebKey,
+  extra?: { require_signature?: boolean },
+) {
   const store = new MemStore();
   const handle = createHandler(store, {
     token: "owner-tok-0123456789",
@@ -63,8 +67,13 @@ async function hookHandler(trailerPolicy: "off" | "shadow" | "enforce", publicKe
       token: HOOK_TOKEN,
       actor: { type: "system", id: "retrace-git" },
       trust: "assert",
-      allowed_actors: [{ type: "agent", id: "claude-code" }, { type: "human", id: "jordan@example.com" }],
+      allowed_actors: [
+        { type: "agent", id: "claude-code" },
+        { type: "agent", id: "codex" },
+        { type: "human", id: "jordan@example.com" },
+      ],
       public_key: publicKey,
+      require_signature: extra?.require_signature,
     }],
   });
   return { store, handle };
@@ -209,7 +218,15 @@ test("T39: signed-actor derivation from author email, malformed trailer → huma
   const { author: _drop, ...rest } = agent.method!.params as Record<string, unknown> & { author: unknown };
   const dropped = { ...agent, method: { ...agent.method, params: rest } };
   assert.equal(await verifyProducerSig(dropped, key.publicKey), false);
-  assert.equal(deriveProducerSignedActor(dropped, PRODUCER_SIG_FORMAT_V2), undefined);
+  assert.deepEqual(payloadSignedActor(dropped), { type: "agent", id: "claude-code", on_behalf_of: "jordan@example.com" });
+  assert.equal(rederiveCommitClaim(dropped), undefined);
+  assert.deepEqual(deriveProducerSignedActor(dropped, PRODUCER_SIG_FORMAT_V2), payloadSignedActor(dropped));
+
+  const noAuthor = await signProducer({
+    ...commitInput(),
+    method: { tool: "git", automated: true, params: { branch: "main", parents: ["p"], files: 1, sha: "abc", raw_message: "x\n\nRetrace-Actor: claude-code\n" } },
+  }, key.privateKey, { format: PRODUCER_SIG_FORMAT_V2 });
+  assert.equal((await verifyProducerSigResult(noAuthor, key.publicKey)).ok, false, "T39: /2 git commit without author is invalid");
 });
 
 test("T38: /1 commit seal in shadow is stored and counted legacy_client; enforce returns 426; unsigned is stored", async () => {
@@ -262,4 +279,164 @@ test("offline countProducerSigs recomputes signed actor and does not trust a sto
   assert.equal(c.producer_invalid, 0);
   const check = await producerSigCheck(event, key.publicKey);
   assert.equal(check.signed_actor?.id, "claude-code");
+});
+
+const claimedCodex = { type: "agent" as const, id: "codex", on_behalf_of: "jordan@example.com" };
+
+function gitParams(over: Record<string, unknown> = {}) {
+  return {
+    branch: "main",
+    parents: ["defdefdefdefdefdefdefdefdefdefdefdefdefd"],
+    files: 1,
+    insertions: 1,
+    deletions: 0,
+    sha: "abcabcabcabcabcabcabcabcabcabcabcabcabca",
+    raw_message: "signed bump\n\nRetrace-Actor: codex\n",
+    author: { name: "Jordan", email: "jordan@example.com" },
+    ...over,
+  };
+}
+
+async function signClaimed(
+  key: JsonWebKey,
+  over: { actor?: EventInput["actor"]; params?: Record<string, unknown>; format?: typeof PRODUCER_SIG_FORMAT | typeof PRODUCER_SIG_FORMAT_V2 } = {},
+) {
+  return signProducer(commitInput({
+    actor: over.actor ?? claimedCodex,
+    method: { tool: "git", automated: true, params: gitParams(over.params ?? {}) },
+  }), key, { format: over.format ?? PRODUCER_SIG_FORMAT_V2 });
+}
+
+function withheldClaim(over: Record<string, unknown> = {}) {
+  return {
+    policy: "trailer-consistency/1",
+    decision: { actor_written: "withheld" },
+    signed_actor: { ...claimedCodex },
+    claim: { type: claimedCodex.type, id: claimedCodex.id },
+    ...over,
+  };
+}
+
+function asWithheld(
+  signed: Awaited<ReturnType<typeof signProducer>>,
+  over: { actor?: EventInput["actor"]; sealedBy?: string; claimDecision?: Record<string, unknown> } = {},
+) {
+  return {
+    ...signed,
+    actor: over.actor ?? { ...PRODUCER_HOOK_SYSTEM_ACTOR },
+    method: {
+      ...signed.method,
+      params: {
+        ...signed.method!.params,
+        [SEALED_BY_PARAM]: over.sealedBy ?? "assert:git hook (assert)",
+        [CLAIM_DECISION_PARAM]: over.claimDecision ?? withheldClaim(),
+      },
+    },
+  };
+}
+
+test("T32: valid withheld T27 fixture reconstructs; every rule-3 guard fails closed", async () => {
+  const key = await generateSigningKey();
+  const signed = await signClaimed(key.privateKey);
+  const valid = asWithheld(signed);
+  const ok = await verifyProducerSigResult(valid, key.publicKey);
+  assert.equal(ok.ok, true);
+  assert.deepEqual(ok.signed_actor, claimedCodex);
+  const { event } = await appendEvent(new MemStore(), valid);
+  assert.equal(await verifyProducerSig(event, key.publicKey), true);
+  assert.deepEqual((await verifyProducerSigResult(event, key.publicKey)).signed_actor, claimedCodex);
+
+  const webhook = asWithheld(signed, {
+    actor: { ...PRODUCER_WEBHOOK_SYSTEM_ACTOR },
+    sealedBy: "webhook:github",
+  });
+  assert.equal((await verifyProducerSigResult(webhook, key.publicKey)).ok, true);
+
+  const guards: [string, Awaited<ReturnType<typeof asWithheld>>][] = [
+    ["competing top-level actor_written", asWithheld(signed, { claimDecision: withheldClaim({ actor_written: "withheld" }) })],
+    ["competing top-level withheld", asWithheld(signed, { claimDecision: withheldClaim({ withheld: true }) })],
+    ["pinned stamp", asWithheld(signed, { sealedBy: "pinned:retrace-git" })],
+    ["untrusted assert stamp", asWithheld(signed, { sealedBy: "assert:hook" })],
+    ["wrong system actor", asWithheld(signed, { actor: { ...PRODUCER_WEBHOOK_SYSTEM_ACTOR } })],
+    ["system actor with on_behalf_of", asWithheld(signed, { actor: { ...PRODUCER_HOOK_SYSTEM_ACTOR, on_behalf_of: "jordan@example.com" } })],
+    ["mismatched claim id", asWithheld(signed, { claimDecision: withheldClaim({ claim: { type: "agent", id: "claude-code" } }) })],
+    ["missing nested selector", asWithheld(signed, { claimDecision: withheldClaim({ decision: { policy: "trailer-consistency/1" } }) })],
+  ];
+  for (const [name, fixture] of guards) {
+    assert.equal((await verifyProducerSigResult(fixture, key.publicKey)).ok, false, name);
+  }
+
+  const nonCommit = { ...valid, action: "edited" as const };
+  assert.equal((await verifyProducerSigResult(nonCommit, key.publicKey)).ok, false, "non-commit");
+
+  const idMismatchSigned = await signClaimed(key.privateKey, { params: { raw_message: "signed bump\n\nRetrace-Actor: claude-code\n" } });
+  assert.equal((await verifyProducerSigResult(asWithheld(idMismatchSigned), key.publicKey)).ok, false, "withheld actor-id mismatch");
+
+  const oboMismatchSigned = await signClaimed(key.privateKey, {
+    actor: { type: "agent", id: "codex", on_behalf_of: "payload@example.com" },
+  });
+  assert.equal(
+    (await verifyProducerSigResult(asWithheld(oboMismatchSigned, {
+      claimDecision: withheldClaim({ signed_actor: { type: "agent", id: "codex", on_behalf_of: "payload@example.com" } }),
+    }), key.publicKey)).ok,
+    false,
+    "withheld on_behalf_of mismatch vs re-derived author email",
+  );
+
+  const legacy = await signClaimed(key.privateKey, {
+    format: PRODUCER_SIG_FORMAT,
+    params: { [CLAIM_DECISION_PARAM]: withheldClaim() },
+  });
+  const legacyWithheld = asWithheld(legacy);
+  assert.equal((await verifyProducerSigResult(legacyWithheld, key.publicKey)).ok, false, "/1 never substitutes");
+});
+
+test("finding 2: signed_actor is the verified payload actor, not the re-derived claim", async () => {
+  const key = await generateSigningKey();
+  const idMismatch = await signClaimed(key.privateKey, {
+    params: { raw_message: "signed bump\n\nRetrace-Actor: claude-code\n" },
+  });
+  const idV = await verifyProducerSigResult(idMismatch, key.publicKey);
+  assert.equal(idV.ok, true);
+  assert.equal(idV.signed_actor?.id, "codex");
+  assert.notEqual(idV.signed_actor?.id, "claude-code");
+
+  const oboMismatch = await signClaimed(key.privateKey, {
+    actor: { type: "agent", id: "codex", on_behalf_of: "payload@example.com" },
+  });
+  const oboV = await verifyProducerSigResult(oboMismatch, key.publicKey);
+  assert.equal(oboV.ok, true);
+  assert.equal(oboV.signed_actor?.on_behalf_of, "payload@example.com");
+  assert.notEqual(oboV.signed_actor?.on_behalf_of, "jordan@example.com");
+
+  const { store, handle } = await hookHandler("off", key.publicKey);
+  const res = await post(handle, "/events", idMismatch, HOOK_TOKEN);
+  assert.equal(res.status, 201);
+  assert.equal((store.events.at(-1)!.method?.params?.[PRODUCER_SIGNED_ACTOR_PARAM] as { id: string }).id, "codex");
+});
+
+test("finding 4: /1 ingress preserves claim_decision and producer_signed_actor", async () => {
+  const key = await generateSigningKey();
+  const planted = {
+    [CLAIM_DECISION_PARAM]: { policy: "trailer-consistency/1", signed_actor: { type: "agent", id: "forged" } },
+    [PRODUCER_SIGNED_ACTOR_PARAM]: { type: "agent", id: "forged" },
+  };
+  for (const requireSig of [false, true]) {
+    for (const name of [CLAIM_DECISION_PARAM, PRODUCER_SIGNED_ACTOR_PARAM] as const) {
+      const { store, handle } = await hookHandler("shadow", key.publicKey, { require_signature: requireSig });
+      const extra = { [name]: planted[name] };
+      const signed = await signProducer({
+        ...commitInput(),
+        method: { tool: "git", automated: true, params: { branch: "main", parents: ["p"], files: 1, sha: "abc", ...extra } },
+      }, key.privateKey);
+      const res = await post(handle, "/events", signed, HOOK_TOKEN);
+      assert.equal(res.status, 201, `${name} require_signature=${requireSig}`);
+      const sealed = store.events.at(-1)!;
+      assert.deepEqual(sealed.method?.params?.[name], extra[name]);
+      assert.equal(await verifyProducerSig(sealed, key.publicKey), true);
+      if (name === CLAIM_DECISION_PARAM) {
+        assert.equal(sealed.method?.params?.[PRODUCER_SIGNED_ACTOR_PARAM], undefined, "/1 must not receive a server /2 stamp");
+      }
+    }
+  }
 });

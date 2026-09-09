@@ -57,7 +57,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/server": "^2.0.0",
-    "@retrace-dev/core": "0.1.7",
+    "@retrace-dev/core": "0.1.8",
     "zod": "^4.2.0"
   },
   "devDependencies": {

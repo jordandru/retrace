@@ -9,6 +9,7 @@ import {
   defaultProducerKeyPath, ensureProducerKey, isExportIssuerKeyPath,
   loadProducerPrivateKey, producerKeySlug, resetProducerSigSchemaCheck, sealForAppend, writeProducerPrivateKey,
 } from "./producer-key.js";
+import { RemoteApiError } from "./remote-store.js";
 
 const sample: EventInput = {
   project: "p",
@@ -110,4 +111,23 @@ test("defaultProducerKeyPath is under producer-keys, not signing-key.json", () =
   const p = defaultProducerKeyPath("claude-code", { RETRACE_PRODUCER_KEYS_DIR: "/tmp/keys" });
   assert.equal(p, join("/tmp/keys", "claude-code.jwk"));
   assert.equal(isExportIssuerKeyPath(p), false);
+});
+
+test("GET /api 503 is a RemoteApiError and is not cached", async () => {
+  const kp = await generateSigningKey();
+  resetProducerSigSchemaCheck();
+  const fetch503 = (async () => ({
+    ok: false,
+    status: 503,
+    headers: new Headers(),
+    text: async () => "unavailable",
+    json: async () => ({}),
+  })) as unknown as typeof fetch;
+  await assert.rejects(
+    () => sealForAppend(sample, { privateKey: kp.privateKey, remoteUrl: "https://blip.example.workers.dev", fetchApi: fetch503 }),
+    (error: unknown) => error instanceof RemoteApiError && error.status === 503 && error.method === "GET",
+  );
+  const okFetch = (async () => ({ ok: true, json: async () => ({ schema: { event: ["producer_sig"] }, capabilities: ["producer-sig/2"] }) })) as unknown as typeof fetch;
+  const signed = await sealForAppend(sample, { privateKey: kp.privateKey, remoteUrl: "https://blip.example.workers.dev", fetchApi: okFetch, format: PRODUCER_SIG_FORMAT_V2 });
+  assert.equal(signed.producer_sig?.format, PRODUCER_SIG_FORMAT_V2);
 });

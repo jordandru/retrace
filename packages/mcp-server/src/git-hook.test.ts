@@ -349,6 +349,89 @@ test("hook script preserves retrace-git stderr but never propagates its failure 
   assert.doesNotMatch(script, /2>&1/);
 });
 
+test("keyed hook 503 on GET /api queues pending-seal like POST 5xx", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "retrace-git-probe-503-"));
+  const kp = await generateSigningKey();
+  const keyFile = join(dir, "hook.jwk");
+  writeProducerPrivateKey(keyFile, kp.privateKey);
+  const server = createServer((req, res) => {
+    if (req.method === "GET") {
+      res.writeHead(503, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "temporarily unavailable" }));
+      return;
+    }
+    res.writeHead(201, { "content-type": "application/json" });
+    res.end("{}");
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    sh(dir, "git", ["init", "-q", "-b", "main"]);
+    writeFileSync(join(dir, ".retrace.json"), JSON.stringify({ project: "rpg", url }));
+    writeFileSync(join(dir, "a.ts"), "1\n");
+    sh(dir, "git", ["add", "."]);
+    sh(dir, "git", ["commit", "-qm", "initial"]);
+    const sha = sh(dir, "git", ["rev-parse", "HEAD"]).trim();
+    await assert.rejects(
+      promisify(execFile)("node", [bin, "commit", "--hook", "--repo", dir], {
+        cwd: dir,
+        encoding: "utf8",
+        env: { ...baseEnv, RETRACE_URL: url, RETRACE_TOKEN: "owner-token", RETRACE_HOOK_KEY_FILE: keyFile },
+      }),
+      (error: any) => {
+        assert.equal(error.code, 1);
+        const retraceLines = error.stderr.trim().split("\n").filter((line: string) => line.startsWith("retrace:"));
+        assert.deepEqual(retraceLines, [`retrace: commit ${sha} pending seal; details: ${join(dir, ".git", "retrace-hook.log")}`]);
+        return true;
+      },
+    );
+    assert.equal(readFileSync(join(dir, ".git", "retrace-pending-seal"), "utf8"), `${sha}\n`);
+  } finally {
+    server.close();
+  }
+});
+
+test("keyed hook GET /api stall past RETRACE_HOOK_DEADLINE_MS queues pending-seal", { timeout: 10_000 }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), "retrace-git-probe-stall-"));
+  const kp = await generateSigningKey();
+  const keyFile = join(dir, "hook.jwk");
+  writeProducerPrivateKey(keyFile, kp.privateKey);
+  const server = createServer((_req, _res) => { /* stall: never respond */ });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    sh(dir, "git", ["init", "-q", "-b", "main"]);
+    writeFileSync(join(dir, ".retrace.json"), JSON.stringify({ project: "rpg", url }));
+    writeFileSync(join(dir, "a.ts"), "1\n");
+    sh(dir, "git", ["add", "."]);
+    sh(dir, "git", ["commit", "-qm", "initial"]);
+    const sha = sh(dir, "git", ["rev-parse", "HEAD"]).trim();
+    await assert.rejects(
+      promisify(execFile)("node", [bin, "commit", "--hook", "--repo", dir], {
+        cwd: dir,
+        encoding: "utf8",
+        env: {
+          ...baseEnv,
+          RETRACE_URL: url,
+          RETRACE_TOKEN: "owner-token",
+          RETRACE_HOOK_KEY_FILE: keyFile,
+          RETRACE_HOOK_DEADLINE_MS: "200",
+        },
+      }),
+      (error: any) => {
+        assert.equal(error.code, 1);
+        const retraceLines = error.stderr.trim().split("\n").filter((line: string) => line.startsWith("retrace:"));
+        assert.deepEqual(retraceLines, [`retrace: commit ${sha} pending seal; details: ${join(dir, ".git", "retrace-hook.log")}`]);
+        return true;
+      },
+    );
+    assert.equal(readFileSync(join(dir, ".git", "retrace-pending-seal"), "utf8"), `${sha}\n`);
+  } finally {
+    server.close();
+  }
+});
+
+
 // Backlog #12 (dogfood log 2026-08-20): 68c343f carried `Retrace-*` in one paragraph and `Co-Authored-By` in the next;
 // git's %(trailers) only reads the last paragraph, so the hook minted actor "claude-fable-5" from the co-author name.
 test("git adapter: trailers from all trailing paragraphs; consistent Co-Authored-By actor (backlog #12)", async () => {
