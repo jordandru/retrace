@@ -1,3 +1,7 @@
+-- Idempotent D1 schema (CREATE IF NOT EXISTS / INSERT OR IGNORE).
+-- Applied by migrate.mjs via wrangler d1 execute --command (query API), not --file (import API / OAuth).
+-- Step 2 half B adds project_policies; do not create that table here.
+
 CREATE TABLE IF NOT EXISTS events (
   id TEXT PRIMARY KEY,
   project TEXT NOT NULL,
@@ -97,4 +101,7 @@ SELECT
   json_extract(e.body, '$.method.params.sealed_by')
 FROM events e, json_each(COALESCE(json_extract(e.body, '$.artifacts'), '[]')) AS a
 WHERE json_extract(a.value, '$.id') IS NOT NULL;
+
+-- Step 2 half B (docs/design/project-policy-document.md) adds project_policies via SCHEMA_SQL.
+-- Leave room; do not create that table in this half-A migrate.
 

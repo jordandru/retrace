@@ -6,6 +6,8 @@
  *                          [--url https://retrace-api.<you>.workers.dev] [--credentials-file ~/.retrace/worker-credentials.json]
  *                          [--out ~/.retrace/onboarding-<project>.md] [--producer-keys-dir ~/.retrace/producer-keys] [--dry-run]
  *   retrace-admin add-agent <project> --member a@x.com --harness openclaw [--url https://…] [--out ~/.retrace/onboarding-…md]
+ *   retrace-admin retire-agent <project> --harness codex
+ *   retrace-admin set-principal <project> --actor agent/codex --principal human/a@x.com [--on-behalf-of a@x.com]
  *   retrace-admin list-teams [--credentials-file …]
  *
  * What new-team does (nothing touches the Worker by itself — secrets are pushed by the operator, see the printed step):
@@ -30,7 +32,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileS
 import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { Credential, generateSigningKey, parseCredentials, publicFromPrivate } from "@retrace-dev/core";
+import { Credential, generateSigningKey, parseCredentials, publicFromPrivate, batchPrincipalConflicts, formatPrincipal, parseActorRef, parsePrincipalRef, refuseReissueIfBound, refuseSetPrincipalIfConflict, samePrincipal } from "@retrace-dev/core";
 import { isMainModule } from "./is-main.js";
 import { defaultProducerKeysDir, producerKeySlug, writeProducerPrivateKey } from "./producer-key.js";
 
@@ -152,6 +154,7 @@ export function planCredentials(spec: TeamSpec, rand: (n: number) => Buffer = ra
         actor: { type: "agent", id: h, on_behalf_of: member },
         trust: "pinned",
         projects: [spec.project],
+        principal: { type: "human", id: member },
       });
     }
   }
@@ -161,6 +164,7 @@ export function planCredentials(spec: TeamSpec, rand: (n: number) => Buffer = ra
     actor: { type: "system", id: gitHookActorId(spec.project) },
     trust: "assert",
     projects: [spec.project],
+    principal: { type: "team", id: spec.project },
     allowed_actors: [
       ...spec.harnesses.map((h) => ({ type: "agent" as const, id: h })),
       ...spec.members.map((m) => ({ type: "human" as const, id: m })),
@@ -173,6 +177,7 @@ export function planCredentials(spec: TeamSpec, rand: (n: number) => Buffer = ra
     trust: "assert",
     allowed_actors: [],
     projects: [spec.project],
+    principal: { type: "team", id: spec.project },
   });
   return out;
 }
@@ -269,6 +274,7 @@ function hookDump(hook: LocalCredential): Record<string, unknown> {
     allowed_actors: hook.allowed_actors,
     ...(hook.public_key ? { public_key: hook.public_key, require_signature: hook.require_signature } : {}),
     ...(hook.producer_key_file ? { producer_key_file: hook.producer_key_file } : {}),
+    ...(hook.principal ? { principal: hook.principal } : {}),
   };
 }
 
@@ -285,6 +291,7 @@ export function planAgentCredential(spec: AgentSpec, rand: (n: number) => Buffer
     actor: { type: "agent", id: spec.harness, on_behalf_of: spec.member },
     trust: "pinned",
     projects: [spec.project],
+    principal: { type: "human", id: spec.member },
   };
 }
 
@@ -370,6 +377,21 @@ export function duplicateLivePinnedError(project: string, actor: { type: string;
   return `refusing to mint a second live pinned ${actor.type}/${actor.id} credential for project "${project}" — ${who} is still live. Retire it first (retrace-admin retire-agent ${project} --harness ${actor.id}).`;
 }
 
+/** PR 27 vs prior rows, then the planned batch against itself, then never-reissue / unknown history vs prior rows. */
+export function assertMintBatch(existing: LocalCredential[], planned: Credential[], project: string): void {
+  for (const c of planned.filter((x) => (x.trust ?? "pinned") === "pinned")) {
+    const live = findLivePinned(existing, project, c.actor);
+    if (live) throw new Error(duplicateLivePinnedError(project, c.actor, live));
+  }
+  const batch = batchPrincipalConflicts(planned, project);
+  if (batch) throw new Error(batch);
+  for (const c of planned) {
+    if (!c.principal) continue;
+    const reissue = refuseReissueIfBound(existing, project, c.actor, c.principal);
+    if (reissue) throw new Error(reissue);
+  }
+}
+
 export function retireLivePinned(
   credentials: LocalCredential[],
   project: string,
@@ -449,10 +471,7 @@ export async function main(argv = process.argv.slice(2), env = process.env, out:
     const existing = readCredentialsFile(credentialsFile);
     if (existing.some((c) => c.projects?.includes(project))) throw new Error(`${credentialsFile} already holds credentials scoped to "${project}" — refusing to mint a second set (remove them first, or pick another project name)`);
     const plan = planTeam(spec);
-    for (const c of plan.credentials.filter((x) => (x.trust ?? "pinned") === "pinned")) {
-      const live = findLivePinned(existing, spec.project, c.actor);
-      if (live) throw new Error(duplicateLivePinnedError(spec.project, c.actor, live));
-    }
+    assertMintBatch(existing, plan.credentials, spec.project);
     const onboardingPath = resolve(String(flags.out ?? defaultOnboardingFile(`onboarding-${project}.md`)));
     const keysDir = resolve(String(flags["producer-keys-dir"] ?? env.RETRACE_PRODUCER_KEYS_DIR ?? defaultProducerKeysDir(env)));
     warnIfOnboardingInGitTree(onboardingPath, out);
@@ -490,8 +509,7 @@ export async function main(argv = process.argv.slice(2), env = process.env, out:
     const existing = readCredentialsFile(credentialsFile);
     if (!existing.some((c) => c.projects?.includes(project)))
       throw new Error(`${credentialsFile} has no credentials scoped to "${project}" — use new-team first`);
-    const live = findLivePinned(existing, spec.project, { type: "agent", id: spec.harness });
-    if (live) throw new Error(duplicateLivePinnedError(spec.project, { type: "agent", id: spec.harness }, live));
+    assertMintBatch(existing, [credential], spec.project);
     const onboardingPath = resolve(String(flags.out ?? defaultOnboardingFile(`onboarding-${project}-${spec.harness}.md`)));
     const keysDir = resolve(String(flags["producer-keys-dir"] ?? env.RETRACE_PRODUCER_KEYS_DIR ?? defaultProducerKeysDir(env)));
     warnIfOnboardingInGitTree(onboardingPath, out);
@@ -524,7 +542,49 @@ export async function main(argv = process.argv.slice(2), env = process.env, out:
     out(`upload the updated secret: npx wrangler secret put RETRACE_CREDENTIALS < ${credentialsFile}`);
     return 0;
   }
-  out("retrace-admin <new-team <project> --member a@x.com[,…] [--harness …] | add-agent <project> --member a@x.com --harness openclaw | retire-agent <project> --harness codex | list-teams> [--url https://…] [--credentials-file …] [--out file.md (default: ~/.retrace/onboarding-*.md)] [--producer-keys-dir ~/.retrace/producer-keys] [--dry-run]");
+  if (cmd === "set-principal") {
+    const project = pos[1];
+    const actorRaw = String(flags.actor ?? "");
+    const principalRaw = String(flags.principal ?? "");
+    if (!project || !actorRaw || !principalRaw)
+      throw new Error("usage: retrace-admin set-principal <project> --actor agent/codex --principal human/a@x.com [--on-behalf-of a@x.com]");
+    const actor = parseActorRef(actorRaw);
+    const principal = parsePrincipalRef(principalRaw);
+    const onBehalf = flags["on-behalf-of"] === undefined ? undefined : String(flags["on-behalf-of"]);
+    const existing = readCredentialsFile(credentialsFile);
+    const matches = existing.filter((c) =>
+      c.actor.type === actor.type &&
+      c.actor.id === actor.id &&
+      credentialCoversProject(c, project) &&
+      (onBehalf === undefined || c.actor.on_behalf_of === onBehalf)
+    );
+    if (!matches.length) {
+      throw new Error(`no credential ${actor.type}/${actor.id} covers project "${project}"${onBehalf ? ` for ${onBehalf}` : ""}`);
+    }
+    if (matches.length > 1) {
+      throw new Error(`ambiguous: ${matches.length} credentials match ${actor.type}/${actor.id} in "${project}" — pass --on-behalf-of <member email>`);
+    }
+    const target = matches[0]!;
+    if (target.principal) {
+      if (samePrincipal(target.principal, principal)) {
+        out(`${target.name ?? `${actor.type}/${actor.id}`} already has principal ${formatPrincipal(principal)}`);
+        return 0;
+      }
+      throw new Error(`principal is immutable — ${target.name ?? `${actor.type}/${actor.id}`} is already bound to ${formatPrincipal(target.principal)}`);
+    }
+    const others = existing.filter((c) => c !== target);
+    const conflict = refuseSetPrincipalIfConflict(others, project, actor, principal);
+    if (conflict) throw new Error(conflict);
+    if (flags["dry-run"]) {
+      out(`dry run — would set principal ${formatPrincipal(principal)} on ${target.name ?? `${actor.type}/${actor.id}`} in ${credentialsFile}`);
+      return 0;
+    }
+    writeCredentialsFile(credentialsFile, existing.map((c) => c === target ? { ...c, principal } : c));
+    out(`set principal ${formatPrincipal(principal)} on ${target.name ?? `${actor.type}/${actor.id}`} in ${credentialsFile}`);
+    out(`upload the updated secret: npx wrangler secret put RETRACE_CREDENTIALS < ${credentialsFile}`);
+    return 0;
+  }
+  out("retrace-admin <new-team <project> --member a@x.com[,…] [--harness …] | add-agent <project> --member a@x.com --harness openclaw | retire-agent <project> --harness codex | set-principal <project> --actor agent/codex --principal human/a@x.com | list-teams> [--url https://…] [--credentials-file …] [--out file.md (default: ~/.retrace/onboarding-*.md)] [--producer-keys-dir ~/.retrace/producer-keys] [--dry-run]");
   return cmd ? 1 : 0;
 }
 

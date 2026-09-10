@@ -373,6 +373,46 @@ export function missingSchema(remote: Record<string, unknown>, local = schemaSur
   });
 }
 
+/** T21 / principal reports from GET /projects/:p/status. Absent `issuance` (older Worker) is skipped, not fail-closed. */
+export function issuanceFindingsFromStatus(status: Pick<ProjectStatus, "issuance">): Finding[] {
+  const issuance = status.issuance;
+  if (!issuance) return [];
+  const findings: Finding[] = [];
+  if (issuance.shared_actor_id.length) {
+    findings.push(result(
+      "fail",
+      "shared_actor_id",
+      issuance.shared_actor_id.map((row) => `${row.type}/${row.id} is live on ${row.count} pinned credentials`).join("; "),
+    ));
+  } else {
+    findings.push(result("pass", "shared_actor_id", "no live pinned actor id is shared"));
+  }
+  const conflicts = issuance.principal_conflicts ?? [];
+  const liveConflicts = conflicts.filter((row) => row.live.length > 0);
+  if (liveConflicts.length) {
+    findings.push(result(
+      "fail",
+      "principal_conflicts",
+      liveConflicts.map((row) => `${row.actor.type}/${row.actor.id} bound to ${row.principals.map((p) => `${p.type}/${p.id}`).join(", ")} and still live`).join("; "),
+    ));
+  } else if (conflicts.length) {
+    findings.push(result(
+      "warn",
+      "principal_conflicts",
+      conflicts.map((row) => `${row.actor.type}/${row.actor.id} historically bound to ${row.principals.map((p) => `${p.type}/${p.id}`).join(", ")} (none live)`).join("; "),
+    ));
+  }
+  const missing = issuance.principals.filter((row) => row.principal === "missing");
+  if (missing.length) {
+    findings.push(result(
+      "warn",
+      "principal",
+      `${missing.length} credential(s) missing principal: ${missing.map((row) => `${row.actor.type}/${row.actor.id}`).join(", ")} — set with retrace-admin set-principal (do not guess)`,
+    ));
+  }
+  return findings;
+}
+
 export function credentialAuthorization(credential: Credential, actor: Actor): Finding {
   if (credential.trust === "assert") {
     const allowed = credential.allowed_actors ?? [];
@@ -472,6 +512,13 @@ async function main() {
       const v: any = await res.json();
       findings.push(v.ok ? result("pass", "ledger integrity", `${project}: ${v.checked} events verified`) : result("fail", "ledger integrity", `${project}: ${v.reason ?? "verification failed"}`));
     } catch (e: any) { findings.push(result("fail", "ledger access", `${e.message}; check URL and credential`)); }
+    try {
+      const res = await fetch(`${url}/projects/${encodeURIComponent(project)}/status`, { headers });
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+      findings.push(...issuanceFindingsFromStatus(await res.json() as ProjectStatus));
+    } catch (e: any) {
+      findings.push(result(gate ? "fail" : "warn", "issuance", `${e.message}; /status not checked`));
+    }
     if (headEvent) {
       const commit = headEvent.artifacts.find((a) => a.kind === "commit")?.id;
       if (gate) {

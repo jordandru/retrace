@@ -336,6 +336,7 @@ CREATE TABLE IF NOT EXISTS shares (
   expires_at TEXT,
   created_by TEXT
 );
+-- Step 2 half B (docs/design/project-policy-document.md) adds project_policies here. Do not add it in half A.
 `;
 
 export function newShareId(): string {

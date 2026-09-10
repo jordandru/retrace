@@ -6,6 +6,9 @@ import { collectProvenanceAmendments, collectRejectedAmendments } from "./amendm
 import { isLegacyClientCommitSeal } from "./producer-sig.js";
 import { CAUSED_BY_UNVERIFIED_TAG, SEALED_BY_PARAM, sealedByKind } from "./store.js";
 import { markUntrustedText } from "./explain.js";
+import { causalRootState, type RootState } from "./causality.js";
+import { projectIssuanceStatus, type IssuanceCredential, type ProjectIssuanceStatus } from "./credential-status.js";
+export { causalRootState } from "./causality.js";
 
 export type StatusActor = { type: Event["actor"]["type"]; id: string; events: number; last_seen: string; models: string[]; amended_from?: {type: Event["actor"]["type"]; id: string}[] };
 export type StatusIntegration = { system: string; events: number; last_seen: string };
@@ -40,12 +43,11 @@ export type ProjectStatus = {
   causality: { eligible_events: number; rooted_in_human_instruction: number; attested_events: number; broken_links: number; unlinked: number; coverage_pct: number };
   actors: StatusActor[];
   integrations: StatusIntegration[];
+  /** Credential issuance for this project (from RETRACE_CREDENTIALS). Absent when the handler has no credential list. */
+  issuance?: ProjectIssuanceStatus;
 };
 
-import { causalRootState, type RootState } from "./causality.js";
-export { causalRootState } from "./causality.js";
-
-export async function buildProjectStatus(store: EventStore, project: string, now = new Date(), attributionOptions?: AttributionOptions): Promise<ProjectStatus> {
+export async function buildProjectStatus(store: EventStore, project: string, now = new Date(), attributionOptions?: AttributionOptions, credentials?: IssuanceCredential[]): Promise<ProjectStatus> {
   const events = await store.all(project);
   const integrity = await verifyProject(store, project);
   const byId = new Map(events.map((e) => [e.id, e]));
@@ -123,6 +125,7 @@ export async function buildProjectStatus(store: EventStore, project: string, now
     },
     actors: [...actors.values()].map((a) => ({ ...a, models: a.models.sort() })).sort((a, b) => a.type.localeCompare(b.type) || a.id.localeCompare(b.id)),
     integrations: [...integrations.values()].sort((a, b) => a.system.localeCompare(b.system)),
+    ...(credentials !== undefined ? { issuance: projectIssuanceStatus(credentials, project) } : {}),
   };
 }
 
@@ -140,6 +143,24 @@ export function projectStatusForModel(status: ProjectStatus): ProjectStatus {
       ...integration,
       system: markUntrustedText(integration.system),
     })),
+    issuance: status.issuance && {
+      shared_actor_id: status.issuance.shared_actor_id.map((row) => ({ ...row, id: markUntrustedText(row.id) })),
+      principals: status.issuance.principals.map((row) => ({
+        ...row,
+        actor: { ...row.actor, id: markUntrustedText(row.actor.id) },
+        principal: row.principal === "missing" ? "missing" : { ...row.principal, id: markUntrustedText(row.principal.id) },
+      })),
+      principal_conflicts: status.issuance.principal_conflicts.map((row) => ({
+        ...row,
+        project: markUntrustedText(row.project),
+        actor: { ...row.actor, id: markUntrustedText(row.actor.id) },
+        principals: row.principals.map((p) => ({ ...p, id: markUntrustedText(p.id) })),
+        live: row.live.map((item) => ({
+          ...item,
+          principal: item.principal === "missing" ? "missing" : { ...item.principal, id: markUntrustedText(item.principal.id) },
+        })),
+      })),
+    },
   };
 }
 
@@ -152,5 +173,14 @@ export function renderProjectStatus(s: ProjectStatus): string {
     `sealed by: ${s.capture.sealed_by.pinned} pinned · ${s.capture.sealed_by.assert} assert · ${s.capture.sealed_by.webhook} webhook · ${s.capture.sealed_by.owner} owner-asserted · ${s.capture.sealed_by.unauthenticated} unauthenticated · ${s.capture.sealed_by.unstamped} unstamped; ${s.capture.agent_events_not_pinned}/${s.capture.agent_events} agent events not pinned\n` +
     (s.capture.attribution_unavailable ? `attribution evaluation unavailable: ${s.capture.attribution_unavailable} (${s.capture.attribution_attempts ?? 0} attempts)\n` : `attribution amendments: ${s.capture.attribution_amendments ?? 0} effective · ${s.capture.superseded_attribution_amendments ?? 0} superseded · ${s.capture.partially_amended_events ?? 0} partially amended events\n`) +
     `actors: ${s.actors.map((a) => `${a.type}/${markUntrustedText(a.id)} (${a.events})`).join(", ") || "none"}\n` +
+    (s.issuance?.shared_actor_id.length
+      ? `shared_actor_id: ${s.issuance.shared_actor_id.map((r) => `${r.type}/${markUntrustedText(r.id)} ×${r.count}`).join(", ")}\n`
+      : "") +
+    (s.issuance?.principals.length
+      ? `principals: ${s.issuance.principals.map((r) => `${r.actor.type}/${markUntrustedText(r.actor.id)} → ${r.principal === "missing" ? "missing" : `${r.principal.type}/${markUntrustedText(r.principal.id)}`}`).join(", ")}\n`
+      : "") +
+    (s.issuance?.principal_conflicts.length
+      ? `principal_conflicts: ${s.issuance.principal_conflicts.map((r) => `${r.actor.type}/${markUntrustedText(r.actor.id)} [${r.principals.map((p) => `${p.type}/${markUntrustedText(p.id)}`).join(", ")}] live ${r.live.length}`).join("; ")}\n`
+      : "") +
     `integrations: ${s.integrations.map((i) => `${markUntrustedText(i.system)} (${i.events}, last ${i.last_seen})`).join(", ") || "none"}`;
 }

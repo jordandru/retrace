@@ -69,6 +69,7 @@ test("GET /projects/:p/status exposes the canonical transparency model", async (
   assert.equal(body.capture.attribution_attempts, 0);
   assert.equal(body.capture.attribution, "unavailable: no_git_context");
   assert.equal("attribution_amendments" in body.capture, false);
+  assert.equal("issuance" in body, false, "no credential list → issuance omitted");
 });
 
 test("status without Git context counts attribution attempts without claiming effective counters", async () => {
@@ -86,6 +87,24 @@ test("status without Git context counts attribution attempts without claiming ef
   assert.equal(capture.attribution, "unavailable: no_git_context");
   assert.equal(capture.attribution_unavailable, "no_git_context");
   for (const counter of ["attribution_amendments", "attribution_amended_events", "partially_amended_events", "superseded_attribution_amendments"]) assert.equal(counter in capture, false);
+});
+
+test("T21: GET /projects/:p/status reports shared_actor_id and principal: missing", async () => {
+  const store = new MemStore();
+  const credentials = [
+    { token: "alice-codex-token-01234567", actor: { type: "agent" as const, id: "codex" }, trust: "pinned" as const, projects: ["p"], principal: { type: "human" as const, id: "alice@acme.dev" } },
+    { token: "bob-codex-token-0123456789", actor: { type: "agent" as const, id: "codex" }, trust: "pinned" as const, projects: ["p"], principal: { type: "human" as const, id: "bob@acme.dev" } },
+    { token: "legacy-gemini-token-012345", actor: { type: "agent" as const, id: "gemini" }, trust: "pinned" as const, projects: ["p"] },
+  ];
+  const res = await get(createHandler(store, { token: "tok", credentials }), "/projects/p/status", "tok");
+  assert.equal(res.status, 200);
+  const body = await res.json() as { issuance: { shared_actor_id: unknown[]; principals: Array<{ actor: { id: string }; principal: unknown }>; principal_conflicts: Array<{ actor: { id: string }; principals: unknown[]; live: unknown[] }> } };
+  assert.deepEqual(body.issuance.shared_actor_id, [{ type: "agent", id: "codex", count: 2 }]);
+  assert.equal(body.issuance.principals.find((row) => row.actor.id === "gemini")?.principal, "missing");
+  assert.deepEqual(body.issuance.principals.find((row) => row.actor.id === "codex" && (row.principal as { id: string }).id === "alice@acme.dev")?.principal, { type: "human", id: "alice@acme.dev" });
+  assert.equal(body.issuance.principal_conflicts.length, 1);
+  assert.equal(body.issuance.principal_conflicts[0]!.actor.id, "codex");
+  assert.equal(body.issuance.principal_conflicts[0]!.live.length, 2);
 });
 
 test("DELETE /projects/:p requires auth and deletes nothing without it", async () => {
