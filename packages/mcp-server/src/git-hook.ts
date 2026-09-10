@@ -43,7 +43,7 @@ import { homedir, hostname } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { EventInput, appendEvent, describeEvent, Event, PRODUCER_SIG_FORMAT_V2, resolveCommitActor } from "@retrace-dev/core";
 import { makeStore, detectIde, harnessSession } from "./index.js";
-import { RemoteApiError, RemoteStore } from "./remote-store.js";
+import { RemoteApiError, RemoteCapabilityError, RemoteStore } from "./remote-store.js";
 import { loadProducerPrivateKeyFromFile, sealForAppend } from "./producer-key.js";
 import { isMainModule } from "./is-main.js";
 
@@ -123,6 +123,7 @@ export function removePendingSeal(gitDir: string, sha: string): void {
 }
 
 export function retryableHookFailure(error: unknown): boolean {
+  if (error instanceof RemoteCapabilityError) return error.retryable;
   if (error instanceof RemoteApiError) return error.status === 426 || error.status >= 500;
   if (!(error instanceof Error)) return false;
   return error.name === "AbortError" || error.name === "TimeoutError" || error instanceof TypeError;

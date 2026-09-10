@@ -11,7 +11,7 @@ import type { AddressInfo } from "node:net";
 import { SqliteStore } from "./sqlite-store.js";
 import { appendEvent, generateSigningKey, PRODUCER_SIG_FORMAT_V2, publicFromPrivate, verifyProducerSig, verifyProject } from "@retrace-dev/core";
 import { hookScript, parseTrailers, resolveHookToken, resolveHookProducerKeyFile, retryableHookFailure, ttySurface, guardRemoteWrite, validCausedById, validActorId } from "./git-hook.js";
-import { RemoteApiError } from "./remote-store.js";
+import { RemoteApiError, RemoteCapabilityError } from "./remote-store.js";
 import { writeProducerPrivateKey } from "./producer-key.js";
 
 async function seedInstruct(db: string, project = "rpg"): Promise<string> {
@@ -231,7 +231,8 @@ test("hook end to end: the named credential is the bearer the server sees; a rej
   }
 });
 
-test("HTTP 426 is retryable like 5xx; 403 is not", () => {
+test("capability mismatches and HTTP 426 are retryable like 5xx; 403 is not", () => {
+  assert.equal(retryableHookFailure(new RemoteCapabilityError("GET", "/api", 200, "schema lacks event.producer_sig")), true);
   assert.equal(retryableHookFailure(new RemoteApiError("POST", "/events", 426, new Headers(), "upgrade required")), true);
   assert.equal(retryableHookFailure(new RemoteApiError("POST", "/events", 403, new Headers(), "forbidden")), false);
   assert.equal(retryableHookFailure(new RemoteApiError("POST", "/events", 503, new Headers(), "unavailable")), true);
@@ -438,7 +439,9 @@ test("keyed hook against an old Worker queues pending-seal when GET /api lacks p
       },
     );
     assert.equal(readFileSync(join(dir, ".git", "retrace-pending-seal"), "utf8"), `${sha}\n`);
-    assert.match(readFileSync(join(dir, ".git", "retrace-hook.log"), "utf8"), /Retrace API GET \/api → 426: .*schema lacks event\.producer_sig/);
+    const log = readFileSync(join(dir, ".git", "retrace-hook.log"), "utf8");
+    assert.match(log, /GET \/api returned 200; schema lacks event\.producer_sig; client refuses to sign; deploy the Worker/);
+    assert.doesNotMatch(log, /→ 426/);
   } finally {
     server.close();
   }
