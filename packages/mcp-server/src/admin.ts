@@ -32,7 +32,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileS
 import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { Credential, generateSigningKey, parseCredentials, publicFromPrivate, formatPrincipal, parseActorRef, parsePrincipalRef, refuseReissueIfBound, samePrincipal } from "@retrace-dev/core";
+import { Credential, generateSigningKey, parseCredentials, publicFromPrivate, batchPrincipalConflicts, formatPrincipal, parseActorRef, parsePrincipalRef, refuseReissueIfBound, refuseSetPrincipalIfConflict, samePrincipal } from "@retrace-dev/core";
 import { isMainModule } from "./is-main.js";
 import { defaultProducerKeysDir, producerKeySlug, writeProducerPrivateKey } from "./producer-key.js";
 
@@ -377,6 +377,21 @@ export function duplicateLivePinnedError(project: string, actor: { type: string;
   return `refusing to mint a second live pinned ${actor.type}/${actor.id} credential for project "${project}" — ${who} is still live. Retire it first (retrace-admin retire-agent ${project} --harness ${actor.id}).`;
 }
 
+/** PR 27 vs prior rows, then the planned batch against itself, then never-reissue / unknown history vs prior rows. */
+export function assertMintBatch(existing: LocalCredential[], planned: Credential[], project: string): void {
+  for (const c of planned.filter((x) => (x.trust ?? "pinned") === "pinned")) {
+    const live = findLivePinned(existing, project, c.actor);
+    if (live) throw new Error(duplicateLivePinnedError(project, c.actor, live));
+  }
+  const batch = batchPrincipalConflicts(planned, project);
+  if (batch) throw new Error(batch);
+  for (const c of planned) {
+    if (!c.principal) continue;
+    const reissue = refuseReissueIfBound(existing, project, c.actor, c.principal);
+    if (reissue) throw new Error(reissue);
+  }
+}
+
 export function retireLivePinned(
   credentials: LocalCredential[],
   project: string,
@@ -456,15 +471,7 @@ export async function main(argv = process.argv.slice(2), env = process.env, out:
     const existing = readCredentialsFile(credentialsFile);
     if (existing.some((c) => c.projects?.includes(project))) throw new Error(`${credentialsFile} already holds credentials scoped to "${project}" — refusing to mint a second set (remove them first, or pick another project name)`);
     const plan = planTeam(spec);
-    for (const c of plan.credentials.filter((x) => (x.trust ?? "pinned") === "pinned")) {
-      const live = findLivePinned(existing, spec.project, c.actor);
-      if (live) throw new Error(duplicateLivePinnedError(spec.project, c.actor, live));
-    }
-    for (const c of plan.credentials) {
-      if (!c.principal) continue;
-      const reissue = refuseReissueIfBound(existing, spec.project, c.actor, c.principal);
-      if (reissue) throw new Error(reissue);
-    }
+    assertMintBatch(existing, plan.credentials, spec.project);
     const onboardingPath = resolve(String(flags.out ?? defaultOnboardingFile(`onboarding-${project}.md`)));
     const keysDir = resolve(String(flags["producer-keys-dir"] ?? env.RETRACE_PRODUCER_KEYS_DIR ?? defaultProducerKeysDir(env)));
     warnIfOnboardingInGitTree(onboardingPath, out);
@@ -502,11 +509,7 @@ export async function main(argv = process.argv.slice(2), env = process.env, out:
     const existing = readCredentialsFile(credentialsFile);
     if (!existing.some((c) => c.projects?.includes(project)))
       throw new Error(`${credentialsFile} has no credentials scoped to "${project}" — use new-team first`);
-    const live = findLivePinned(existing, spec.project, { type: "agent", id: spec.harness });
-    if (live) throw new Error(duplicateLivePinnedError(spec.project, { type: "agent", id: spec.harness }, live));
-    const requested = { type: "human" as const, id: spec.member };
-    const reissue = refuseReissueIfBound(existing, spec.project, { type: "agent", id: spec.harness }, requested);
-    if (reissue) throw new Error(reissue);
+    assertMintBatch(existing, [credential], spec.project);
     const onboardingPath = resolve(String(flags.out ?? defaultOnboardingFile(`onboarding-${project}-${spec.harness}.md`)));
     const keysDir = resolve(String(flags["producer-keys-dir"] ?? env.RETRACE_PRODUCER_KEYS_DIR ?? defaultProducerKeysDir(env)));
     warnIfOnboardingInGitTree(onboardingPath, out);
@@ -569,6 +572,9 @@ export async function main(argv = process.argv.slice(2), env = process.env, out:
       }
       throw new Error(`principal is immutable — ${target.name ?? `${actor.type}/${actor.id}`} is already bound to ${formatPrincipal(target.principal)}`);
     }
+    const others = existing.filter((c) => c !== target);
+    const conflict = refuseSetPrincipalIfConflict(others, project, actor, principal);
+    if (conflict) throw new Error(conflict);
     if (flags["dry-run"]) {
       out(`dry run — would set principal ${formatPrincipal(principal)} on ${target.name ?? `${actor.type}/${actor.id}`} in ${credentialsFile}`);
       return 0;

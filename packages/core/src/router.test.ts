@@ -98,10 +98,13 @@ test("T21: GET /projects/:p/status reports shared_actor_id and principal: missin
   ];
   const res = await get(createHandler(store, { token: "tok", credentials }), "/projects/p/status", "tok");
   assert.equal(res.status, 200);
-  const body = await res.json() as { issuance: { shared_actor_id: unknown[]; principals: Array<{ actor: { id: string }; principal: unknown }> } };
+  const body = await res.json() as { issuance: { shared_actor_id: unknown[]; principals: Array<{ actor: { id: string }; principal: unknown }>; principal_conflicts: Array<{ actor: { id: string }; principals: unknown[]; live: unknown[] }> } };
   assert.deepEqual(body.issuance.shared_actor_id, [{ type: "agent", id: "codex", count: 2 }]);
   assert.equal(body.issuance.principals.find((row) => row.actor.id === "gemini")?.principal, "missing");
   assert.deepEqual(body.issuance.principals.find((row) => row.actor.id === "codex" && (row.principal as { id: string }).id === "alice@acme.dev")?.principal, { type: "human", id: "alice@acme.dev" });
+  assert.equal(body.issuance.principal_conflicts.length, 1);
+  assert.equal(body.issuance.principal_conflicts[0]!.actor.id, "codex");
+  assert.equal(body.issuance.principal_conflicts[0]!.live.length, 2);
 });
 
 test("DELETE /projects/:p requires auth and deletes nothing without it", async () => {

@@ -185,21 +185,36 @@ test("captureCoverageFinding: worst unacknowledged level wins; acknowledged and 
 test("issuanceFindingsFromStatus: T21 shared_actor_id fails; missing principal warns; older Worker skipped", () => {
   assert.deepEqual(issuanceFindingsFromStatus({}), []);
   const healthy = issuanceFindingsFromStatus({
-    issuance: { shared_actor_id: [], principals: [{ actor: { type: "agent", id: "codex" }, principal: { type: "human", id: "alice@acme.dev" }, live: true }] },
+    issuance: { shared_actor_id: [], principals: [{ actor: { type: "agent", id: "codex" }, principal: { type: "human", id: "alice@acme.dev" }, live: true }], principal_conflicts: [] },
   });
   assert.equal(healthy.length, 1);
   assert.equal(healthy[0]!.level, "pass");
   assert.equal(healthy[0]!.label, "shared_actor_id");
   const fail = issuanceFindingsFromStatus({
-    issuance: { shared_actor_id: [{ type: "agent", id: "codex", count: 2 }], principals: [] },
+    issuance: { shared_actor_id: [{ type: "agent", id: "codex", count: 2 }], principals: [], principal_conflicts: [] },
   });
   assert.equal(fail[0]!.level, "fail");
   assert.match(fail[0]!.detail, /agent\/codex is live on 2 pinned credentials/);
   const warn = issuanceFindingsFromStatus({
-    issuance: { shared_actor_id: [], principals: [{ actor: { type: "agent", id: "gemini" }, principal: "missing", live: true }] },
+    issuance: { shared_actor_id: [], principals: [{ actor: { type: "agent", id: "gemini" }, principal: "missing", live: true }], principal_conflicts: [] },
   });
   assert.equal(warn.find((f) => f.label === "principal")?.level, "warn");
   assert.match(warn.find((f) => f.label === "principal")!.detail, /agent\/gemini/);
+  const hidden = issuanceFindingsFromStatus({
+    issuance: {
+      shared_actor_id: [],
+      principals: [],
+      principal_conflicts: [{
+        project: "acme",
+        actor: { type: "agent", id: "codex" },
+        principals: [{ type: "human", id: "alice@acme.dev" }, { type: "human", id: "bob@acme.dev" }],
+        live: [{ principal: { type: "human", id: "bob@acme.dev" } }],
+      }],
+    },
+  });
+  assert.equal(hidden.find((f) => f.label === "shared_actor_id")?.level, "pass");
+  assert.equal(hidden.find((f) => f.label === "principal_conflicts")?.level, "fail");
+  assert.match(hidden.find((f) => f.label === "principal_conflicts")!.detail, /still live/);
 });
 
 class DoctorMemStore implements EventStore {

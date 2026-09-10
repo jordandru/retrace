@@ -389,3 +389,69 @@ test("set-principal fills a missing principal once and never overwrites; does no
 test("retireLivePinned throws when nothing live covers the project", () => {
   assert.throws(() => retireLivePinned([], "acme-app", { type: "agent", id: "codex" }, "2026-09-08T00:00:00.000Z"), /no live pinned agent\/codex/);
 });
+
+test("new-team refuses a batch that would bind one actor id to two principals", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "retrace-admin-batch-"));
+  const file = join(dir, "creds.json");
+  await assert.rejects(
+    () => main(["new-team", "acme-app", "--member", "alice@acme.dev,bob@acme.dev", "--harness", "codex", "--url", "https://retrace.example", "--credentials-file", file, "--dry-run"], {}, () => {}),
+    /multiple principals in this batch/,
+  );
+  assert.equal(existsSync(file) ? readCredentialsFile(file).length : 0, 0);
+});
+
+test("add-agent refuses an unknown historical principal until set-principal; then Alice rotates and Bob is refused", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "retrace-admin-unknown-history-"));
+  const file = join(dir, "creds.json");
+  const keysDir = join(dir, "producer-keys");
+  const one: TeamSpec = { project: "acme-app", members: ["alice@acme.dev"], harnesses: ["codex"], url: "https://retrace.example" };
+  const minted = planCredentials(one, fakeRand());
+  const stripped = minted.map((c) => c.actor.id === "codex" ? { ...c, principal: undefined } : c);
+  appendCredentials(file, [], stripped);
+  assert.equal(await main(["retire-agent", "acme-app", "--harness", "codex", "--credentials-file", file], {}, () => {}), 0);
+
+  await assert.rejects(
+    () => main(["add-agent", "acme-app", "--member", "bob@acme.dev", "--harness", "codex", "--url", "https://retrace.example", "--credentials-file", file, "--producer-keys-dir", keysDir], {}, () => {}),
+    /have no principal/,
+  );
+  await assert.rejects(
+    () => main(["add-agent", "acme-app", "--member", "alice@acme.dev", "--harness", "codex", "--url", "https://retrace.example", "--credentials-file", file, "--producer-keys-dir", keysDir], {}, () => {}),
+    /set-principal/,
+  );
+
+  assert.equal(await main(["set-principal", "acme-app", "--actor", "agent/codex", "--principal", "human/alice@acme.dev", "--credentials-file", file], {}, () => {}), 0);
+  await assert.rejects(
+    () => main(["add-agent", "acme-app", "--member", "bob@acme.dev", "--harness", "codex", "--url", "https://retrace.example", "--credentials-file", file, "--producer-keys-dir", keysDir], {}, () => {}),
+    /originally bound to human\/alice@acme\.dev/,
+  );
+  assert.equal(await main(["add-agent", "acme-app", "--member", "alice@acme.dev", "--harness", "codex", "--url", "https://retrace.example", "--credentials-file", file, "--producer-keys-dir", keysDir, "--out", join(dir, "alice.md")], {}, () => {}), 0);
+  assert.deepEqual(readCredentialsFile(file).at(-1)!.principal, { type: "human", id: "alice@acme.dev" });
+});
+
+test("set-principal refuses an assignment that conflicts with established history", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "retrace-admin-set-conflict-"));
+  const file = join(dir, "creds.json");
+  appendCredentials(file, [], [
+    {
+      token: "alice-token-0123456789abcd",
+      name: "alice-codex",
+      actor: { type: "agent", id: "codex", on_behalf_of: "alice@acme.dev" },
+      trust: "pinned",
+      projects: ["acme-app"],
+      principal: { type: "human", id: "alice@acme.dev" },
+      retired_at: "2026-09-01T00:00:00.000Z",
+    },
+    {
+      token: "bob-token-0123456789abcdef",
+      name: "bob-codex",
+      actor: { type: "agent", id: "codex", on_behalf_of: "bob@acme.dev" },
+      trust: "pinned",
+      projects: ["acme-app"],
+    },
+  ]);
+  await assert.rejects(
+    () => main(["set-principal", "acme-app", "--actor", "agent/codex", "--principal", "human/bob@acme.dev", "--on-behalf-of", "bob@acme.dev", "--credentials-file", file], {}, () => {}),
+    /already bound to human\/alice@acme\.dev/,
+  );
+  assert.equal(readCredentialsFile(file).find((c) => c.actor.on_behalf_of === "bob@acme.dev")!.principal, undefined);
+});

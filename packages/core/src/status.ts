@@ -150,6 +150,16 @@ export function projectStatusForModel(status: ProjectStatus): ProjectStatus {
         actor: { ...row.actor, id: markUntrustedText(row.actor.id) },
         principal: row.principal === "missing" ? "missing" : { ...row.principal, id: markUntrustedText(row.principal.id) },
       })),
+      principal_conflicts: status.issuance.principal_conflicts.map((row) => ({
+        ...row,
+        project: markUntrustedText(row.project),
+        actor: { ...row.actor, id: markUntrustedText(row.actor.id) },
+        principals: row.principals.map((p) => ({ ...p, id: markUntrustedText(p.id) })),
+        live: row.live.map((item) => ({
+          ...item,
+          principal: item.principal === "missing" ? "missing" : { ...item.principal, id: markUntrustedText(item.principal.id) },
+        })),
+      })),
     },
   };
 }
@@ -168,6 +178,9 @@ export function renderProjectStatus(s: ProjectStatus): string {
       : "") +
     (s.issuance?.principals.length
       ? `principals: ${s.issuance.principals.map((r) => `${r.actor.type}/${markUntrustedText(r.actor.id)} → ${r.principal === "missing" ? "missing" : `${r.principal.type}/${markUntrustedText(r.principal.id)}`}`).join(", ")}\n`
+      : "") +
+    (s.issuance?.principal_conflicts.length
+      ? `principal_conflicts: ${s.issuance.principal_conflicts.map((r) => `${r.actor.type}/${markUntrustedText(r.actor.id)} [${r.principals.map((p) => `${p.type}/${markUntrustedText(p.id)}`).join(", ")}] live ${r.live.length}`).join("; ")}\n`
       : "") +
     `integrations: ${s.integrations.map((i) => `${markUntrustedText(i.system)} (${i.events}, last ${i.last_seen})`).join(", ") || "none"}`;
 }

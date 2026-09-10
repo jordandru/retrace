@@ -10,6 +10,9 @@
  * Schema statements are idempotent (CREATE … IF NOT EXISTS, INSERT OR IGNORE).
  * Re-running this script is safe. Step 2 half B adds project_policies; this
  * half does not.
+ *
+ * Failure: any spawn result other than status === 0 stops the script before the
+ * next statement (exit code, killed-by-signal, or spawn error).
  */
 import { readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
@@ -25,6 +28,13 @@ function splitSqlStatements(sql) {
     .map((s) => `${s};`);
 }
 
+function wranglerFailure(result) {
+  if (result.status === 0) return undefined;
+  if (result.error) return result.error.message;
+  if (result.status === null) return `killed by ${result.signal ?? "unknown signal"}`;
+  return `exit ${result.status}`;
+}
+
 const root = dirname(fileURLToPath(import.meta.url));
 const schemaPath = join(root, "schema.sql");
 const statements = splitSqlStatements(readFileSync(schemaPath, "utf8"));
@@ -34,19 +44,20 @@ if (!statements.length) {
 }
 
 const db = process.env.RETRACE_D1_DATABASE ?? "retrace-db";
+const wrangler = process.env.RETRACE_WRANGLER ?? "wrangler";
 const extra = [];
 if (process.argv.includes("--local")) extra.push("--local");
 else extra.push("--remote");
 
 for (const statement of statements) {
   const result = spawnSync(
-    "wrangler",
+    wrangler,
     ["d1", "execute", db, ...extra, "--yes", "--command", statement],
     { cwd: root, stdio: "inherit", env: process.env },
   );
-  if (result.status) process.exit(result.status ?? 1);
-  if (result.error) {
-    console.error(result.error);
-    process.exit(1);
+  const failure = wranglerFailure(result);
+  if (failure) {
+    console.error(`migrate: wrangler failed (${failure}); stopping before the next statement`);
+    process.exit(result.status === null || result.status === undefined ? 1 : result.status);
   }
 }

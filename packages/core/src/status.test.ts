@@ -132,4 +132,12 @@ test("project status issuance: shared_actor_id and principal missing; omitted wh
   assert.equal(s.issuance?.principals.find((row) => row.actor.id === "gemini")?.principal, "missing");
   assert.match(renderProjectStatus(s), /shared_actor_id: agent\/«codex» ×2/);
   assert.match(renderProjectStatus(s), /gemini» → missing/);
+  assert.match(renderProjectStatus(s), /principal_conflicts: agent\/«codex»/);
+  const retiredAliceLiveBob = await buildProjectStatus(store, "p", new Date(), undefined, [
+    { actor: { type: "agent", id: "codex" }, trust: "pinned", projects: ["p"], principal: { type: "human", id: "alice@acme.dev" }, retired_at: "2026-09-01T00:00:00Z" },
+    { actor: { type: "agent", id: "codex" }, trust: "pinned", projects: ["p"], principal: { type: "human", id: "bob@acme.dev" } },
+  ]);
+  assert.deepEqual(retiredAliceLiveBob.issuance?.shared_actor_id, []);
+  assert.equal(retiredAliceLiveBob.issuance?.principal_conflicts[0]?.live.length, 1);
+  assert.match(renderProjectStatus(retiredAliceLiveBob), /principal_conflicts: agent\/«codex»/);
 });

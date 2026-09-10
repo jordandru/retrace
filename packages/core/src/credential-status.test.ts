@@ -1,12 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  batchPrincipalConflicts,
   boundPrincipals,
   formatPrincipal,
   parseActorRef,
   parsePrincipalRef,
   projectIssuanceStatus,
   refuseReissueIfBound,
+  refuseSetPrincipalIfConflict,
   sharedLivePinnedActorIds,
   type IssuanceCredential,
 } from "./credential-status.js";
@@ -50,7 +52,7 @@ test("issuance reports principal: missing and never guesses", () => {
   assert.deepEqual(status.principals[1]!.principal, alice);
 });
 
-test("T29: refuseReissueIfBound names the original principal; same principal is allowed; missing is not guessed", () => {
+test("T29: refuseReissueIfBound names the original principal; same principal is allowed; missing history blocks reissue", () => {
   const actor = { type: "agent", id: "codex" };
   assert.equal(refuseReissueIfBound([], "acme", actor, bob), undefined);
   const retiredAlice = cred({ actor, principal: alice, retired_at: "2026-09-01T00:00:00Z" });
@@ -62,11 +64,44 @@ test("T29: refuseReissueIfBound names the original principal; same principal is 
 
   const missing = cred({ actor: { type: "agent", id: "codex", on_behalf_of: "alice@acme.dev" } });
   assert.deepEqual(boundPrincipals([missing], "acme", actor), []);
-  assert.equal(refuseReissueIfBound([missing], "acme", actor, bob), undefined, "missing principal is not guessed");
+  assert.match(refuseReissueIfBound([missing], "acme", actor, bob)!, /have no principal/);
+  assert.match(refuseReissueIfBound([missing], "acme", actor, alice)!, /set-principal/);
+  assert.match(refuseReissueIfBound([missing], "acme", actor, bob)!, /do not guess from on_behalf_of/);
 
   const conflict = [
     cred({ actor, principal: alice, retired_at: "2026-09-01T00:00:00Z" }),
     cred({ actor, principal: bob, retired_at: "2026-09-02T00:00:00Z" }),
   ];
   assert.match(refuseReissueIfBound(conflict, "acme", actor, alice)!, /human\/alice@acme\.dev, human\/bob@acme\.dev/);
+});
+
+test("historicalPrincipalConflicts stay visible after the original holder is retired", () => {
+  const actor = { type: "agent", id: "codex" };
+  const retiredAlice = cred({ actor, principal: alice, retired_at: "2026-09-01T00:00:00Z", name: "alice-codex" });
+  const liveBob = cred({ actor, principal: bob, name: "bob-codex" });
+  const status = projectIssuanceStatus([retiredAlice, liveBob], "acme");
+  assert.deepEqual(status.shared_actor_id, []);
+  assert.equal(status.principal_conflicts.length, 1);
+  assert.deepEqual(status.principal_conflicts[0]!.actor, actor);
+  assert.deepEqual(status.principal_conflicts[0]!.principals, [alice, bob]);
+  assert.equal(status.principal_conflicts[0]!.live.length, 1);
+  assert.equal(status.principal_conflicts[0]!.live[0]!.principal, bob);
+});
+
+test("batchPrincipalConflicts refuses two principals for one actor id in a first batch", () => {
+  const planned = [
+    cred({ actor: { type: "agent", id: "codex" }, principal: alice }),
+    cred({ actor: { type: "agent", id: "codex" }, principal: bob }),
+  ];
+  assert.match(batchPrincipalConflicts(planned, "acme")!, /multiple principals in this batch/);
+  assert.equal(batchPrincipalConflicts([cred({ actor: { type: "agent", id: "codex" }, principal: alice })], "acme"), undefined);
+});
+
+test("refuseSetPrincipalIfConflict blocks a second principal against established history", () => {
+  const actor = { type: "agent", id: "codex" };
+  const retiredAlice = cred({ actor, principal: alice, retired_at: "2026-09-01T00:00:00Z" });
+  assert.match(refuseSetPrincipalIfConflict([retiredAlice], "acme", actor, bob)!, /already bound to human\/alice@acme\.dev/);
+  assert.equal(refuseSetPrincipalIfConflict([retiredAlice], "acme", actor, alice), undefined);
+  const both = [retiredAlice, cred({ actor, principal: bob, retired_at: "2026-09-02T00:00:00Z" })];
+  assert.match(refuseSetPrincipalIfConflict(both, "acme", actor, bob)!, /history already conflicts/);
 });

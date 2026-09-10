@@ -387,6 +387,21 @@ export function issuanceFindingsFromStatus(status: Pick<ProjectStatus, "issuance
   } else {
     findings.push(result("pass", "shared_actor_id", "no live pinned actor id is shared"));
   }
+  const conflicts = issuance.principal_conflicts ?? [];
+  const liveConflicts = conflicts.filter((row) => row.live.length > 0);
+  if (liveConflicts.length) {
+    findings.push(result(
+      "fail",
+      "principal_conflicts",
+      liveConflicts.map((row) => `${row.actor.type}/${row.actor.id} bound to ${row.principals.map((p) => `${p.type}/${p.id}`).join(", ")} and still live`).join("; "),
+    ));
+  } else if (conflicts.length) {
+    findings.push(result(
+      "warn",
+      "principal_conflicts",
+      conflicts.map((row) => `${row.actor.type}/${row.actor.id} historically bound to ${row.principals.map((p) => `${p.type}/${p.id}`).join(", ")} (none live)`).join("; "),
+    ));
+  }
   const missing = issuance.principals.filter((row) => row.principal === "missing");
   if (missing.length) {
     findings.push(result(
