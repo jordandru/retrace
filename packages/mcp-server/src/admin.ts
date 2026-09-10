@@ -31,8 +31,8 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
-import { Credential, generateSigningKey, parseCredentials, publicFromPrivate, batchPrincipalConflicts, formatPrincipal, parseActorRef, parsePrincipalRef, refuseReissueIfBound, refuseSetPrincipalIfConflict, samePrincipal } from "@retrace-dev/core";
+import { basename, dirname, join, resolve } from "node:path";
+import { Credential, generateSigningKey, parseCredentials, publicFromPrivate, batchPrincipalConflicts, bodyPreviewSha256, formatPrincipal, parseActorRef, parsePrincipalRef, parseGithubRepoProjects, proposedPolicyBody, refuseReissueIfBound, refuseSetPrincipalIfConflict, samePrincipal } from "@retrace-dev/core";
 import { isMainModule } from "./is-main.js";
 import { defaultProducerKeysDir, producerKeySlug, writeProducerPrivateKey } from "./producer-key.js";
 
@@ -584,8 +584,80 @@ export async function main(argv = process.argv.slice(2), env = process.env, out:
     out(`upload the updated secret: npx wrangler secret put RETRACE_CREDENTIALS < ${credentialsFile}`);
     return 0;
   }
-  out("retrace-admin <new-team <project> --member a@x.com[,…] [--harness …] | add-agent <project> --member a@x.com --harness openclaw | retire-agent <project> --harness codex | set-principal <project> --actor agent/codex --principal human/a@x.com | list-teams> [--url https://…] [--credentials-file …] [--out file.md (default: ~/.retrace/onboarding-*.md)] [--producer-keys-dir ~/.retrace/producer-keys] [--dry-run]");
+  if (cmd === "set-policy") {
+    const project = pos[1];
+    const from = String(flags.from ?? "");
+    const ifMatch = String(flags["if-match"] ?? "");
+    if (!project || !from || !ifMatch)
+      throw new Error("usage: retrace-admin set-policy <project> --from <repo>/.retrace.json --if-match <digest>|none [--url] [--cross-project-copy] [--yes]");
+    const proposal = await proposeSetPolicy({
+      project,
+      fromPath: resolve(from),
+      ifMatch,
+      url: String(flags.url ?? env.RETRACE_URL ?? "").replace(/\/+$/, ""),
+      token: env.RETRACE_TOKEN,
+      envGithubProjects: env.RETRACE_GITHUB_PROJECTS,
+      crossProjectCopy: flags["cross-project-copy"] === true,
+    });
+    out(proposal.printed);
+    if (flags.yes && proposal.body) {
+      const url = String(flags.url ?? env.RETRACE_URL ?? "").replace(/\/+$/, "");
+      const token = env.RETRACE_TOKEN;
+      if (!url || !token) throw new Error("PUT requires --url / RETRACE_URL and RETRACE_TOKEN");
+      const res = await fetch(`${url}/projects/${encodeURIComponent(project)}/policy`, {
+        method: "PUT",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json", "if-match": ifMatch },
+        body: JSON.stringify(proposal.body),
+      });
+      const text = await res.text();
+      if (!res.ok) throw new Error(`PUT /policy ${res.status}: ${text}`);
+      const doc = JSON.parse(text) as { digest: string; envelope: { version: number; activation: { event_id: string } } };
+      out(`authoritative policy_digest ${doc.digest} version ${doc.envelope.version} activation ${doc.envelope.activation.event_id}`);
+    }
+    return 0;
+  }
+  out("retrace-admin <new-team <project> --member a@x.com[,…] [--harness …] | add-agent <project> --member a@x.com --harness openclaw | retire-agent <project> --harness codex | set-principal <project> --actor agent/codex --principal human/a@x.com | set-policy <project> --from <repo>/.retrace.json --if-match <digest>|none | list-teams> [--url https://…] [--credentials-file …] [--out file.md (default: ~/.retrace/onboarding-*.md)] [--producer-keys-dir ~/.retrace/producer-keys] [--dry-run]");
   return cmd ? 1 : 0;
+}
+
+export async function proposeSetPolicy(opts: {
+  project: string;
+  fromPath: string;
+  ifMatch: string;
+  url?: string;
+  token?: string;
+  envGithubProjects?: string;
+  crossProjectCopy?: boolean;
+}): Promise<{ printed: string; body?: ReturnType<typeof proposedPolicyBody>; refused?: string }> {
+  const cfg = JSON.parse(readFileSync(opts.fromPath, "utf8")) as {
+    project?: string;
+    reconcile?: { hook_sealed_by?: string[] };
+    attribution?: { repositories?: { name: string; aliases?: string[] }[] };
+  };
+  const declared = typeof cfg.project === "string" && cfg.project ? cfg.project : undefined;
+  const hint = basename(dirname(opts.fromPath));
+  const lines: string[] = [];
+  if (declared && declared !== opts.project && !opts.crossProjectCopy) {
+    return { printed: `refused: .retrace.json declares project ${JSON.stringify(declared)}, not ${JSON.stringify(opts.project)} (pass --cross-project-copy to copy)`, refused: "declared-project mismatch" };
+  }
+  if (declared && declared !== opts.project && opts.crossProjectCopy) {
+    lines.push(`--cross-project-copy: copying settings declared for ${declared} onto ${opts.project}`);
+  }
+  if (!declared) lines.push(`no declared project in ${opts.fromPath}; directory basename hint only: ${hint}`);
+  const stamps = cfg.reconcile?.hook_sealed_by ?? [];
+  const repositories = (cfg.attribution?.repositories ?? []).map((r) => ({ name: r.name, aliases: r.aliases ?? [] }));
+  let github_repos: string[] = [];
+  try {
+    const map = parseGithubRepoProjects(opts.envGithubProjects);
+    github_repos = Object.entries(map).filter(([, p]) => p === opts.project).map(([repo]) => repo);
+  } catch { /* ignore malformed env in the proposal; PUT validation will fail loud */ }
+  const body = proposedPolicyBody({ project: opts.project, stamps, repositories, github_repos });
+  const preview = await bodyPreviewSha256(body);
+  lines.push("proposed policy body:");
+  lines.push(JSON.stringify(body, null, 2));
+  lines.push(`body_preview_sha256 ${preview}  (settings-only preview, not the policy digest)`);
+  lines.push(`If-Match: ${opts.ifMatch}`);
+  return { printed: lines.join("\n"), body };
 }
 
 if (isMainModule(import.meta.url)) main().then((code) => process.exit(code)).catch((e) => { console.error("retrace-admin:", e.message ?? e); process.exit(1); });

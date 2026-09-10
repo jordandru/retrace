@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -88,4 +88,36 @@ test("migrate treats a missing wrangler binary as failure (spawn error)", () => 
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /migrate: wrangler failed/);
   assert.equal(commands.length, 0);
+});
+
+test("resolveWrangler prefers RETRACE_WRANGLER then a workspace .bin", async () => {
+  const { resolveWrangler } = await import("../migrate.mjs");
+  const dir = mkdtempSync(join(tmpdir(), "retrace-migrate-resolve-"));
+  const override = fakeWrangler(dir);
+  assert.equal(resolveWrangler({ RETRACE_WRANGLER: override }, dir), override);
+  const bin = join(dir, "node_modules", ".bin");
+  mkdirSync(bin, { recursive: true });
+  const workspace = fakeWrangler(bin);
+  assert.equal(resolveWrangler({}, dir), workspace);
+  assert.equal(resolveWrangler({}, join(tmpdir(), "retrace-empty-wrangler-")), "wrangler");
+});
+
+test("migrate treats duplicate column name as success and continues", () => {
+  const dir = mkdtempSync(join(tmpdir(), "retrace-migrate-dupcol-"));
+  const wranglerPath = join(dir, "wrangler");
+  writeFileSync(wranglerPath, `#!/usr/bin/env node
+import { appendFileSync } from "node:fs";
+const log = process.env.WRANGLER_LOG;
+const cmd = process.argv[process.argv.indexOf("--command") + 1] ?? "";
+if (log) appendFileSync(log, JSON.stringify({ command: true, file: false, alter: /ALTER TABLE/i.test(cmd) }) + "\\n");
+if (/ALTER TABLE/i.test(cmd)) {
+  console.error("duplicate column name: repo");
+  process.exit(1);
+}
+process.exit(0);
+`, { mode: 0o755 });
+  chmodSync(wranglerPath, 0o755);
+  const { result, commands } = runMigrate(dir, "ok", wranglerPath);
+  assert.equal(result.status, 0, result.stderr);
+  assert.ok(commands.some((c) => c.alter === true) || commands.length >= 2);
 });

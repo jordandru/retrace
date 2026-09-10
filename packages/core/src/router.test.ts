@@ -1,37 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createHandler, parseCredentials, Credential, EventStore, Event, Share, appendEvent, EventInput, verifyProject, ChainHead, HeadMovedError, schemaSurface, Location, Action, tokenEquals, parseGithubRepoProjects, resolveGithubProject, pageHistoryNewest, generateSigningKey } from "./index.js";
+import { createHandler, parseCredentials, Credential, EventStore, Event, Share, appendEvent, EventInput, verifyProject, ChainHead, HeadMovedError, schemaSurface, Location, Action, tokenEquals, parseGithubRepoProjects, resolveGithubProject, pageHistoryNewest, generateSigningKey, MemoryEventStore } from "./index.js";
 
-/** minimal in-memory store for tests */
-class MemStore implements EventStore {
-  events: Event[] = []; shares = new Map<string, Share>();
-  async head(p: string) { const e = this.events.filter((x) => x.project === p).at(-1); return e ? { seq: e.seq, hash: e.hash } : null; }
-  async insert(e: Event) { this.events.push(e); }
-  async byIdempotencyKey(p: string, k: string) { return this.events.find((e) => e.project === p && e.idempotency_key === k) ?? null; }
-  async get(id: string) { return this.events.find((e) => e.id === id) ?? null; }
-  async all(p: string) { return this.events.filter((e) => e.project === p).sort((a, b) => a.seq - b.seq); }
-  async projects() { return [...new Set(this.events.map((e) => e.project))]; }
-  async history(q: any) { return pageHistoryNewest(this.events, q); }
-  async createShare(s: Share) { this.shares.set(s.id, s); }
-  async getShare(id: string) { return this.shares.get(id) ?? null; }
-  async deleteShare(id: string) { return this.shares.delete(id); }
-  async deleteProject(p: string, audit: Event, expectedHead: ChainHead) {
-    const head = await this.head(p);
-    if (!head || head.seq !== expectedHead.seq || head.hash !== expectedHead.hash) throw new HeadMovedError(p, expectedHead);
-    const evs = this.events.filter((e) => e.project === p);
-    const counts = {
-      events: evs.length,
-      event_artifacts: evs.reduce((n, e) => n + e.artifacts.length, 0),
-      shares: [...this.shares.values()].filter((s) => s.project === p).length,
-    };
-    // mimic a UNIQUE(project, seq) constraint so the router's re-seal/retry path is exercised
-    if (this.events.some((e) => e.project === audit.project && e.seq === audit.seq)) throw new Error("UNIQUE constraint failed: events.project, events.seq");
-    this.events = this.events.filter((e) => e.project !== p);
-    for (const [id, s] of this.shares) if (s.project === p) this.shares.delete(id);
-    this.events.push(audit);
-    return counts;
-  }
-}
+const MemStore = MemoryEventStore;
 
 test("human authority probe exposes only the authenticated owner and never scoped credential secrets",async()=>{
   const token="owner-token-long-enough", scoped="agent-token-long-enough";
@@ -704,7 +675,8 @@ test("POST /hooks/github: project comes from HMAC-covered repo, not ?project=; d
     headers: { "content-type": "application/json", "x-hub-signature-256": otherSig, "x-github-event": "pull_request", "x-github-delivery": "deliv-2" },
     body: otherRepo,
   }));
-  assert.equal(blocked.status, 403);
+  assert.equal(blocked.status, 202);
+  assert.equal((await blocked.json() as any).routing, "unresolved");
   await appendEvent(store, ev({
     project: "other",
     idempotency_key: "gh:deliv-cross",

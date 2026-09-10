@@ -137,6 +137,16 @@ export interface EventStore {
   insertPendingDelivery?(row: PendingDelivery): Promise<void>;
   listPendingDeliveriesOlderThan?(received_at: string): Promise<PendingDelivery[]>;
   deletePendingDelivery?(delivery_id: string): Promise<boolean>;
+  /** Current / digest / version lookup, constrained to `project` by the caller. */
+  getPolicy?(project: string, lookup?: { digest?: string; version?: number; current?: boolean }): Promise<import("./policy.js").PolicyDocument | null>;
+  listPolicies?(project: string, limit?: number): Promise<import("./policy.js").PolicyDocument[]>;
+  getPolicyRoute?(repo: string): Promise<import("./policy.js").PolicyRouteRow | null>;
+  listPolicyRoutes?(project: string): Promise<import("./policy.js").PolicyRouteRow[]>;
+  /** Indexed: greatest activation_seq ≤ throughSeq for this project. */
+  getPolicyByActivationSeq?(project: string, throughSeq: number): Promise<import("./policy.js").PolicyDocument | null>;
+  readPolicySnapshot?(project: string, U?: number): Promise<import("./policy.js").PolicySnapshot>;
+  /** One transaction: activation event(s) + documents + route upserts. Throws HeadMovedError if a head raced. */
+  applyPolicyWrite?(write: import("./policy.js").PolicyWrite, expectedHeads: Record<string, ChainHead | null>): Promise<void>;
 }
 
 /** One row of the §3.5 artifact index. `event_artifacts` remains the history join table (event_id, artifact_id). */
@@ -174,6 +184,12 @@ export interface PendingDelivery {
   project: string;
   raw_body: string;
   received_at: string;
+  /** Canonical repository identity pinned at receipt (§7). */
+  repo?: string;
+  /** policy | env | unresolved */
+  routing_source?: string;
+  routing_digest?: string;
+  routing_state?: string;
 }
 
 /** Index rows for one event, keyed by `artifactKey` (same comparison identity as `sameArtifact`). */
@@ -324,7 +340,11 @@ CREATE TABLE IF NOT EXISTS pending_deliveries (
   delivery_id TEXT PRIMARY KEY,
   project TEXT NOT NULL,
   raw_body TEXT NOT NULL,
-  received_at TEXT NOT NULL
+  received_at TEXT NOT NULL,
+  repo TEXT,
+  routing_source TEXT,
+  routing_digest TEXT,
+  routing_state TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_pending_deliveries_received ON pending_deliveries(received_at);
 CREATE TABLE IF NOT EXISTS shares (
@@ -336,8 +356,35 @@ CREATE TABLE IF NOT EXISTS shares (
   expires_at TEXT,
   created_by TEXT
 );
--- Step 2 half B (docs/design/project-policy-document.md) adds project_policies here. Do not add it in half A.
+CREATE TABLE IF NOT EXISTS project_policies (
+  project TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  digest TEXT UNIQUE NOT NULL,
+  body TEXT NOT NULL,
+  envelope TEXT NOT NULL,
+  activation_seq INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (project, version)
+);
+CREATE INDEX IF NOT EXISTS idx_project_policies_activation ON project_policies(project, activation_seq);
+CREATE TABLE IF NOT EXISTS policy_routes (
+  repo TEXT PRIMARY KEY,
+  state TEXT NOT NULL CHECK (state IN ('active','revoked')),
+  project TEXT NOT NULL,
+  digest TEXT NOT NULL,
+  activation_seq INTEGER NOT NULL,
+  set_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_policy_routes_project ON policy_routes(project);
 `;
+
+/** Idempotent ALTERs for DBs whose pending_deliveries table predated routing columns. */
+export const SCHEMA_PENDING_ROUTE_COLUMNS_SQL = [
+  "ALTER TABLE pending_deliveries ADD COLUMN repo TEXT",
+  "ALTER TABLE pending_deliveries ADD COLUMN routing_source TEXT",
+  "ALTER TABLE pending_deliveries ADD COLUMN routing_digest TEXT",
+  "ALTER TABLE pending_deliveries ADD COLUMN routing_state TEXT",
+];
 
 export function newShareId(): string {
   const bytes = new Uint8Array(12);
@@ -442,6 +489,9 @@ export function adapterIdempotencyError(input: EventInput): string | undefined {
   if (k.startsWith("gh:")) {
     if (tool.startsWith("github") || tags.includes("github")) return undefined;
     return 'idempotency_key prefix "gh:" is reserved for the GitHub adapter';
+  }
+  if (k.startsWith("policy:")) {
+    return 'idempotency_key prefix "policy:" is reserved for policy activation (PUT /projects/:p/policy)';
   }
   return undefined;
 }

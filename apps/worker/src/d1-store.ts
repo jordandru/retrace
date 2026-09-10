@@ -1,4 +1,5 @@
-import { ArtifactIndexQuery, ArtifactIndexResult, ChainHead, Event, EventStore, HeadMovedError, HistoryQuery, HistoryPage, PendingDelivery, Share, artifactIndexRows, clampHistoryLimit, eventsReferencingArtifactsSql, historyPageFromNewestFirst, likeContains } from "@retrace-dev/core";
+import { ArtifactIndexQuery, ArtifactIndexResult, ChainHead, Event, EventStore, HeadMovedError, HistoryQuery, HistoryPage, PendingDelivery, Share, artifactIndexRows, clampHistoryLimit, eventsReferencingArtifactsSql, historyPageFromNewestFirst, likeContains, policyDocumentFromRow } from "@retrace-dev/core";
+import type { PolicyRouteRow, PolicySnapshot, PolicyWrite } from "@retrace-dev/core";
 
 export class D1Store implements EventStore {
   constructor(private db: D1Database) {}
@@ -41,7 +42,7 @@ export class D1Store implements EventStore {
     if (audit.project === project) throw new Error("audit event must not live in the project being deleted");
     // Keep every project-owned row in this guarded transaction. In particular, leaving export_cache behind would
     // retain the deleted ledger bytes and could serve them as a stale bundle if the project name were recreated.
-    const tables = ["events", "event_artifacts", "event_artifact_index", "pending_deliveries", "shares", "checkpoints", "export_cache"];
+    const tables = ["events", "event_artifacts", "event_artifact_index", "pending_deliveries", "shares", "checkpoints", "export_cache", "project_policies"];
     const headMatches = {
       sql: "EXISTS (SELECT 1 FROM events WHERE project = ? AND seq = ? AND hash = ?) AND NOT EXISTS (SELECT 1 FROM events WHERE project = ? AND seq > ?)",
       params: [project, expectedHead.seq, expectedHead.hash, project, expectedHead.seq],
@@ -52,6 +53,7 @@ export class D1Store implements EventStore {
       auditEvent,
       ...auditArtifacts, // the guard still holds here: the audit lives in another project, so the target head is unchanged
       ...tables.map((t) => this.db.prepare(`DELETE FROM ${t} WHERE project = ? AND ${auditLanded}`).bind(project, audit.id)),
+      this.db.prepare(`DELETE FROM policy_routes WHERE project = ? AND ${auditLanded}`).bind(project, audit.id),
     ]);
     const landed = results[0].meta.changes === 1 || (results[0].meta.changes == null && !!(await this.get(audit.id)));
     if (!landed) throw new HeadMovedError(project, expectedHead);
@@ -135,13 +137,13 @@ export class D1Store implements EventStore {
 
   async insertPendingDelivery(row: PendingDelivery) {
     await this.db.prepare(
-      "INSERT OR REPLACE INTO pending_deliveries (delivery_id, project, raw_body, received_at) VALUES (?, ?, ?, ?)",
-    ).bind(row.delivery_id, row.project, row.raw_body, row.received_at).run();
+      "INSERT OR REPLACE INTO pending_deliveries (delivery_id, project, raw_body, received_at, repo, routing_source, routing_digest, routing_state) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    ).bind(row.delivery_id, row.project, row.raw_body, row.received_at, row.repo ?? null, row.routing_source ?? null, row.routing_digest ?? null, row.routing_state ?? null).run();
   }
 
   async listPendingDeliveriesOlderThan(received_at: string): Promise<PendingDelivery[]> {
     const { results } = await this.db.prepare(
-      "SELECT delivery_id, project, raw_body, received_at FROM pending_deliveries WHERE received_at < ? ORDER BY received_at ASC",
+      "SELECT delivery_id, project, raw_body, received_at, repo, routing_source, routing_digest, routing_state FROM pending_deliveries WHERE received_at < ? ORDER BY received_at ASC",
     ).bind(received_at).all<PendingDelivery>();
     return results;
   }
@@ -149,5 +151,61 @@ export class D1Store implements EventStore {
   async deletePendingDelivery(delivery_id: string): Promise<boolean> {
     const r = await this.db.prepare("DELETE FROM pending_deliveries WHERE delivery_id = ?").bind(delivery_id).run();
     return (r.meta.changes ?? 0) > 0;
+  }
+
+  async getPolicy(project: string, lookup: { digest?: string; version?: number; current?: boolean } = { current: true }) {
+    const row = lookup.digest
+      ? await this.db.prepare("SELECT body, envelope, digest FROM project_policies WHERE project = ? AND digest = ?").bind(project, lookup.digest).first<{ body: string; envelope: string; digest: string }>()
+      : lookup.version !== undefined
+        ? await this.db.prepare("SELECT body, envelope, digest FROM project_policies WHERE project = ? AND version = ?").bind(project, lookup.version).first<{ body: string; envelope: string; digest: string }>()
+        : await this.db.prepare("SELECT body, envelope, digest FROM project_policies WHERE project = ? ORDER BY version DESC LIMIT 1").bind(project).first<{ body: string; envelope: string; digest: string }>();
+    return row ? policyDocumentFromRow(row) : null;
+  }
+
+  async listPolicies(project: string, limit = 50) {
+    const { results } = await this.db.prepare("SELECT body, envelope, digest FROM project_policies WHERE project = ? ORDER BY version DESC LIMIT ?").bind(project, limit).all<{ body: string; envelope: string; digest: string }>();
+    return results.map(policyDocumentFromRow);
+  }
+
+  async getPolicyRoute(repo: string) {
+    return (await this.db.prepare("SELECT repo, state, project, digest, activation_seq, set_at FROM policy_routes WHERE repo = ?").bind(repo).first<PolicyRouteRow>()) ?? null;
+  }
+
+  async listPolicyRoutes(project: string) {
+    const { results } = await this.db.prepare("SELECT repo, state, project, digest, activation_seq, set_at FROM policy_routes WHERE project = ? ORDER BY repo").bind(project).all<PolicyRouteRow>();
+    return results;
+  }
+
+  async getPolicyByActivationSeq(project: string, throughSeq: number) {
+    const row = await this.db.prepare("SELECT body, envelope, digest FROM project_policies WHERE project = ? AND activation_seq <= ? ORDER BY activation_seq DESC LIMIT 1").bind(project, throughSeq).first<{ body: string; envelope: string; digest: string }>();
+    return row ? policyDocumentFromRow(row) : null;
+  }
+
+  async readPolicySnapshot(project: string, U?: number): Promise<PolicySnapshot> {
+    const events = await this.all(project);
+    const u = U ?? (events.at(-1)?.seq ?? -1);
+    const slice = events.filter((e) => e.seq <= u);
+    return { U: u, events: slice, activations: slice.filter((e) => (e.idempotency_key ?? "").startsWith("policy:")) };
+  }
+
+  async applyPolicyWrite(write: PolicyWrite, expectedHeads: Record<string, ChainHead | null>) {
+    for (const [project, expected] of Object.entries(expectedHeads)) {
+      const head = await this.head(project);
+      if (expected === null) {
+        if (head) throw new HeadMovedError(project, { seq: -1, hash: "none" });
+      } else if (!head || head.seq !== expected.seq || head.hash !== expected.hash) {
+        throw new HeadMovedError(project, expected);
+      }
+    }
+    const stmts = [
+      ...write.events.flatMap((e) => this.insertStatements(e)),
+      ...write.documents.map((d) => this.db.prepare(
+        "INSERT INTO project_policies (project, version, digest, body, envelope, activation_seq, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      ).bind(d.body.project, d.envelope.version, d.digest, JSON.stringify(d.body), JSON.stringify(d.envelope), d.envelope.activation.seq, d.envelope.created_at)),
+      ...write.routes.map((r) => this.db.prepare(
+        "INSERT OR REPLACE INTO policy_routes (repo, state, project, digest, activation_seq, set_at) VALUES (?, ?, ?, ?, ?, ?)",
+      ).bind(r.repo, r.state, r.project, r.digest, r.activation_seq, r.set_at)),
+    ];
+    await this.db.batch(stmts);
   }
 }

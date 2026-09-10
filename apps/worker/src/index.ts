@@ -11,7 +11,7 @@
  *   GET /projects/:p/export|report|lineage · POST /projects/:p/share · GET /.well-known/retrace-pubkey
  *   POST /hooks/github  (GitHub webhook; HMAC-verified with RETRACE_GITHUB_SECRET; project from repo via RETRACE_GITHUB_PROJECTS)
  */
-import { createHandler, parseCheckpointProjectAllowlist, parseCredentials, parseGithubRepoProjects, parseSigningKey, parseTrailerPolicy, runCheckpointCron, refreshExportCache, exportBuilder, keyId } from "@retrace-dev/core";
+import { createHandler, parseCheckpointProjectAllowlist, parseCredentials, parseGithubRepoProjects, parseOwnerPrincipal, parseSigningKey, parseTrailerPolicy, runCheckpointCron, refreshExportCache, exportBuilder, keyId } from "@retrace-dev/core";
 import { D1Store } from "./d1-store.js";
 import { D1CheckpointLog } from "./checkpoint-log.js";
 import { D1ExportCache } from "./export-cache-d1.js";
@@ -78,6 +78,7 @@ export default {
       githubIncludePush: env.RETRACE_GITHUB_PUSH === "1",
       opsProject: env.RETRACE_OPS_PROJECT,
       ownerActor: env.RETRACE_OWNER ? { type: "human", id: env.RETRACE_OWNER } : undefined,
+      ownerPrincipal: parseOwnerPrincipal(env.RETRACE_OWNER),
       exportCache: new D1ExportCache(env.DB),
       trailerPolicy: parseTrailerPolicy(env.RETRACE_TRAILER_POLICY),
     });

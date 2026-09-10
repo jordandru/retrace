@@ -18,7 +18,7 @@
     }
   },
   "scripts": {
-    "build": "node scripts/embed-ui.mjs && tsc -p tsconfig.json",
+    "build": "node scripts/embed-ui.mjs && tsc -p tsconfig.json && node -e \"import { cpSync } from 'node:fs'; cpSync('src/fixtures','dist/fixtures',{recursive:true})\"",
     "prepack": "npm run build",
     "test": "node --test dist/*.test.js"
   },

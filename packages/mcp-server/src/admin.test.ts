@@ -455,3 +455,36 @@ test("set-principal refuses an assignment that conflicts with established histor
   );
   assert.equal(readCredentialsFile(file).find((c) => c.actor.on_behalf_of === "bob@acme.dev")!.principal, undefined);
 });
+
+test("P6: set-policy refuses declared-project mismatch; --cross-project-copy prints; preview ≠ digest; basename hint", async () => {
+  const { proposeSetPolicy } = await import("./admin.js");
+  const dir = mkdtempSync(join(tmpdir(), "retrace-set-policy-"));
+  const cfg = join(dir, ".retrace.json");
+  writeFileSync(cfg, JSON.stringify({
+    project: "other",
+    reconcile: { hook_sealed_by: ["assert:git hook (assert)"] },
+    attribution: { repositories: [{ name: "acme/app", aliases: ["app"] }] },
+  }));
+  const refused = await proposeSetPolicy({ project: "demo", fromPath: cfg, ifMatch: "none" });
+  assert.match(refused.printed, /refused/);
+  assert.equal(refused.body, undefined);
+  const copied = await proposeSetPolicy({ project: "demo", fromPath: cfg, ifMatch: "none", crossProjectCopy: true });
+  assert.match(copied.printed, /--cross-project-copy/);
+  assert.match(copied.printed, /body_preview_sha256/);
+  assert.match(copied.printed, /settings-only preview, not the policy digest/);
+  assert.equal(copied.body?.unresolved_claims, "record");
+  const unnamed = join(dir, "repo", ".retrace.json");
+  mkdirSync(join(dir, "repo"));
+  writeFileSync(unnamed, JSON.stringify({ reconcile: { hook_sealed_by: ["assert:x"] } }));
+  const hint = await proposeSetPolicy({ project: "demo", fromPath: unnamed, ifMatch: "none" });
+  assert.match(hint.printed, /basename hint only/);
+  assert.ok(copied.body);
+  const { bodyPreviewSha256, policyDigestOf, validatePolicyEnvelope } = await import("@retrace-dev/core");
+  const preview = await bodyPreviewSha256(copied.body!);
+  const fakeEnv = validatePolicyEnvelope({
+    version: 1, created_at: "2026-09-10T03:45:00.000Z", set_by: { type: "human", id: "o" },
+    supersedes: null, activation: { event_id: "evt_x", seq: 0 },
+  });
+  const digest = await policyDigestOf(copied.body!, fakeEnv);
+  assert.notEqual(preview, digest);
+});

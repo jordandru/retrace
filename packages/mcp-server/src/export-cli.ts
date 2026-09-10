@@ -31,7 +31,6 @@ import { amendAttributionMain, attributionOptionsForRepo } from "./attribution.j
 import { collectAttributionAmendments, attributionSummary, renderTimeline } from "@retrace-dev/core";
 import { reconcileMain } from "./reconcile.js";
 import { loadPublicKey, resolveTrustedKey } from "./trusted-key.js";
-import { trustedHookStampsFor } from "./hook-stamps.js";
 
 /** Checkpoint witnesses use a separate signing key, so never silently reuse the export issuer key. */
 async function resolveCheckpointTrustedKey(flag: unknown): Promise<{ key: JsonWebKey; from: string } | undefined> {
@@ -50,11 +49,9 @@ function parseArgs(argv: string[]) {
 }
 
 function bundleVerifyOpts(flags: Record<string, string | boolean>, bundle: ExportBundle, producers?: ProducerKey[]) {
-  const project = bundle.scope.project;
-  const trustedHookStamps = trustedHookStampsFor(String(flags.repo ?? process.cwd()), project);
+  // Stamps come from bundle.policies (verifyExportBundle). `.retrace.json` is bootstrap-only.
   return {
-    project,
-    ...(trustedHookStamps ? { trustedHookStamps } : {}),
+    project: bundle.scope.project,
     ...(producers ? { producers } : {}),
   };
 }

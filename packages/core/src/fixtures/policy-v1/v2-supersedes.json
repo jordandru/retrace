@@ -1,0 +1,38 @@
+{
+  "name": "v2-supersedes",
+  "body": {
+    "profile": "retrace-project-policy/1",
+    "project": "demo",
+    "trusted_hook_stamps": [
+      "assert:git hook (assert)",
+      "assert:release-recorder"
+    ],
+    "unresolved_claims": "record",
+    "repositories": [
+      {
+        "name": "acme/demo",
+        "aliases": [
+          "demo"
+        ]
+      }
+    ],
+    "github_repos": [
+      "acme/demo"
+    ]
+  },
+  "envelope": {
+    "version": 2,
+    "created_at": "2026-09-10T04:00:00.000Z",
+    "set_by": {
+      "type": "human",
+      "id": "owner@example.com"
+    },
+    "supersedes": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "activation": {
+      "event_id": "evt_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "seq": 7
+    }
+  },
+  "canonical": "{\"activation\":{\"event_id\":\"evt_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"seq\":7},\"created_at\":\"2026-09-10T04:00:00.000Z\",\"github_repos\":[\"acme/demo\"],\"profile\":\"retrace-project-policy/1\",\"project\":\"demo\",\"repositories\":[{\"aliases\":[\"demo\"],\"name\":\"acme/demo\"}],\"set_by\":{\"id\":\"owner@example.com\",\"type\":\"human\"},\"supersedes\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"trusted_hook_stamps\":[\"assert:git hook (assert)\",\"assert:release-recorder\"],\"unresolved_claims\":\"record\",\"version\":2}",
+  "digest": "7666b26ff7de8a259e9dde59b5602f06d47a5f399c90b16c1eedc9adbf632d41"
+}
