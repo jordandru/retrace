@@ -15,6 +15,7 @@ test("review effort R1/R5/R6/R7: routing data requires digests, immutable heads,
   const rules = json<any>("routing-rules/1.json");
   assert.equal(rules.rule_version, "effort-routing/1");
   assert.equal(rules.routing_event.record_before_launch, true);
+  assert.equal(rules.routing_event.head_sha_format, "^[0-9a-f]{40}$");
   for (const field of ["rules_digest", "models_digest", "head_sha", "surface_class", "target"]) {
     assert.ok(rules.routing_event.required_params.includes(field), field);
   }

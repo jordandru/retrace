@@ -78,6 +78,7 @@
   },
   "routing_event": {
     "record_before_launch": true,
+    "head_sha_format": "^[0-9a-f]{40}$",
     "required_params": [
       "rule_version",
       "rules_digest",
