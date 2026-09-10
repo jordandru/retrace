@@ -260,6 +260,11 @@ export function reviewEffortFindings(events: Event[], models: RoutingModelRegist
     const model = review.actor.model;
     const capability = model ? models[model] : undefined;
 
+    if (!model) {
+      findings.push(result("warn", "review model", `${review.id}: review did not self-report actor.model`));
+    } else if (!capability) {
+      findings.push(result("warn", "review model", `${review.id}: ${model} is not listed in the routing model registry`));
+    }
     if (capability?.supports_effort && !effort) {
       findings.push(result("warn", "review reasoning effort", `${review.id}: ${model} supports effort but the review did not self-report method.params.reasoning_effort`));
     }
@@ -277,9 +282,18 @@ export function reviewEffortFindings(events: Event[], models: RoutingModelRegist
       continue;
     }
     const target = paramsOf(routing).target;
-    const routedEffort = target && typeof target === "object" && typeof (target as Record<string, unknown>).effort === "string"
-      ? (target as Record<string, unknown>).effort as string
+    const routed = target && typeof target === "object" ? target as Record<string, unknown> : {};
+    const routedAgent = typeof routed.agent === "string" ? routed.agent : undefined;
+    const routedModel = typeof routed.model === "string" ? routed.model : undefined;
+    const routedEffort = typeof routed.effort === "string"
+      ? routed.effort
       : undefined;
+    if (routedAgent && routedAgent !== review.actor.id) {
+      findings.push(result("warn", "review agent mismatch", `${review.id}: routed ${routedAgent} · ran ${review.actor.id} (${routingId})`));
+    }
+    if (routedModel && model && routedModel !== model) {
+      findings.push(result("warn", "review model mismatch", `${review.id}: routed ${routedModel} · ran ${model} (${routingId})`));
+    }
     if (effort && routedEffort && effort !== routedEffort) {
       findings.push(result("warn", "review effort mismatch", `${review.id}: routed ${routedEffort} · ran ${effort} (${routingId})`));
     }

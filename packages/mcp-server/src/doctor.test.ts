@@ -58,7 +58,17 @@ test("doctor: review effort warns only when the model supports effort, routing i
   const unsupported = reviewEffortFindings([routing, review("evt_nemotron", "nvidia/nemotron-3-ultra", {
     routing_event_id: routing.id,
   })], models);
-  assert.deepEqual(unsupported, []);
+  assert.equal(unsupported[0]?.label, "review model mismatch");
+
+  const wrongTarget = reviewEffortFindings([routing, {
+    ...review("evt_wrong", "unlisted-model", { reasoning_effort: "high", routing_event_id: routing.id }),
+    actor: { type: "agent", id: "other-reviewer", model: "unlisted-model" },
+  }], models);
+  assert.deepEqual(wrongTarget.map((finding) => finding.label), [
+    "review model",
+    "review agent mismatch",
+    "review model mismatch",
+  ]);
 
   const lateRouting = reviewEffortFindings([
     { ...routing, id: "evt_adopt", seq: 0 },
