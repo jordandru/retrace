@@ -13,6 +13,7 @@ export * from "./lineage.js";
 export * from "./github.js";
 export * from "./gdrive.js";
 export * from "./status.js";
+export * from "./credential-status.js";
 export * from "./amendment.js";
 export * from "./reconcile.js";
 export * from "./commit-actor.js";

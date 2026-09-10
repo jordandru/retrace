@@ -129,6 +129,8 @@ export const Credential = z.object({
   require_signature: z.boolean().optional(),
   /** ISO timestamp. A retired credential must not authenticate and does not block a replacement mint. */
   retired_at: z.string().min(1).optional(),
+  /** Immutable issuer principal (human email or team id). Absent on pre-step-2 rows; never guessed. */
+  principal: z.object({ type: z.enum(["human", "team"]), id: z.string().min(1) }).optional(),
 });
 export type Credential = z.infer<typeof Credential>;
 /** Parse the RETRACE_CREDENTIALS secret (JSON array). Throws on malformed config so a bad deploy fails loudly. */
@@ -650,7 +652,7 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
             });
           }
           if (sub === "verify") return json(await verifyProject(store, project));
-          if (sub === "status") return json(await buildProjectStatus(store, project));
+          if (sub === "status") return json(await buildProjectStatus(store, project, new Date(), undefined, opts.credentials));
           if (sub === "events") {
             const beforeRaw = q.before_seq;
             const before_seq = beforeRaw !== undefined && beforeRaw !== "" ? Number(beforeRaw) : undefined;

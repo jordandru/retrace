@@ -63,6 +63,7 @@ test("planCredentials: one pinned credential per member×harness, scoped to the 
   for (const c of pinned) {
     assert.deepEqual(c.projects, ["acme-app"], "every team credential is project-scoped");
     assert.ok(spec.members.includes(c.actor.on_behalf_of!), "pinned to a member");
+    assert.deepEqual(c.principal, { type: "human", id: c.actor.on_behalf_of });
     assert.ok(c.token.length >= 32);
   }
   assert.equal(new Set(creds.map((c) => c.token)).size, creds.length, "tokens are unique");
@@ -74,6 +75,8 @@ test("planCredentials: one pinned credential per member×harness, scoped to the 
     { type: "human", id: "alice@acme.dev" }, { type: "human", id: "bob@acme.dev" },
   ]);
   const ci = creds.find((c) => c.actor.id === ciActorId("acme-app"))!;
+  assert.deepEqual(hook.principal, { type: "team", id: "acme-app" });
+  assert.deepEqual(ci.principal, { type: "team", id: "acme-app" });
   assert.deepEqual([ci.trust, ci.actor.type, ci.projects], ["assert", "system", ["acme-app"]]);
   assert.deepEqual(ci.allowed_actors, []);
   // The Worker's own schema accepts what we minted.
@@ -278,6 +281,7 @@ test("add-agent validates a single member/harness and requires an existing proje
   await assert.rejects(() => main(["add-agent", "missing", "--member", "alice@acme.dev,bob@acme.dev", "--harness", "openclaw", "--url", "https://retrace.example", "--credentials-file", file], {}, () => {}), /usage/);
   assert.throws(() => planAgentCredential({ project: "acme-app", member: "alice@acme.dev", harness: "unknown" as any, url: "https://retrace.example" }), /unknown harness/);
   const cred = planAgentCredential({ project: "acme-app", member: "alice@acme.dev", harness: "openclaw", url: "https://retrace.example" }, fakeRand());
+  assert.deepEqual(cred.principal, { type: "human", id: "alice@acme.dev" });
   assert.match(renderAgentOnboarding({ project: "acme-app", member: "alice@acme.dev", harness: "openclaw", url: "https://retrace.example" }, cred), /RETRACE_MCP_ENABLED=1/);
 });
 
@@ -296,14 +300,11 @@ test("issuance guard: a second live pinned credential for the same {project, typ
   assert.equal(readCredentialsFile(file).filter((c) => c.actor.id === "codex" && !c.retired_at).length, 2, "alice+bob from new-team unchanged");
 });
 
-test("issuance guard: retire-agent then add-agent mints a replacement for the same {project, type, id}", async () => {
+test("issuance guard: retire-agent then add-agent for a different principal is refused (T29); conflicting historical bindings fail closed", async () => {
   const dir = mkdtempSync(join(tmpdir(), "retrace-admin-retire-"));
   const file = join(dir, "creds.json");
   const keysDir = join(dir, "producer-keys");
-  const onboarding = join(dir, "nooa.md");
   appendCredentials(file, [], planCredentials(spec, fakeRand()));
-  const before = readCredentialsFile(file).filter((c) => c.actor.id === "openclaw");
-  assert.equal(before.length, 0);
 
   await assert.rejects(
     () => main(["add-agent", "acme-app", "--member", "alice@acme.dev", "--harness", "codex", "--url", "https://retrace.example", "--credentials-file", file, "--producer-keys-dir", keysDir], {}, () => {}),
@@ -321,11 +322,68 @@ test("issuance guard: retire-agent then add-agent mints a replacement for the sa
   assert.equal(findLivePinned(readCredentialsFile(file), "acme-app", { type: "agent", id: "codex" }), undefined);
   assert.ok(readCredentialsFile(file).some((c) => c.actor.id === "codex" && c.retired_at));
 
-  assert.equal(await main(["add-agent", "acme-app", "--member", "carol@acme.dev", "--harness", "codex", "--url", "https://retrace.example", "--credentials-file", file, "--producer-keys-dir", keysDir, "--out", onboarding], {}, () => {}), 0);
+  await assert.rejects(
+    () => main(["add-agent", "acme-app", "--member", "carol@acme.dev", "--harness", "codex", "--url", "https://retrace.example", "--credentials-file", file, "--producer-keys-dir", keysDir], {}, () => {}),
+    /originally bound to human\/alice@acme\.dev, human\/bob@acme\.dev/,
+  );
+  await assert.rejects(
+    () => main(["add-agent", "acme-app", "--member", "alice@acme.dev", "--harness", "codex", "--url", "https://retrace.example", "--credentials-file", file, "--producer-keys-dir", keysDir], {}, () => {}),
+    /originally bound to human\/alice@acme\.dev, human\/bob@acme\.dev/,
+    "alice+bob both bound agent/codex — reissue to either fails closed",
+  );
+});
+
+test("T29: retire-agent then add-agent of the same principal is allowed; a different principal is refused", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "retrace-admin-t29-"));
+  const file = join(dir, "creds.json");
+  const keysDir = join(dir, "producer-keys");
+  const one: TeamSpec = { project: "acme-app", members: ["alice@acme.dev"], harnesses: ["codex"], url: "https://retrace.example" };
+  appendCredentials(file, [], planCredentials(one, fakeRand()));
+  assert.equal(await main(["retire-agent", "acme-app", "--harness", "codex", "--credentials-file", file], {}, () => {}), 0);
+
+  await assert.rejects(
+    () => main(["add-agent", "acme-app", "--member", "bob@acme.dev", "--harness", "codex", "--url", "https://retrace.example", "--credentials-file", file, "--producer-keys-dir", keysDir], {}, () => {}),
+    /originally bound to human\/alice@acme\.dev/,
+  );
+  assert.equal(findLivePinned(readCredentialsFile(file), "acme-app", { type: "agent", id: "codex" }), undefined);
+
+  assert.equal(await main(["add-agent", "acme-app", "--member", "alice@acme.dev", "--harness", "codex", "--url", "https://retrace.example", "--credentials-file", file, "--producer-keys-dir", keysDir, "--out", join(dir, "alice.md")], {}, () => {}), 0);
   const added = readCredentialsFile(file).at(-1)!;
-  assert.deepEqual(added.actor, { type: "agent", id: "codex", on_behalf_of: "carol@acme.dev" });
+  assert.deepEqual(added.actor, { type: "agent", id: "codex", on_behalf_of: "alice@acme.dev" });
+  assert.deepEqual(added.principal, { type: "human", id: "alice@acme.dev" });
   assert.equal(added.retired_at, undefined);
   assert.ok(findLivePinned(readCredentialsFile(file), "acme-app", { type: "agent", id: "codex" }));
+});
+
+test("set-principal fills a missing principal once and never overwrites; does not guess from on_behalf_of", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "retrace-admin-set-principal-"));
+  const file = join(dir, "creds.json");
+  appendCredentials(file, [], [{
+    token: "legacy-token-0123456789abcd",
+    name: "legacy codex",
+    actor: { type: "agent", id: "codex", on_behalf_of: "alice@acme.dev" },
+    trust: "pinned",
+    projects: ["acme-app"],
+  }]);
+  assert.equal(readCredentialsFile(file)[0]!.principal, undefined);
+
+  const dry: string[] = [];
+  assert.equal(await main(["set-principal", "acme-app", "--actor", "agent/codex", "--principal", "human/alice@acme.dev", "--credentials-file", file, "--dry-run"], {}, (s) => dry.push(s)), 0);
+  assert.match(dry.join("\n"), /would set principal human\/alice@acme\.dev/);
+  assert.equal(readCredentialsFile(file)[0]!.principal, undefined, "dry-run does not write");
+
+  const lines: string[] = [];
+  assert.equal(await main(["set-principal", "acme-app", "--actor", "agent/codex", "--principal", "human/alice@acme.dev", "--credentials-file", file], {}, (s) => lines.push(s)), 0);
+  assert.deepEqual(readCredentialsFile(file)[0]!.principal, { type: "human", id: "alice@acme.dev" });
+
+  const again: string[] = [];
+  assert.equal(await main(["set-principal", "acme-app", "--actor", "agent/codex", "--principal", "human/alice@acme.dev", "--credentials-file", file], {}, (s) => again.push(s)), 0);
+  assert.match(again.join("\n"), /already has principal/);
+
+  await assert.rejects(
+    () => main(["set-principal", "acme-app", "--actor", "agent/codex", "--principal", "human/bob@acme.dev", "--credentials-file", file], {}, () => {}),
+    /already bound to human\/alice@acme\.dev/,
+  );
 });
 
 test("retireLivePinned throws when nothing live covers the project", () => {
