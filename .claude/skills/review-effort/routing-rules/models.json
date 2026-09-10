@@ -1,0 +1,18 @@
+{
+  "gpt-6-astra": {
+    "supports_effort": true,
+    "levels": ["low", "medium", "high", "xhigh"]
+  },
+  "gpt-5.6-sol": {
+    "supports_effort": true,
+    "levels": ["low", "medium", "high", "xhigh"]
+  },
+  "claude-fable-5.1": {
+    "supports_effort": true,
+    "levels": ["low", "medium", "high", "xhigh"]
+  },
+  "nvidia_nim/nvidia/nemotron-3-ultra-550b-a55b": {
+    "supports_effort": false,
+    "levels": []
+  }
+}

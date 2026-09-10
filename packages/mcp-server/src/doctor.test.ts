@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Credential, Event, EventInput, EventStore, Share, appendEvent, buildExportBundle, generateSigningKey, pageHistoryNewest, schemaSurface, signCanonical } from "@retrace-dev/core";
-import { attributionFinding, cliVersionGap, credentialAuthorization, doctorHistoryEvents, gateRemoteAuthorization, headDelivery, instructRootFinding, issuanceFindingsFromStatus, missingSchema, parseDoctorArgs, pendingSealsFinding, pinSessionFinding, remoteCaptureCoverage, sealedCommitEvent, sealedLooksAgent } from "./doctor.js";
+import { attributionFinding, cliVersionGap, credentialAuthorization, doctorHistoryEvents, gateRemoteAuthorization, headDelivery, instructRootFinding, issuanceFindingsFromStatus, missingSchema, parseDoctorArgs, pendingSealsFinding, pinSessionFinding, remoteCaptureCoverage, reviewEffortFindings, sealedCommitEvent, sealedLooksAgent } from "./doctor.js";
 import { RemoteStore } from "./remote-store.js";
 import { SqliteStore } from "./sqlite-store.js";
 
@@ -18,6 +18,48 @@ test("doctor: schema comparison names only fields the deployment would drop", ()
   remote.location = remote.location.filter((k) => k !== "workspace");
   assert.deepEqual(missingSchema(remote), ["location.workspace"]);
   assert.deepEqual(missingSchema({ ...local, future: ["x"] }), []);
+});
+
+test("doctor: review effort warns only when the model supports effort, routing is absent, or routed and run effort differ", () => {
+  const routing = commitEvt({
+    id: "evt_route", seq: 1, action: "other", action_detail: "routed",
+    actor: { type: "agent", id: "claude-code" },
+    method: { tool: "routing", params: { target: { agent: "codex", model: "gpt-6-astra", effort: "high" } } },
+  });
+  const review = (id: string, model: string, params: Record<string, unknown>): Event => commitEvt({
+    id, seq: 2, action: "approved", actor: { type: "agent", id: "codex", model },
+    tags: ["review"], method: { tool: "review", params },
+  });
+  const models = {
+    "gpt-6-astra": { supports_effort: true, levels: ["low", "medium", "high", "xhigh"] },
+    "nvidia/nemotron-3-ultra": { supports_effort: false, levels: [] },
+  };
+
+  assert.deepEqual(reviewEffortFindings([routing, review("evt_ok", "gpt-6-astra", {
+    reasoning_effort: "high", routing_event_id: routing.id,
+  })], models), []);
+
+  const missing = reviewEffortFindings([review("evt_missing", "gpt-6-astra", {})], models);
+  assert.deepEqual(missing.map((finding) => finding.label), ["review reasoning effort", "review routing"]);
+  assert.ok(missing.every((finding) => finding.level === "warn"));
+
+  const mismatch = reviewEffortFindings([routing, review("evt_mismatch", "gpt-6-astra", {
+    reasoning_effort: "medium", routing_event_id: routing.id,
+  })], models);
+  assert.equal(mismatch[0]?.label, "review effort mismatch");
+  assert.match(mismatch[0]!.detail, /routed high · ran medium/);
+
+  const unsupported = reviewEffortFindings([routing, review("evt_nemotron", "nvidia/nemotron-3-ultra", {
+    routing_event_id: routing.id,
+  })], models);
+  assert.deepEqual(unsupported, []);
+
+  const lateRouting = reviewEffortFindings([
+    review("evt_early", "gpt-6-astra", { reasoning_effort: "high", routing_event_id: "evt_late" }),
+    { ...routing, id: "evt_late", seq: 3 },
+  ], models);
+  assert.equal(lateRouting[0]?.label, "review routing");
+  assert.match(lateRouting[0]!.detail, /recorded before the review/);
 });
 
 test("doctor: CLI version gap when Worker advertises min_cli_version above the running CLI", () => {

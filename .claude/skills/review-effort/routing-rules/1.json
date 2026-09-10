@@ -1,0 +1,97 @@
+{
+  "rule_version": "effort-routing/1",
+  "classification": {
+    "input": "git diff --name-only <base_sha>..<head_sha>",
+    "highest_class_wins": true,
+    "class_order": ["S", "D", "C", "T", "F"],
+    "reclassify_on_head_change": true
+  },
+  "surface_classes": {
+    "S": {
+      "label": "security/trust",
+      "path_patterns": [
+        "**/router.ts",
+        "**/producer-sig*",
+        "**/policy*",
+        "**/chain.ts",
+        "**/store.ts",
+        "**/*credential*",
+        "**/*secret*",
+        "**/schema.sql",
+        "**/admin.ts",
+        "apps/worker/src/index.ts"
+      ],
+      "first_pass": "high",
+      "recheck": "medium",
+      "recheck_new_surfaces": "high",
+      "minimum_first_pass": "high"
+    },
+    "D": {
+      "label": "design contracts",
+      "path_patterns": ["docs/design/**"],
+      "first_pass": {
+        "v1-v2": "high",
+        "after_v2": "medium"
+      },
+      "recheck": "medium"
+    },
+    "C": {
+      "label": "consumers",
+      "path_patterns": [
+        "**/status.ts",
+        "**/reconcile.ts",
+        "**/doctor.ts",
+        "**/export-cli.ts",
+        "**/ui/**",
+        "**/ui-*"
+      ],
+      "first_pass": "medium",
+      "recheck": "medium"
+    },
+    "T": {
+      "label": "tests, fixtures, tooling",
+      "path_patterns": [
+        "**/*.test.ts",
+        "**/fixtures/**",
+        "**/scripts/**",
+        "**/migrate.mjs"
+      ],
+      "first_pass": "medium",
+      "recheck": "low"
+    },
+    "F": {
+      "label": "formatting, comments, renames",
+      "path_patterns": [],
+      "requires": "no semantic change (AST-equal or comment-only)",
+      "first_pass": "low",
+      "recheck": "low"
+    }
+  },
+  "pins": {
+    "direction": "raise_only",
+    "source": "stamped_ledger_event",
+    "required_fields": ["pr", "head_sha", "level"],
+    "authorised_principal": "project policy set_by or owner",
+    "accepted_stamps": ["owner", "pinned"],
+    "unauthorised_action": "ignore_and_report",
+    "below_rubric_action": "refuse"
+  },
+  "routing_event": {
+    "record_before_launch": true,
+    "required_params": [
+      "rule_version",
+      "rules_digest",
+      "models_digest",
+      "head_sha",
+      "surface_class",
+      "target",
+      "pin_event",
+      "escalated_from"
+    ],
+    "target_fields": ["agent", "model", "effort"]
+  },
+  "escalation": {
+    "record_before_relaunch": true,
+    "required_params": ["escalated_from", "signal", "head_sha"]
+  }
+}

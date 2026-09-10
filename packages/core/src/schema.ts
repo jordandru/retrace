@@ -128,11 +128,19 @@ export const Location = z.object({
 });
 export type Location = z.infer<typeof Location>;
 
+export const MethodParams = z.object({
+  /** Self-reported by a review agent from the configuration it actually ran with. */
+  reasoning_effort: z.string().min(1).optional(),
+  /** Routing decision this review fulfils. */
+  routing_event_id: z.string().min(1).optional(),
+}).catchall(z.unknown());
+export type MethodParams = z.infer<typeof MethodParams>;
+
 export const Method = z.object({
   tool: z.string().optional(), // e.g. "Edit", "git commit", "gdocs-ui"
   /** Reference to instruction/prompt that drove this (id, hash, or short text) */
   instruction: z.string().optional(),
-  params: z.record(z.unknown()).optional(),
+  params: MethodParams.optional(),
   automated: z.boolean().optional(),
   tokens: z.number().int().nonnegative().optional(),
   cost_usd: z.number().nonnegative().optional(),
@@ -190,11 +198,12 @@ export type Event = z.infer<typeof Event>;
  * `bacabed`; `location.client`/`ide`/`workspace`/`surface`, 2026-08-28), both times found by eye.
  * `GET /api` publishes this, and `npm run check-deploy` diffs a deployment against the local build.
  */
-export function schemaSurface(): { event: string[]; location: string[]; artifact: string[]; actions: string[] } {
+export function schemaSurface(): { event: string[]; location: string[]; artifact: string[]; method_params: string[]; actions: string[] } {
   return {
     event: Object.keys(EventInput.shape).sort(),
     location: Object.keys(Location.shape).sort(),
     artifact: Object.keys(ArtifactRef.shape).sort(),
+    method_params: Object.keys(MethodParams.shape).sort(),
     actions: [...Action.options].sort(),
   };
 }

@@ -14,6 +14,7 @@ type Level = "pass" | "warn" | "fail";
 export type Finding = { level: Level; label: string; detail: string };
 export type DoctorArgs = { command: "doctor" | "status"; gate: boolean; json: boolean; local: boolean; repo?: string; statusProject?: string };
 type RepoConfig = ReconcileCfg & { credential?: string };
+export type RoutingModelRegistry = Record<string, { supports_effort: boolean; levels: string[] }>;
 
 const git = (repo: string, args: string[]) => execFileSync("git", ["-C", repo, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 const result = (level: Level, label: string, detail: string): Finding => ({ level, label, detail });
@@ -229,6 +230,72 @@ export function captureCoverageFinding(report: ReconcileReport): Finding {
   }
   const top = live.filter((f) => f.level === worst);
   return result(worst, "capture coverage", top.map((f) => `${f.kind}: ${f.detail}`).join("; "));
+}
+
+function paramsOf(event: Event): Record<string, unknown> {
+  return event.method?.params ?? {};
+}
+
+function isReviewEvent(event: Event): boolean {
+  return event.actor.type === "agent" && (
+    event.action === "approved"
+    || event.action === "rejected"
+    || event.action_detail === "reviewed"
+    || event.tags?.includes("review") === true
+  );
+}
+
+/** Advisory R2/R3 checks: routing is intent; the review event remains the truth about what ran. */
+export function reviewEffortFindings(events: Event[], models: RoutingModelRegistry): Finding[] {
+  const byId = new Map(events.map((event) => [event.id, event]));
+  const findings: Finding[] = [];
+  for (const review of events.filter(isReviewEvent)) {
+    const params = paramsOf(review);
+    const effort = typeof params.reasoning_effort === "string" ? params.reasoning_effort : undefined;
+    const routingId = typeof params.routing_event_id === "string" ? params.routing_event_id : undefined;
+    const model = review.actor.model;
+    const capability = model ? models[model] : undefined;
+
+    if (capability?.supports_effort && !effort) {
+      findings.push(result("warn", "review reasoning effort", `${review.id}: ${model} supports effort but the review did not self-report method.params.reasoning_effort`));
+    }
+    if (!routingId) {
+      findings.push(result("warn", "review routing", `${review.id}: review cites no method.params.routing_event_id`));
+      continue;
+    }
+    const routing = byId.get(routingId);
+    if (!routing) {
+      findings.push(result("warn", "review routing", `${review.id}: cited routing event ${routingId} is not in the inspected ledger`));
+      continue;
+    }
+    if (routing.method?.tool !== "routing" || routing.seq >= review.seq) {
+      findings.push(result("warn", "review routing", `${review.id}: ${routingId} is not a routing event recorded before the review`));
+      continue;
+    }
+    const target = paramsOf(routing).target;
+    const routedEffort = target && typeof target === "object" && typeof (target as Record<string, unknown>).effort === "string"
+      ? (target as Record<string, unknown>).effort as string
+      : undefined;
+    if (effort && routedEffort && effort !== routedEffort) {
+      findings.push(result("warn", "review effort mismatch", `${review.id}: routed ${routedEffort} · ran ${effort} (${routingId})`));
+    }
+  }
+  return findings;
+}
+
+export function loadRoutingModels(repo: string): RoutingModelRegistry | undefined {
+  const path = join(repo, ".claude", "skills", "review-effort", "routing-rules", "models.json");
+  if (!existsSync(path)) return undefined;
+  const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error(`${path}: expected an object`);
+  for (const [model, value] of Object.entries(parsed)) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${path}: ${model} must be an object`);
+    const row = value as Record<string, unknown>;
+    if (typeof row.supports_effort !== "boolean" || !Array.isArray(row.levels) || row.levels.some((level) => typeof level !== "string")) {
+      throw new Error(`${path}: ${model} must contain supports_effort:boolean and levels:string[]`);
+    }
+  }
+  return parsed as RoutingModelRegistry;
 }
 
 /** Walk caused_by inside an already-verified event set. Same project + depth bound as explainEvent. */
@@ -465,6 +532,9 @@ async function main() {
   if (!existsSync(cfgPath)) findings.push(result("fail", "repository wiring", `${cfgPath} is missing; run retrace-git install --repo ${repo}`));
   else try { cfg = JSON.parse(readFileSync(cfgPath, "utf8")); findings.push(result("pass", "repository wiring", cfgPath)); }
   catch (e: any) { findings.push(result("fail", "repository wiring", `${cfgPath} is invalid JSON: ${e.message}`)); }
+  let routingModels: RoutingModelRegistry | undefined;
+  try { routingModels = loadRoutingModels(repo); }
+  catch (e: any) { findings.push(result("warn", "review routing registry", e.message)); }
 
   if (!gate) {
     findings.push(...hookFindings(repo));
@@ -541,12 +611,17 @@ async function main() {
           const remote = new RemoteStore(url, auth.token);
           const { findings: authFindings, verified } = await gateRemoteAuthorization(commit, remote, project, undefined, url, { project });
           findings.push(...authFindings);
+          if (routingModels) findings.push(...reviewEffortFindings(verified.events, routingModels));
           try {
             findings.push(await remoteCaptureCoverage(repo, project, remote, cfg, args, undefined, url, verified));
           } catch (e: any) { findings.push(result("fail", "capture coverage", e.message)); }
         } catch (e: any) { findings.push(result("fail", "HEAD delivery", e.message)); }
       } else {
         try {
+          if (routingModels) {
+            const reviewFindings = reviewEffortFindings(await new RemoteStore(url, auth.token).all(project), routingModels);
+            findings.push(...reviewFindings.map((finding) => ({ ...finding, detail: `${finding.detail} (unsigned history; --gate uses the verified ledger)` })));
+          }
           const action = headEvent.action === "merged" ? "merged" : "committed";
           const res = await fetch(`${url}/projects/${encodeURIComponent(project)}/events?artifact_id=${encodeURIComponent(commit ?? "")}&action=${action}`, { headers });
           if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
