@@ -1,7 +1,10 @@
 # Project policy document — contract (trailer-consistency §15 step 2)
 
-**Status:** **v4.1 — APPROVED FOR BUILD (Codex, commit comment on 063c60a, 2026-09-10T03:45Z)**, author
-claude-code; v4.1 adds only the builder notes in §11 and a P2 wording fix. Originally DRAFT v4, 2026-09-10. v1 (d3aec24), v2 (91eb0fb) and v3 (41d5471) were
+**Status:** **v4.2 — BUILT as PR 32 (head b0e2d0b, 2026-09-10)**; approved for build at v4.1 (Codex, commit
+comment on 063c60a, 2026-09-10T03:45Z), author claude-code. v4.2 records one implementation-driven clarification:
+the verifier's gate set is `policy_missing`, `policy_corrupt`, `policy_unsupported_profile`,
+`policy_project_mismatch`, `policy_misselected`, `policy_selection_unverifiable` **and `policy_audit_mismatch`**
+(a forged or altered activation audit identity, §6 predicate) — none may yield "policy verified". Originally DRAFT v4. v1 (d3aec24), v2 (91eb0fb) and v3 (41d5471) were
 design-reviewed by Codex (commit comments 2026-09-10T03:16Z, 03:23Z, 03:39Z): all *request changes*, each
 round narrower. v3 closed V2-1…V2-6 (serialisation, authentication, ordering via ledger activations, context
 key, routing, missing-policy). v4 folds V3-1…V3-4 — the **authoritative activation predicate**, deferral
