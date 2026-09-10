@@ -22,7 +22,8 @@ digest of the exact bytes of each file. Do not route from an unstamped copy or o
 
 1. Confirm the current head still equals `head_sha`.
 2. Classify `git diff --name-only <base_sha>..<head_sha>` with `routing-rules/1.json`. The highest class
-   touched wins. Class F requires evidence of no semantic change; it is not a filename fallback.
+   touched wins. Unmatched paths take `default_surface_class`; never leave a path unclassified. Class F
+   requires evidence of no semantic change; it is not a filename fallback.
 3. Select the rubric effort for the round. Class S first passes are never below `high`.
 4. If a pin was supplied, fetch the ledger event and verify all of the following before using it:
    - it is owner-stamped or pinned-credential-stamped;

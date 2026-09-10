@@ -198,12 +198,11 @@ export type Event = z.infer<typeof Event>;
  * `bacabed`; `location.client`/`ide`/`workspace`/`surface`, 2026-08-28), both times found by eye.
  * `GET /api` publishes this, and `npm run check-deploy` diffs a deployment against the local build.
  */
-export function schemaSurface(): { event: string[]; location: string[]; artifact: string[]; method_params: string[]; actions: string[] } {
+export function schemaSurface(): { event: string[]; location: string[]; artifact: string[]; actions: string[] } {
   return {
     event: Object.keys(EventInput.shape).sort(),
     location: Object.keys(Location.shape).sort(),
     artifact: Object.keys(ArtifactRef.shape).sort(),
-    method_params: Object.keys(MethodParams.shape).sort(),
     actions: [...Action.options].sort(),
   };
 }

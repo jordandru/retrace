@@ -500,13 +500,12 @@ test("schemaSurface is derived from the zod shapes, so it cannot drift from the 
   // Derived, not hand-listed: adding a field to Location must show up here with no other edit. If someone replaces
   // this with a literal array, this assertion is what fails.
   assert.deepEqual(surface.location, Object.keys(Location.shape).sort());
-  assert.deepEqual(surface.method_params, Object.keys(MethodParams.shape).sort());
   assert.deepEqual(surface.actions, [...Action.options].sort());
   // The fields whose silent loss motivated the probe.
   for (const f of ["session", "client", "ide", "workspace", "surface", "device", "system"]) assert.ok(surface.location.includes(f), f);
   for (const f of ["actor", "action", "artifacts", "location", "caused_by", "idempotency_key"]) assert.ok(surface.event.includes(f), f);
   assert.ok(surface.artifact.includes("role"));
-  assert.deepEqual(surface.method_params, ["reasoning_effort", "routing_event_id"]);
+  assert.deepEqual(Object.keys(MethodParams.shape).sort(), ["reasoning_effort", "routing_event_id"]);
 });
 
 test("GET /api publishes the schema surface, unauthenticated, and it matches this build", async () => {

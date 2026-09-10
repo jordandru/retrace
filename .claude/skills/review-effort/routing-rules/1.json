@@ -4,7 +4,8 @@
     "input": "git diff --name-only <base_sha>..<head_sha>",
     "highest_class_wins": true,
     "class_order": ["S", "D", "C", "T", "F"],
-    "reclassify_on_head_change": true
+    "reclassify_on_head_change": true,
+    "default_surface_class": "C"
   },
   "surface_classes": {
     "S": {
@@ -18,8 +19,10 @@
         "**/*credential*",
         "**/*secret*",
         "**/schema.sql",
+        "packages/core/src/schema.ts",
         "**/admin.ts",
-        "apps/worker/src/index.ts"
+        "apps/worker/src/index.ts",
+        ".claude/skills/review-effort/**"
       ],
       "first_pass": "high",
       "recheck": "medium",

@@ -23,6 +23,7 @@ test("review effort R1/R5/R6/R7: routing data requires digests, immutable heads,
   assert.ok(rules.escalation.required_params.includes("escalated_from"));
   assert.ok(rules.escalation.required_params.includes("head_sha"));
   assert.equal(rules.classification.reclassify_on_head_change, true);
+  assert.equal(rules.classification.default_surface_class, "C");
   assert.match(digest("routing-rules/1.json"), /^[0-9a-f]{64}$/);
   assert.match(digest("routing-rules/models.json"), /^[0-9a-f]{64}$/);
 });
@@ -31,6 +32,8 @@ test("review effort R4: class S cannot route below high and pins cannot lower th
   const rules = json<any>("routing-rules/1.json");
   assert.equal(rules.surface_classes.S.first_pass, "high");
   assert.equal(rules.surface_classes.S.minimum_first_pass, "high");
+  assert.ok(rules.surface_classes.S.path_patterns.includes("packages/core/src/schema.ts"));
+  assert.ok(rules.surface_classes.S.path_patterns.includes(".claude/skills/review-effort/**"));
   assert.equal(rules.pins.direction, "raise_only");
   assert.equal(rules.pins.below_rubric_action, "refuse");
   assert.equal(rules.pins.source, "stamped_ledger_event");

@@ -40,8 +40,14 @@ test("doctor: review effort warns only when the model supports effort, routing i
   })], models), []);
 
   const missing = reviewEffortFindings([review("evt_missing", "gpt-6-astra", {})], models);
-  assert.deepEqual(missing.map((finding) => finding.label), ["review reasoning effort", "review routing"]);
-  assert.ok(missing.every((finding) => finding.level === "warn"));
+  assert.deepEqual(missing, [], "reviews before routing adoption are not retroactively warned");
+
+  const adoptedMissing = reviewEffortFindings([
+    routing,
+    { ...review("evt_missing", "gpt-6-astra", {}), seq: 2 },
+  ], models);
+  assert.deepEqual(adoptedMissing.map((finding) => finding.label), ["review reasoning effort", "review routing"]);
+  assert.ok(adoptedMissing.every((finding) => finding.level === "warn"));
 
   const mismatch = reviewEffortFindings([routing, review("evt_mismatch", "gpt-6-astra", {
     reasoning_effort: "medium", routing_event_id: routing.id,
@@ -55,6 +61,7 @@ test("doctor: review effort warns only when the model supports effort, routing i
   assert.deepEqual(unsupported, []);
 
   const lateRouting = reviewEffortFindings([
+    { ...routing, id: "evt_adopt", seq: 0 },
     review("evt_early", "gpt-6-astra", { reasoning_effort: "high", routing_event_id: "evt_late" }),
     { ...routing, id: "evt_late", seq: 3 },
   ], models);

@@ -248,8 +248,12 @@ function isReviewEvent(event: Event): boolean {
 /** Advisory R2/R3 checks: routing is intent; the review event remains the truth about what ran. */
 export function reviewEffortFindings(events: Event[], models: RoutingModelRegistry): Finding[] {
   const byId = new Map(events.map((event) => [event.id, event]));
+  const adoptionSeq = events
+    .filter((event) => event.method?.tool === "routing")
+    .reduce<number | undefined>((first, event) => first === undefined ? event.seq : Math.min(first, event.seq), undefined);
+  if (adoptionSeq === undefined) return [];
   const findings: Finding[] = [];
-  for (const review of events.filter(isReviewEvent)) {
+  for (const review of events.filter((event) => event.seq > adoptionSeq && isReviewEvent(event))) {
     const params = paramsOf(review);
     const effort = typeof params.reasoning_effort === "string" ? params.reasoning_effort : undefined;
     const routingId = typeof params.routing_event_id === "string" ? params.routing_event_id : undefined;
@@ -617,11 +621,15 @@ async function main() {
           } catch (e: any) { findings.push(result("fail", "capture coverage", e.message)); }
         } catch (e: any) { findings.push(result("fail", "HEAD delivery", e.message)); }
       } else {
-        try {
-          if (routingModels) {
+        if (routingModels) {
+          try {
             const reviewFindings = reviewEffortFindings(await new RemoteStore(url, auth.token).all(project), routingModels);
             findings.push(...reviewFindings.map((finding) => ({ ...finding, detail: `${finding.detail} (unsigned history; --gate uses the verified ledger)` })));
+          } catch (e: any) {
+            findings.push(result("warn", "review routing", `${e.message}; advisory review history not checked`));
           }
+        }
+        try {
           const action = headEvent.action === "merged" ? "merged" : "committed";
           const res = await fetch(`${url}/projects/${encodeURIComponent(project)}/events?artifact_id=${encodeURIComponent(commit ?? "")}&action=${action}`, { headers });
           if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);

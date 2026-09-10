@@ -1,5 +1,5 @@
 {
-  "gpt-6-astra": {
+  "gpt-6": {
     "supports_effort": true,
     "levels": ["low", "medium", "high", "xhigh"]
   },
@@ -7,7 +7,7 @@
     "supports_effort": true,
     "levels": ["low", "medium", "high", "xhigh"]
   },
-  "claude-fable-5.1": {
+  "claude-fable-5-1": {
     "supports_effort": true,
     "levels": ["low", "medium", "high", "xhigh"]
   },
