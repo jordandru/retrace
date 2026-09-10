@@ -225,11 +225,17 @@ export class D1Store implements EventStore {
       (repo) => existingByRepo.get(repo) ?? null,
       (project) => write.documents.find((d) => d.body.project === project) ?? liveByProject.get(project) ?? null,
     );
+    // Route CAS first. D1 cannot RAISE outside a trigger, so a lost upsert is a no-op;
+    // events and documents are INSERT…SELECT…WHERE the active routes now belong to us.
+    // If CAS lost, those writes insert nothing and the batch has no loser activation.
+    const activeRoutes = write.routes.filter((r) => r.state === "active");
+    const guard = activeRoutes.length
+      ? {
+        sql: activeRoutes.map(() => "EXISTS (SELECT 1 FROM policy_routes WHERE repo = ? AND project = ?)").join(" AND "),
+        params: activeRoutes.flatMap((r) => [r.repo, r.project]),
+      }
+      : undefined;
     const stmts = [
-      ...write.events.flatMap((e) => this.insertStatements(e)),
-      ...write.documents.map((d) => this.db.prepare(
-        "INSERT INTO project_policies (project, version, digest, body, envelope, activation_seq, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-      ).bind(d.body.project, d.envelope.version, d.digest, JSON.stringify(d.body), JSON.stringify(d.envelope), d.envelope.activation.seq, d.envelope.created_at)),
       ...write.routes.map((r) => this.db.prepare(
         `INSERT INTO policy_routes (repo, state, project, digest, activation_seq, set_at) VALUES (?, ?, ?, ?, ?, ?)
          ON CONFLICT(repo) DO UPDATE SET state=excluded.state, project=excluded.project, digest=excluded.digest, activation_seq=excluded.activation_seq, set_at=excluded.set_at
@@ -245,6 +251,15 @@ export class D1Store implements EventStore {
                 )
             )`,
       ).bind(r.repo, r.state, r.project, r.digest, r.activation_seq, r.set_at)),
+      ...write.events.flatMap((e) => this.insertStatements(e, guard)),
+      ...write.documents.map((d) => {
+        const where = guard ? ` WHERE ${guard.sql}` : "";
+        const gp = guard?.params ?? [];
+        return this.db.prepare(
+          `INSERT INTO project_policies (project, version, digest, body, envelope, activation_seq, created_at)
+           SELECT ?, ?, ?, ?, ?, ?, ?${where}`,
+        ).bind(d.body.project, d.envelope.version, d.digest, JSON.stringify(d.body), JSON.stringify(d.envelope), d.envelope.activation.seq, d.envelope.created_at, ...gp);
+      }),
     ];
     await this.db.batch(stmts);
     for (const r of write.routes) {

@@ -105,7 +105,8 @@ export type PolicyVerifyFinding =
   | "policy_selection_unverifiable"
   | "policy_corrupt"
   | "policy_project_mismatch"
-  | "policy_unsupported_profile";
+  | "policy_unsupported_profile"
+  | "policy_audit_mismatch";
 
 export function parseOwnerPrincipal(raw?: string | null): OwnerPrincipal | undefined {
   if (!raw || !raw.trim()) return undefined;
@@ -482,7 +483,7 @@ export function evaluateActivation(
   e: Event,
   documents: ReadonlyMap<string, PolicyDocument>,
   earlierEligibleVersions: number[],
-): PolicySelection | { status: "ignored" } | { status: "eligible"; digest: string; version: number; seq: number; document: PolicyDocument } {
+): PolicySelection | { status: "ignored"; reason?: "policy_audit_mismatch" } | { status: "eligible"; digest: string; version: number; seq: number; document: PolicyDocument } {
   const key = e.idempotency_key ?? "";
   const params = asParams(e);
   const arts = e.artifacts.filter((a) => typeof a.id === "string" && a.id.startsWith("policy:"));
@@ -515,13 +516,19 @@ export function evaluateActivation(
   if (pSupersedes !== doc.envelope.supersedes) return { status: "ignored" };
   if (typeof pVersion !== "number" || earlierEligibleVersions.some((v) => pVersion <= v))
     return { status: "ignored" };
-  if (e.actor?.type !== "system" || e.actor?.id !== POLICY_ACTOR_ID) return { status: "ignored" };
+  // Audit identity is ignored for selection (P4: a later real activation can still win) but
+  // verifyPolicySelectionOffline maps it to policy_audit_mismatch, not policy_missing.
+  if (e.actor?.type !== "system" || e.actor?.id !== POLICY_ACTOR_ID)
+    return { status: "ignored", reason: "policy_audit_mismatch" };
   const setBy = doc.envelope.set_by;
-  if (e.actor.on_behalf_of !== `${setBy.type}:${setBy.id}`) return { status: "ignored" };
+  if (e.actor.on_behalf_of !== `${setBy.type}:${setBy.id}`)
+    return { status: "ignored", reason: "policy_audit_mismatch" };
   const pSetBy = params.set_by;
-  if (!pSetBy || typeof pSetBy !== "object" || Array.isArray(pSetBy)) return { status: "ignored" };
+  if (!pSetBy || typeof pSetBy !== "object" || Array.isArray(pSetBy))
+    return { status: "ignored", reason: "policy_audit_mismatch" };
   const sb = pSetBy as { type?: unknown; id?: unknown };
-  if (sb.type !== setBy.type || sb.id !== setBy.id) return { status: "ignored" };
+  if (sb.type !== setBy.type || sb.id !== setBy.id)
+    return { status: "ignored", reason: "policy_audit_mismatch" };
   return { status: "eligible", digest, version: doc.envelope.version, seq: e.seq, document: doc };
 }
 
@@ -845,16 +852,11 @@ async function planRouteChanges(opts: {
     // Revoked row owned by another project: env stays ineligible. ?reassign is only for a *live*
     // claimant (current document still lists the repo). A tombstone with no live claimant may be
     // activated by a new owner PUT without ?reassign.
+    // Revoked row: the previous owner dropped the repo by definition, so there is no live
+    // claimant and ?reassign is not required (F11). Env stays ineligible via the tombstone.
     if (existing.state === "revoked" && existing.project !== opts.project) {
-      const ownerDoc = opts.currentByProject[existing.project];
-      if (ownerDoc?.body.github_repos.includes(repo)) {
-        if (!opts.reassignFrom || opts.reassignFrom !== existing.project)
-          return { error: `repository ${repo} is routed to project ${existing.project}; pass ?reassign=${existing.project}` };
-        reassignNeeded.add(repo);
-      } else {
-        routes.push({ repo, state: "active", project: opts.project, digest: "", activation_seq: 0, set_at: "" });
-        primaryChanges.push({ repo, from_project: existing.project, to_project: opts.project, state: "active" });
-      }
+      routes.push({ repo, state: "active", project: opts.project, digest: "", activation_seq: 0, set_at: "" });
+      primaryChanges.push({ repo, from_project: existing.project, to_project: opts.project, state: "active" });
     }
   }
 
@@ -1054,13 +1056,17 @@ export function verifyPolicySelectionOffline(opts: {
   }
   const snapshot: PolicySnapshot = { U: U < 0 ? -1 : U, events: opts.events.filter((e) => e.seq <= U), activations: opts.events.filter((e) => e.seq <= U) };
   const selected = selectPolicyForContext(snapshot, documents);
+  const auditMismatch = snapshot.activations.some((e) => {
+    const ev = evaluateActivation(e, documents, []);
+    return ev.status === "ignored" && ev.reason === "policy_audit_mismatch";
+  });
   if (selected.status === "incomplete") {
     findings.push(selected.reason === "policy_missing" ? "policy_missing" : "policy_corrupt");
     return { ok: false, findings, selected };
   }
   if (opts.claimedDigest) {
     if (selected.status === "none") {
-      findings.push("policy_missing");
+      findings.push(auditMismatch ? "policy_audit_mismatch" : "policy_missing");
       return { ok: false, findings, selected };
     }
     if (selected.digest !== opts.claimedDigest) {

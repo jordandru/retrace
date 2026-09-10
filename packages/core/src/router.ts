@@ -758,9 +758,9 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
               if (!doc) return json({ error: "not found" }, 404);
               return json(doc);
             }
-            const snap = store.readPolicySnapshot ? await store.readPolicySnapshot(project) : null;
+            const snap = store.readPolicySnapshot ? await store.readPolicySnapshot(project) : undefined;
             if (snap?.unavailable) return json({ error: "policy unavailable" }, 501);
-            const doc = snap?.document ?? await store.getPolicy(project, { current: true });
+            const doc = snap !== undefined ? (snap.document ?? null) : await store.getPolicy(project, { current: true });
             if (!doc) return json({ error: "not found" }, 404);
             return json(doc);
           }
@@ -818,6 +818,10 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
           const ifMatchHeader = req.headers.get("if-match");
           const reassignFrom = url.searchParams.get("reassign") ?? undefined;
           for (let attempt = 0; attempt < 2; attempt++) {
+            if (store.readPolicySnapshot) {
+              const snap = await store.readPolicySnapshot(project);
+              if (snap.unavailable) return json({ error: "policy unavailable" }, 501);
+            }
             const current = await store.getPolicy(project, { current: true });
             const currentByProject: Record<string, typeof current> = { [project]: current };
             const heads: Record<string, Awaited<ReturnType<EventStore["head"]>>> = { [project]: await store.head(project) };
@@ -847,7 +851,7 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
               await store.applyPolicyWrite(planned.write, planned.expectedHeads);
               return json(planned.document, 201);
             } catch (e: any) {
-              if (e instanceof RouteConflictError || e?.name === "RouteConflictError" || (e instanceof PolicyError && e.status === 409 && e.name === "RouteConflictError"))
+              if (e instanceof RouteConflictError)
                 return json({ error: e.message }, 409);
               if (!(isHeadMovedError(e) || /UNIQUE/i.test(String(e?.message))) || attempt >= 1)
                 return json({ error: "policy version collision" }, 409);

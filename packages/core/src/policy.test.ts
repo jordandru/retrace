@@ -237,6 +237,36 @@ test("F4: activation identity mismatch is ignored so a later real activation can
   });
   const ev = evaluateActivation(forged, docs, []);
   assert.equal(ev.status, "ignored");
+  assert.equal(ev.status === "ignored" ? ev.reason : undefined, "policy_audit_mismatch");
+});
+
+test("N3: spoofed activation actor/set_by is policy_audit_mismatch, not policy_missing", () => {
+  const v1: PolicyDocument = {
+    body: validatePolicyBody({ profile: POLICY_PROFILE, project: "p", trusted_hook_stamps: [], unresolved_claims: "record", repositories: [], github_repos: [] }),
+    envelope: validatePolicyEnvelope({ version: 1, created_at: "2026-09-10T03:45:00.000Z", set_by: { type: "human", id: "x" }, supersedes: null, activation: { event_id: "evt_v1", seq: 5 } }),
+    digest: "d1".padEnd(64, "0"),
+  };
+  const art = `policy:p@${v1.digest}`;
+  const prefix = [0, 1, 2, 3, 4].map((seq) => fakeEvent({
+    id: `e${seq}`, seq, action: "instructed", artifacts: [{ id: "t" }],
+    actor: { type: "human", id: "j" }, idempotency_key: `x:${seq}`,
+  }));
+  const forged = fakeEvent({
+    id: "evt_v1", seq: 5, artifacts: [{ id: art, kind: "policy", role: "generated" }],
+    actor: { type: "human", id: "invented" },
+    method: { tool: "retrace-api", params: { sealed_by: SEALED_BY_OWNER, policy_profile: POLICY_PROFILE, policy_version: 1, policy_digest: v1.digest, supersedes: null, set_by: { type: "human", id: "other" } } },
+    idempotency_key: "policy:p:1",
+  });
+  const result = verifyPolicySelectionOffline({
+    project: "p",
+    claimedDigest: v1.digest,
+    readHeadSeq: 5,
+    events: [...prefix, forged],
+    policies: [v1],
+    coverageComplete: true,
+  });
+  assert.ok(result.findings.includes("policy_audit_mismatch"), JSON.stringify(result.findings));
+  assert.equal(result.findings.includes("policy_missing"), false, JSON.stringify(result.findings));
 });
 
 test("F14: localConfigDrift compares aliases, not only repository names", () => {

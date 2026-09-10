@@ -277,6 +277,36 @@ test("P10: store failure on policy lookup surfaces as 501/unavailable rather tha
   assert.equal(res.status, 501);
 });
 
+test("N4: unavailable snapshot is 501 and does not fall back to getPolicy(current)", async () => {
+  const { store, h } = handler();
+  assert.equal((await put(h, "p", JSON.stringify(body()), "none")).status, 201);
+  let currentLookups = 0;
+  const origGet = store.getPolicy!.bind(store);
+  store.getPolicy = async (project, lookup) => {
+    if (lookup?.current) currentLookups++;
+    return origGet(project, lookup);
+  };
+  store.getPolicyByActivationSeq = async () => { throw new Error("disk on fire"); };
+  const res = await h(new Request("http://test/projects/p/policy", { headers: owner }));
+  const text = await res.text();
+  assert.equal(res.status, 501, text);
+  assert.match(text, /unavailable/);
+  assert.equal(currentLookups, 0, "must not fall back to getPolicy(current:true)");
+});
+
+test("N5: duck-typed RouteConflictError name is not treated as a claim conflict", async () => {
+  const store = new MemoryEventStore();
+  const h = createHandler(store, { token: "owner-token-long-enough", ownerPrincipal: { type: "human", id: "o" } });
+  store.applyPolicyWrite = async () => {
+    const e = new Error("repository acme/app is already claimed");
+    e.name = "RouteConflictError";
+    throw e;
+  };
+  const res = await put(h, "p", JSON.stringify(body()), "none");
+  assert.equal(res.status, 409);
+  assert.match(await res.text(), /policy version collision/);
+});
+
 test("F1: PUT {\"__proto__\": body} is 400", async () => {
   const { h } = handler();
   const wrapper = `{"__proto__":${JSON.stringify(body())}}`;
