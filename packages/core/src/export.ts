@@ -303,6 +303,9 @@ const POLICY_GATE_FINDINGS = new Set<PolicyVerifyFinding>([
   "policy_missing",
   "policy_misselected",
   "policy_selection_unverifiable",
+  "policy_corrupt",
+  "policy_unsupported_profile",
+  "policy_project_mismatch",
 ]);
 
 export function policyFindingsFailExport(findings: PolicyVerifyFinding[] | undefined): boolean {

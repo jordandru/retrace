@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { generateSigningKey, buildExportBundle, verifyExportBundle, exportVerdictOk, parseExportBundle, MemoryEventStore, appendEvent, POLICY_PROFILE, validatePolicyBody, validatePolicyEnvelope, policyDigestOf, Event } from "./index.js";
+import { generateSigningKey, buildExportBundle, verifyExportBundle, exportVerdictOk, parseExportBundle, MemoryEventStore, appendEvent, POLICY_PROFILE, validatePolicyBody, validatePolicyEnvelope, policyDigestOf, signCanonical, Event } from "./index.js";
 
 test("P3/P9: bundle.policies under signature; missing/misselected/unverifiable; two-project uses bundle policy", async () => {
   const store = new MemoryEventStore();
@@ -69,6 +69,36 @@ test("P3/P9: bundle.policies under signature; missing/misselected/unverifiable; 
 
 test("F2: duplicate keys at the bundle boundary are rejected", () => {
   assert.throws(() => parseExportBundle('{"format":"retrace-export/1","format":"retrace-export/1"}'), /duplicate object key|invalid export bundle/);
+});
+
+test("F2a: unknown-field policy document cannot yield VALID", async () => {
+  const store = new MemoryEventStore();
+  await appendEvent(store, { project: "p", actor: { type: "human", id: "j" }, action: "instructed", artifacts: [{ id: "t" }] });
+  const key = await generateSigningKey();
+  const body = validatePolicyBody({
+    profile: POLICY_PROFILE, project: "p", trusted_hook_stamps: ["X"], unresolved_claims: "record",
+    repositories: [], github_repos: [],
+  });
+  const envelope = validatePolicyEnvelope({
+    version: 1, created_at: "2026-09-10T03:45:00.000Z", set_by: { type: "human", id: "o" },
+    supersedes: null, activation: { event_id: "evt_pol", seq: 1 },
+  });
+  const digest = await policyDigestOf(body, envelope);
+  store.policies.push({ body, envelope, digest });
+  const sealed = store.events[0]!;
+  store.events[0] = {
+    ...sealed,
+    method: { ...sealed.method, params: { ...sealed.method?.params, claim_decision: { context: { policy_digest: digest, read_head_seq: 0 } } } },
+  } as Event;
+  const bundle = await buildExportBundle(store, { project: "p" }, { signingKey: key.privateKey });
+  const doc = bundle.policies![0]!;
+  const mutated = { ...doc, body: { ...doc.body, extra_unknown: true } };
+  const unsigned = { ...bundle, policies: [mutated], signature: undefined };
+  const resigned = { ...unsigned, signature: await signCanonical(key.privateKey, unsigned) };
+  const v = await verifyExportBundle(resigned, key.publicKey);
+  assert.equal(v.signature, "valid", "re-signed so the gate, not the signature, is the thing under test");
+  assert.ok(v.policy_findings?.includes("policy_corrupt"), `expected policy_corrupt, got ${JSON.stringify(v.policy_findings)}`);
+  assert.equal(exportVerdictOk(v), false, "§5B: corrupt / unknown-field document must not be VALID");
 });
 
 test("F6: caller-supplied trustedHookStamps must not override document stampsFor", async () => {

@@ -1,5 +1,14 @@
 /** Remote store: talks to the Retrace Cloudflare Worker over HTTP. Set RETRACE_URL (+ RETRACE_TOKEN). */
-import { Event, EventStore, HistoryQuery, HistoryPage, VerifyResult, EventInput, Share, ExportBundle, ProjectStatus, asHistoryPage, collectHistory } from "@retrace-dev/core";
+import { Event, EventStore, HistoryQuery, HistoryPage, VerifyResult, EventInput, Share, ProjectStatus, asHistoryPage, collectHistory, parseExportBundle, parseJsonRejectDuplicateKeys, PolicyError } from "@retrace-dev/core";
+
+function parseRemoteJson(raw: string, what: string): unknown {
+  try {
+    return parseJsonRejectDuplicateKeys(raw);
+  } catch (e) {
+    if (e instanceof PolicyError) throw new Error(`${what}: ${e.message}`);
+    throw e;
+  }
+}
 
 export class RemoteApiError extends Error {
   constructor(
@@ -78,7 +87,18 @@ export class RemoteStore implements EventStore {
     if (scope.artifact_id) p.set("artifact_id", scope.artifact_id);
     if (opts.fresh) p.set("fresh", "1");
     if (opts.cached) p.set("cached", "1");
-    return this.req<ExportBundle>("GET", `/projects/${encodeURIComponent(scope.project)}/export?${p}`);
+    const path = `/projects/${encodeURIComponent(scope.project)}/export?${p}`;
+    const res = await fetch(this.baseUrl + path, {
+      method: "GET",
+      headers: retraceHeaders(this.token),
+      signal: this.options.deadlineMs === undefined ? undefined : AbortSignal.timeout(this.options.deadlineMs),
+    });
+    if (!res.ok) throw new RemoteApiError("GET", path, res.status, new Headers(res.headers), await res.text());
+    try {
+      return parseExportBundle(await res.text());
+    } catch (e: any) {
+      throw new Error(`Retrace API GET ${path}: ${e?.message ?? e}`);
+    }
   }
   async head(project: string) {
     return this.req<{ seq: number; hash: string } | null>("GET", `/projects/${encodeURIComponent(project)}/head`);
@@ -106,7 +126,7 @@ export class RemoteStore implements EventStore {
     });
     if (res.status === 404) return null;
     if (!res.ok) throw new Error(`Retrace API GET /events/${id} → ${res.status}: ${await res.text()}`);
-    return (await res.json()) as Event;
+    return parseRemoteJson(await res.text(), `Retrace API GET /events/${id}`) as Event;
   }
   async all(project: string) {
     return collectHistory(this, { project });
