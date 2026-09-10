@@ -90,15 +90,33 @@ test("migrate treats a missing wrangler binary as failure (spawn error)", () => 
   assert.equal(commands.length, 0);
 });
 
-test("resolveWrangler prefers RETRACE_WRANGLER then a workspace .bin", async () => {
+test("resolveWrangler default finds stubbed repo-root node_modules/.bin/wrangler without RETRACE_WRANGLER", async () => {
   const { resolveWrangler } = await import("../migrate.mjs");
-  const dir = mkdtempSync(join(tmpdir(), "retrace-migrate-resolve-"));
-  const override = fakeWrangler(dir);
-  assert.equal(resolveWrangler({ RETRACE_WRANGLER: override }, dir), override);
-  const bin = join(dir, "node_modules", ".bin");
-  mkdirSync(bin, { recursive: true });
-  const workspace = fakeWrangler(bin);
-  assert.equal(resolveWrangler({}, dir), workspace);
+  const repo = mkdtempSync(join(tmpdir(), "retrace-migrate-resolve-"));
+  const worker = join(repo, "apps", "worker");
+  mkdirSync(worker, { recursive: true });
+  const override = fakeWrangler(repo);
+  assert.equal(resolveWrangler({ RETRACE_WRANGLER: override }, worker), override);
+
+  const rootBin = join(repo, "node_modules", ".bin");
+  mkdirSync(rootBin, { recursive: true });
+  const rootWrangler = fakeWrangler(rootBin);
+  const env = {};
+  assert.equal(resolveWrangler(env, worker), rootWrangler, "repo-root .bin without RETRACE_WRANGLER");
+  assert.equal("RETRACE_WRANGLER" in env, false);
+
+  const pkgBin = join(worker, "node_modules", ".bin");
+  mkdirSync(pkgBin, { recursive: true });
+  fakeWrangler(pkgBin);
+  assert.equal(resolveWrangler({}, worker), rootWrangler, "repo root wins over the package .bin");
+
+  const pkgOnly = mkdtempSync(join(tmpdir(), "retrace-migrate-pkg-"));
+  const pkgWorker = join(pkgOnly, "apps", "worker");
+  const onlyPkgBin = join(pkgWorker, "node_modules", ".bin");
+  mkdirSync(onlyPkgBin, { recursive: true });
+  const pkgWrangler = fakeWrangler(onlyPkgBin);
+  assert.equal(resolveWrangler({}, pkgWorker), pkgWrangler, "package .bin when the repo root has none");
+
   assert.equal(resolveWrangler({}, join(tmpdir(), "retrace-empty-wrangler-")), "wrangler");
 });
 

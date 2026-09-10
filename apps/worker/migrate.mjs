@@ -19,11 +19,16 @@ import { spawnSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+/**
+ * PR 31 follow-up: `spawnSync("wrangler")` is ENOENT outside `npx` (wrangler is a
+ * workspace dep, not on PATH). Default: repo-root node_modules/.bin, then this
+ * package's node_modules/.bin, then PATH. RETRACE_WRANGLER remains the override.
+ */
 export function resolveWrangler(env = process.env, fromDir = dirname(fileURLToPath(import.meta.url))) {
   if (env.RETRACE_WRANGLER) return env.RETRACE_WRANGLER;
   const candidates = [
-    join(fromDir, "node_modules", ".bin", "wrangler"),
     join(fromDir, "..", "..", "node_modules", ".bin", "wrangler"),
+    join(fromDir, "node_modules", ".bin", "wrangler"),
   ];
   for (const c of candidates) if (existsSync(c)) return c;
   return "wrangler";
