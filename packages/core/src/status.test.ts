@@ -33,6 +33,7 @@ test("project status: integrity, causal coverage, capture gaps, actors and integ
   assert.equal(s.capture.amended_unlinked_commits, 0);
   assert.equal(s.capture.ineffective_amendments, 0);
   assert.equal(s.capture.unverified_links, 0);
+  assert.equal(s.capture.legacy_client, 0);
   assert.deepEqual(s.actors.map((a) => [a.type, a.id, a.events]), [["agent", "gemini", 2], ["human", "jordan@example.com", 2]]);
   assert.deepEqual(s.integrations.map((i) => [i.system, i.events]), [["gemini-cli", 2], ["git", 2]]);
 });

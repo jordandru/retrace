@@ -8,8 +8,9 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync } from "n
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
-import { EventInput, generateSigningKey, publicFromPrivate, keyId, signProducer, schemaSurface } from "@retrace-dev/core";
+import { EventInput, generateSigningKey, publicFromPrivate, keyId, signProducer, schemaSurface, PRODUCER_SIG_FORMAT, PRODUCER_SIG_FORMAT_V2, type ProducerSigFormat } from "@retrace-dev/core";
 import { keyPath } from "./keys.js";
+import { RemoteApiError } from "./remote-store.js";
 
 export function defaultProducerKeysDir(env: NodeJS.ProcessEnv = process.env): string {
   return env.RETRACE_PRODUCER_KEYS_DIR ?? join(homedir(), ".retrace", "producer-keys");
@@ -85,7 +86,7 @@ export async function ensureProducerKey(path: string): Promise<{ privateKey: Jso
   return { ...kp, publicKey: publicFromPrivate(kp.privateKey), path, created: true };
 }
 
-const checkedRemotes = new Set<string>();
+const checkedRemotes = new Map<string, ProducerSigFormat>();
 
 /** Tests reset the lazy GET /api cache so a second case can fetch again. */
 export function resetProducerSigSchemaCheck(): void {
@@ -95,38 +96,62 @@ export function resetProducerSigSchemaCheck(): void {
 /**
  * An old Worker silently strips `producer_sig` (zod). Refuse to sign against a remote whose GET /api schema
  * lacks the field. Local SQLite needs no check. Lazy so MCP tests that never sign never fetch.
+ *
+ * Deploy order (Jordan): Worker first (must verify /2 before anything signs /2), then publish the CLI, then
+ * re-run `retrace-git install`. This probe returns `/2` only when the Worker advertises `producer-sig/2`;
+ * otherwise `/1`, so a new CLI talking to an undeployed Worker cannot seal unverifiable /2 bytes.
  */
-export async function assertRemoteAcceptsProducerSig(url: string, fetchApi: typeof fetch = fetch): Promise<void> {
+export async function assertRemoteAcceptsProducerSig(
+  url: string,
+  fetchApi: typeof fetch = fetch,
+  opts: { deadlineMs?: number } = {},
+): Promise<ProducerSigFormat> {
   const base = url.replace(/\/+$/, "");
-  if (checkedRemotes.has(base)) return;
-  const res = await fetchApi(base + "/api");
-  if (!res.ok) throw new Error(`refusing to sign: GET ${base}/api returned ${res.status}`);
-  const api = await res.json() as { schema?: Record<string, unknown> };
+  const cached = checkedRemotes.get(base);
+  if (cached) return cached;
+  const res = await fetchApi(base + "/api", {
+    signal: opts.deadlineMs === undefined ? undefined : AbortSignal.timeout(opts.deadlineMs),
+  });
+  if (!res.ok) throw new RemoteApiError("GET", "/api", res.status, new Headers(res.headers), await res.text());
+  const api = await res.json() as { schema?: Record<string, unknown>; capabilities?: unknown };
   const eventKeys = Array.isArray(api.schema?.event) ? api.schema!.event as unknown[] : [];
   if (!eventKeys.includes("producer_sig") && schemaSurface().event.includes("producer_sig")) {
     throw new Error(`refusing to sign against ${base}: GET /api schema lacks event.producer_sig — deploy the Worker before any producer signs (an old Worker silently strips the signature)`);
   }
-  checkedRemotes.add(base);
+  const caps = Array.isArray(api.capabilities) ? api.capabilities : [];
+  const format = caps.includes("producer-sig/2") ? PRODUCER_SIG_FORMAT_V2 : PRODUCER_SIG_FORMAT;
+  checkedRemotes.set(base, format);
+  return format;
 }
 
 export type SealOpts = {
   privateKey?: JsonWebKey | null;
   remoteUrl?: string | null;
   fetchApi?: typeof fetch;
+  /** Requested format. The git hook asks for /2; against a remote that does not advertise producer-sig/2 the
+   *  probe falls back to /1 so an undeployed Worker is not sent unverifiable bytes. */
+  format?: ProducerSigFormat;
+  /** Bound the GET /api probe the same way RemoteStore bounds POST /events (hook deadline). */
+  deadlineMs?: number;
 };
 
 /**
  * Sign an event about to be appended. No key → input unchanged. When signing, fills `timestamp` and
- * `idempotency_key` if the caller omitted them (required by signProducer). Remote URL triggers the schema gate.
+ * `idempotency_key` if the caller omitted them (required by signProducer). Remote URL triggers the schema gate
+ * and, for a requested /2, falls back to /1 until the Worker advertises `producer-sig/2`.
  */
 export async function sealForAppend<T extends EventInput>(input: T, opts: SealOpts = {}): Promise<T> {
   const key = opts.privateKey !== undefined ? opts.privateKey : loadProducerPrivateKey();
   if (!key) return input;
-  if (opts.remoteUrl) await assertRemoteAcceptsProducerSig(opts.remoteUrl, opts.fetchApi ?? fetch);
+  let format = opts.format ?? PRODUCER_SIG_FORMAT;
+  if (opts.remoteUrl) {
+    const advertised = await assertRemoteAcceptsProducerSig(opts.remoteUrl, opts.fetchApi ?? fetch, { deadlineMs: opts.deadlineMs });
+    if (format === PRODUCER_SIG_FORMAT_V2 && advertised !== PRODUCER_SIG_FORMAT_V2) format = PRODUCER_SIG_FORMAT;
+  }
   const ready = {
     ...input,
     timestamp: input.timestamp ?? new Date().toISOString(),
     idempotency_key: input.idempotency_key ?? randomUUID(),
   };
-  return signProducer(ready, key);
+  return signProducer(ready, key, format === PRODUCER_SIG_FORMAT ? undefined : { format });
 }

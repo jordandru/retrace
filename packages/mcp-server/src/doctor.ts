@@ -10,6 +10,7 @@ import { ReconcileCfg, commitFacts, reconcileOptionsFrom, reconcileWithGit, repo
 import { RemoteStore, retraceHeaders } from "./remote-store.js";
 import { fetchVerifiedRemoteEvents } from "./verified-events.js";
 import { isMainModule } from "./is-main.js";
+import { producerVerifyOptsFor } from "./hook-stamps.js";
 
 type Level = "pass" | "warn" | "fail";
 export type Finding = { level: Level; label: string; detail: string };
@@ -299,8 +300,9 @@ export async function gateRemoteAuthorization(
   project: string,
   pubkeyFlag?: unknown,
   baseUrl?: string,
+  opts?: { trustedHookStamps?: readonly string[]; project?: string },
 ): Promise<{ findings: Finding[]; verified: { events: Event[]; note: string } }> {
-  const verified = await fetchVerifiedRemoteEvents(store, project, pubkeyFlag, baseUrl);
+  const verified = await fetchVerifiedRemoteEvents(store, project, pubkeyFlag, baseUrl, opts);
   return { findings: verifiedHeadFindings(true, commitId, verified), verified };
 }
 
@@ -314,7 +316,7 @@ export async function remoteCaptureCoverage(
   baseUrl?: string,
   prefetched?: { events: Event[]; note: string },
 ): Promise<Finding> {
-  const { events, note } = prefetched ?? await fetchVerifiedRemoteEvents(store, project, pubkeyFlag, baseUrl);
+  const { events, note } = prefetched ?? await fetchVerifiedRemoteEvents(store, project, pubkeyFlag, baseUrl, producerVerifyOptsFor(repo, project));
   let attribution: import("@retrace-dev/core").AttributionOptions | undefined;
   let attributionNote = "";
   if (events.some(isAttributionAmendment)) {
@@ -339,6 +341,29 @@ export function attributionDeployment(api: { capabilities?: unknown }, gate: boo
   return Array.isArray(api.capabilities) && api.capabilities.includes("attribution-v7")
     ? result("pass", "attribution deployment", "Worker advertises attribution-v7")
     : result(gate ? "fail" : "warn", "attribution deployment", "Worker predates this build's attribution profile (attribution-v7); deploy the Worker from this build first");
+}
+
+export function compareCliVersions(running: string, minimum: string): number {
+  const pa = running.split(".").map((x) => Number.parseInt(x, 10) || 0);
+  const pb = minimum.split(".").map((x) => Number.parseInt(x, 10) || 0);
+  const n = Math.max(pa.length, pb.length, 3);
+  for (let i = 0; i < n; i++) {
+    const da = pa[i] ?? 0, db = pb[i] ?? 0;
+    if (da !== db) return da - db;
+  }
+  return 0;
+}
+
+/** When the Worker advertises min_cli_version above the running CLI, doctor fails the version gap (T38). */
+export function cliVersionGap(api: { min_cli_version?: unknown }, running: string): Finding | undefined {
+  if (typeof api.min_cli_version !== "string" || !api.min_cli_version.trim()) return undefined;
+  if (compareCliVersions(running, api.min_cli_version) >= 0)
+    return result("pass", "CLI version", `this CLI ${running} meets Worker minimum ${api.min_cli_version}`);
+  return result("fail", "CLI version", `Worker requires CLI ${api.min_cli_version} (producer-sig/2); this CLI is ${running}`);
+}
+
+function runningCliVersion(): string {
+  return JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version as string;
 }
 
 export function missingSchema(remote: Record<string, unknown>, local = schemaSurface()): string[] {
@@ -437,6 +462,8 @@ async function main() {
       const res = await fetch(`${url}/api`, { headers: retraceHeaders() }); if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const api: any = await res.json(); const missing = missingSchema(api.schema ?? {});
       findings.push(attributionDeployment(api, gate));
+      const gap = cliVersionGap(api, runningCliVersion());
+      if (gap) findings.push(gap);
       findings.push(missing.length ? result("fail", "deployment schema", `would drop: ${missing.join(", ")}; deploy this build first`) : result("pass", "deployment schema", `${url} understands this build`));
     } catch (e: any) { findings.push(result("fail", "deployment", `${url}/api is unreachable: ${e.message}`)); }
     try {
@@ -452,7 +479,7 @@ async function main() {
         // /events and /why must not decide delivery, actor, pin/session, or instruct-root.
         try {
           const remote = new RemoteStore(url, auth.token);
-          const { findings: authFindings, verified } = await gateRemoteAuthorization(commit, remote, project, undefined, url);
+          const { findings: authFindings, verified } = await gateRemoteAuthorization(commit, remote, project, undefined, url, producerVerifyOptsFor(repo, project));
           findings.push(...authFindings);
           try {
             findings.push(await remoteCaptureCoverage(repo, project, remote, cfg, args, undefined, url, verified));

@@ -5,6 +5,7 @@ import { generatesArtifact, buildProjectStatus, EventStore, parseTrailers, Event
 import { makeStore } from "./index.js";
 import { RemoteStore } from "./remote-store.js";
 import { fetchVerifiedRemoteEvents } from "./verified-events.js";
+import { producerVerifyOptsFor } from "./hook-stamps.js";
 
 const git = (repo: string, args: string[]) => execFileSync("git",["-C",repo,...args],{encoding:"utf8",stdio:["ignore","pipe","pipe"]});
 export function loadAttributionPolicy(repo: string, file?: string): AttributionPolicy {
@@ -111,7 +112,7 @@ export async function amendAttributionMain(flags: Record<string,string|boolean>)
   const store=makeStore();
   const authority=store instanceof RemoteStore ? await store.humanAuthority() : {actor:{type:"human" as const,id:human},sealed_by:"owner" as const,attribution_profile:"retrace-attribution/1"};
   if(authority.attribution_profile!=="retrace-attribution/1" || authority.sealed_by!=="owner" || !sameActor(authority.actor,{type:"human",id:human})) throw new Error("human authority does not match --human");
-  const read=async()=>store instanceof RemoteStore ? (await fetchVerifiedRemoteEvents(store,project,flags.pubkey)).events : await store.all(project);
+  const read=async()=>store instanceof RemoteStore ? (await fetchVerifiedRemoteEvents(store,project,flags.pubkey,undefined,producerVerifyOptsFor(repo,project))).events : await store.all(project);
   const evaluate=async()=> {const events=await read();const options=await attributionOptionsForRepo(repo,events,project,[request.target_event_id],typeof flags.policy==="string"?flags.policy:undefined);return {options,preflight:preflightAttributionAmendment(request,authority,options)};};
   let {options,preflight}=await evaluate();
   const preview=()=> {
@@ -148,7 +149,7 @@ export async function attributionViewForEvents(repo: string, events: Event[], pr
 /** Remote projections require the authenticated export/head path, not a head inferred from an event page. */
 export async function attributionViewForStore(store: ReturnType<typeof makeStore>, repo: string, project: string) {
   try {
-    const events = store instanceof RemoteStore ? (await fetchVerifiedRemoteEvents(store, project)).events : await store.all(project);
+    const events = store instanceof RemoteStore ? (await fetchVerifiedRemoteEvents(store, project, undefined, undefined, producerVerifyOptsFor(repo, project))).events : await store.all(project);
     return await attributionViewForEvents(repo, events, project);
   } catch (error) {
     return {...collectAttributionAmendments([]), unavailable: error instanceof Error ? error.message : String(error)};
@@ -156,7 +157,7 @@ export async function attributionViewForStore(store: ReturnType<typeof makeStore
 }
 
 export async function attributionStatusForStore(store: ReturnType<typeof makeStore>, repo: string, project: string) {
-  const events = store instanceof RemoteStore ? (await fetchVerifiedRemoteEvents(store, project)).events : await store.all(project);
+  const events = store instanceof RemoteStore ? (await fetchVerifiedRemoteEvents(store, project, undefined, undefined, producerVerifyOptsFor(repo, project))).events : await store.all(project);
   const snapshotStore: EventStore = Object.create(store);
   snapshotStore.all = async () => events;
   try {

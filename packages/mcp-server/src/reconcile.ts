@@ -13,6 +13,7 @@ import { Cfg, remoteName } from "./git-hook.js";
 import { makeStore } from "./index.js";
 import { RemoteStore } from "./remote-store.js";
 import { fetchVerifiedRemoteEvents, verifiedExportEvents } from "./verified-events.js";
+import { producerVerifyOptsFor } from "./hook-stamps.js";
 
 export type ReconcileCfg = Cfg & { reconcile?: { uncovered?: ReconcileLevel; ack_actors?: string[]; /** exact `assert:<credential name>` stamps of this repo's git hook credential */ hook_sealed_by?: string[]; owner_seals?: boolean; dual_witness?: "fail" | "warn" } };
 export { verifiedExportEvents } from "./verified-events.js";
@@ -92,10 +93,10 @@ export function readRepoConfig(repo: string): ReconcileCfg {
   return existsSync(p) ? (JSON.parse(readFileSync(p, "utf8")) as ReconcileCfg) : {};
 }
 
-async function fetchEvents(project: string, pubkeyFlag?: unknown): Promise<{ events: Event[]; note: string }> {
+async function fetchEvents(project: string, pubkeyFlag: unknown | undefined, repo: string): Promise<{ events: Event[]; note: string }> {
   const store = makeStore();
   if (store instanceof RemoteStore) {
-    return fetchVerifiedRemoteEvents(store, project, pubkeyFlag);
+    return fetchVerifiedRemoteEvents(store, project, pubkeyFlag, undefined, producerVerifyOptsFor(repo, project));
   }
   const events = await store.all(project);
   return { events, note: `${events.length} events from the local store` };
@@ -106,14 +107,15 @@ export async function reconcileRepo(repo: string, opts: { since?: string; limit?
   const project = process.env.RETRACE_PROJECT ?? cfg.project ?? basename(repo);
   const shas = opts.refs ?? listCommits(repo, { since: opts.since, limit: opts.since ? opts.limit : opts.limit ?? 50 });
   const commits = shas.map((s) => commitFacts(repo, s));
-  const { events, note } = await fetchEvents(project, opts.pubkey);
+  const reconcileOpts = reconcileOptionsFrom(cfg, opts);
+  const { events, note } = await fetchEvents(project, opts.pubkey, repo);
   let attribution;
   let attributionNote="";
   if(events.some(isAttributionAmendment)) {
     try { const {attributionOptionsForRepo}=await import("./attribution.js"); attribution=await attributionOptionsForRepo(repo,events,project); }
     catch(error) { attributionNote=`; attribution evaluation unavailable: ${error instanceof Error?error.message:error}`; }
   }
-  const report = reconcileWithGit(repo, commits, events, { ...repoNamesFor(repo, cfg), repoPath: repo, ...reconcileOptionsFrom(cfg, opts), attribution });
+  const report = reconcileWithGit(repo, commits, events, { ...repoNamesFor(repo, cfg), repoPath: repo, ...reconcileOpts, attribution });
   return { report, note:note+attributionNote };
 }
 

@@ -48,6 +48,7 @@ import { SqliteStore } from "./sqlite-store.js";
 import { RemoteStore } from "./remote-store.js";
 import { isMainModule } from "./is-main.js";
 import { AuditActor, registerAuditMcpTools, type AuditMcpHandlers } from "./audit-mcp.js";
+import { producerVerifyOptsFor } from "./hook-stamps.js";
 
 const env = process.env;
 const DEFAULT_PROJECT = env.RETRACE_PROJECT ?? "default";
@@ -375,7 +376,7 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
       else if (/^https:/i.test(env.RETRACE_URL ?? "")) {
         try { const wk: any = await (await fetch(env.RETRACE_URL!.replace(/\/+$/, "") + "/.well-known/retrace-pubkey")).json(); if (wk?.public_key?.x) trustedKey = wk.public_key; } catch {}
       }
-      const verdict = await verifyExportBundle(bundle, trustedKey);
+      const verdict = await verifyExportBundle(bundle, trustedKey, producerVerifyOptsFor(process.cwd(), bundle.scope.project ?? project));
       const outJson = args.out_json ? confinedWritePath(args.out_json) : undefined;
       const outHtml = args.out_html ? confinedWritePath(args.out_html) : undefined;
       if (outJson) writeFileSync(outJson, JSON.stringify(bundle, null, 2));
