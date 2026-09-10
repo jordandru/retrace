@@ -1,215 +1,278 @@
 # Project policy document — contract (trailer-consistency §15 step 2)
 
-**Status:** DRAFT v2, 2026-09-10, author claude-code. v1 (d3aec24) was reviewed by Codex (design review,
-commit comment 2026-09-10T03:16Z): *request changes* — direction right, five contract gaps (F1–F5).
-v2 folds every finding; dispositions in §10. For Codex's second pass before build. Companion to
-`commit-trailer-consistency.md` §3.2/§3.5 (snapshot and read budget), §6 rule 3 (trusted hook stamps),
-§9 (policy distribution and drift) and §15 step 2. Nothing here changes a classification rule or Jordan's
-`unresolved_claims: record` default; it defines where the Worker and the offline verifier get the
-per-project policy they already require, and how a seal's `policy_digest` stays resolvable years later.
+**Status:** DRAFT v3, 2026-09-10, author claude-code. v1 (d3aec24) and v2 (91eb0fb) were design-reviewed by
+Codex (commit comments 2026-09-10T03:16Z and 03:23Z): both *request changes*. v2 closed F2 (selection ≠
+retrieval), project-bound retrieval, export coverage, Q3 (owner authority), F5 (bootstrap, drift labels).
+v3 folds the six remaining findings (V2-1…V2-6) and the §3/§8 clarifications; dispositions in §11.
+Companion to `commit-trailer-consistency.md` §3.2/§3.5 (snapshot, context key, read budget), §5.3
+(pending), §6 rules 3–5, §9 (policy distribution, drift) and §15 step 2. Nothing here changes a
+classification rule or Jordan's `unresolved_claims: record` default.
 
 ## 1. Why a stored document
 
-The Worker does not read `.retrace.json` (§9). Step 1 shipped a verifier that substitutes a withheld actor
-only for stamps in the project's **trusted hook stamps**, bound to a **named project** (PR 29). Today that
-list reaches the verifier only from `.retrace.json` on the CLI side; the Worker passes none, and an export
-bundle carries no policy. Step 3 needs the Worker to select a policy atomically with its evidence snapshot,
-and every seal must record **which version** decided it. So the policy is a stored, append-only,
-digest-addressed document on the Worker, set by the owner, exported with every bundle that references it.
+The Worker does not read `.retrace.json` (§9). Step 1's verifier substitutes a withheld actor only for
+stamps in the project's **trusted hook stamps**, bound to a **named project** (PR 29); that list reaches the
+verifier only from `.retrace.json` on the CLI side, the Worker passes none, and export bundles carry no
+policy. Step 3 must select a policy atomically with its evidence snapshot and every seal must record
+**which version** decided it — and that choice must be **recomputable from the exported ledger alone**,
+not attested by a server. So: an append-only, digest-addressed document on the Worker, set by the owner,
+whose every activation is itself a **ledger event** (§6), exported with every bundle that references it.
 
-## 2. Document: body and envelope
+## 2. Document: body, envelope, and the frozen canonical form
 
-Two layers, hashed together. The **body** is what the owner writes; the **envelope** is what the server
-adds. The digest identifies the *version* (body + envelope), not merely "equivalent settings" (Codex F1).
+Two layers, hashed together. The digest identifies the *version* (body + envelope), never "settings".
 
 ```
 body (owner-supplied, validated):
   profile:             "retrace-project-policy/1"
   project:             "<ledger project>"                 // must equal the URL's :p
-  trusted_hook_stamps: ["assert:git hook (assert)", …]  // exact sealed_by strings; sorted, unique, non-empty strings
-  unresolved_claims:   "record" | "withhold"              // §9 Phase C; default "record" (Jordan)
-  repositories:        [ { name: "<canonical repo>", aliases: ["…"] } ]   // artifact-name aliases only; sorted by name
-  github_repos:        [ "<canonical repo>", … ]          // repositories routed to THIS project; sorted, unique
+  trusted_hook_stamps: ["assert:git hook (assert)", …]  // exact sealed_by strings
+  unresolved_claims:   "record" | "withhold"              // §9 Phase C; the bootstrap writes "record" explicitly
+  repositories:        [ { name: "<canonical repo>", aliases: ["…"] } ]   // artifact-name aliases only
+  github_repos:        [ "<canonical repo>", … ]          // repositories routed to THIS project
 
 envelope (server-assigned, immutable):
-  version:    <int ≥ 1, monotonic per project>
-  created_at: "<ISO 8601 UTC, server clock>"
-  set_by:     { type: "human" | "team", id: "<configured owner principal>" }
-  supersedes: "<policy_digest of version-1>" | null
+  version:      <integer ≥ 1, monotonic per project>
+  created_at:   "<RFC 3339 UTC, millisecond precision, 'Z'>"
+  set_by:       { type: "human" | "team", id: "<configured owner principal>" }
+  supersedes:   "<policy_digest of version-1>" | null
+  activation:   { event_id: "<evt_…>", seq: <integer> }   // the ledger event that activated this version (§6)
 
-policy_digest = sha256( canonical_v1( { ...body, ...envelope } ) )    // everything above; hex
+policy_digest = sha256hex( canonical_v1( body ∪ envelope ) )
 ```
 
-Canonical form `canonical_v1` is **frozen by this document**, not by a helper's name (Codex F1): JSON with
-object keys sorted by UTF-16 code unit, no insignificant whitespace, strings as JSON escapes with `\u`
-lower-case hex, integers only (no floats anywhere in a `/1` body), arrays in the order given — which the
-validator has already forced to sorted/unique for every array in `/1`, so array order cannot vary. No
-defaults are materialised into the hash: every `/1` field is **required** and the validator rejects a body
-that omits one (so "absent" and "default" can never hash differently). Nested objects validate by the same
-rules. Unknown fields anywhere → 400. **Golden vectors:** `packages/core/src/fixtures/policy-v1/*.json`
-hold three bodies with their exact canonical bytes and digests; the test suite recomputes them on every
-run, and `retrace-export verify` refuses a bundle whose policy profile it does not know.
+**`canonical_v1` is RFC 8785 (JSON Canonicalization Scheme), with these `/1` constraints** (Codex V2-1):
+- Serialisation is exactly JCS: object members sorted by UTF-16 code units of the key; no whitespace;
+  strings escaped per JCS §3.2.2.2 only (`\"`, `\\`, `\b`, `\f`, `\n`, `\r`, `\t`, other control characters
+  below U+0020 as `\u00xx` lower-case; **everything else literal**, so `"a"` and `"a"` have one
+  canonical spelling and non-ASCII is emitted as UTF-8, never escaped). Output bytes are UTF-8.
+- Numbers: **integers only** in `/1`, range `0 ≤ n ≤ 2^53−1`, serialised as decimal without sign, exponent
+  or fraction. Any float, negative, or out-of-range integer → 400 (body) / internal error (envelope).
+- Strings must be valid Unicode scalar sequences: a lone surrogate anywhere → 400. Strings are compared and
+  sorted by **UTF-8 byte sequence**; every string array in `/1` (`trusted_hook_stamps`, `aliases`,
+  `github_repos`) must arrive sorted by that comparator and unique, and `repositories` sorted by `name`;
+  otherwise 400 — so array order can never vary between two representations of one document.
+- All fields are **required**; nothing is defaulted into the hash; unknown fields at any depth → 400.
+- Implementation: a dedicated `canonicalPolicyV1()` validated against the RFC 8785 test vectors; the
+  hash chain's own `canonicalize()` (`chain.ts`) is not changed or relied on for this format.
+- **Golden vectors** `packages/core/src/fixtures/policy-v1/*.json`: at least five complete
+  **body + envelope** inputs with expected canonical bytes and digests — ASCII; non-ASCII stamp and alias
+  (literal UTF-8); a string containing `"`, `\` and a control character; version 1 with `supersedes: null`;
+  version ≥ 2 with `supersedes` set. The suite recomputes all of them every run.
 
-`github_repos` entries are **canonical repository identities** — `owner/name` lower-cased as GitHub
-reports `repository.full_name` — and the same canonicalisation is applied to the webhook payload before
-routing (Codex F3). A body may only route repositories to its own `project`; there is no cross-project
-field.
+`github_repos` entries are **canonical repository identities**: `owner/name`, lower-cased, exactly as
+GitHub's `repository.full_name` after the same lower-casing, which the webhook applies before routing.
+A body may only route repositories to its own `project`.
 
 ## 3. Endpoints (Worker and `retrace-serve`)
 
-- `PUT /projects/:p/policy` — **owner authority only** (§9; Codex Q3). Body = the body layer only;
-  `project` must equal `:p`. Optional header `If-Match: <expected current policy_digest>` (or `"none"` for
-  the first version): a mismatch is `412` — the way a stale administrative update is rejected. The server
-  validates, assigns the envelope, computes the digest, and **appends** in one transaction whose version
-  assignment is `SELECT MAX(version)+1` under a write lock (D1: single statement with the uniqueness
-  constraint; SQLite: `BEGIN IMMEDIATE`); a version collision retries once and then returns `409`.
-  Identical body to the current version → `200` with the current document, nothing written (deterministic
-  no-op, digest unchanged). Otherwise `201` with the new document. Documents are never updated or
-  deleted.
-  - **`set_by`** is the Worker's configured owner principal (`RETRACE_OWNER`, already the identity used
-    for owner-only DELETE audits), never a request-supplied actor and never invented. Where the owner is
-    a team, `RETRACE_OWNER` may be `team:<id>`; the schema records `{type:"team"}` honestly. Possession
-    of the shared owner bearer identifies the owner principal, not an individual; the document says so.
-  - `retrace-serve` (local): owner authority means the configured `RETRACE_TOKEN` bearer **and** a
-    configured `RETRACE_OWNER`; a permissive/no-auth local server has no owner and `PUT` returns `403`
-    with "no owner principal configured" — permissiveness never satisfies owner-only (Codex Q3).
-- `GET /projects/:p/policy` — the current document. `GET /projects/:p/policy?digest=<hex>` — exactly that
-  version, **constrained to `:p`**: a digest that belongs to another project is `404` (Codex F1).
-  `?version=n` likewise. Readable by any credential scoped to the project.
-- `GET /projects/:p/policy/history` — every version, newest first, bounded by `?limit=` (default 50).
-- **Unique active routing** (Codex F3): a `PUT` whose `github_repos` claims a repository that another
-  project's *current* document already routes is `409` naming the other project, unless the same request
-  is an explicit reassignment (`?reassign=<other project>`), which the server applies atomically by
-  recording the reassignment on both projects' histories. Routing is never resolved by iteration order.
+- `PUT /projects/:p/policy` — **owner authority only** (§9; Codex Q3). Body = the body layer; `project`
+  must equal `:p`. Header `If-Match: <expected current policy_digest>` or `If-Match: none` (first
+  version) is **required**. Everything below happens in **one atomic operation** (D1 batch / SQLite
+  `BEGIN IMMEDIATE`), and the precondition is re-checked inside a collision retry (Codex §3 clarification):
+  1. precondition: current digest ≠ `If-Match` → `412`, **even when the submitted body equals current**;
+  2. validation (§2) → `400`; routing conflicts (§7) → `409`;
+  3. no-op: body identical to current → `200` with the current document, nothing written;
+  4. otherwise assign the envelope (`version = current + 1`, `created_at`, `set_by`, `supersedes`), append
+     the **activation event** (§6) to the project's chain, write `project_policies` and every affected
+     `policy_routes` row, return `201` with the document (which now carries `activation`).
+  A version collision under contention retries once from step 1, then `409`. Documents are never updated
+  or deleted.
+  - `set_by` is the Worker's configured owner principal (`RETRACE_OWNER`; already the identity used for
+    owner-only DELETE audits), never request-supplied, never invented; `team:<id>` is recorded as
+    `{type:"team"}`. Possession of the shared owner bearer identifies the owner principal, not a person.
+  - `retrace-serve`: owner authority requires the configured `RETRACE_TOKEN` bearer **and** a configured
+    `RETRACE_OWNER`; without an owner principal `PUT` is `403` "no owner principal configured".
+- `GET /projects/:p/policy` — current. `?digest=<hex>` / `?version=n` — that version, **constrained to
+  `:p`** (another project's digest → `404`). Readable by any credential scoped to the project.
+- `GET /projects/:p/policy/history?limit=` — versions newest first (default 50).
+- `GET /projects/:p/routes` — this project's `policy_routes` rows including revoked ones (§7).
 
 ## 4. Storage and read budget
 
-D1 / SQLite:
-
 ```
 project_policies (project TEXT, version INTEGER, digest TEXT UNIQUE, body TEXT, envelope TEXT,
-                  created_at TEXT, PRIMARY KEY (project, version))
-policy_routes    (repo TEXT PRIMARY KEY, project TEXT, digest TEXT, set_at TEXT)   -- current routing, one row per repository
+                  activation_seq INTEGER, created_at TEXT, PRIMARY KEY (project, version))
+policy_routes    (repo TEXT PRIMARY KEY,                       -- canonical repository; rows are never deleted
+                  state TEXT CHECK (state IN ('active','revoked')),
+                  project TEXT, digest TEXT, activation_seq INTEGER, set_at TEXT)
 ```
 
-`SCHEMA_SQL` gains both (`IF NOT EXISTS`); `npm run migrate` applies through the query endpoint
-(`wrangler d1 execute --command`; the import API needs OAuth the CLI lacks). Every read the classifier
-or verifier performs is a **single indexed point lookup** — `(project, digest)` or `(project, MAX(version))`
-or `(repo)` — inside the §3.5 bounded operation; a failure is an explicit `unavailable`, never a scan of
-history or of other projects' documents (Codex F4).
+`SCHEMA_SQL` gains both (`IF NOT EXISTS`); `npm run migrate` applies them through the query endpoint
+(`wrangler d1 execute --command`). Every classifier/verifier read is a **single indexed point lookup** —
+`(project, digest)`, `(project, activation_seq ≤ U)` via `activation_seq` index, or `(repo)` — inside the
+§3.5 bounded operation; any failure is an explicit `unavailable`, never a history or cross-project scan.
 
-## 5. Selection versus retrieval (the precedence question, answered — Codex F2)
-
-Two different questions, kept apart:
+## 5. Selection versus retrieval (Codex F2 — closed in v2, restated with v3's activation rule)
 
 **A. Which version applies?**
 | Situation | Version |
 |---|---|
-| A **new** classification context is being created for a sha (step 3) | the project's current document, read in the **same snapshot** as the evidence head `U` (§6 below); its digest is written into the context as `context.policy_digest` |
-| An **existing** context / a seal that carries `context.policy_digest` — any later producer, retry, drained delivery, newly encountered path, amendment, or offline verification | **exactly** `(event.project, context.policy_digest)`. Never the latest, never a union of versions, never cwd config, never another project's document. If that version cannot be retrieved: `unavailable` (online) / `policy_missing` **invalid** (offline) — fail closed |
-| A `/2` withheld seal being verified (rule 3) | the trusted stamps of the version named by the seal's `context.policy_digest`; a seal with no context (pre-step-3) has no substitution path — as today |
-| Current document differs from the version a context used | **drift**, reported (doctor WARN `policy_drift` naming both digests); never applied retroactively. v1 trusts X, v2 removes X: a v1-context seal still reconstructs under v1. v2 adds X: a v1-context seal does not gain it |
+| A **new** classification context is created for `(project, R, sha)` at evidence head `U` | the version whose **activation event has the greatest `seq ≤ U`** — a pure function of the ledger up to `U` (§6). Its digest is written into the context as `context.policy_digest`, with `context.read_head_seq = U` |
+| An **existing** context — any later producer, retry, drained delivery, new path, amendment, or offline verification | **exactly** `(event.project, context.policy_digest)`. Never latest, never a union, never cwd, never another project. Unretrievable → `unavailable` online / `policy_missing` **invalid** offline |
+| A `/2` withheld seal under rule 3 | the trusted stamps of the version named by its `context.policy_digest`; a seal with no context has no substitution path (as today) |
+| Current version ≠ the version a context used | **drift** (`policy_drift`, WARN naming both digests); never applied retroactively. v1 trusts X, v2 removes X → a v1-context seal still reconstructs under v1; v2 adds Y → a v1-context seal stamped Y is invalid |
 
-**B. Where is that version retrieved from?**
+**B. Where is it retrieved from?**
 | Consumer | Source |
 |---|---|
-| Worker (ingestion, verification, status) | `project_policies` by `(project, digest)` |
-| Offline verify / export / report | `bundle.policies` — the bundle carries **every** `(project, digest)` referenced by any exported seal or context, retired versions included, placed **before** the issuer signature is computed; the verifier recomputes each digest, checks `profile` and `document.project == event.project == bundle.scope.project`, rejects conflicting definitions of one digest, and reports missing / corrupt / unsupported-profile policy per event (Codex F1) |
-| CLI reconcile / doctor / attribution with a Worker configured | the Worker, by digest for existing contexts and current for drift |
-| Local-only ledgers (`RETRACE_DB`, `retrace-serve`) | their own `project_policies` table, written by the local `PUT`; `.retrace.json` `reconcile.hook_sealed_by` is **only** the bootstrap source for the first local document — never verifier authority (Codex F5). Local classifications (always `unresolved / no_authenticated_ingress`, §5.4) still record the digest so they are reproducible |
-| Legacy seals (no context) | no policy is manufactured for them; format-specific behaviour unchanged |
+| Worker (ingestion, verification, status) | `project_policies` by `(project, digest)`; activations by `(project, activation_seq ≤ U)` |
+| Offline verify / export / report | `bundle.policies` — **every** `(project, digest)` referenced by any exported seal or context, retired versions included, plus the activation events (they are ordinary events in the bundle), all placed **before** the issuer signature; the verifier recomputes each digest, checks `profile`, checks `document.project == event.project == bundle.scope.project`, recomputes "activation with greatest seq ≤ context.read_head_seq" and requires it to equal `context.policy_digest`, rejects conflicting definitions of one digest, and reports missing / corrupt / unsupported-profile / **mis-selected** policy per event |
+| CLI reconcile / doctor / attribution with a Worker configured | the Worker, by digest for existing contexts; current only for drift |
+| Local-only ledgers (`RETRACE_DB`, `retrace-serve`) | their own `project_policies`, written by the local `PUT` (activation events land in the local chain the same way); `.retrace.json` `reconcile.hook_sealed_by` is only the **bootstrap source** for the first local document, never verifier authority |
+| Legacy seals (no context) | no policy is manufactured; format-specific behaviour unchanged |
 
-A content hash proves identity, not authorisation. The reference is authenticated by the seal it sits in
-(hash chain, producer signature) and the enclosed document by the issuer-signed export — no separate
-policy-signing scheme (Codex F1).
+**What authenticates what** (Codex V2-2): `claim_decision`, including `context.policy_digest`, is a
+**server annotation outside the `/2` producer-signed bytes** (§6 rule 4). Producer-signature success
+**never** authenticates the policy reference. The reference is covered by the server's **hash chain**, whose
+authority rests on the existing checkpoint/issuer trust model; a context exported outside an event is
+covered by the **issuer-signed bundle**; and the activation events are chain events like any other. Verified
+producer testimony ("signed as A") and server policy-selection testimony ("selected v1 at U") stay
+distinguishable in every consumer's output.
 
-## 6. The atomic selection interface step 3 will call (Codex F4)
+## 6. Activation events — the ordering record step 3 needs (Codex V2-3)
+
+A policy version becomes **current** only when its **activation event** is appended to the project's
+chain — inside the same atomic `PUT` (§3). Shape:
 
 ```
-selectPolicyForContext(project, U): { digest, version } | unavailable
+{ project, actor: <set_by principal>, action: "created",
+  artifacts: [ { id: "policy:<project>@<policy_digest>", kind: "policy", role: "generated",
+                 derived_from: ["policy:<project>@<supersedes digest>"]? } ],
+  intent: "policy v<version> activated",
+  method: { tool: "retrace-admin" | "retrace-api", params: { policy_profile, policy_version, policy_digest, supersedes,
+            routes_changed: [ { repo, from_project?, to_project?, state } ] } },
+  idempotency_key: "policy:<project>:<version>" }
 ```
-Reads the current document **in the same store snapshot** that produced the evidence head `U`
-(`read_head_seq/hash`): on D1, one batched statement list reading head and current policy; on SQLite, one
-`BEGIN` … `COMMIT`. The context row's insert-if-absent winner records `policy_digest` **and**
-`policy_selected_at_seq = U`; every other producer, retry and new path resolves that context and uses its
-digest (§3.2). A `PUT` that commits after `U` is drift for that context, not a change to it. Because the
-context also stores `U`, the relationship "this policy was current at head `U`" is verifiable later from
-the exported context plus `bundle.policies` (created_at and version alone do not establish it).
 
-Recorded **separately** from the document (so `policy_digest` is not mistaken for a hash of every
-execution setting): `classifier_profile: "trailer-consistency/1"`, `rollout_mode: off|shadow|enforce` at
-selection, and the amendment snapshot the context used. All of these are exported with the context;
-`/1`-signed events stay byte-preserved (§6 rule 5). Repository-mapping changes never cause an existing sha
-to acquire a second context under another repository name: the context is keyed by
-`(project, sha)`, and routing is resolved **before** context lookup using the routing recorded with the
-pending delivery (below).
+Consequences:
+- **Currentness is a pure function of the ledger.** "Current at `U`" = the version whose activation event
+  has the greatest `seq ≤ U`. A `PUT` cannot change policy without moving the head, so two contexts with
+  the same `read_head_seq` necessarily used the same version, and a mis-selected version is **detectable**
+  offline from the exported events (Codex's counterexample cannot occur: C1 at head 100 selects v1; the
+  `PUT` appends v2's activation at 101; C2 reads head 101 and selects v2; both are recomputable).
+- **The API owns the snapshot.** `selectPolicyForContext` is not called with a bare number: the §3.2
+  evidence read returns `{ U, events ≤ U, activations ≤ U }` from one snapshot (D1 batch / SQLite
+  transaction), and selection is computed from that result. There is no second "read current" query.
+- Recorded on the context **separately** from the document: `classifier_profile: "trailer-consistency/1"`,
+  `rollout_mode` at selection, and the amendment snapshot used. Replay uses the **recorded** settings; a
+  consumer that re-evaluates under a later mode labels the result as such. `/1`-signed events stay
+  byte-preserved (§6 rule 5).
+- The verifier relationship: exported context + exported events (activations included) + `bundle.policies`
+  ⇒ the selection is **reconstructible**, not merely attested. Where a bundle lacks the activation events
+  (a scoped export), the verifier reports `policy_selection_unverifiable` rather than passing.
 
-## 7. Webhook routing and the env fallback (Codex F3)
+**Context key** (Codex V2-4): the classification context is keyed by `(project, canonical repository R,
+full sha)` exactly as §3.2 accepted — v2's `(project, sha)` was a regression and is withdrawn. Forks and
+mirrors inside one project share Git objects but have different `repo:R#path` evidence and lower bounds,
+so they get **different** contexts; aliases and renames map to one `R` (via `repositories[].aliases` of the
+policy version in force) so one repository reached by an old and a new name gets **one** context. Routing
+(§7) resolves `R` before context lookup, from the routing pinned to the delivery.
 
-Order at delivery time: (1) canonicalise `repository.full_name`; (2) `policy_routes` lookup → project,
-with the routing digest; (3) only if **no stored route exists for that repository** and the candidate
-project from `RETRACE_GITHUB_PROJECTS` **has no document at all** (an unbootstrapped project), use the env
-mapping; (4) otherwise `unroutable` → `202 pending` with reason, reported on `/status`. The resolved
-`(project, routing source: "policy" | "env", digest)` is stored **with the pending delivery** and reused
-on drain, so an env or policy change between receipt and drain cannot move a delivery into another trust
-domain. Once a project has a document, removing a route never resurrects its env route (rule 3 above).
-`/status` reports `routing: env_fallback` per repository still on env; the env is deleted after every
-mapped project has a document (a later step). The fallback supplies **routing only** — never trusted
-stamps, never a stand-in for a missing policy: an unbootstrapped project's commits are sealed but not
-classified (`unavailable / policy_missing`).
+## 7. Webhook routing and the env fallback (Codex F3 → V2-5, V2-6)
 
-## 8. Bootstrap (Codex F5)
+`policy_routes` is an authoritative, **never-deleted** table: one row per canonical repository with
+`state ∈ {active, revoked}`. Order at delivery time:
+1. canonicalise `repository.full_name`;
+2. `policy_routes(repo)`: `active` → that project (routing source `policy`, with the route's digest);
+   `revoked` → **not routable by env**, go to step 4;
+3. no row at all **and** the env candidate project has **no document** (unbootstrapped) → env mapping
+   (source `env`);
+4. otherwise **unroutable** → a durable `pending_deliveries` row with `routing_state = "unresolved"` is
+   written **before** `202` is returned; `/status` lists it.
 
-`retrace-admin set-policy <project> --from <repo>/.retrace.json [--url] [--if-match <digest>|none]`
-builds a body from the repo's `reconcile.hook_sealed_by`, `attribution.repositories`, and the Worker's
-current env mapping for that project; prints the body and its would-be digest; PUTs on confirmation.
-- If the file declares `project` and it differs from `<project>`: **refused**. `--cross-project-copy`
-  is the explicit, printed override (the owner is copying A's list to B on purpose).
-- If the file declares no `project`, the directory basename is shown as a **hint** only; the owner names
-  the project on the command line. Basename is never verifier authority.
-- Drift check for doctor: compare the local file's *settings* (stamps, aliases, unresolved) with the
-  **body** of the current stored document — never with the envelope digest, which a local file cannot
-  reproduce. Report as `local_config_drift` (WARN), distinct from `policy_drift` (context vs current) and
+The resolved `{ repo, project, source, digest }` is stored on the pending delivery and reused on drain, so
+neither an env change nor a policy change between receipt and drain can move a delivery between trust
+domains. Rules:
+- Removing a repository from a document (a new version without it) sets its route to **`revoked`**, not
+  absent: a stale env route can **never** be resurrected by a revocation. Codex's A/B case: env maps
+  `org/repo` → B (no document); A's document claims it (route active→A); A later drops it → `revoked`;
+  B stays unbootstrapped and gets nothing. Only an explicit owner action re-enables the repo: a document
+  from some project claiming it (`?reassign=` semantics below), or `retrace-admin release-route <repo>`
+  which records a `released` activation on the owning project's chain and deletes nothing.
+- **Reassignment is atomic across both projects.** `PUT …/A/policy?reassign=<from>` succeeds only if
+  the route's current owner is exactly `<from>`; it appends a new version to **both** projects (`<from>`
+  minus the repo, A plus it), two activation events, and the route row change, in one operation. A stale
+  `?reassign=B` against a route now owned by C → `409`. Duplicate claims are never resolved by iteration.
+- The env fallback supplies **routing only**, never trusted stamps and never a stand-in policy.
+- **Missing policy is mode-dependent** (Codex V2-6): under `rollout_mode = off` an env-routed commit of an
+  unbootstrapped project is sealed unclassified (`unavailable / policy_missing`, transitional). Under
+  `shadow` or `enforce`, a required policy that is missing keeps the webhook delivery **durably pending**
+  and the hook **queued and loud** (§3.5, §5.3, §5.2); nothing bypasses classification. All three modes
+  are tested with a valid env route and no policy.
+- `/status` reports per repository: `routing: policy | env_fallback | revoked | unresolved`. The env is
+  removed after every mapped project has a document (a later step).
+
+## 8. Bootstrap (Codex F5, closed; §8 clarification)
+
+`retrace-admin set-policy <project> --from <repo>/.retrace.json [--url] --if-match <digest>|none`
+builds a body from `reconcile.hook_sealed_by`, `attribution.repositories`, the Worker's current env
+mapping for that project, and `unresolved_claims: "record"` **explicitly**; prints the proposed **body**
+and a `body_preview_sha256` (labelled as a settings-only preview, **not** the policy digest); on
+confirmation PUTs and prints the **authoritative** `policy_digest`, version and activation event id the
+server returned.
+- Declared `project` differing from `<project>` → **refused**; `--cross-project-copy` is the explicit,
+  printed override.
+- No declared `project` → the directory basename is shown as a **hint** only; the owner names the project.
+- doctor `local_config_drift` (WARN) compares the local file's settings with the **body** of the current
+  document — never the envelope digest — and is distinct from `policy_drift` (context vs current) and
   from two-producer `policy_divergence` (§9, Codex #2737 R8).
 
 ## 9. Acceptance tests
 
-P1 PUT authority: pinned/assert/admin-named credential → 403; owner → 201 v1; identical body → 200 same
-digest; changed body → 201 v2 with `supersedes` = v1 digest; `If-Match` stale → 412; two concurrent
-different PUTs → versions 2 and 3, both immutable, or one 409 — never a lost write; two concurrent
-identical PUTs → one 201 one 200, same digest. Local serve without `RETRACE_OWNER` → 403.
-P2 Validation: unknown field, missing field, float, unsorted/duplicate array, `github_repos` for another
-project, non-canonical repo string → 400. Golden vectors reproduce byte-for-byte; key order does not change
-the digest.
-P3 Historical resolution: v1 trusts X; withheld seal with context under v1; v2 removes X → seal still
-verifies under v1 (online and offline); v2 adds Y; a v1-context seal stamped Y → invalid; a seal whose
-digest is absent from the bundle → `policy_missing` invalid; a tampered policy body in the bundle →
-digest mismatch invalid; a digest belonging to another project → 404 online, invalid offline.
-P4 Snapshot binding: context created at `U` with v1; PUT v2 commits at `U+1`; a second producer, a retry,
-a new path and an amendment all resolve v1; `/status` shows drift for that context. P7 distinguishes
-first-context creation from a later seal of the same sha after the update.
-P5 Routing: stored route wins over env; env used only for an unbootstrapped project with no stored route;
-route removal does not resurrect env; duplicate repository claim → 409; explicit reassignment atomic;
-pending delivery drained after an env change keeps its recorded project.
-P6 Bootstrap: declared-project mismatch refused; `--cross-project-copy` prints and proceeds; basename
-shown as hint only; `local_config_drift` reported against the body, not the digest.
-P8 Export: every referenced digest present before the issuer signature; omission or unknown profile
-fails verification explicitly; `retrace-export verify` from A's cwd of B's bundle uses B's enclosed
-policy (extends PR 29's two-project fixtures).
-P9 Budget: every classifier/verifier policy read is one indexed lookup; a store failure yields
-`unavailable`, not a partial decision.
+P1 Authority and atomicity: pinned/assert/"admin"-named credential → 403; owner → 201 v1 with an
+activation event; identical body, correct `If-Match` → 200, nothing written; identical body, stale
+`If-Match` → 412; changed body → 201 v2, `supersedes` = v1, second activation event; concurrent different
+PUTs → versions 2 and 3 immutable (or one 409), never a lost write; concurrent identical PUTs with a valid
+precondition → one 201 one 200, same digest; `retrace-serve` without `RETRACE_OWNER` → 403.
+P2 Canonical form: golden body+envelope vectors byte-exact; `"a"` and `"a"` produce one digest;
+non-ASCII literal; control-character escapes; unsorted/duplicate arrays, floats, negative or 2^53 integers,
+lone surrogate, unknown nested field → 400.
+P3 Historical resolution: v1 trusts X; withheld seal with a v1 context; v2 removes X → seal verifies under
+v1 online and offline; v2 adds Y → v1-context seal stamped Y invalid; digest absent from bundle →
+`policy_missing`; tampered body → digest mismatch; another project's digest → 404 online / invalid offline.
+P4 Ordering (V2-3): C1 created at head 100 selects v1; `PUT` v2 → activation at 101; C2 at 101 selects v2;
+export both; offline recompute reproduces both selections; a context claiming v2 with `read_head_seq =
+100` → `policy_misselected`; a scoped bundle without the activation events → `policy_selection_unverifiable`.
+Later producers, retries, new paths and amendments of C1 all resolve v1; drift shown for C1.
+P5 Routing (V2-5): stored active route wins over env; env only for a no-row repo of an unbootstrapped
+project; A claims env-B's repo then drops it → `revoked`, B gets nothing; `release-route` re-enables
+explicitly; duplicate claim → 409; `?reassign=` atomic across both documents and the route row; stale
+`?reassign=B` against C's route → 409; unroutable delivery has a durable unresolved row before 202;
+drained delivery after an env change keeps its recorded project and repo.
+P6 Bootstrap: declared-project mismatch refused; `--cross-project-copy` prints and proceeds; basename hint
+only; preview hash labelled and unequal to the returned digest; `local_config_drift` against the body.
+P7 Context key (V2-4): two repositories in one project sharing a sha with different evidence → two
+contexts; one repository reached by old and new alias → one context.
+P8 Missing policy by mode (V2-6): valid env route, no document: `off` → sealed unclassified;
+`shadow`/`enforce` → webhook delivery pending, hook queued and loud, no seal.
+P9 Export and authentication (V2-2): every referenced digest and activation event present before the
+issuer signature; omission or unknown profile fails explicitly; a `/2` seal whose producer signature
+verifies but whose `claim_decision` was altered → chain failure, and the consumer output still says
+"signed as A" separately from "policy selection invalid"; A-cwd/B-bundle uses B's enclosed policy.
+P10 Budget: every classifier/verifier policy read is one indexed lookup; store failure → `unavailable`.
 
-## 10. v1 → v2 dispositions (Codex, 2026-09-10)
+## 10. Out of scope
 
-| Finding | Where answered |
-|---|---|
-| F1 (P2) freeze canonicalisation, golden vectors, version-envelope digest, export coverage, verifier recompute, digest constrained by project, no separate signing | §2, §5B, P2, P3, P8 |
-| F2 (P1) precedence contradicts frozen policy-used; separate selection from retrieval; exact `(project, digest)`; drift only | §5A/§5B, P3, P4 |
-| F3 (P1) env fallback: unbootstrapped-only, routing-only, provenance through pending retries, canonical repo identity, unique active routing | §2 (canonical repos), §3 (409/reassign), §7, P5 |
-| Q3 owner-only correct; `set_by` from configured principal; team represented honestly; local serve explicit | §3 |
-| F4 (P1) atomic historical selection bound to `U`; classifier profile and rollout mode recorded separately; indexed reads; context data exported | §4, §6, P4, P9 |
-| F5 (P2) bootstrap declared-project mismatch; basename hint only; drift semantics | §8, P6 |
-| Acceptance additions (a)–(f) | P1, P3, P4, P5, P6, P8 |
+Credential `principal` / never-reissue (PR 31, in parallel); the classifier and context table (step 3);
+removing `RETRACE_GITHUB_PROJECTS` entirely (after bootstrap completes); `policy:write` permission for
+team credentials (an authorisation extension, per Codex Q3).
 
-Out of scope, unchanged: credential `principal` / never-reissue (built in parallel), the classifier and
-context table (step 3), removing the env mapping entirely (after bootstrap completes).
+## 11. Dispositions
+
+| Round | Finding | Where answered |
+|---|---|---|
+| v1→v2 | F1 version-envelope, export coverage, project-bound fetch | §2, §5B, P3 |
+| v1→v2 | F2 selection ≠ retrieval; drift never applied | §5A/B — **closed** (Codex v2) |
+| v1→v2 | F3 env fallback routing-only, provenance | §7 |
+| v1→v2 | Q3 owner authority, `set_by` | §3 — **closed** |
+| v1→v2 | F4 atomic selection | §6 (superseded by v3's activation events) |
+| v1→v2 | F5 bootstrap, drift labels | §8 — **closed** |
+| v2→v3 | V2-1 (P2) serialisation under-specified; vectors need envelope | §2: RFC 8785, integer/Unicode/comparator rules, body+envelope vectors; P2 |
+| v2→v3 | V2-2 (P2) producer signature does not authenticate the policy reference | §5 "What authenticates what"; P9 |
+| v2→v3 | V2-3 (P1) `policy_selected_at_seq = U` proves nothing; API must own the snapshot | §6 activation events; selection = greatest activation `seq ≤ U`; P4 |
+| v2→v3 | V2-4 (P1) context key dropped the repository | §6 key restored to `(project, R, sha)`; P7 |
+| v2→v3 | V2-5 (P1) revocation resurrects env; reassignment atomicity; durable unresolved routing | §7 `revoked` state, atomic two-document reassign, unresolved row before 202; P5 |
+| v2→v3 | V2-6 (P1) missing policy must stay pending in shadow/enforce | §7 mode-dependent rule; P8 |
+| v2→v3 | §3 clarifications (one atomic op, recheck on retry, 412 even if equal) | §3 steps 1–4; P1 |
+| v2→v3 | §8 digest preview honesty; explicit `record` | §8; P6 |
