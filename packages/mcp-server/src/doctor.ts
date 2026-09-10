@@ -253,13 +253,20 @@ export function reviewEffortFindings(events: Event[], models: RoutingModelRegist
     .reduce<number | undefined>((first, event) => first === undefined ? event.seq : Math.min(first, event.seq), undefined);
   if (adoptionSeq === undefined) return [];
   const findings: Finding[] = [];
+  const unrouted: Event[] = [];
+  let reviewCount = 0;
   for (const review of events.filter((event) => event.seq > adoptionSeq && isReviewEvent(event))) {
+    reviewCount++;
     const params = paramsOf(review);
     const effort = typeof params.reasoning_effort === "string" ? params.reasoning_effort : undefined;
     const routingId = typeof params.routing_event_id === "string" ? params.routing_event_id : undefined;
     const model = review.actor.model;
     const capability = model ? models[model] : undefined;
 
+    if (!routingId) {
+      unrouted.push(review);
+      continue;
+    }
     if (!model) {
       findings.push(result("warn", "review model", `${review.id}: review did not self-report actor.model`));
     } else if (!capability) {
@@ -267,10 +274,6 @@ export function reviewEffortFindings(events: Event[], models: RoutingModelRegist
     }
     if (capability?.supports_effort && !effort) {
       findings.push(result("warn", "review reasoning effort", `${review.id}: ${model} supports effort but the review did not self-report method.params.reasoning_effort`));
-    }
-    if (!routingId) {
-      findings.push(result("warn", "review routing", `${review.id}: review cites no method.params.routing_event_id`));
-      continue;
     }
     const routing = byId.get(routingId);
     if (!routing) {
@@ -297,6 +300,14 @@ export function reviewEffortFindings(events: Event[], models: RoutingModelRegist
     if (effort && routedEffort && effort !== routedEffort) {
       findings.push(result("warn", "review effort mismatch", `${review.id}: routed ${routedEffort} · ran ${effort} (${routingId})`));
     }
+  }
+  if (unrouted.length) {
+    const oldest = unrouted.reduce((a, b) => (a.seq < b.seq ? a : b));
+    findings.unshift(result(
+      "warn",
+      "review routing",
+      `${unrouted.length} of ${reviewCount} reviews since adoption cite no routing_event_id (oldest ${oldest.id})`,
+    ));
   }
   return findings;
 }

@@ -46,8 +46,9 @@ test("doctor: review effort warns only when the model supports effort, routing i
     routing,
     { ...review("evt_missing", "gpt-6-astra", {}), seq: 2 },
   ], models);
-  assert.deepEqual(adoptedMissing.map((finding) => finding.label), ["review reasoning effort", "review routing"]);
+  assert.deepEqual(adoptedMissing.map((finding) => finding.label), ["review routing"]);
   assert.ok(adoptedMissing.every((finding) => finding.level === "warn"));
+  assert.match(adoptedMissing[0]!.detail, /1 of 1 reviews since adoption cite no routing_event_id \(oldest evt_missing\)/);
 
   const mismatch = reviewEffortFindings([routing, review("evt_mismatch", "gpt-6-astra", {
     reasoning_effort: "medium", routing_event_id: routing.id,
@@ -77,6 +78,31 @@ test("doctor: review effort warns only when the model supports effort, routing i
   ], models);
   assert.equal(lateRouting[0]?.label, "review routing");
   assert.match(lateRouting[0]!.detail, /recorded before the review/);
+});
+
+test("doctor: un-routed review finding count does not grow with ledger size", () => {
+  const routing = commitEvt({
+    id: "evt_route", seq: 1, action: "other", action_detail: "routed",
+    actor: { type: "agent", id: "claude-code" },
+    method: { tool: "routing", params: { target: { agent: "codex", model: "gpt-6-astra", effort: "high" } } },
+  });
+  const models = {
+    "gpt-6-astra": { supports_effort: true, levels: ["low", "medium", "high", "xhigh"] },
+  };
+  const unrouted = (count: number): Event[] => Array.from({ length: count }, (_, i) => commitEvt({
+    id: `evt_unrouted_${i}`, seq: 2 + i, action: "approved",
+    actor: { type: "agent", id: "codex", model: "gpt-6-astra" },
+    tags: ["review"], method: { tool: "review", params: {} },
+  }));
+
+  const five = reviewEffortFindings([routing, ...unrouted(5)], models);
+  const fifty = reviewEffortFindings([routing, ...unrouted(50)], models);
+  assert.equal(five.length, fifty.length, "finding count must be independent of un-routed review volume");
+  assert.equal(five.length, 1);
+  assert.equal(five[0]?.label, "review routing");
+  assert.equal(five[0]?.level, "warn");
+  assert.match(five[0]!.detail, /5 of 5 reviews since adoption cite no routing_event_id \(oldest evt_unrouted_0\)/);
+  assert.match(fifty[0]!.detail, /50 of 50 reviews since adoption cite no routing_event_id \(oldest evt_unrouted_0\)/);
 });
 
 test("doctor: CLI version gap when Worker advertises min_cli_version above the running CLI", () => {
