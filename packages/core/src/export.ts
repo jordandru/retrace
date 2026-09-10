@@ -10,8 +10,9 @@ import { ProducerKey, countProducerSigs } from "./producer-sig.js";
 import { GENESIS_HASH } from "./schema.js";
 import { keyId, publicFromPrivate, signCanonical, verifyCanonical } from "./signing.js";
 import {
-  POLICY_PROFILE, PolicyDocument, PolicyVerifyFinding, canonicalPolicyV1, collectReferencedPolicies,
-  documentMapKey, eventPolicyRef, policyHashObject, verifyPolicySelectionOffline,
+  POLICY_PROFILE, PolicyDocument, PolicyError, PolicyVerifyFinding, canonicalPolicyV1, collectReferencedPolicies,
+  documentMapKey, eventPolicyRef, parseJsonRejectDuplicateKeys, policyHashObject, validatePolicyBody, validatePolicyEnvelope,
+  verifyPolicySelectionOffline,
 } from "./policy.js";
 
 export const EXPORT_FORMAT = "retrace-export/1";
@@ -80,6 +81,19 @@ export async function buildExportBundle(store: EventStore, scope: ExportScope, o
       if (events.some((e) => e.id === d.envelope.activation.event_id)) byKey.set(documentMapKey(d.body.project, d.digest), d);
     }
     if (byKey.size) bundle.policies = [...byKey.values()];
+    const have = new Set(events.map((e) => e.id));
+    for (const d of byKey.values()) {
+      const id = d.envelope.activation.event_id;
+      if (have.has(id)) continue;
+      const act = await store.get(id);
+      if (!act || act.project !== scope.project) continue;
+      events.push(act);
+      have.add(id);
+      context_events++;
+    }
+    events.sort((a, b) => a.seq - b.seq);
+    bundle.events = events;
+    bundle.context_events = context_events;
   }
   if (opts.signingKey) {
     const pub = publicFromPrivate(opts.signingKey);
@@ -218,14 +232,14 @@ export async function verifyExportBundle(bundle: ExportBundle, trustedPublicKey?
   // issuer key); with neither, signed events are uncheckable and only the unsigned-agent count is meaningful.
   const producerKeys = vopts?.producers ?? bundle.producers ?? [];
   const project = vopts?.project ?? bundle.scope.project;
-  const trustedHookStamps = vopts?.trustedHookStamps;
-  const stampsFor = vopts?.trustedHookStamps ? undefined : (e: Event) => {
+  // Document resolution is authoritative even if a caller supplies trustedHookStamps.
+  const stampsFor = (e: Event) => {
     const digest = eventPolicyRef(e).digest;
     if (!digest) return undefined;
     const docs = bundle.policies ?? [];
     return docs.find((d) => d.digest === digest && d.body.project === e.project)?.body.trusted_hook_stamps;
   };
-  const ps = await countProducerSigs(sorted, producerKeys, { trustedHookStamps, stampsFor, project });
+  const ps = await countProducerSigs(sorted, producerKeys, { stampsFor, project });
   problems.push(...ps.problems);
   const policy_findings: PolicyVerifyFinding[] = [];
   if (bundle.policies) {
@@ -235,6 +249,13 @@ export async function verifyExportBundle(bundle: ExportBundle, trustedPublicKey?
         if (recomputed !== d.digest) {
           policy_findings.push("policy_corrupt");
           problems.push(`policy ${d.digest} digest mismatch`);
+        }
+        try {
+          validatePolicyBody(d.body);
+          validatePolicyEnvelope(d.envelope);
+        } catch (err: any) {
+          policy_findings.push("policy_corrupt");
+          problems.push(`policy ${d.digest} failed /1 validation: ${err?.message ?? err}`);
         }
         if (d.body.project !== bundle.scope.project) {
           policy_findings.push("policy_project_mismatch");
@@ -278,12 +299,49 @@ function stampsFromBundlePolicies(bundle: ExportBundle, project: string): readon
   return current?.body.trusted_hook_stamps;
 }
 
+const POLICY_GATE_FINDINGS = new Set<PolicyVerifyFinding>([
+  "policy_missing",
+  "policy_misselected",
+  "policy_selection_unverifiable",
+]);
+
+export function policyFindingsFailExport(findings: PolicyVerifyFinding[] | undefined): boolean {
+  return (findings ?? []).some((f) => POLICY_GATE_FINDINGS.has(f));
+}
+
 /**
  * One boolean for callers that gate on a bundle: signed by a TRUSTED key, intact, linked, chain ok at export, and (for
  * full exports) complete. A self-attested signature does not pass — pass the issuer's public key to verifyExportBundle.
+ * Policy selection failures never pass VALID.
  */
 export function exportVerdictOk(v: ExportVerdict): boolean {
+  if (policyFindingsFailExport(v.policy_findings)) return false;
   return v.signature === "valid" && v.events_intact && v.links_consistent && v.chain_ok_at_export && v.coverage.complete !== false;
+}
+
+export function parseExportBundle(raw: string): ExportBundle {
+  let parsed: unknown;
+  try { parsed = parseJsonRejectDuplicateKeys(raw); }
+  catch (e) {
+    if (e instanceof PolicyError) throw new Error(`invalid export bundle: ${e.message}`);
+    throw e;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("invalid export bundle: not an object");
+  const obj = parsed as Record<string, unknown>;
+  if (obj.policies !== undefined) {
+    if (!Array.isArray(obj.policies)) throw new Error("invalid export bundle: policies must be an array");
+    for (const d of obj.policies) {
+      if (!d || typeof d !== "object" || Array.isArray(d)) throw new Error("invalid export bundle: policy document must be an object");
+      const doc = d as Record<string, unknown>;
+      try {
+        validatePolicyBody(doc.body);
+        validatePolicyEnvelope(doc.envelope);
+      } catch (e: any) {
+        throw new Error(`invalid export bundle: ${e?.message ?? e}`);
+      }
+    }
+  }
+  return parsed as ExportBundle;
 }
 
 export { verifyProject };

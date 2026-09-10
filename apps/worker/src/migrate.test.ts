@@ -27,14 +27,14 @@ if (mode === "exit9") process.exit(9);
 process.exit(0);
 `;
 
-function fakeWrangler(dir) {
+function fakeWrangler(dir: string) {
   const path = join(dir, "wrangler");
   writeFileSync(path, FAKE_WRANGLER, { mode: 0o755 });
   chmodSync(path, 0o755);
   return path;
 }
 
-function runMigrate(dir, fake, wranglerPath = fakeWrangler(dir)) {
+function runMigrate(dir: string, fake: string, wranglerPath = fakeWrangler(dir)) {
   const log = join(dir, "wrangler.log");
   writeFileSync(log, "");
   const result = spawnSync(process.execPath, [migrateJs], {
@@ -47,7 +47,7 @@ function runMigrate(dir, fake, wranglerPath = fakeWrangler(dir)) {
       WRANGLER_FAKE: fake,
     },
   });
-  const commands = readFileSync(log, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line) as { command: boolean; file: boolean });
+  const commands = readFileSync(log, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line) as { command: boolean; file: boolean; alter?: boolean });
   return { result, commands };
 }
 

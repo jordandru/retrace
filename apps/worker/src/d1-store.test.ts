@@ -80,7 +80,7 @@ test("deleteProject deletes checkpoint, export-cache, artifact index and pending
 
   assert.deepEqual(
     deletes.map((statement) => statement.sql.match(/^DELETE FROM (\w+)/)?.[1]),
-    ["events", "event_artifacts", "event_artifact_index", "pending_deliveries", "shares", "checkpoints", "export_cache", "project_policies", "policy_routes"],
+    ["events", "event_artifacts", "event_artifact_index", "pending_deliveries", "shares", "checkpoints", "export_cache", "project_policies"],
   );
   for (const statement of deletes) {
     assert.match(statement.sql, /EXISTS \(SELECT 1 FROM events WHERE id = \?\)$/);
@@ -155,7 +155,8 @@ test("pending_deliveries insert/list/delete SQL", async () => {
   await store.insertPendingDelivery({
     delivery_id: "123", project: "retrace", raw_body: "{\"ok\":true}", received_at: "2026-09-08T00:00:00.000Z",
   });
-  assert.match(db.last!.sql, /INSERT OR REPLACE INTO pending_deliveries/);
+  assert.match(db.last!.sql, /INSERT INTO pending_deliveries/);
+  assert.doesNotMatch(db.last!.sql, /OR REPLACE/);
   assert.deepEqual(db.last!.params, ["123", "retrace", "{\"ok\":true}", "2026-09-08T00:00:00.000Z", null, null, null, null]);
   await store.listPendingDeliveriesOlderThan("2026-09-09T00:00:00.000Z");
   assert.match(db.last!.sql, /FROM pending_deliveries WHERE received_at < \?/);

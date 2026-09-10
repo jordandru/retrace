@@ -7,7 +7,7 @@ import {
   ArtifactIndexQuery, ArtifactIndexResult, ChainHead, EventStore, HeadMovedError, HistoryQuery, HistoryPage,
   PendingDelivery, Share, pageHistoryNewest,
 } from "./store.js";
-import { PolicyDocument, PolicyRouteRow, PolicySnapshot, PolicyWrite } from "./policy.js";
+import { PolicyDocument, PolicyRouteRow, PolicySnapshot, PolicySnapshotBudget, PolicyWrite, assertRouteWriteConsistent, policySnapshotFromIndex } from "./policy.js";
 
 export class MemoryEventStore implements EventStore {
   events: Event[] = [];
@@ -47,7 +47,6 @@ export class MemoryEventStore implements EventStore {
     if (this.events.some((e) => e.project === audit.project && e.seq === audit.seq)) throw new Error("UNIQUE constraint failed: events.project, events.seq");
     this.events = this.events.filter((e) => e.project !== p);
     this.policies = this.policies.filter((d) => d.body.project !== p);
-    for (const [repo, row] of this.routes) if (row.project === p) this.routes.delete(repo);
     for (const [id, s] of this.shares) if (s.project === p) this.shares.delete(id);
     this.events.push(audit);
     return counts;
@@ -57,8 +56,11 @@ export class MemoryEventStore implements EventStore {
     return { ok: true, events };
   }
   async insertPendingDelivery(row: PendingDelivery) {
-    this.pending = this.pending.filter((p) => p.delivery_id !== row.delivery_id);
+    if (this.pending.some((p) => p.delivery_id === row.delivery_id)) return;
     this.pending.push(row);
+  }
+  async getPendingDelivery(delivery_id: string) {
+    return this.pending.find((p) => p.delivery_id === delivery_id) ?? null;
   }
   async listPendingDeliveriesOlderThan(received_at: string) {
     return this.pending.filter((p) => p.received_at < received_at);
@@ -85,12 +87,16 @@ export class MemoryEventStore implements EventStore {
       .filter((d) => d.body.project === project && d.envelope.activation.seq <= throughSeq)
       .sort((a, b) => b.envelope.activation.seq - a.envelope.activation.seq)[0] ?? null;
   }
-  async readPolicySnapshot(project: string, U?: number): Promise<PolicySnapshot> {
-    const events = this.events.filter((e) => e.project === project).sort((a, b) => a.seq - b.seq);
-    const u = U ?? (events.at(-1)?.seq ?? -1);
-    const slice = events.filter((e) => e.seq <= u);
-    const activations = slice.filter((e) => (e.idempotency_key ?? "").startsWith("policy:"));
-    return { U: u, events: slice, activations };
+  async readPolicySnapshot(project: string, U?: number, budget?: PolicySnapshotBudget): Promise<PolicySnapshot> {
+    const head = await this.head(project);
+    return policySnapshotFromIndex({
+      project,
+      U,
+      budget,
+      headSeq: head?.seq,
+      getByActivationSeq: (p, seq) => this.getPolicyByActivationSeq(p, seq),
+      getEvent: (id) => this.get(id),
+    });
   }
   async applyPolicyWrite(write: PolicyWrite, expectedHeads: Record<string, ChainHead | null>) {
     return this.enqueue(async () => {
@@ -102,6 +108,11 @@ export class MemoryEventStore implements EventStore {
           throw new HeadMovedError(project, expected);
         }
       }
+      assertRouteWriteConsistent(
+        write,
+        (repo) => this.routes.get(repo) ?? null,
+        (project) => this.policies.filter((d) => d.body.project === project).sort((a, b) => b.envelope.version - a.envelope.version)[0] ?? null,
+      );
       const snapshot = {
         events: this.events.slice(),
         policies: this.policies.slice(),
@@ -110,7 +121,6 @@ export class MemoryEventStore implements EventStore {
       try {
         for (const e of write.events) {
           if (this.events.some((x) => x.project === e.project && x.seq === e.seq)) throw new Error("UNIQUE constraint failed: events.project, events.seq");
-          if (this.policies.some((d) => d.digest === write.documents.find(() => true)?.digest && false)) { /* noop */ }
           this.events.push(e);
         }
         for (const d of write.documents) {

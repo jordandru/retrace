@@ -5,8 +5,8 @@ import {
   HistoryQuery, HistoryPage, PendingDelivery, SCHEMA_PENDING_ROUTE_COLUMNS_SQL, SCHEMA_SQL, Share, artifactIndexRows, clampHistoryLimit,
   eventsReferencingArtifactsSql, historyPageFromNewestFirst, likeContains,
 } from "@retrace-dev/core";
-import type { PolicyRouteRow, PolicySnapshot, PolicyWrite } from "@retrace-dev/core";
-import { policyDocumentFromRow } from "@retrace-dev/core";
+import type { PolicyRouteRow, PolicySnapshot, PolicySnapshotBudget, PolicyWrite } from "@retrace-dev/core";
+import { assertRouteWriteConsistent, policyDocumentFromRow, policySnapshotFromIndex } from "@retrace-dev/core";
 
 export class SqliteStore implements EventStore {
   private db: DatabaseSync;
@@ -72,7 +72,6 @@ export class SqliteStore implements EventStore {
       const head = this.headSync(project); // synchronous: the transaction never yields between check and deletes
       if (!head || head.seq !== expectedHead.seq || head.hash !== expectedHead.hash) throw new HeadMovedError(project, expectedHead);
       const counts = Object.fromEntries(tables.map((t) => [t, Number(this.db.prepare(`DELETE FROM ${t} WHERE project = ?`).run(project).changes)]));
-      this.db.prepare("DELETE FROM policy_routes WHERE project = ?").run(project);
       this.insertRows(audit);
       this.db.exec("COMMIT");
       return counts;
@@ -161,9 +160,19 @@ export class SqliteStore implements EventStore {
   }
 
   async insertPendingDelivery(row: PendingDelivery) {
-    this.db.prepare(
-      "INSERT OR REPLACE INTO pending_deliveries (delivery_id, project, raw_body, received_at, repo, routing_source, routing_digest, routing_state) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-    ).run(row.delivery_id, row.project, row.raw_body, row.received_at, row.repo ?? null, row.routing_source ?? null, row.routing_digest ?? null, row.routing_state ?? null);
+    try {
+      this.db.prepare(
+        "INSERT INTO pending_deliveries (delivery_id, project, raw_body, received_at, repo, routing_source, routing_digest, routing_state) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      ).run(row.delivery_id, row.project, row.raw_body, row.received_at, row.repo ?? null, row.routing_source ?? null, row.routing_digest ?? null, row.routing_state ?? null);
+    } catch (e: unknown) {
+      if (!/UNIQUE/i.test(String((e as Error)?.message))) throw e;
+    }
+  }
+
+  async getPendingDelivery(delivery_id: string): Promise<PendingDelivery | null> {
+    return (this.db.prepare(
+      "SELECT delivery_id, project, raw_body, received_at, repo, routing_source, routing_digest, routing_state FROM pending_deliveries WHERE delivery_id = ?",
+    ).get(delivery_id) as PendingDelivery | undefined) ?? null;
   }
 
   async listPendingDeliveriesOlderThan(received_at: string): Promise<PendingDelivery[]> {
@@ -206,11 +215,16 @@ export class SqliteStore implements EventStore {
     return row ? policyDocumentFromRow(row) : null;
   }
 
-  async readPolicySnapshot(project: string, U?: number): Promise<PolicySnapshot> {
-    const events = await this.all(project);
-    const u = U ?? (events.at(-1)?.seq ?? -1);
-    const slice = events.filter((e) => e.seq <= u);
-    return { U: u, events: slice, activations: slice.filter((e) => (e.idempotency_key ?? "").startsWith("policy:")) };
+  async readPolicySnapshot(project: string, U?: number, budget?: PolicySnapshotBudget): Promise<PolicySnapshot> {
+    const head = this.headSync(project);
+    return policySnapshotFromIndex({
+      project,
+      U,
+      budget,
+      headSeq: head?.seq,
+      getByActivationSeq: (p, seq) => this.getPolicyByActivationSeq(p, seq),
+      getEvent: (id) => this.get(id),
+    });
   }
 
   async applyPolicyWrite(write: PolicyWrite, expectedHeads: Record<string, ChainHead | null>) {
@@ -224,6 +238,14 @@ export class SqliteStore implements EventStore {
           throw new HeadMovedError(project, expected);
         }
       }
+      assertRouteWriteConsistent(
+        write,
+        (repo) => (this.db.prepare("SELECT repo, state, project, digest, activation_seq, set_at FROM policy_routes WHERE repo = ?").get(repo) as PolicyRouteRow | undefined) ?? null,
+        (project) => {
+          const row = this.db.prepare("SELECT body, envelope, digest FROM project_policies WHERE project = ? ORDER BY version DESC LIMIT 1").get(project) as { body: string; envelope: string; digest: string } | undefined;
+          return row ? policyDocumentFromRow(row) : null;
+        },
+      );
       for (const e of write.events) this.insertRows(e);
       const insPol = this.db.prepare("INSERT INTO project_policies (project, version, digest, body, envelope, activation_seq, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)");
       for (const d of write.documents) {

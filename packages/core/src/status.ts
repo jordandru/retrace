@@ -8,6 +8,7 @@ import { CAUSED_BY_UNVERIFIED_TAG, SEALED_BY_PARAM, sealedByKind } from "./store
 import { markUntrustedText } from "./explain.js";
 import { causalRootState, type RootState } from "./causality.js";
 import { projectIssuanceStatus, type IssuanceCredential, type ProjectIssuanceStatus } from "./credential-status.js";
+import { canonicalGithubRepo, routeGithubDelivery } from "./policy.js";
 export { causalRootState } from "./causality.js";
 
 export type StatusActor = { type: Event["actor"]["type"]; id: string; events: number; last_seen: string; models: string[]; amended_from?: {type: Event["actor"]["type"]; id: string}[] };
@@ -146,31 +147,36 @@ async function projectPolicyStatus(
   githubRepoProjects?: Record<string, string>,
 ): Promise<Pick<ProjectStatus, "policy" | "routing">> {
   const doc = store.getPolicy ? await store.getPolicy(project, { current: true }) : null;
-  const routes = store.listPolicyRoutes ? await store.listPolicyRoutes(project) : [];
-  const pending = store.listPendingDeliveriesOlderThan
-    ? await store.listPendingDeliveriesOlderThan("9999-12-31T23:59:59.999Z")
-    : [];
-  const envRepos = Object.entries(githubRepoProjects ?? {}).filter(([, p]) => p === project).map(([repo]) => repo);
+  const envRepos = Object.entries(githubRepoProjects ?? {})
+    .filter(([, p]) => p === project)
+    .map(([repo]) => canonicalGithubRepo(repo));
   const routing: NonNullable<ProjectStatus["routing"]> = [];
   const seen = new Set<string>();
-  for (const r of routes) {
+  for (const repo of envRepos) {
+    const route = store.getPolicyRoute ? await store.getPolicyRoute(repo) : null;
+    const decision = routeGithubDelivery({
+      fullName: repo,
+      route,
+      envProject: project,
+      envProjectHasDocument: !!doc,
+    });
+    if (decision.kind === "routed" && decision.project !== project) continue;
+    seen.add(repo);
+    if (decision.kind === "routed")
+      routing.push({ repo, source: decision.source === "policy" ? "policy" : "env_fallback" });
+    else
+      routing.push({ repo, source: decision.reason === "revoked" ? "revoked" : "unresolved" });
+  }
+  const ownRoutes = store.listPolicyRoutes ? await store.listPolicyRoutes(project) : [];
+  for (const r of ownRoutes) {
+    if (seen.has(r.repo)) continue;
     seen.add(r.repo);
     routing.push({ repo: r.repo, source: r.state === "revoked" ? "revoked" : "policy" });
   }
-  for (const p of pending) {
-    if (p.routing_state === "unresolved" && p.repo && !seen.has(p.repo)) {
-      seen.add(p.repo);
-      routing.push({ repo: p.repo, source: "unresolved" });
-    }
-  }
-  for (const repo of envRepos) {
-    if (seen.has(repo)) continue;
-    seen.add(repo);
-    routing.push({ repo, source: doc ? "policy" : "env_fallback" });
-  }
+  const hasEnvFallback = routing.some((r) => r.source === "env_fallback");
   const policy = doc
     ? { mode: "document" as const, digest: doc.digest, version: doc.envelope.version }
-    : envRepos.length
+    : hasEnvFallback
       ? { mode: "env_fallback" as const }
       : { mode: "none" as const };
   return { policy, routing };

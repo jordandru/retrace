@@ -23,6 +23,14 @@ export class PolicyError extends Error {
   }
 }
 
+/** Thrown from `applyPolicyWrite` when in-transaction route CAS loses to another claimant. */
+export class RouteConflictError extends PolicyError {
+  constructor(message: string) {
+    super(409, message);
+    this.name = "RouteConflictError";
+  }
+}
+
 export type OwnerPrincipal = { type: "human" | "team"; id: string };
 
 export interface PolicyRepository {
@@ -80,7 +88,11 @@ export type PolicySnapshot = {
   U: number;
   events: Event[];
   activations: Event[];
+  document?: PolicyDocument | null;
+  unavailable?: "budget" | "deadline" | "store_error";
 };
+
+export type PolicySnapshotBudget = { deadline?: number; now?: () => number };
 
 export type PolicySelection =
   | { status: "none" }
@@ -224,6 +236,7 @@ export function parseJsonRejectDuplicateKeys(raw: string): unknown {
           i += 4;
         } else fail("invalid escape");
       } else {
+        if (c.charCodeAt(0) < 0x20) fail("unescaped control character in JSON string");
         out += c;
         i++;
       }
@@ -253,12 +266,14 @@ export function parseJsonRejectDuplicateKeys(raw: string): unknown {
     if (c === "{") {
       i++;
       skipWs();
-      const obj: Record<string, unknown> = {};
+      const obj = Object.create(null) as Record<string, unknown>;
       const seen = new Set<string>();
       if (s[i] === "}") { i++; return obj; }
       while (i < s.length) {
         skipWs();
         const key = parseString();
+        if (key === "__proto__" || key === "constructor" || key === "prototype")
+          fail(`forbidden object key ${JSON.stringify(key)}`);
         if (seen.has(key)) fail(`duplicate object key ${JSON.stringify(key)}`);
         seen.add(key);
         skipWs();
@@ -304,6 +319,10 @@ const REPO_KEYS = new Set(["name", "aliases"]);
 const ENVELOPE_KEYS = new Set(["version", "created_at", "set_by", "supersedes", "activation"]);
 const SET_BY_KEYS = new Set(["type", "id"]);
 const ACTIVATION_KEYS = new Set(["event_id", "seq"]);
+
+function hasOwn(obj: object, k: string): boolean {
+  return Object.prototype.hasOwnProperty.call(obj, k);
+}
 
 function requireObject(v: unknown, label: string): Record<string, unknown> {
   if (!v || typeof v !== "object" || Array.isArray(v)) throw new PolicyError(400, `${label} must be an object`);
@@ -351,7 +370,7 @@ export function assertCanonicalGithubRepo(name: string, label: string): string {
 export function validatePolicyBody(raw: unknown, expectedProject?: string): PolicyBody {
   const obj = requireObject(raw, "policy body");
   rejectUnknown(obj, BODY_KEYS, "policy body");
-  for (const k of BODY_KEYS) if (!(k in obj)) throw new PolicyError(400, `missing required field ${k}`);
+  for (const k of BODY_KEYS) if (!hasOwn(obj, k)) throw new PolicyError(400, `missing required field ${k}`);
   if (obj.profile !== POLICY_PROFILE) throw new PolicyError(400, `profile must be ${POLICY_PROFILE}`);
   const project = requireString(obj.project, "project");
   if (!project) throw new PolicyError(400, "project must be non-empty");
@@ -364,7 +383,7 @@ export function validatePolicyBody(raw: unknown, expectedProject?: string): Poli
   const repositories: PolicyRepository[] = obj.repositories.map((r, i) => {
     const ro = requireObject(r, `repositories[${i}]`);
     rejectUnknown(ro, REPO_KEYS, `repositories[${i}]`);
-    if (!("name" in ro) || !("aliases" in ro)) throw new PolicyError(400, `repositories[${i}] requires name and aliases`);
+    if (!hasOwn(ro, "name") || !hasOwn(ro, "aliases")) throw new PolicyError(400, `repositories[${i}] requires name and aliases`);
     const name = assertCanonicalGithubRepo(requireString(ro.name, `repositories[${i}].name`), `repositories[${i}].name`);
     const aliases = requireSortedUniqueStrings(ro.aliases, `repositories[${i}].aliases`);
     return { name, aliases };
@@ -390,13 +409,13 @@ export function validatePolicyBody(raw: unknown, expectedProject?: string): Poli
 export function validatePolicyEnvelope(raw: unknown): PolicyEnvelope {
   const obj = requireObject(raw, "policy envelope");
   rejectUnknown(obj, ENVELOPE_KEYS, "policy envelope");
-  for (const k of ENVELOPE_KEYS) if (!(k in obj)) throw new PolicyError(400, `missing required envelope field ${k}`);
+  for (const k of ENVELOPE_KEYS) if (!hasOwn(obj, k)) throw new PolicyError(400, `missing required envelope field ${k}`);
   if (!isSafeUint(obj.version) || obj.version < 1) throw new PolicyError(400, "envelope.version must be an integer ≥ 1 and ≤ 2^53-1");
   const created_at = requireString(obj.created_at, "created_at");
   if (!CREATED_AT_RE.test(created_at)) throw new PolicyError(400, "created_at must be RFC 3339 UTC with millisecond precision and Z");
   const setBy = requireObject(obj.set_by, "set_by");
   rejectUnknown(setBy, SET_BY_KEYS, "set_by");
-  if (!("type" in setBy) || !("id" in setBy)) throw new PolicyError(400, "set_by requires type and id");
+  if (!hasOwn(setBy, "type") || !hasOwn(setBy, "id")) throw new PolicyError(400, "set_by requires type and id");
   if (setBy.type !== "human" && setBy.type !== "team") throw new PolicyError(400, 'set_by.type must be "human" or "team"');
   const id = requireString(setBy.id, "set_by.id");
   if (!id) throw new PolicyError(400, "set_by.id must be non-empty");
@@ -409,7 +428,7 @@ export function validatePolicyEnvelope(raw: unknown): PolicyEnvelope {
   }
   const act = requireObject(obj.activation, "activation");
   rejectUnknown(act, ACTIVATION_KEYS, "activation");
-  if (!("event_id" in act) || !("seq" in act)) throw new PolicyError(400, "activation requires event_id and seq");
+  if (!hasOwn(act, "event_id") || !hasOwn(act, "seq")) throw new PolicyError(400, "activation requires event_id and seq");
   const event_id = requireString(act.event_id, "activation.event_id");
   if (!event_id) throw new PolicyError(400, "activation.event_id must be non-empty");
   if (!isSafeUint(act.seq)) throw new PolicyError(400, "activation.seq must be an integer in 0..2^53-1");
@@ -496,11 +515,43 @@ export function evaluateActivation(
   if (pSupersedes !== doc.envelope.supersedes) return { status: "ignored" };
   if (typeof pVersion !== "number" || earlierEligibleVersions.some((v) => pVersion <= v))
     return { status: "ignored" };
+  if (e.actor?.type !== "system" || e.actor?.id !== POLICY_ACTOR_ID) return { status: "ignored" };
+  const setBy = doc.envelope.set_by;
+  if (e.actor.on_behalf_of !== `${setBy.type}:${setBy.id}`) return { status: "ignored" };
+  const pSetBy = params.set_by;
+  if (!pSetBy || typeof pSetBy !== "object" || Array.isArray(pSetBy)) return { status: "ignored" };
+  const sb = pSetBy as { type?: unknown; id?: unknown };
+  if (sb.type !== setBy.type || sb.id !== setBy.id) return { status: "ignored" };
   return { status: "eligible", digest, version: doc.envelope.version, seq: e.seq, document: doc };
 }
 
 export function documentMapKey(project: string, digest: string): string {
   return `${project}\0${digest}`;
+}
+
+/** Bounded snapshot: one indexed `activation_seq ≤ U` lookup, never `all(project)`. */
+export async function policySnapshotFromIndex(opts: {
+  project: string;
+  U?: number;
+  budget?: PolicySnapshotBudget;
+  headSeq: number | undefined;
+  getByActivationSeq: (project: string, throughSeq: number) => Promise<PolicyDocument | null>;
+  getEvent: (id: string) => Promise<Event | null>;
+}): Promise<PolicySnapshot> {
+  const now = opts.budget?.now?.() ?? Date.now();
+  if (opts.budget?.deadline !== undefined && now >= opts.budget.deadline)
+    return { U: opts.U ?? -1, events: [], activations: [], unavailable: "deadline" };
+  try {
+    const u = opts.U ?? (opts.headSeq ?? -1);
+    if (u < 0) return { U: -1, events: [], activations: [] };
+    const doc = await opts.getByActivationSeq(opts.project, u);
+    if (!doc) return { U: u, events: [], activations: [], document: null };
+    const act = await opts.getEvent(doc.envelope.activation.event_id);
+    const activations = act && act.project === opts.project && act.seq <= u ? [act] : [];
+    return { U: u, events: activations, activations, document: doc };
+  } catch {
+    return { U: opts.U ?? -1, events: [], activations: [], unavailable: "store_error" };
+  }
 }
 
 /**
@@ -791,11 +842,19 @@ async function planRouteChanges(opts: {
       reassignNeeded.add(repo);
       continue;
     }
-    // revoked row owned by another project: still not env-eligible; claiming requires reassign of that project.
+    // Revoked row owned by another project: env stays ineligible. ?reassign is only for a *live*
+    // claimant (current document still lists the repo). A tombstone with no live claimant may be
+    // activated by a new owner PUT without ?reassign.
     if (existing.state === "revoked" && existing.project !== opts.project) {
-      if (!opts.reassignFrom || opts.reassignFrom !== existing.project)
-        return { error: `repository ${repo} has a revoked route owned by ${existing.project}; pass ?reassign=${existing.project}` };
-      reassignNeeded.add(repo);
+      const ownerDoc = opts.currentByProject[existing.project];
+      if (ownerDoc?.body.github_repos.includes(repo)) {
+        if (!opts.reassignFrom || opts.reassignFrom !== existing.project)
+          return { error: `repository ${repo} is routed to project ${existing.project}; pass ?reassign=${existing.project}` };
+        reassignNeeded.add(repo);
+      } else {
+        routes.push({ repo, state: "active", project: opts.project, digest: "", activation_seq: 0, set_at: "" });
+        primaryChanges.push({ repo, from_project: existing.project, to_project: opts.project, state: "active" });
+      }
     }
   }
 
@@ -896,6 +955,15 @@ export async function bodyPreviewSha256(body: PolicyBody): Promise<string> {
   return sha256Hex(canonicalPolicyV1(body as unknown as Record<string, unknown>));
 }
 
+function normalizeReposForDrift(repos: PolicyRepository[]): { name: string; aliases: string[] }[] {
+  return repos
+    .map((r) => ({
+      name: canonicalGithubRepo(r.name),
+      aliases: [...(r.aliases ?? [])].sort(compareUtf8),
+    }))
+    .sort((a, b) => compareUtf8(a.name, b.name));
+}
+
 export function localConfigDrift(local: {
   stamps?: string[];
   repositories?: PolicyRepository[];
@@ -903,8 +971,8 @@ export function localConfigDrift(local: {
   if (!body) return { drifted: true, detail: "no current policy document to compare" };
   const stamps = [...(local.stamps ?? [])].sort(compareUtf8);
   const bodyStamps = [...body.trusted_hook_stamps].sort(compareUtf8);
-  const repos = (local.repositories ?? []).map((r) => r.name).sort(compareUtf8);
-  const bodyRepos = body.repositories.map((r) => r.name).sort(compareUtf8);
+  const repos = normalizeReposForDrift(local.repositories ?? []);
+  const bodyRepos = normalizeReposForDrift(body.repositories);
   const stampEq = JSON.stringify(stamps) === JSON.stringify(bodyStamps);
   const repoEq = JSON.stringify(repos) === JSON.stringify(bodyRepos);
   if (stampEq && repoEq) return { drifted: false, detail: "local .retrace.json settings match the current policy body" };
@@ -912,6 +980,39 @@ export function localConfigDrift(local: {
   if (!stampEq) bits.push("trusted_hook_stamps");
   if (!repoEq) bits.push("repositories");
   return { drifted: true, detail: `local .retrace.json ${bits.join(" and ")} differ from the current policy body` };
+}
+
+/** In-transaction CAS: an `active` route in `write` must still be claimable against live rows. */
+export function routeActivationAllowed(
+  existing: PolicyRouteRow | null,
+  next: PolicyRouteRow,
+  write: PolicyWrite,
+  currentOf: (project: string) => PolicyDocument | null,
+): boolean {
+  if (next.state !== "active") return true;
+  if (!existing) return true;
+  if (existing.project === next.project) return true;
+  const fromDoc = write.documents.find((d) => d.body.project === existing.project);
+  const droppedInWrite = !!fromDoc && !fromDoc.body.github_repos.includes(next.repo);
+  if (existing.state === "revoked") {
+    if (droppedInWrite) return true;
+    const ownerDoc = fromDoc ?? currentOf(existing.project);
+    return !ownerDoc?.body.github_repos.includes(next.repo);
+  }
+  return droppedInWrite;
+}
+
+export function assertRouteWriteConsistent(
+  write: PolicyWrite,
+  existingOf: (repo: string) => PolicyRouteRow | null,
+  currentOf: (project: string) => PolicyDocument | null,
+): void {
+  for (const r of write.routes) {
+    if (r.state !== "active") continue;
+    const existing = existingOf(r.repo);
+    if (!routeActivationAllowed(existing, r, write, currentOf))
+      throw new RouteConflictError(`repository ${r.repo} is already claimed`);
+  }
 }
 
 /** Completeness of the event prefix through `readHeadSeq` (full contiguous 0..U). */

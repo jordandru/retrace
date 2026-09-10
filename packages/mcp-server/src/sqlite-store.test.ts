@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { appendEvent, sealEvent, verifyProject, EventInput, HeadMovedError } from "@retrace-dev/core";
+import { appendEvent, sealEvent, verifyProject, EventInput, HeadMovedError, createHandler, POLICY_PROFILE } from "@retrace-dev/core";
 import { SqliteStore } from "./sqlite-store.js";
 
 const ev = (over: Partial<EventInput>): EventInput => ({ project: "junk", actor: { type: "agent", id: "claude" }, action: "edited", artifacts: [{ id: "a" }], ...over });
@@ -188,4 +188,43 @@ test("builder note 2: failed policy write rolls back activation, document, and r
   assert.equal((await store.listPolicies("p")).length, 1);
   assert.deepEqual(await store.listPolicyRoutes("p"), routes1);
   assert.equal((await store.all("p")).length, events1.length);
+});
+
+test("F3: sqlite concurrent A/B PUT claiming one repo is one 201 and one 409", async () => {
+  const store = new SqliteStore(":memory:");
+  const h = createHandler(store, { token: "owner-token-long-enough", ownerPrincipal: { type: "human", id: "o" } });
+  const raw = (project: string) => JSON.stringify({
+    profile: POLICY_PROFILE, project, trusted_hook_stamps: [], unresolved_claims: "record",
+    repositories: [{ name: "acme/shared", aliases: [] }], github_repos: ["acme/shared"],
+  });
+  const put = (project: string) => h(new Request(`http://test/projects/${project}/policy`, {
+    method: "PUT",
+    headers: { authorization: "Bearer owner-token-long-enough", "content-type": "application/json", "if-match": "none" },
+    body: raw(project),
+  }));
+  const [r1, r2] = await Promise.all([put("a"), put("b")]);
+  assert.deepEqual([r1.status, r2.status].sort(), [201, 409]);
+  const routes = [await store.getPolicyRoute("acme/shared")];
+  assert.equal(routes.filter((r) => r?.state === "active").length, 1);
+});
+
+test("F15: readPolicySnapshot uses indexed getPolicyByActivationSeq, not all()", async () => {
+  const store = new SqliteStore(":memory:");
+  let allCalls = 0;
+  const origAll = store.all.bind(store);
+  store.all = async (...args: Parameters<SqliteStore["all"]>) => { allCalls++; return origAll(...args); };
+  let idxCalls = 0;
+  const origIdx = store.getPolicyByActivationSeq.bind(store);
+  store.getPolicyByActivationSeq = async (...args: Parameters<SqliteStore["getPolicyByActivationSeq"]>) => {
+    idxCalls++;
+    return origIdx(...args);
+  };
+  await store.readPolicySnapshot("p", 0);
+  assert.equal(allCalls, 0);
+  assert.equal(idxCalls, 1);
+  const dead = await store.readPolicySnapshot("p", 0, { deadline: 0, now: () => 1 });
+  assert.equal(dead.unavailable, "deadline");
+  store.getPolicyByActivationSeq = async () => { throw new Error("disk on fire"); };
+  const snap = await store.readPolicySnapshot("p", 0);
+  assert.equal(snap.unavailable, "store_error");
 });

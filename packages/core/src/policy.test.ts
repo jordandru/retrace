@@ -7,7 +7,7 @@ import {
   canonicalPolicyV1, canonicalRepositoryR, compareUtf8, contextKey, eventPolicyRef, jcsSerialize,
   parseJsonRejectDuplicateKeys, policyDigestOf, policyHashObject, selectPolicyForContext,
   validatePolicyBody, validatePolicyEnvelope, verifyPolicySelectionOffline, POLICY_PROFILE,
-  PolicyDocument,
+  PolicyDocument, evaluateActivation, localConfigDrift,
 } from "./policy.js";
 import { SEALED_BY_OWNER } from "./store.js";
 import { Event } from "./schema.js";
@@ -58,7 +58,8 @@ test("P2 / builder note 3: \"a\" and \"\\u0061\" produce one digest; duplicate k
   assert.throws(() => parseJsonRejectDuplicateKeys('{"a":1,"a":2}'), /duplicate object key/);
   assert.throws(() => parseJsonRejectDuplicateKeys('{"outer":{"x":1,"x":2}}'), /duplicate object key/);
   const ok = parseJsonRejectDuplicateKeys('{"a":1,"b":{"a":2}}');
-  assert.deepEqual(ok, { a: 1, b: { a: 2 } });
+  assert.equal(JSON.stringify(ok), JSON.stringify({ a: 1, b: { a: 2 } }));
+  assert.equal(Object.getPrototypeOf(ok), null);
 });
 
 test("P2: unsorted/duplicate arrays, floats, negatives, 2^53, lone surrogate, unknown fields → 400", () => {
@@ -83,20 +84,34 @@ function env1() {
 }
 
 function fakeEvent(over: Partial<Event> & { seq: number; id: string; project?: string }): Event {
+  const overMethod = over.method;
+  const { method: _method, ...rest } = over;
   return {
     project: over.project ?? "p",
     actor: { type: "system", id: "retrace-api", on_behalf_of: "human:x" },
     action: "created",
     artifacts: over.artifacts ?? [{ id: "policy:p@dead", kind: "policy", role: "generated" }],
     intent: "policy v1 activated",
-    method: { tool: "retrace-api", params: { sealed_by: SEALED_BY_OWNER, policy_profile: POLICY_PROFILE, policy_version: 1, policy_digest: "dead", supersedes: null, ...(over.method?.params ?? {}) } },
+    method: {
+      tool: "retrace-api",
+      ...overMethod,
+      params: {
+        sealed_by: SEALED_BY_OWNER,
+        policy_profile: POLICY_PROFILE,
+        policy_version: 1,
+        policy_digest: "dead",
+        supersedes: null,
+        set_by: { type: "human", id: "x" },
+        ...overMethod?.params,
+      },
+    },
     idempotency_key: over.idempotency_key ?? "policy:p:1",
     timestamp: "2026-09-10T03:45:00.000Z",
     prev_hash: "0".repeat(64),
     hash: "h",
     received_at: "2026-09-10T03:45:00.000Z",
     hash_v: 2,
-    ...over,
+    ...rest,
     id: over.id,
     seq: over.seq,
   } as Event;
@@ -192,4 +207,52 @@ test("P7: context key is (project, canonical R, sha); aliases collapse to one R"
   assert.notEqual(contextKey("p", "acme/app", "abc"), contextKey("p", "acme/fork", "abc"));
   assert.equal(compareUtf8("a", "b") < 0, true);
   assert.ok(eventPolicyRef({ method: { params: { claim_decision: { context: { policy_digest: "d", read_head_seq: 3 } } } } } as unknown as Event).digest === "d");
+});
+
+test("F1: prototype-safe parse rejects __proto__ wrapper and unescaped newlines", () => {
+  const body = {
+    profile: POLICY_PROFILE, project: "p", trusted_hook_stamps: [], unresolved_claims: "record",
+    repositories: [], github_repos: [],
+  };
+  assert.throws(() => parseJsonRejectDuplicateKeys(`{"__proto__":${JSON.stringify(body)}}`), /forbidden object key/);
+  assert.throws(() => parseJsonRejectDuplicateKeys('{"a":"line\nbreak"}'), /unescaped control character/);
+  const protoSafe = parseJsonRejectDuplicateKeys('{"ok":1}') as Record<string, unknown>;
+  assert.equal(Object.getPrototypeOf(protoSafe), null);
+  assert.equal(protoSafe.ok, 1);
+});
+
+test("F4: activation identity mismatch is ignored so a later real activation can win", () => {
+  const v1: PolicyDocument = {
+    body: validatePolicyBody({ profile: POLICY_PROFILE, project: "p", trusted_hook_stamps: [], unresolved_claims: "record", repositories: [], github_repos: [] }),
+    envelope: validatePolicyEnvelope({ version: 1, created_at: "2026-09-10T03:45:00.000Z", set_by: { type: "human", id: "x" }, supersedes: null, activation: { event_id: "evt_v1", seq: 5 } }),
+    digest: "d1".padEnd(64, "0"),
+  };
+  const art = `policy:p@${v1.digest}`;
+  const docs = new Map<string, PolicyDocument>([[`p\0${v1.digest}`, v1], [v1.digest, v1]]);
+  const forged = fakeEvent({
+    id: "evt_v1", seq: 5, artifacts: [{ id: art, kind: "policy", role: "generated" }],
+    actor: { type: "human", id: "invented" },
+    method: { tool: "retrace-api", params: { sealed_by: SEALED_BY_OWNER, policy_profile: POLICY_PROFILE, policy_version: 1, policy_digest: v1.digest, supersedes: null, set_by: { type: "human", id: "other" } } },
+    idempotency_key: "policy:p:1",
+  });
+  const ev = evaluateActivation(forged, docs, []);
+  assert.equal(ev.status, "ignored");
+});
+
+test("F14: localConfigDrift compares aliases, not only repository names", () => {
+  const body = validatePolicyBody({
+    profile: POLICY_PROFILE, project: "p", trusted_hook_stamps: ["a"], unresolved_claims: "record",
+    repositories: [{ name: "acme/app", aliases: ["new"] }], github_repos: ["acme/app"],
+  });
+  const sameNames = localConfigDrift({
+    stamps: ["a"],
+    repositories: [{ name: "acme/app", aliases: ["old"] }],
+  }, body);
+  assert.equal(sameNames.drifted, true);
+  assert.match(sameNames.detail, /repositories/);
+  const match = localConfigDrift({
+    stamps: ["a"],
+    repositories: [{ name: "acme/app", aliases: ["new"] }],
+  }, body);
+  assert.equal(match.drifted, false);
 });

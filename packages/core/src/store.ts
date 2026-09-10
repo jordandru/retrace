@@ -135,6 +135,7 @@ export interface EventStore {
   /** Bounded artifact-index read (§3.5). Over budget / deadline / store error is a typed result, never a throw. */
   eventsReferencingArtifacts?(q: ArtifactIndexQuery, now?: () => number): Promise<ArtifactIndexResult>;
   insertPendingDelivery?(row: PendingDelivery): Promise<void>;
+  getPendingDelivery?(delivery_id: string): Promise<PendingDelivery | null>;
   listPendingDeliveriesOlderThan?(received_at: string): Promise<PendingDelivery[]>;
   deletePendingDelivery?(delivery_id: string): Promise<boolean>;
   /** Current / digest / version lookup, constrained to `project` by the caller. */
@@ -144,7 +145,7 @@ export interface EventStore {
   listPolicyRoutes?(project: string): Promise<import("./policy.js").PolicyRouteRow[]>;
   /** Indexed: greatest activation_seq ≤ throughSeq for this project. */
   getPolicyByActivationSeq?(project: string, throughSeq: number): Promise<import("./policy.js").PolicyDocument | null>;
-  readPolicySnapshot?(project: string, U?: number): Promise<import("./policy.js").PolicySnapshot>;
+  readPolicySnapshot?(project: string, U?: number, budget?: import("./policy.js").PolicySnapshotBudget): Promise<import("./policy.js").PolicySnapshot>;
   /** One transaction: activation event(s) + documents + route upserts. Throws HeadMovedError if a head raced. */
   applyPolicyWrite?(write: import("./policy.js").PolicyWrite, expectedHeads: Record<string, ChainHead | null>): Promise<void>;
 }

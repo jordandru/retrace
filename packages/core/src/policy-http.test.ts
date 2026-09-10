@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createHandler, MemoryEventStore, POLICY_PROFILE, appendEvent, EventInput } from "./index.js";
+import { createHandler, MemoryEventStore, POLICY_PROFILE, appendEvent, EventInput, generateSigningKey, publicFromPrivate, signProducer, PRODUCER_SIG_FORMAT_V2 } from "./index.js";
 
 const ev = (over: Partial<EventInput>): EventInput => ({ project: "p", actor: { type: "agent", id: "claude" }, action: "edited", artifacts: [{ id: "a" }], ...over });
 
@@ -275,4 +275,207 @@ test("P10: store failure on policy lookup surfaces as 501/unavailable rather tha
   } as any, { token: "owner-token-long-enough", ownerPrincipal: { type: "human", id: "o" } });
   const res = await put(bare, "p", JSON.stringify(body()), "none");
   assert.equal(res.status, 501);
+});
+
+test("F1: PUT {\"__proto__\": body} is 400", async () => {
+  const { h } = handler();
+  const wrapper = `{"__proto__":${JSON.stringify(body())}}`;
+  assert.equal((await put(h, "p", wrapper, "none")).status, 400);
+});
+
+test("F3: concurrent A/B PUT claiming one repo yields one 201 and one 409", async () => {
+  const store = new MemoryEventStore();
+  const h = createHandler(store, { token: "owner-token-long-enough", ownerPrincipal: { type: "human", id: "o" } });
+  const rawA = JSON.stringify({ ...body(), project: "a", github_repos: ["acme/shared"], repositories: [{ name: "acme/shared", aliases: [] }] });
+  const rawB = JSON.stringify({ ...body(), project: "b", github_repos: ["acme/shared"], repositories: [{ name: "acme/shared", aliases: [] }] });
+  const [r1, r2] = await Promise.all([put(h, "a", rawA, "none"), put(h, "b", rawB, "none")]);
+  const statuses = [r1.status, r2.status].sort();
+  assert.deepEqual(statuses, [201, 409]);
+  const active = [...store.routes.values()].filter((r) => r.repo === "acme/shared" && r.state === "active");
+  assert.equal(active.length, 1);
+  const docs = store.policies.filter((d) => d.body.github_repos.includes("acme/shared"));
+  assert.equal(docs.length, 1, "only the winning document may claim the repo");
+});
+
+test("F7: no named digest → no trusted list; missing named lookup → 501", async () => {
+  const kp = await generateSigningKey();
+  const store = new MemoryEventStore();
+  const h = createHandler(store, {
+    token: "owner-token-long-enough",
+    ownerPrincipal: { type: "human", id: "o" },
+    credentials: [{
+      token: "pinned-token-long-enough",
+      trust: "pinned",
+      actor: { type: "agent", id: "codex" },
+      projects: ["p"],
+      public_key: publicFromPrivate(kp.privateKey),
+      require_signature: true,
+    }],
+  });
+  const unsignedOk = await h(new Request("http://test/events", {
+    method: "POST",
+    headers: { authorization: "Bearer owner-token-long-enough", "content-type": "application/json" },
+    body: JSON.stringify(ev({ project: "p" })),
+  }));
+  assert.equal(unsignedOk.status, 201);
+    const signed = await signProducer({
+      ...ev({
+        project: "p",
+        actor: { type: "agent", id: "codex" },
+        timestamp: "2026-09-09T12:00:00.000Z",
+        idempotency_key: "agent:f7-named",
+        method: { params: { claim_decision: { context: { policy_digest: "ab".repeat(32) } } } },
+      }),
+    }, kp.privateKey);
+  const miss = await h(new Request("http://test/events", {
+    method: "POST",
+    headers: { authorization: "Bearer pinned-token-long-enough", "content-type": "application/json" },
+    body: JSON.stringify(signed),
+  }));
+  assert.equal(miss.status, 501);
+});
+
+test("F9: DELETE preserves policy_routes tombstones so env cannot resurrect", async () => {
+  const store = new MemoryEventStore();
+  const h = createHandler(store, {
+    token: "owner-token-long-enough",
+    ownerPrincipal: { type: "human", id: "o" },
+    ownerActor: { type: "human", id: "o" },
+    githubSecret: "s3cret",
+    githubRepoProjects: { "acme/app": "b" },
+  });
+  await put(h, "a", JSON.stringify({ ...body(), project: "a", github_repos: ["acme/app"], repositories: [{ name: "acme/app", aliases: [] }] }), "none");
+  const cur = await (await h(new Request("http://test/projects/a/policy", { headers: owner }))).json() as any;
+  assert.equal((await put(h, "a", JSON.stringify({ ...body(), project: "a", github_repos: [], repositories: [] }), cur.digest)).status, 201);
+  assert.equal(store.routes.get("acme/app")!.state, "revoked");
+  const del = await h(new Request("http://test/projects/a?confirm=a", { method: "DELETE", headers: owner }));
+  assert.equal(del.status, 200, await del.text());
+  assert.equal(store.routes.get("acme/app")?.state, "revoked");
+  const payload = JSON.stringify({
+    action: "opened", repository: { full_name: "acme/app" }, sender: { login: "j" },
+    pull_request: { number: 1, title: "t", html_url: "https://x", updated_at: "2026-08-30T00:00:00Z", head: { sha: "abc", ref: "f" }, base: { ref: "main" } },
+  });
+  const hook = await h(new Request("http://test/hooks/github", {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-hub-signature-256": await ghSigned("s3cret", payload), "x-github-event": "pull_request", "x-github-delivery": "d-resurrect" },
+    body: payload,
+  }));
+  assert.equal(hook.status, 202);
+  assert.equal((await hook.json() as any).routing, "unresolved");
+});
+
+test("F10: pending-delivery routing is insert-once; redelivery reuses the stored project", async () => {
+  const store = new MemoryEventStore();
+  const h = createHandler(store, {
+    token: "owner-token-long-enough",
+    ownerPrincipal: { type: "human", id: "o" },
+    githubSecret: "s3cret",
+    githubRepoProjects: { "acme/envb": "b" },
+    trailerPolicy: "shadow",
+  });
+  const payload = JSON.stringify({
+    action: "opened", repository: { full_name: "acme/envb" }, sender: { login: "j" },
+    pull_request: { number: 1, title: "t", html_url: "https://x", updated_at: "2026-08-30T00:00:00Z", head: { sha: "abc", ref: "f" }, base: { ref: "main" } },
+  });
+  store.pending.push({
+    delivery_id: "d-pin", project: "pinned-a", raw_body: payload, received_at: "2026-09-01T00:00:00.000Z",
+    repo: "acme/envb", routing_source: "env", routing_state: "pending_policy",
+  });
+  const res = await h(new Request("http://test/hooks/github", {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-hub-signature-256": await ghSigned("s3cret", payload), "x-github-event": "pull_request", "x-github-delivery": "d-pin" },
+    body: payload,
+  }));
+  assert.equal(res.status, 202);
+  const bodyJ = await res.json() as any;
+  assert.equal(bodyJ.reused, true);
+  assert.equal(bodyJ.project, "pinned-a");
+  assert.equal(store.pending.filter((p) => p.delivery_id === "d-pin").length, 1);
+  assert.equal(store.pending.find((p) => p.delivery_id === "d-pin")!.project, "pinned-a");
+});
+
+test("F11: revoked tombstone with no live claimant activates without ?reassign", async () => {
+  const store = new MemoryEventStore();
+  const h = createHandler(store, { token: "owner-token-long-enough", ownerPrincipal: { type: "human", id: "o" } });
+  await put(h, "a", JSON.stringify({ ...body(), project: "a", github_repos: ["acme/app"], repositories: [{ name: "acme/app", aliases: [] }] }), "none");
+  const cur = await (await h(new Request("http://test/projects/a/policy", { headers: owner }))).json() as any;
+  assert.equal((await put(h, "a", JSON.stringify({ ...body(), project: "a", github_repos: [], repositories: [] }), cur.digest)).status, 201);
+  assert.equal(store.routes.get("acme/app")!.state, "revoked");
+  const take = await put(h, "b", JSON.stringify({ ...body(), project: "b", github_repos: ["acme/app"], repositories: [{ name: "acme/app", aliases: [] }] }), "none");
+  assert.equal(take.status, 201, await take.text());
+  assert.equal(store.routes.get("acme/app")!.project, "b");
+  assert.equal(store.routes.get("acme/app")!.state, "active");
+});
+
+test("F12: hook /2 POST /events under shadow/enforce is 503 and appends nothing; off may seal", async () => {
+  const kp = await generateSigningKey();
+  const pub = publicFromPrivate(kp.privateKey);
+  const commit = async (mode: "off" | "shadow" | "enforce") => {
+    const store = new MemoryEventStore();
+    const h = createHandler(store, {
+      token: "owner-token-long-enough",
+      ownerPrincipal: { type: "human", id: "o" },
+      trailerPolicy: mode,
+      credentials: [{
+        token: "assert-token-long-enough",
+        trust: "assert",
+        actor: { type: "agent", id: "hook" },
+        projects: ["p"],
+        allowed_actors: [{ type: "agent", id: "hook" }],
+        public_key: pub,
+        require_signature: true,
+      }],
+    });
+    const input = await signProducer({
+      project: "p",
+      actor: { type: "agent", id: "hook" },
+      action: "committed",
+      artifacts: [{ id: "commit:p@abc1234abc12", kind: "commit", role: "generated" }],
+      timestamp: "2026-09-09T12:00:00.000Z",
+      idempotency_key: "git:" + mode,
+      intent: "signed bump",
+      method: {
+        tool: "git",
+        automated: true,
+        params: {
+          branch: "main",
+          parents: ["defdefdefdefdefdefdefdefdefdefdefdefdefd"],
+          files: 1, insertions: 1, deletions: 0,
+          sha: "abcabcabcabcabcabcabcabcabcabcabcabcabca",
+          raw_message: "signed bump\n",
+          author: { name: "Jordan", email: "jordan@example.com" },
+        },
+      },
+    }, kp.privateKey, { format: PRODUCER_SIG_FORMAT_V2 });
+    const res = await h(new Request("http://test/events", {
+      method: "POST",
+      headers: { authorization: "Bearer assert-token-long-enough", "content-type": "application/json" },
+      body: JSON.stringify(input),
+    }));
+    return { res, store };
+  };
+  const off = await commit("off");
+  assert.equal(off.res.status, 201, await off.res.text());
+  assert.equal(off.store.events.length, 1);
+  for (const mode of ["shadow", "enforce"] as const) {
+    const r = await commit(mode);
+    assert.equal(r.res.status, 503, mode);
+    assert.equal(r.store.events.length, 0, mode);
+    assert.match(await r.res.text(), /policy_missing/);
+  }
+});
+
+test("F16: /status routing matches delivery and does not leak another project's active repo", async () => {
+  const store = new MemoryEventStore();
+  const h = createHandler(store, {
+    token: "owner-token-long-enough",
+    ownerPrincipal: { type: "human", id: "o" },
+    githubRepoProjects: { "acme/app": "b", "acme/onlyb": "b" },
+  });
+  await put(h, "a", JSON.stringify({ ...body(), project: "a", github_repos: ["acme/app"], repositories: [{ name: "acme/app", aliases: [] }] }), "none");
+  const bStatus = await (await h(new Request("http://test/projects/b/status", { headers: owner }))).json() as any;
+  assert.ok(!bStatus.routing?.some((r: any) => r.repo === "acme/app" && r.source === "env_fallback"));
+  assert.ok(bStatus.routing?.some((r: any) => r.repo === "acme/onlyb" && r.source === "env_fallback"));
+  const aStatus = await (await h(new Request("http://test/projects/a/status", { headers: owner }))).json() as any;
+  assert.ok(aStatus.routing?.some((r: any) => r.repo === "acme/app" && r.source === "policy"));
 });

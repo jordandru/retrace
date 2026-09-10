@@ -468,15 +468,24 @@ test("P6: set-policy refuses declared-project mismatch; --cross-project-copy pri
   const refused = await proposeSetPolicy({ project: "demo", fromPath: cfg, ifMatch: "none" });
   assert.match(refused.printed, /refused/);
   assert.equal(refused.body, undefined);
-  const copied = await proposeSetPolicy({ project: "demo", fromPath: cfg, ifMatch: "none", crossProjectCopy: true });
+  const fetchImpl: typeof fetch = async () =>
+    new Response(JSON.stringify({ routing: [{ repo: "acme/demo", source: "env_fallback" }] }), { status: 200 });
+  const copied = await proposeSetPolicy({
+    project: "demo", fromPath: cfg, ifMatch: "none", crossProjectCopy: true,
+    url: "https://worker.example", token: "tok", fetchImpl,
+  });
   assert.match(copied.printed, /--cross-project-copy/);
   assert.match(copied.printed, /body_preview_sha256/);
   assert.match(copied.printed, /settings-only preview, not the policy digest/);
   assert.equal(copied.body?.unresolved_claims, "record");
+  assert.deepEqual(copied.body?.github_repos, ["acme/demo"]);
   const unnamed = join(dir, "repo", ".retrace.json");
   mkdirSync(join(dir, "repo"));
   writeFileSync(unnamed, JSON.stringify({ reconcile: { hook_sealed_by: ["assert:x"] } }));
-  const hint = await proposeSetPolicy({ project: "demo", fromPath: unnamed, ifMatch: "none" });
+  const hint = await proposeSetPolicy({
+    project: "demo", fromPath: unnamed, ifMatch: "none",
+    url: "https://worker.example", token: "tok", fetchImpl,
+  });
   assert.match(hint.printed, /basename hint only/);
   assert.ok(copied.body);
   const { bodyPreviewSha256, policyDigestOf, validatePolicyEnvelope } = await import("@retrace-dev/core");
@@ -487,4 +496,13 @@ test("P6: set-policy refuses declared-project mismatch; --cross-project-copy pri
   });
   const digest = await policyDigestOf(copied.body!, fakeEnv);
   assert.notEqual(preview, digest);
+  const noUrl = await proposeSetPolicy({ project: "demo", fromPath: unnamed, ifMatch: "none" });
+  assert.match(noUrl.printed, /Worker|url and a token/i);
+  assert.equal(noUrl.refused, "worker mapping unavailable");
+  const badFetch: typeof fetch = async () => new Response("nope", { status: 503 });
+  const unavail = await proposeSetPolicy({
+    project: "demo", fromPath: unnamed, ifMatch: "none",
+    url: "https://worker.example", token: "tok", fetchImpl: badFetch,
+  });
+  assert.equal(unavail.refused, "worker mapping unavailable");
 });
