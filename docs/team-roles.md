@@ -84,3 +84,5 @@ never reliably calls the provenance tools; OpenCode is held (PR 19) until it can
 Reassign by saying so; the ledger will show the real assignment regardless. Revise this file when the
 evidence changes — a seat that stops earning its description, a new harness that clears the identity gate,
 or a budget that moves. Cite the events.
+
+_Gemini (agent/gemini) retired 2026-09-10: 7 events since 09-04, never called `retrace_instruct`; credential retired, id stays bound to its principal (never-reissue). Brought on by Claude Cowork in the early stages._
