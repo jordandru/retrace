@@ -294,6 +294,21 @@ test("N4: unavailable snapshot is 501 and does not fall back to getPolicy(curren
   assert.equal(currentLookups, 0, "must not fall back to getPolicy(current:true)");
 });
 
+test("N2: GET /policy without readPolicySnapshot is 501, not getPolicy(current)", async () => {
+  const stub = {
+    async head() { return null; }, async insert() {}, async byIdempotencyKey() { return null; },
+    async get() { return null; }, async all() { return []; }, async projects() { return []; },
+    async history() { return { events: [], truncated: false }; },
+    async createShare() {}, async getShare() { return null; },
+    async getPolicy() { return { body: body(), envelope: {}, digest: "x" }; },
+  } as any;
+  const h = createHandler(stub, { token: "owner-token-long-enough", ownerPrincipal: { type: "human", id: "o" } });
+  const res = await h(new Request("http://test/projects/p/policy", { headers: owner }));
+  const text = await res.text();
+  assert.equal(res.status, 501, text);
+  assert.match(text, /unavailable/);
+});
+
 test("N5: duck-typed RouteConflictError name is not treated as a claim conflict", async () => {
   const store = new MemoryEventStore();
   const h = createHandler(store, { token: "owner-token-long-enough", ownerPrincipal: { type: "human", id: "o" } });
@@ -435,6 +450,17 @@ test("F11: revoked tombstone with no live claimant activates without ?reassign",
   assert.equal(take.status, 201, await take.text());
   assert.equal(store.routes.get("acme/app")!.project, "b");
   assert.equal(store.routes.get("acme/app")!.state, "active");
+});
+
+test("N6: revoked tombstone whose owner document still lists the repo requires ?reassign", async () => {
+  const store = new MemoryEventStore();
+  const h = createHandler(store, { token: "owner-token-long-enough", ownerPrincipal: { type: "human", id: "o" } });
+  await put(h, "a", JSON.stringify({ ...body(), project: "a", github_repos: ["acme/app"], repositories: [{ name: "acme/app", aliases: [] }] }), "none");
+  store.routes.get("acme/app")!.state = "revoked";
+  const take = await put(h, "b", JSON.stringify({ ...body(), project: "b", github_repos: ["acme/app"], repositories: [{ name: "acme/app", aliases: [] }] }), "none");
+  const text = await take.text();
+  assert.equal(take.status, 409, text);
+  assert.match(text, /reassign=a/);
 });
 
 test("F12: hook /2 POST /events under shadow/enforce is 503 and appends nothing; off may seal", async () => {

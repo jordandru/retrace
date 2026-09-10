@@ -851,12 +851,18 @@ async function planRouteChanges(opts: {
     }
     // Revoked row owned by another project: env stays ineligible. ?reassign is only for a *live*
     // claimant (current document still lists the repo). A tombstone with no live claimant may be
-    // activated by a new owner PUT without ?reassign.
-    // Revoked row: the previous owner dropped the repo by definition, so there is no live
-    // claimant and ?reassign is not required (F11). Env stays ineligible via the tombstone.
+    // activated by a new owner PUT without ?reassign. Keep the owner-document check even though
+    // the SQL upsert already has one — inconsistent store state must not silently steal.
     if (existing.state === "revoked" && existing.project !== opts.project) {
-      routes.push({ repo, state: "active", project: opts.project, digest: "", activation_seq: 0, set_at: "" });
-      primaryChanges.push({ repo, from_project: existing.project, to_project: opts.project, state: "active" });
+      const ownerDoc = opts.currentByProject[existing.project];
+      if (ownerDoc?.body.github_repos.includes(repo)) {
+        if (!opts.reassignFrom || opts.reassignFrom !== existing.project)
+          return { error: `repository ${repo} is routed to project ${existing.project}; pass ?reassign=${existing.project}` };
+        reassignNeeded.add(repo);
+      } else {
+        routes.push({ repo, state: "active", project: opts.project, digest: "", activation_seq: 0, set_at: "" });
+        primaryChanges.push({ repo, from_project: existing.project, to_project: opts.project, state: "active" });
+      }
     }
   }
 
@@ -1056,17 +1062,16 @@ export function verifyPolicySelectionOffline(opts: {
   }
   const snapshot: PolicySnapshot = { U: U < 0 ? -1 : U, events: opts.events.filter((e) => e.seq <= U), activations: opts.events.filter((e) => e.seq <= U) };
   const selected = selectPolicyForContext(snapshot, documents);
-  const auditMismatch = snapshot.activations.some((e) => {
-    const ev = evaluateActivation(e, documents, []);
-    return ev.status === "ignored" && ev.reason === "policy_audit_mismatch";
-  });
   if (selected.status === "incomplete") {
     findings.push(selected.reason === "policy_missing" ? "policy_missing" : "policy_corrupt");
     return { ok: false, findings, selected };
   }
   if (opts.claimedDigest) {
     if (selected.status === "none") {
-      findings.push(auditMismatch ? "policy_audit_mismatch" : "policy_missing");
+      const art = `policy:${opts.project}@${opts.claimedDigest}`;
+      const claimedAct = snapshot.activations.find((e) => e.artifacts.some((a) => a.id === art));
+      const ev = claimedAct ? evaluateActivation(claimedAct, documents, []) : undefined;
+      findings.push(ev?.status === "ignored" && ev.reason === "policy_audit_mismatch" ? "policy_audit_mismatch" : "policy_missing");
       return { ok: false, findings, selected };
     }
     if (selected.digest !== opts.claimedDigest) {

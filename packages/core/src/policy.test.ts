@@ -267,6 +267,28 @@ test("N3: spoofed activation actor/set_by is policy_audit_mismatch, not policy_m
   });
   assert.ok(result.findings.includes("policy_audit_mismatch"), JSON.stringify(result.findings));
   assert.equal(result.findings.includes("policy_missing"), false, JSON.stringify(result.findings));
+
+  const other = "d2".padEnd(64, "0");
+  const olderSpoof = fakeEvent({
+    id: "evt_old", seq: 3, artifacts: [{ id: art, kind: "policy", role: "generated" }],
+    actor: { type: "human", id: "invented" },
+    method: { tool: "retrace-api", params: { sealed_by: SEALED_BY_OWNER, policy_profile: POLICY_PROFILE, policy_version: 1, policy_digest: v1.digest, supersedes: null, set_by: { type: "human", id: "other" } } },
+    idempotency_key: "policy:p:1",
+  });
+  const unrelated = fakeEvent({
+    id: "e5b", seq: 5, action: "instructed", artifacts: [{ id: "t" }],
+    actor: { type: "human", id: "j" }, idempotency_key: "x:5",
+  });
+  const onlyClaimed = verifyPolicySelectionOffline({
+    project: "p",
+    claimedDigest: other,
+    readHeadSeq: 5,
+    events: [...prefix.slice(0, 3), olderSpoof, prefix[4]!, unrelated],
+    policies: [v1],
+    coverageComplete: true,
+  });
+  assert.ok(onlyClaimed.findings.includes("policy_missing"), JSON.stringify(onlyClaimed.findings));
+  assert.equal(onlyClaimed.findings.includes("policy_audit_mismatch"), false, "audit mismatch is for the claimed activation only");
 });
 
 test("F14: localConfigDrift compares aliases, not only repository names", () => {

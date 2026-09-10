@@ -759,8 +759,8 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
               return json(doc);
             }
             const snap = store.readPolicySnapshot ? await store.readPolicySnapshot(project) : undefined;
-            if (snap?.unavailable) return json({ error: "policy unavailable" }, 501);
-            const doc = snap !== undefined ? (snap.document ?? null) : await store.getPolicy(project, { current: true });
+            if (snap === undefined || snap.unavailable) return json({ error: "policy unavailable" }, 501);
+            const doc = snap.document ?? null;
             if (!doc) return json({ error: "not found" }, 404);
             return json(doc);
           }
