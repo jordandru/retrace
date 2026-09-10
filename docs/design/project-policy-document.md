@@ -1,6 +1,7 @@
 # Project policy document — contract (trailer-consistency §15 step 2)
 
-**Status:** DRAFT v4, 2026-09-10, author claude-code. v1 (d3aec24), v2 (91eb0fb) and v3 (41d5471) were
+**Status:** **v4.1 — APPROVED FOR BUILD (Codex, commit comment on 063c60a, 2026-09-10T03:45Z)**, author
+claude-code; v4.1 adds only the builder notes in §11 and a P2 wording fix. Originally DRAFT v4, 2026-09-10. v1 (d3aec24), v2 (91eb0fb) and v3 (41d5471) were
 design-reviewed by Codex (commit comments 2026-09-10T03:16Z, 03:23Z, 03:39Z): all *request changes*, each
 round narrower. v3 closed V2-1…V2-6 (serialisation, authentication, ordering via ledger activations, context
 key, routing, missing-policy). v4 folds V3-1…V3-4 — the **authoritative activation predicate**, deferral
@@ -268,7 +269,8 @@ v1's digest as `If-Match` (same or different changed bodies) → exactly one 201
 second's precondition is stale even if its body now equals v2; resubmitting with v2's digest is a new
 request (200 if equal, 201 v3 if different); two concurrent **unchanged**-body PUTs against the still-current
 version → both 200, nothing written; `retrace-serve` without `RETRACE_OWNER` → 403.
-P2 Canonical form: golden body+envelope vectors byte-exact; `"a"` and `"a"` produce one digest;
+P2 Canonical form: golden body+envelope vectors byte-exact; the input spellings `"a"` and `"\u0061"`
+produce one digest;
 non-ASCII literal; control-character escapes; unsorted/duplicate arrays, floats, negative or 2^53 integers,
 lone surrogate, unknown nested field → 400.
 P3 Historical resolution: v1 trusts X; withheld seal with a v1 context; v2 removes X → seal verifies under
@@ -309,7 +311,23 @@ Credential `principal` / never-reissue (PR 31, in parallel); the classifier and 
 removing `RETRACE_GITHUB_PROJECTS` entirely (after bootstrap completes); `policy:write` permission for
 team credentials (an authorisation extension, per Codex Q3).
 
-## 11. Dispositions
+## 11. Builder notes (Codex approval, non-blocking; each must be closed by the half-B PR)
+
+1. **Missing document is incomplete evidence, not an ignorable event.** Apply §5/P9's missing/corrupt-policy
+   rule *before* treating a candidate activation as an ordinary ignored event: a complete event prefix whose
+   required activation document is absent must not let a later real activation "disappear" and permit
+   fallback to an older version. Fixture: v2 activation present, v2 document absent, context claims v1 →
+   no successful policy-verification verdict.
+2. **`policy:` reservation and atomicity.** Reject the prefix on every ordinary append ingress, owner bearer
+   included; the atomic `PUT` uses an internal-only path. Cross-check the complete audit shape (actor,
+   `on_behalf_of`, `params.set_by`, both back-references). Keep selection an indexed bounded lookup — never
+   an online scan of all activations. Test transaction rollback: a failed write leaves no partial activation
+   and no changed route or document.
+3. **Serializer tests on raw input.** Use the §2 example (`"a"` vs `"\u0061"`) in the actual test. Detect
+   duplicate JSON keys *before* a normal parser discards them — test raw request bodies and raw bundle
+   bytes, not only constructed objects.
+
+## 12. Dispositions
 
 | Round | Finding | Where answered |
 |---|---|---|
@@ -332,3 +350,4 @@ team credentials (an authorisation extension, per Codex Q3).
 | v3→v4 | V3-3 (P2) concurrency outcomes contradict If-Match | P1 rewritten: one 201 + one 412 |
 | v3→v4 | V3-4 (P2) team principal not an Event actor | §6 shape: `system/retrace-api` on_behalf_of principal, `params.set_by` verbatim |
 | v3→v4 | non-blocking: reserve event id/seq before hashing; completeness for verifiability; alias stability; RFC input rules; escape example | §3 step 4; §6 consequences; P7; §2 |
+| v4→v4.1 | **APPROVE** (build-ready); three non-blocking implementation notes | §11 builder notes; P2 wording |
