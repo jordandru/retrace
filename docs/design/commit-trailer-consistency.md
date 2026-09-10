@@ -776,7 +776,10 @@ Grok's review of v2.4 (from 2026-09-11) is welcome and may reopen this section; 
    for shadow and enforce; T27, T32, T38, T39 as tests. **Must merge and deploy before step 3.** Release sequence
    (v2.5; Codex PR 29 finding 3): Worker → publish `@retrace-dev/core` → publish `@retrace-dev/cli` → re-run
    `retrace-git install` in hooked repos; the packed CLI is validated against its declared core dependency, not the
-   workspace link. T32's verifier half ships here because the published offline verifier must know rule 3 before
+   workspace link.
+   **Status 2026-09-09:** PR 29 MERGED as 8dc9b1c (cursor-agent built; Codex five rounds, APPROVE; claude-code
+   last); Worker deployed version 8bca96a1, `/api` advertises `producer-sig/2`; main dist rebuilt; core/CLI 0.1.8
+   publish pending (Jordan). `RETRACE_TRAILER_POLICY` unset → `off`. T32's verifier half ships here because the published offline verifier must know rule 3 before
    step 3 writes the first withheld seal.
 2. **Credential `principal`** and never-reissue rule (§10; PR 27 follow-up); `RETRACE_GITHUB_PROJECTS`
    → stored project policy document with digest (§9); `npm run migrate` switched to the query endpoint.
