@@ -2,9 +2,11 @@
 import { DatabaseSync } from "node:sqlite";
 import {
   ArtifactIndexQuery, ArtifactIndexResult, BACKFILL_ARTIFACT_INDEX_SQL, ChainHead, Event, EventStore, HeadMovedError,
-  HistoryQuery, HistoryPage, PendingDelivery, SCHEMA_SQL, Share, artifactIndexRows, clampHistoryLimit,
+  HistoryQuery, HistoryPage, PendingDelivery, SCHEMA_PENDING_ROUTE_COLUMNS_SQL, SCHEMA_SQL, Share, artifactIndexRows, clampHistoryLimit,
   eventsReferencingArtifactsSql, historyPageFromNewestFirst, likeContains,
 } from "@retrace-dev/core";
+import type { PolicyRouteRow, PolicySnapshot, PolicySnapshotBudget, PolicyWrite } from "@retrace-dev/core";
+import { assertRouteWriteConsistent, policyDocumentFromRow, policySnapshotFromIndex } from "@retrace-dev/core";
 
 export class SqliteStore implements EventStore {
   private db: DatabaseSync;
@@ -12,6 +14,9 @@ export class SqliteStore implements EventStore {
     this.db = new DatabaseSync(path);
     this.db.exec("PRAGMA journal_mode = WAL;");
     this.db.exec(SCHEMA_SQL);
+    for (const sql of SCHEMA_PENDING_ROUTE_COLUMNS_SQL) {
+      try { this.db.exec(sql); } catch { /* column already present */ }
+    }
     this.backfillArtifactIndexOnce();
   }
 
@@ -61,7 +66,7 @@ export class SqliteStore implements EventStore {
   /** Deletes + audit insert in one transaction (B3); the local server's DELETE /projects/:p needs this. The head
    *  check runs inside the same transaction, so the audit can only ever commit against the head it describes. */
   async deleteProject(project: string, audit: Event, expectedHead: ChainHead) {
-    const tables = ["events", "event_artifacts", "event_artifact_index", "pending_deliveries", "shares"];
+    const tables = ["events", "event_artifacts", "event_artifact_index", "pending_deliveries", "shares", "project_policies"];
     this.db.exec("BEGIN");
     try {
       const head = this.headSync(project); // synchronous: the transaction never yields between check and deletes
@@ -155,18 +160,103 @@ export class SqliteStore implements EventStore {
   }
 
   async insertPendingDelivery(row: PendingDelivery) {
-    this.db.prepare(
-      "INSERT OR REPLACE INTO pending_deliveries (delivery_id, project, raw_body, received_at) VALUES (?, ?, ?, ?)",
-    ).run(row.delivery_id, row.project, row.raw_body, row.received_at);
+    try {
+      this.db.prepare(
+        "INSERT INTO pending_deliveries (delivery_id, project, raw_body, received_at, repo, routing_source, routing_digest, routing_state) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      ).run(row.delivery_id, row.project, row.raw_body, row.received_at, row.repo ?? null, row.routing_source ?? null, row.routing_digest ?? null, row.routing_state ?? null);
+    } catch (e: unknown) {
+      if (!/UNIQUE/i.test(String((e as Error)?.message))) throw e;
+    }
+  }
+
+  async getPendingDelivery(delivery_id: string): Promise<PendingDelivery | null> {
+    return (this.db.prepare(
+      "SELECT delivery_id, project, raw_body, received_at, repo, routing_source, routing_digest, routing_state FROM pending_deliveries WHERE delivery_id = ?",
+    ).get(delivery_id) as PendingDelivery | undefined) ?? null;
   }
 
   async listPendingDeliveriesOlderThan(received_at: string): Promise<PendingDelivery[]> {
     return this.db.prepare(
-      "SELECT delivery_id, project, raw_body, received_at FROM pending_deliveries WHERE received_at < ? ORDER BY received_at ASC",
+      "SELECT delivery_id, project, raw_body, received_at, repo, routing_source, routing_digest, routing_state FROM pending_deliveries WHERE received_at < ? ORDER BY received_at ASC",
     ).all(received_at) as unknown as PendingDelivery[];
   }
 
   async deletePendingDelivery(delivery_id: string): Promise<boolean> {
     return this.db.prepare("DELETE FROM pending_deliveries WHERE delivery_id = ?").run(delivery_id).changes > 0;
+  }
+
+  async getPolicy(project: string, lookup: { digest?: string; version?: number; current?: boolean } = { current: true }) {
+    let row: { body: string; envelope: string; digest: string } | undefined;
+    if (lookup.digest) {
+      row = this.db.prepare("SELECT body, envelope, digest FROM project_policies WHERE project = ? AND digest = ?").get(project, lookup.digest) as typeof row;
+    } else if (lookup.version !== undefined) {
+      row = this.db.prepare("SELECT body, envelope, digest FROM project_policies WHERE project = ? AND version = ?").get(project, lookup.version) as typeof row;
+    } else {
+      row = this.db.prepare("SELECT body, envelope, digest FROM project_policies WHERE project = ? ORDER BY version DESC LIMIT 1").get(project) as typeof row;
+    }
+    return row ? policyDocumentFromRow(row) : null;
+  }
+
+  async listPolicies(project: string, limit = 50) {
+    const rows = this.db.prepare("SELECT body, envelope, digest FROM project_policies WHERE project = ? ORDER BY version DESC LIMIT ?").all(project, limit) as { body: string; envelope: string; digest: string }[];
+    return rows.map(policyDocumentFromRow);
+  }
+
+  async getPolicyRoute(repo: string) {
+    return (this.db.prepare("SELECT repo, state, project, digest, activation_seq, set_at FROM policy_routes WHERE repo = ?").get(repo) as PolicyRouteRow | undefined) ?? null;
+  }
+
+  async listPolicyRoutes(project: string) {
+    return this.db.prepare("SELECT repo, state, project, digest, activation_seq, set_at FROM policy_routes WHERE project = ? ORDER BY repo").all(project) as unknown as PolicyRouteRow[];
+  }
+
+  async getPolicyByActivationSeq(project: string, throughSeq: number) {
+    const row = this.db.prepare("SELECT body, envelope, digest FROM project_policies WHERE project = ? AND activation_seq <= ? ORDER BY activation_seq DESC LIMIT 1").get(project, throughSeq) as { body: string; envelope: string; digest: string } | undefined;
+    return row ? policyDocumentFromRow(row) : null;
+  }
+
+  async readPolicySnapshot(project: string, U?: number, budget?: PolicySnapshotBudget): Promise<PolicySnapshot> {
+    const head = this.headSync(project);
+    return policySnapshotFromIndex({
+      project,
+      U,
+      budget,
+      headSeq: head?.seq,
+      getByActivationSeq: (p, seq) => this.getPolicyByActivationSeq(p, seq),
+      getEvent: (id) => this.get(id),
+    });
+  }
+
+  async applyPolicyWrite(write: PolicyWrite, expectedHeads: Record<string, ChainHead | null>) {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const [project, expected] of Object.entries(expectedHeads)) {
+        const head = this.headSync(project);
+        if (expected === null) {
+          if (head) throw new HeadMovedError(project, { seq: -1, hash: "none" });
+        } else if (!head || head.seq !== expected.seq || head.hash !== expected.hash) {
+          throw new HeadMovedError(project, expected);
+        }
+      }
+      assertRouteWriteConsistent(
+        write,
+        (repo) => (this.db.prepare("SELECT repo, state, project, digest, activation_seq, set_at FROM policy_routes WHERE repo = ?").get(repo) as PolicyRouteRow | undefined) ?? null,
+        (project) => {
+          const row = this.db.prepare("SELECT body, envelope, digest FROM project_policies WHERE project = ? ORDER BY version DESC LIMIT 1").get(project) as { body: string; envelope: string; digest: string } | undefined;
+          return row ? policyDocumentFromRow(row) : null;
+        },
+      );
+      for (const e of write.events) this.insertRows(e);
+      const insPol = this.db.prepare("INSERT INTO project_policies (project, version, digest, body, envelope, activation_seq, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)");
+      for (const d of write.documents) {
+        insPol.run(d.body.project, d.envelope.version, d.digest, JSON.stringify(d.body), JSON.stringify(d.envelope), d.envelope.activation.seq, d.envelope.created_at);
+      }
+      const ups = this.db.prepare("INSERT OR REPLACE INTO policy_routes (repo, state, project, digest, activation_seq, set_at) VALUES (?, ?, ?, ?, ?, ?)");
+      for (const r of write.routes) ups.run(r.repo, r.state, r.project, r.digest, r.activation_seq, r.set_at);
+      this.db.exec("COMMIT");
+    } catch (err) {
+      this.db.exec("ROLLBACK");
+      throw err;
+    }
   }
 }

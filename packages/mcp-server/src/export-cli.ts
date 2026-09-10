@@ -20,7 +20,7 @@
  */
 import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import { ProducerKey, keyId, buildExportBundle, verifyExportBundle, exportVerdictOk, renderReportHtml, parseSigningKey, ExportBundle, newShareId, checkpointFromBundle, verifyCheckpoint, compareBundleToCheckpoint, parseCheckpointLog, latestCheckpoint } from "@retrace-dev/core";
+import { ProducerKey, keyId, buildExportBundle, verifyExportBundle, exportVerdictOk, policyFindingsFailExport, parseExportBundle, renderReportHtml, parseSigningKey, ExportBundle, newShareId, checkpointFromBundle, verifyCheckpoint, compareBundleToCheckpoint, parseCheckpointLog, latestCheckpoint } from "@retrace-dev/core";
 import { makeStore } from "./index.js";
 import { RemoteStore } from "./remote-store.js";
 import { ensureSigningKey, loadSigningKey } from "./keys.js";
@@ -31,7 +31,6 @@ import { amendAttributionMain, attributionOptionsForRepo } from "./attribution.j
 import { collectAttributionAmendments, attributionSummary, renderTimeline } from "@retrace-dev/core";
 import { reconcileMain } from "./reconcile.js";
 import { loadPublicKey, resolveTrustedKey } from "./trusted-key.js";
-import { trustedHookStampsFor } from "./hook-stamps.js";
 
 /** Checkpoint witnesses use a separate signing key, so never silently reuse the export issuer key. */
 async function resolveCheckpointTrustedKey(flag: unknown): Promise<{ key: JsonWebKey; from: string } | undefined> {
@@ -50,11 +49,9 @@ function parseArgs(argv: string[]) {
 }
 
 function bundleVerifyOpts(flags: Record<string, string | boolean>, bundle: ExportBundle, producers?: ProducerKey[]) {
-  const project = bundle.scope.project;
-  const trustedHookStamps = trustedHookStampsFor(String(flags.repo ?? process.cwd()), project);
+  // Stamps come from bundle.policies (verifyExportBundle). `.retrace.json` is bootstrap-only.
   return {
-    project,
-    ...(trustedHookStamps ? { trustedHookStamps } : {}),
+    project: bundle.scope.project,
     ...(producers ? { producers } : {}),
   };
 }
@@ -65,7 +62,7 @@ async function main() {
   if (cmd === "amend-attribution") { process.exitCode = await amendAttributionMain(flags); return; }
   if (cmd === "render") {
     if (!pos[1]) throw new Error("usage: retrace-export render <bundle.json> [--effective] [--repo . --policy policy.json]");
-    const bundle = JSON.parse(readFileSync(pos[1],"utf8")) as ExportBundle;
+    const bundle = parseExportBundle(readFileSync(pos[1],"utf8"));
     const trusted=await resolveTrustedKey(flags.pubkey);
     const verdict=await verifyExportBundle(bundle,trusted?.key, bundleVerifyOpts(flags, bundle));
     let attribution=collectAttributionAmendments(bundle.events);
@@ -108,7 +105,7 @@ async function main() {
   }
   if (cmd === "verify") {
     const file = pos[1]; if (!file) throw new Error("usage: retrace-export verify <bundle.json> [--pubkey jwk.json|url]");
-    const bundle = JSON.parse(readFileSync(file, "utf8")) as ExportBundle;
+    const bundle = parseExportBundle(readFileSync(file, "utf8"));
     const trusted = await resolveTrustedKey(flags.pubkey);
     // --producers: a TRUSTED producer-key list that replaces the bundle's own (which is self-attested, like the
     // issuer key). Each entry's kid is recomputed from its public_key; a mismatch is a corrupt or tampered file.
@@ -124,7 +121,8 @@ async function main() {
     const v = await verifyExportBundle(bundle, trusted?.key, bundleVerifyOpts(flags, bundle, producers));
     let ok = exportVerdictOk(v);
     // Self-attested = the bundle verified against the key it carries. Anyone can produce that. Fail closed unless asked.
-    if (v.signature === "self_attested" && flags["allow-self-attested"] && v.events_intact && v.links_consistent && v.chain_ok_at_export && v.coverage.complete !== false) ok = true;
+    // Policy selection failures still never pass VALID.
+    if (v.signature === "self_attested" && flags["allow-self-attested"] && v.events_intact && v.links_consistent && v.chain_ok_at_export && v.coverage.complete !== false && !policyFindingsFailExport(v.policy_findings)) ok = true;
     console.log(`${ok ? "VALID" : "NOT VALID"} — signature: ${v.signature}${v.kid ? " (kid " + v.kid + (trusted ? ", trusted key from " + trusted.from : ", key embedded in bundle — NOT a trusted key") + ")" : ""}; events intact: ${v.events_intact}; links: ${v.links_consistent}; chain ok at export: ${v.chain_ok_at_export}; coverage: ${v.coverage.scope === "full" ? (v.coverage.complete ? "complete" : "INCOMPLETE") : "scoped (omission not checkable offline)"} — ${v.coverage.events} of ${v.coverage.total_events} events${v.legacy_hash_events ? `; ${v.legacy_hash_events} legacy-hash event${v.legacy_hash_events === 1 ? "" : "s"} (received_at not provably covered)` : ""}${v.producer_signed || v.producer_invalid || v.producer_unsigned_agent_events ? `; producer sigs: ${v.producer_signed} verified · ${v.producer_invalid} INVALID · ${v.producer_unsigned_agent_events} unsigned agent event${v.producer_unsigned_agent_events === 1 ? "" : "s"}` : ""}`);
     console.log("  coverage: " + v.coverage.note);
     let attribution=collectAttributionAmendments(bundle.events);
@@ -185,7 +183,7 @@ async function main() {
   if (cmd === "checkpoint") {
     const project = pos[1]; if (!project) throw new Error("usage: retrace-export checkpoint <project> [--bundle file.json] [--out .retrace/checkpoints.jsonl]");
     let bundle: ExportBundle;
-    if (flags.bundle) bundle = JSON.parse(readFileSync(String(flags.bundle), "utf8"));
+    if (flags.bundle) bundle = parseExportBundle(readFileSync(String(flags.bundle), "utf8"));
     else {
       const store = makeStore();
       if (store instanceof RemoteStore) bundle = await store.export({ project });

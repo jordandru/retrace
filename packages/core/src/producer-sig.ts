@@ -232,15 +232,18 @@ function competingWithheldSelectors(cd: Record<string, unknown>): boolean {
  */
 export type ProducerVerifyOpts = {
   trustedHookStamps?: readonly string[];
+  /** Per-event stamps (resolved policy version). Overrides `trustedHookStamps` when set. */
+  stampsFor?: (e: Event) => readonly string[] | undefined;
   /** Ledger project these stamps were resolved for. Hook substitution requires `opts.project === e.project`. */
   project?: string;
 };
 
-function trustedStampKind(sealedBy: unknown, opts: ProducerVerifyOpts | undefined, eventProject: string): "hook" | "webhook" | undefined {
+function trustedStampKind(sealedBy: unknown, opts: ProducerVerifyOpts | undefined, eventProject: string, event?: Event): "hook" | "webhook" | undefined {
   if (typeof sealedBy !== "string" || sealedBy === "") return undefined;
   if (sealedBy === SEALED_BY_GITHUB_WEBHOOK) return "webhook";
   if (opts?.project !== eventProject) return undefined;
-  if (opts.trustedHookStamps?.includes(sealedBy)) return "hook";
+  const stamps = (event && opts.stampsFor?.(event)) ?? opts.trustedHookStamps;
+  if (stamps?.includes(sealedBy)) return "hook";
   return undefined;
 }
 
@@ -250,7 +253,7 @@ function trustedStampKind(sealedBy: unknown, opts: ProducerVerifyOpts | undefine
  */
 export function reconstructWithheldPayload(e: Signable, opts?: ProducerVerifyOpts): Signable | undefined {
   if (!isGitCommitSeal(e)) return undefined;
-  const stamp = trustedStampKind(e.method?.params?.[SEALED_BY_PARAM], opts, e.project);
+  const stamp = trustedStampKind(e.method?.params?.[SEALED_BY_PARAM], opts, e.project, typeof (e as Event).seq === "number" ? e as Event : undefined);
   if (!stamp) return undefined;
   const expected = stamp === "webhook" ? PRODUCER_WEBHOOK_SYSTEM_ACTOR : PRODUCER_HOOK_SYSTEM_ACTOR;
   if (!isExactSystemActor(e.actor, expected)) return undefined;

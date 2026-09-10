@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -27,14 +27,14 @@ if (mode === "exit9") process.exit(9);
 process.exit(0);
 `;
 
-function fakeWrangler(dir) {
+function fakeWrangler(dir: string) {
   const path = join(dir, "wrangler");
   writeFileSync(path, FAKE_WRANGLER, { mode: 0o755 });
   chmodSync(path, 0o755);
   return path;
 }
 
-function runMigrate(dir, fake, wranglerPath = fakeWrangler(dir)) {
+function runMigrate(dir: string, fake: string, wranglerPath = fakeWrangler(dir)) {
   const log = join(dir, "wrangler.log");
   writeFileSync(log, "");
   const result = spawnSync(process.execPath, [migrateJs], {
@@ -47,7 +47,7 @@ function runMigrate(dir, fake, wranglerPath = fakeWrangler(dir)) {
       WRANGLER_FAKE: fake,
     },
   });
-  const commands = readFileSync(log, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line) as { command: boolean; file: boolean });
+  const commands = readFileSync(log, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line) as { command: boolean; file: boolean; alter?: boolean });
   return { result, commands };
 }
 
@@ -88,4 +88,54 @@ test("migrate treats a missing wrangler binary as failure (spawn error)", () => 
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /migrate: wrangler failed/);
   assert.equal(commands.length, 0);
+});
+
+test("resolveWrangler default finds stubbed repo-root node_modules/.bin/wrangler without RETRACE_WRANGLER", async () => {
+  const { resolveWrangler } = await import("../migrate.mjs");
+  const repo = mkdtempSync(join(tmpdir(), "retrace-migrate-resolve-"));
+  const worker = join(repo, "apps", "worker");
+  mkdirSync(worker, { recursive: true });
+  const override = fakeWrangler(repo);
+  assert.equal(resolveWrangler({ RETRACE_WRANGLER: override }, worker), override);
+
+  const rootBin = join(repo, "node_modules", ".bin");
+  mkdirSync(rootBin, { recursive: true });
+  const rootWrangler = fakeWrangler(rootBin);
+  const env = {};
+  assert.equal(resolveWrangler(env, worker), rootWrangler, "repo-root .bin without RETRACE_WRANGLER");
+  assert.equal("RETRACE_WRANGLER" in env, false);
+
+  const pkgBin = join(worker, "node_modules", ".bin");
+  mkdirSync(pkgBin, { recursive: true });
+  fakeWrangler(pkgBin);
+  assert.equal(resolveWrangler({}, worker), rootWrangler, "repo root wins over the package .bin");
+
+  const pkgOnly = mkdtempSync(join(tmpdir(), "retrace-migrate-pkg-"));
+  const pkgWorker = join(pkgOnly, "apps", "worker");
+  const onlyPkgBin = join(pkgWorker, "node_modules", ".bin");
+  mkdirSync(onlyPkgBin, { recursive: true });
+  const pkgWrangler = fakeWrangler(onlyPkgBin);
+  assert.equal(resolveWrangler({}, pkgWorker), pkgWrangler, "package .bin when the repo root has none");
+
+  assert.equal(resolveWrangler({}, join(tmpdir(), "retrace-empty-wrangler-")), "wrangler");
+});
+
+test("migrate treats duplicate column name as success and continues", () => {
+  const dir = mkdtempSync(join(tmpdir(), "retrace-migrate-dupcol-"));
+  const wranglerPath = join(dir, "wrangler");
+  writeFileSync(wranglerPath, `#!/usr/bin/env node
+import { appendFileSync } from "node:fs";
+const log = process.env.WRANGLER_LOG;
+const cmd = process.argv[process.argv.indexOf("--command") + 1] ?? "";
+if (log) appendFileSync(log, JSON.stringify({ command: true, file: false, alter: /ALTER TABLE/i.test(cmd) }) + "\\n");
+if (/ALTER TABLE/i.test(cmd)) {
+  console.error("duplicate column name: repo");
+  process.exit(1);
+}
+process.exit(0);
+`, { mode: 0o755 });
+  chmodSync(wranglerPath, 0o755);
+  const { result, commands } = runMigrate(dir, "ok", wranglerPath);
+  assert.equal(result.status, 0, result.stderr);
+  assert.ok(commands.some((c) => c.alter === true) || commands.length >= 2);
 });

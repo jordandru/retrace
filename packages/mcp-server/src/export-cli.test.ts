@@ -5,13 +5,27 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync }
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { appendEvent, buildExportBundle, checkpointFromBundle, generateSigningKey, keyId, signProducer, PRODUCER_SIG_FORMAT_V2, CLAIM_DECISION_PARAM, PRODUCER_HOOK_SYSTEM_ACTOR, SEALED_BY_PARAM } from "@retrace-dev/core";
+import { appendEvent, buildExportBundle, checkpointFromBundle, createHandler, generateSigningKey, keyId, signProducer, PRODUCER_SIG_FORMAT_V2, CLAIM_DECISION_PARAM, PRODUCER_HOOK_SYSTEM_ACTOR, SEALED_BY_PARAM, POLICY_PROFILE } from "@retrace-dev/core";
 import { SqliteStore } from "./sqlite-store.js";
 import { trustedHookStampsFor, producerVerifyOptsFor } from "./hook-stamps.js";
 
 const bin = fileURLToPath(new URL("./export-cli.js", import.meta.url));
 const HOST_VARS = /^(RETRACE_|ORCA_|CLAUDE_CODE_SESSION_ID$|GROK_SESSION_ID$)/;
 const baseEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => !HOST_VARS.test(k))) as Record<string, string>;
+
+async function putPolicy(store: SqliteStore, project: string, stamps: string[]) {
+  const h = createHandler(store, { token: "owner-token-long-enough", ownerPrincipal: { type: "human", id: "o" } });
+  const res = await h(new Request(`http://test/projects/${project}/policy`, {
+    method: "PUT",
+    headers: { authorization: "Bearer owner-token-long-enough", "content-type": "application/json", "if-match": "none" },
+    body: JSON.stringify({
+      profile: POLICY_PROFILE, project, trusted_hook_stamps: stamps,
+      unresolved_claims: "record", repositories: [], github_repos: [],
+    }),
+  }));
+  if (res.status !== 201) throw new Error(`PUT policy ${res.status}: ${await res.text()}`);
+  return (await res.json() as { digest: string }).digest;
+}
 
 function runVerify(args: string[]) {
   return spawnSync(process.execPath, [bin, "verify", ...args], { encoding: "utf8", env: baseEnv, cwd: args[0] ? dirname(args[0]) : undefined });
@@ -179,11 +193,16 @@ test("verify binds hook stamps to bundle.scope.project, not cwd (two-project, de
       },
     };
     const store = new SqliteStore(join(root, "ledger.db"));
+    const digest = await putPolicy(store, "projectB", ["assert:release-recorder"]);
+    (withheld.method.params[CLAIM_DECISION_PARAM] as { context?: { policy_digest: string; read_head_seq: number } }).context = {
+      policy_digest: digest, read_head_seq: 0,
+    };
     await appendEvent(store, withheld);
     const bundle = await buildExportBundle(store, { project: "projectB" }, {
       signingKey: issuer.privateKey,
       producers: [{ kid: await keyId(producer.publicKey), public_key: producer.publicKey }],
     });
+    assert.ok(bundle.policies?.some((d) => d.digest === digest));
     const bundleFile = join(root, "bundle.json");
     const issuerPub = join(root, "issuer-pub.json");
     writeFileSync(bundleFile, JSON.stringify(bundle));
@@ -192,10 +211,16 @@ test("verify binds hook stamps to bundle.scope.project, not cwd (two-project, de
     const verifyFrom = (cwd: string) =>
       spawnSync(process.execPath, [bin, "verify", bundleFile, "--pubkey", issuerPub], { encoding: "utf8", env: baseEnv, cwd });
 
+    // A-cwd / B-bundle uses B's enclosed policy, not repo A's .retrace.json.
     const fromA = verifyFrom(repoA);
-    assert.match(fromA.stdout, /producer sigs: 0 verified · 1 INVALID/, fromA.stdout + fromA.stderr);
+    assert.match(fromA.stdout, /producer sigs: 1 verified · 0 INVALID/, fromA.stdout + fromA.stderr);
     const fromB = verifyFrom(repoB);
     assert.match(fromB.stdout, /producer sigs: 1 verified · 0 INVALID/, fromB.stdout + fromB.stderr);
+
+    const stripped = { ...bundle, policies: [] };
+    writeFileSync(bundleFile, JSON.stringify(stripped));
+    const fromAMissing = verifyFrom(repoA);
+    assert.match(fromAMissing.stdout, /producer sigs: 0 verified · 1 INVALID/, fromAMissing.stdout + fromAMissing.stderr);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -329,6 +354,10 @@ test("verify basename fallback: no cfg.project, directory named projectB, B's wi
       },
     };
     const store = new SqliteStore(join(root, "ledger.db"));
+    const digest = await putPolicy(store, "projectB", ["assert:release-recorder"]);
+    (withheld.method.params[CLAIM_DECISION_PARAM] as { context?: { policy_digest: string; read_head_seq: number } }).context = {
+      policy_digest: digest, read_head_seq: 0,
+    };
     await appendEvent(store, withheld);
     const bundle = await buildExportBundle(store, { project: "projectB" }, {
       signingKey: issuer.privateKey,

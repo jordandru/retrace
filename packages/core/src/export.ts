@@ -5,10 +5,15 @@
  */
 import { Event } from "./schema.js";
 import { EventStore, collectHistory, verifyProject } from "./store.js";
-import { verifyChain, VerifyResult, computeHash, hashRule } from "./chain.js";
+import { verifyChain, VerifyResult, computeHash, hashRule, sha256Hex } from "./chain.js";
 import { ProducerKey, countProducerSigs } from "./producer-sig.js";
 import { GENESIS_HASH } from "./schema.js";
 import { keyId, publicFromPrivate, signCanonical, verifyCanonical } from "./signing.js";
+import {
+  POLICY_PROFILE, PolicyDocument, PolicyError, PolicyVerifyFinding, canonicalPolicyV1, collectReferencedPolicies,
+  documentMapKey, eventPolicyRef, parseJsonRejectDuplicateKeys, policyHashObject, validatePolicyBody, validatePolicyEnvelope,
+  verifyPolicySelectionOffline,
+} from "./policy.js";
 
 export const EXPORT_FORMAT = "retrace-export/1";
 
@@ -27,6 +32,8 @@ export interface ExportBundle {
    *  re-check producer signatures. Set BEFORE signing, so a swapped list invalidates the bundle signature. Bundle-
    *  carried keys are self-attested like the issuer key; the trusted path is a --producers file you hold. */
   producers?: ProducerKey[];
+  /** Every referenced (project, digest) plus documents needed to recompute activations. Placed before signing. */
+  policies?: PolicyDocument[];
   issuer?: { kid: string; alg: "Ed25519"; public_key: JsonWebKey; name?: string };
   signature?: string; // base64url Ed25519 over canonical(bundle without signature)
 }
@@ -65,6 +72,29 @@ export async function buildExportBundle(store: EventStore, scope: ExportScope, o
     context_events,
   };
   if (opts.producers?.length) bundle.producers = opts.producers;
+  if (store.listPolicies) {
+    const all = await store.listPolicies(scope.project, 100_000);
+    const referenced = collectReferencedPolicies(events, all);
+    // Always include every document whose activation event is in the exported set.
+    const byKey = new Map(referenced.map((d) => [documentMapKey(d.body.project, d.digest), d]));
+    for (const d of all) {
+      if (events.some((e) => e.id === d.envelope.activation.event_id)) byKey.set(documentMapKey(d.body.project, d.digest), d);
+    }
+    if (byKey.size) bundle.policies = [...byKey.values()];
+    const have = new Set(events.map((e) => e.id));
+    for (const d of byKey.values()) {
+      const id = d.envelope.activation.event_id;
+      if (have.has(id)) continue;
+      const act = await store.get(id);
+      if (!act || act.project !== scope.project) continue;
+      events.push(act);
+      have.add(id);
+      context_events++;
+    }
+    events.sort((a, b) => a.seq - b.seq);
+    bundle.events = events;
+    bundle.context_events = context_events;
+  }
   if (opts.signingKey) {
     const pub = publicFromPrivate(opts.signingKey);
     bundle.issuer = { kid: await keyId(pub), alg: "Ed25519", public_key: pub, name: opts.issuerName };
@@ -107,6 +137,7 @@ export interface ExportVerdict {
   producer_unsigned_agent_events: number;
   kid?: string;
   problems: string[];
+  policy_findings?: PolicyVerifyFinding[];
 }
 
 const MISSING_SEQ_CAP = 50;
@@ -200,20 +231,121 @@ export async function verifyExportBundle(bundle: ExportBundle, trustedPublicKey?
   // Producer signatures (rung 5): a supplied trusted list REPLACES the bundle's own (which is self-attested, like the
   // issuer key); with neither, signed events are uncheckable and only the unsigned-agent count is meaningful.
   const producerKeys = vopts?.producers ?? bundle.producers ?? [];
-  const ps = await countProducerSigs(sorted, producerKeys, {
-    trustedHookStamps: vopts?.trustedHookStamps,
-    project: vopts?.project ?? bundle.scope.project,
-  });
+  const project = vopts?.project ?? bundle.scope.project;
+  // Document resolution is authoritative even if a caller supplies trustedHookStamps.
+  const stampsFor = (e: Event) => {
+    const digest = eventPolicyRef(e).digest;
+    if (!digest) return undefined;
+    const docs = bundle.policies ?? [];
+    return docs.find((d) => d.digest === digest && d.body.project === e.project)?.body.trusted_hook_stamps;
+  };
+  const ps = await countProducerSigs(sorted, producerKeys, { stampsFor, project });
   problems.push(...ps.problems);
-  return { signature, events_intact, links_consistent, chain_ok_at_export: !!bundle.chain?.ok, coverage, legacy_hash_events, producer_signed: ps.producer_signed, producer_invalid: ps.producer_invalid, producer_unsigned_agent_events: ps.producer_unsigned_agent_events, kid: bundle.issuer?.kid, problems };
+  const policy_findings: PolicyVerifyFinding[] = [];
+  if (bundle.policies) {
+    for (const d of bundle.policies) {
+      try {
+        const recomputed = await sha256Hex(canonicalPolicyV1(policyHashObject(d.body, d.envelope)));
+        if (recomputed !== d.digest) {
+          policy_findings.push("policy_corrupt");
+          problems.push(`policy ${d.digest} digest mismatch`);
+        }
+        try {
+          validatePolicyBody(d.body);
+          validatePolicyEnvelope(d.envelope);
+        } catch (err: any) {
+          policy_findings.push("policy_corrupt");
+          problems.push(`policy ${d.digest} failed /1 validation: ${err?.message ?? err}`);
+        }
+        if (d.body.project !== bundle.scope.project) {
+          policy_findings.push("policy_project_mismatch");
+          problems.push(`policy ${d.digest} project ${d.body.project} != bundle ${bundle.scope.project}`);
+        }
+        if (d.body.profile !== POLICY_PROFILE) {
+          policy_findings.push("policy_unsupported_profile");
+          problems.push(`policy ${d.digest} unsupported profile`);
+        }
+      } catch (e: any) {
+        policy_findings.push("policy_corrupt");
+        problems.push(`policy ${d.digest} failed to recompute: ${e?.message ?? e}`);
+      }
+    }
+  }
+  const refs = sorted.map((e) => ({ e, ref: eventPolicyRef(e) })).filter((x) => x.ref.digest);
+  for (const { e, ref } of refs) {
+    const result = verifyPolicySelectionOffline({
+      project: e.project,
+      claimedDigest: ref.digest,
+      readHeadSeq: ref.readHeadSeq,
+      events: sorted,
+      policies: bundle.policies ?? [],
+      coverageComplete: coverage.complete === true || (coverage.scope === "full" && coverage.complete !== false),
+    });
+    policy_findings.push(...result.findings);
+    for (const f of result.findings) problems.push(`event #${e.seq} ${f}`);
+  }
+  return {
+    signature, events_intact, links_consistent, chain_ok_at_export: !!bundle.chain?.ok, coverage, legacy_hash_events,
+    producer_signed: ps.producer_signed, producer_invalid: ps.producer_invalid,
+    producer_unsigned_agent_events: ps.producer_unsigned_agent_events,
+    kid: bundle.issuer?.kid, problems, policy_findings: policy_findings.length ? policy_findings : undefined,
+  };
+}
+
+function stampsFromBundlePolicies(bundle: ExportBundle, project: string): readonly string[] | undefined {
+  const docs = (bundle.policies ?? []).filter((d) => d.body.project === project);
+  if (!docs.length) return undefined;
+  const current = docs.sort((a, b) => b.envelope.version - a.envelope.version)[0];
+  return current?.body.trusted_hook_stamps;
+}
+
+const POLICY_GATE_FINDINGS = new Set<PolicyVerifyFinding>([
+  "policy_missing",
+  "policy_misselected",
+  "policy_selection_unverifiable",
+  "policy_corrupt",
+  "policy_unsupported_profile",
+  "policy_project_mismatch",
+  "policy_audit_mismatch",
+]);
+
+export function policyFindingsFailExport(findings: PolicyVerifyFinding[] | undefined): boolean {
+  return (findings ?? []).some((f) => POLICY_GATE_FINDINGS.has(f));
 }
 
 /**
  * One boolean for callers that gate on a bundle: signed by a TRUSTED key, intact, linked, chain ok at export, and (for
  * full exports) complete. A self-attested signature does not pass — pass the issuer's public key to verifyExportBundle.
+ * Policy selection failures never pass VALID.
  */
 export function exportVerdictOk(v: ExportVerdict): boolean {
+  if (policyFindingsFailExport(v.policy_findings)) return false;
   return v.signature === "valid" && v.events_intact && v.links_consistent && v.chain_ok_at_export && v.coverage.complete !== false;
+}
+
+export function parseExportBundle(raw: string): ExportBundle {
+  let parsed: unknown;
+  try { parsed = parseJsonRejectDuplicateKeys(raw); }
+  catch (e) {
+    if (e instanceof PolicyError) throw new Error(`invalid export bundle: ${e.message}`);
+    throw e;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("invalid export bundle: not an object");
+  const obj = parsed as Record<string, unknown>;
+  if (obj.policies !== undefined) {
+    if (!Array.isArray(obj.policies)) throw new Error("invalid export bundle: policies must be an array");
+    for (const d of obj.policies) {
+      if (!d || typeof d !== "object" || Array.isArray(d)) throw new Error("invalid export bundle: policy document must be an object");
+      const doc = d as Record<string, unknown>;
+      try {
+        validatePolicyBody(doc.body);
+        validatePolicyEnvelope(doc.envelope);
+      } catch (e: any) {
+        throw new Error(`invalid export bundle: ${e?.message ?? e}`);
+      }
+    }
+  }
+  return parsed as ExportBundle;
 }
 
 export { verifyProject };

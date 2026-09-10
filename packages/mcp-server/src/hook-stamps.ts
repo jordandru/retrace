@@ -2,8 +2,10 @@ import { existsSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 
 /**
- * Exact `reconcile.hook_sealed_by` for a *named ledger project*. Returns undefined (fail closed,
- * no hook substitution) unless this repo's declared `.retrace.json` `project` equals `targetProject`.
+ * Bootstrap-only reader of `.retrace.json` `reconcile.hook_sealed_by` for `set-policy`.
+ * Verifiers take stamps from the stored / exported policy document, not this file.
+ * Returns undefined (fail closed, no hook substitution) unless this repo's declared
+ * `.retrace.json` `project` equals `targetProject`.
  * `basename(repo)` is a fallback only when `cfg.project` is absent — the same order doctor/reconcile
  * use to pick the ledger project (`cfg.project ?? basename`). A directory name never widens a
  * declared project's trust domain; `repoNamesFor` aliases are repository/artifact names, not

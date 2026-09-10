@@ -4,14 +4,12 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, lstatSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
-import { isAttributionAmendment, Actor, Credential, Event, ProjectStatus, ReconcileReport, asHistoryPage, causalRootState, renderProjectStatus, schemaSurface } from "@retrace-dev/core";
+import { isAttributionAmendment, Actor, Credential, Event, ProjectStatus, ReconcileReport, asHistoryPage, causalRootState, localConfigDrift, renderProjectStatus, schemaSurface } from "@retrace-dev/core";
 import { Cfg, commitToEvent, resolveHookToken } from "./git-hook.js";
 import { ReconcileCfg, commitFacts, reconcileOptionsFrom, reconcileWithGit, repoNamesFor } from "./reconcile.js";
 import { RemoteStore, retraceHeaders } from "./remote-store.js";
 import { fetchVerifiedRemoteEvents } from "./verified-events.js";
 import { isMainModule } from "./is-main.js";
-import { producerVerifyOptsFor } from "./hook-stamps.js";
-
 type Level = "pass" | "warn" | "fail";
 export type Finding = { level: Level; label: string; detail: string };
 export type DoctorArgs = { command: "doctor" | "status"; gate: boolean; json: boolean; local: boolean; repo?: string; statusProject?: string };
@@ -316,7 +314,7 @@ export async function remoteCaptureCoverage(
   baseUrl?: string,
   prefetched?: { events: Event[]; note: string },
 ): Promise<Finding> {
-  const { events, note } = prefetched ?? await fetchVerifiedRemoteEvents(store, project, pubkeyFlag, baseUrl, producerVerifyOptsFor(repo, project));
+  const { events, note } = prefetched ?? await fetchVerifiedRemoteEvents(store, project, pubkeyFlag, baseUrl, { project });
   let attribution: import("@retrace-dev/core").AttributionOptions | undefined;
   let attributionNote = "";
   if (events.some(isAttributionAmendment)) {
@@ -519,6 +517,21 @@ async function main() {
     } catch (e: any) {
       findings.push(result(gate ? "fail" : "warn", "issuance", `${e.message}; /status not checked`));
     }
+    try {
+      const res = await fetch(`${url}/projects/${encodeURIComponent(project)}/policy`, { headers });
+      if (res.status === 404) {
+        findings.push(result("warn", "local_config_drift", "no current policy document to compare against the local .retrace.json body"));
+      } else if (res.ok) {
+        const doc = await res.json() as { body: { trusted_hook_stamps: string[]; repositories: { name: string; aliases: string[] }[] } };
+        const drift = localConfigDrift({
+          stamps: cfg.reconcile?.hook_sealed_by,
+          repositories: (cfg as { attribution?: { repositories?: { name: string; aliases?: string[] }[] } }).attribution?.repositories?.map((r) => ({ name: r.name, aliases: r.aliases ?? [] })),
+        }, doc.body);
+        findings.push(result(drift.drifted ? "warn" : "pass", "local_config_drift", drift.detail));
+      }
+    } catch (e: any) {
+      findings.push(result("warn", "local_config_drift", `${e.message}; current policy body not compared`));
+    }
     if (headEvent) {
       const commit = headEvent.artifacts.find((a) => a.kind === "commit")?.id;
       if (gate) {
@@ -526,7 +539,7 @@ async function main() {
         // /events and /why must not decide delivery, actor, pin/session, or instruct-root.
         try {
           const remote = new RemoteStore(url, auth.token);
-          const { findings: authFindings, verified } = await gateRemoteAuthorization(commit, remote, project, undefined, url, producerVerifyOptsFor(repo, project));
+          const { findings: authFindings, verified } = await gateRemoteAuthorization(commit, remote, project, undefined, url, { project });
           findings.push(...authFindings);
           try {
             findings.push(await remoteCaptureCoverage(repo, project, remote, cfg, args, undefined, url, verified));

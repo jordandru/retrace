@@ -13,7 +13,6 @@ import { Cfg, remoteName } from "./git-hook.js";
 import { makeStore } from "./index.js";
 import { RemoteStore } from "./remote-store.js";
 import { fetchVerifiedRemoteEvents, verifiedExportEvents } from "./verified-events.js";
-import { producerVerifyOptsFor } from "./hook-stamps.js";
 
 export type ReconcileCfg = Cfg & { reconcile?: { uncovered?: ReconcileLevel; ack_actors?: string[]; /** exact `assert:<credential name>` stamps of this repo's git hook credential */ hook_sealed_by?: string[]; owner_seals?: boolean; dual_witness?: "fail" | "warn" } };
 export { verifiedExportEvents } from "./verified-events.js";
@@ -96,7 +95,7 @@ export function readRepoConfig(repo: string): ReconcileCfg {
 async function fetchEvents(project: string, pubkeyFlag: unknown | undefined, repo: string): Promise<{ events: Event[]; note: string }> {
   const store = makeStore();
   if (store instanceof RemoteStore) {
-    return fetchVerifiedRemoteEvents(store, project, pubkeyFlag, undefined, producerVerifyOptsFor(repo, project));
+    return fetchVerifiedRemoteEvents(store, project, pubkeyFlag, undefined, { project });
   }
   const events = await store.all(project);
   return { events, note: `${events.length} events from the local store` };

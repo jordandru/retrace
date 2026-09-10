@@ -1,3 +1,5 @@
+export * from "./policy.js";
+export * from "./mem-store.js";
 export * from "./schema.js";
 export * from "./chain.js";
 export * from "./store.js";

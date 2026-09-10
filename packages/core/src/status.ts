@@ -8,6 +8,7 @@ import { CAUSED_BY_UNVERIFIED_TAG, SEALED_BY_PARAM, sealedByKind } from "./store
 import { markUntrustedText } from "./explain.js";
 import { causalRootState, type RootState } from "./causality.js";
 import { projectIssuanceStatus, type IssuanceCredential, type ProjectIssuanceStatus } from "./credential-status.js";
+import { canonicalGithubRepo, routeGithubDelivery } from "./policy.js";
 export { causalRootState } from "./causality.js";
 
 export type StatusActor = { type: Event["actor"]["type"]; id: string; events: number; last_seen: string; models: string[]; amended_from?: {type: Event["actor"]["type"]; id: string}[] };
@@ -45,9 +46,19 @@ export type ProjectStatus = {
   integrations: StatusIntegration[];
   /** Credential issuance for this project (from RETRACE_CREDENTIALS). Absent when the handler has no credential list. */
   issuance?: ProjectIssuanceStatus;
+  /** §8: none | env_fallback when the project has no document; document + digest when it does. */
+  policy?: { mode: "none" | "env_fallback" | "document"; digest?: string; version?: number };
+  routing?: { repo: string; source: "policy" | "env_fallback" | "revoked" | "unresolved" }[];
 };
 
-export async function buildProjectStatus(store: EventStore, project: string, now = new Date(), attributionOptions?: AttributionOptions, credentials?: IssuanceCredential[]): Promise<ProjectStatus> {
+export async function buildProjectStatus(
+  store: EventStore,
+  project: string,
+  now = new Date(),
+  attributionOptions?: AttributionOptions,
+  credentials?: IssuanceCredential[],
+  extras?: { githubRepoProjects?: Record<string, string> },
+): Promise<ProjectStatus> {
   const events = await store.all(project);
   const integrity = await verifyProject(store, project);
   const byId = new Map(events.map((e) => [e.id, e]));
@@ -126,7 +137,49 @@ export async function buildProjectStatus(store: EventStore, project: string, now
     actors: [...actors.values()].map((a) => ({ ...a, models: a.models.sort() })).sort((a, b) => a.type.localeCompare(b.type) || a.id.localeCompare(b.id)),
     integrations: [...integrations.values()].sort((a, b) => a.system.localeCompare(b.system)),
     ...(credentials !== undefined ? { issuance: projectIssuanceStatus(credentials, project) } : {}),
+    ...(await projectPolicyStatus(store, project, extras?.githubRepoProjects)),
   };
+}
+
+async function projectPolicyStatus(
+  store: EventStore,
+  project: string,
+  githubRepoProjects?: Record<string, string>,
+): Promise<Pick<ProjectStatus, "policy" | "routing">> {
+  const doc = store.getPolicy ? await store.getPolicy(project, { current: true }) : null;
+  const envRepos = Object.entries(githubRepoProjects ?? {})
+    .filter(([, p]) => p === project)
+    .map(([repo]) => canonicalGithubRepo(repo));
+  const routing: NonNullable<ProjectStatus["routing"]> = [];
+  const seen = new Set<string>();
+  for (const repo of envRepos) {
+    const route = store.getPolicyRoute ? await store.getPolicyRoute(repo) : null;
+    const decision = routeGithubDelivery({
+      fullName: repo,
+      route,
+      envProject: project,
+      envProjectHasDocument: !!doc,
+    });
+    if (decision.kind === "routed" && decision.project !== project) continue;
+    seen.add(repo);
+    if (decision.kind === "routed")
+      routing.push({ repo, source: decision.source === "policy" ? "policy" : "env_fallback" });
+    else
+      routing.push({ repo, source: decision.reason === "revoked" ? "revoked" : "unresolved" });
+  }
+  const ownRoutes = store.listPolicyRoutes ? await store.listPolicyRoutes(project) : [];
+  for (const r of ownRoutes) {
+    if (seen.has(r.repo)) continue;
+    seen.add(r.repo);
+    routing.push({ repo: r.repo, source: r.state === "revoked" ? "revoked" : "policy" });
+  }
+  const hasEnvFallback = routing.some((r) => r.source === "env_fallback");
+  const policy = doc
+    ? { mode: "document" as const, digest: doc.digest, version: doc.envelope.version }
+    : hasEnvFallback
+      ? { mode: "env_fallback" as const }
+      : { mode: "none" as const };
+  return { policy, routing };
 }
 
 export function projectStatusForModel(status: ProjectStatus): ProjectStatus {

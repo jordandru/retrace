@@ -455,3 +455,54 @@ test("set-principal refuses an assignment that conflicts with established histor
   );
   assert.equal(readCredentialsFile(file).find((c) => c.actor.on_behalf_of === "bob@acme.dev")!.principal, undefined);
 });
+
+test("P6: set-policy refuses declared-project mismatch; --cross-project-copy prints; preview ≠ digest; basename hint", async () => {
+  const { proposeSetPolicy } = await import("./admin.js");
+  const dir = mkdtempSync(join(tmpdir(), "retrace-set-policy-"));
+  const cfg = join(dir, ".retrace.json");
+  writeFileSync(cfg, JSON.stringify({
+    project: "other",
+    reconcile: { hook_sealed_by: ["assert:git hook (assert)"] },
+    attribution: { repositories: [{ name: "acme/app", aliases: ["app"] }] },
+  }));
+  const refused = await proposeSetPolicy({ project: "demo", fromPath: cfg, ifMatch: "none" });
+  assert.match(refused.printed, /refused/);
+  assert.equal(refused.body, undefined);
+  const fetchImpl: typeof fetch = async () =>
+    new Response(JSON.stringify({ routing: [{ repo: "acme/demo", source: "env_fallback" }] }), { status: 200 });
+  const copied = await proposeSetPolicy({
+    project: "demo", fromPath: cfg, ifMatch: "none", crossProjectCopy: true,
+    url: "https://worker.example", token: "tok", fetchImpl,
+  });
+  assert.match(copied.printed, /--cross-project-copy/);
+  assert.match(copied.printed, /body_preview_sha256/);
+  assert.match(copied.printed, /settings-only preview, not the policy digest/);
+  assert.equal(copied.body?.unresolved_claims, "record");
+  assert.deepEqual(copied.body?.github_repos, ["acme/demo"]);
+  const unnamed = join(dir, "repo", ".retrace.json");
+  mkdirSync(join(dir, "repo"));
+  writeFileSync(unnamed, JSON.stringify({ reconcile: { hook_sealed_by: ["assert:x"] } }));
+  const hint = await proposeSetPolicy({
+    project: "demo", fromPath: unnamed, ifMatch: "none",
+    url: "https://worker.example", token: "tok", fetchImpl,
+  });
+  assert.match(hint.printed, /basename hint only/);
+  assert.ok(copied.body);
+  const { bodyPreviewSha256, policyDigestOf, validatePolicyEnvelope } = await import("@retrace-dev/core");
+  const preview = await bodyPreviewSha256(copied.body!);
+  const fakeEnv = validatePolicyEnvelope({
+    version: 1, created_at: "2026-09-10T03:45:00.000Z", set_by: { type: "human", id: "o" },
+    supersedes: null, activation: { event_id: "evt_x", seq: 0 },
+  });
+  const digest = await policyDigestOf(copied.body!, fakeEnv);
+  assert.notEqual(preview, digest);
+  const noUrl = await proposeSetPolicy({ project: "demo", fromPath: unnamed, ifMatch: "none" });
+  assert.match(noUrl.printed, /Worker|url and a token/i);
+  assert.equal(noUrl.refused, "worker mapping unavailable");
+  const badFetch: typeof fetch = async () => new Response("nope", { status: 503 });
+  const unavail = await proposeSetPolicy({
+    project: "demo", fromPath: unnamed, ifMatch: "none",
+    url: "https://worker.example", token: "tok", fetchImpl: badFetch,
+  });
+  assert.equal(unavail.refused, "worker mapping unavailable");
+});

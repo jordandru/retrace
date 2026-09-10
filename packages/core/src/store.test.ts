@@ -95,6 +95,8 @@ test("adapter idempotency: git:/gd:/gh: are reserved unless the event is adapter
 
   assert.equal(adapterIdempotencyError(ev({ idempotency_key: "k1" })), undefined);
   assert.equal(adapterIdempotencyError(ev({})), undefined);
+  assert.match(adapterIdempotencyError(ev({ idempotency_key: "policy:p:1" })) ?? "", /policy:/);
+  assert.match(adapterIdempotencyError(ev({ idempotency_key: "policy:p:1", method: { tool: "retrace-api" }, action: "created" })) ?? "", /policy:/);
 });
 
 test("appendEvent: a planted git: key on a non-commit does not shadow a later git-hook event", async () => {

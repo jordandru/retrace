@@ -35,13 +35,17 @@
 import { z } from "zod";
 import { Actor, ActorType, EventInput, GENESIS_HASH, schemaSurface } from "./schema.js";
 import { EventStore, appendEvent, AdapterIdempotencyError, CausedByError, verifyProject, explainEvent, newShareId, shareIsLive, Share, isHeadMovedError, SEALED_BY_PARAM, SEALED_BY_OWNER, SEALED_BY_UNAUTHENTICATED, SEALED_BY_GITHUB_WEBHOOK } from "./store.js";
+import {
+  OwnerPrincipal, PolicyError, RouteConflictError, canonicalGithubRepo, missingPolicyDisposition, parseOwnerPrincipal, planPolicyPut,
+  routeGithubDelivery,
+} from "./policy.js";
 import { sealEvent } from "./chain.js";
 import { buildExportBundle, verifyExportBundle } from "./export.js";
 import { ExportCacheStore } from "./export-cache.js";
 import {
   CLAIM_DECISION_PARAM, PRODUCER_SIGNED_ACTOR_PARAM, PRODUCER_SIG_FORMAT, PRODUCER_SIG_FORMAT_V2,
   PRODUCER_SIG_V2_MIN_CLI_VERSION, PRODUCER_SIG_VERDICT_PARAM, ProducerKey, ProducerSigVerdict,
-  TrailerPolicy, isLegacyClientCommitSeal, parseTrailerPolicy, producerSigCheck, producerSigFormatOf,
+  TrailerPolicy, isGitCommitSeal, isLegacyClientCommitSeal, parseTrailerPolicy, producerSigCheck, producerSigFormatOf,
 } from "./producer-sig.js";
 import { renderReportHtml } from "./report.js";
 import { collectAttributionAmendments } from "./attribution.js";
@@ -88,10 +92,20 @@ export function parseGithubRepoProjects(raw?: string | null): Record<string, str
 /** Project for a GitHub delivery: HMAC-covered repository.full_name, optionally remapped. Query ?project= is never used. */
 export function resolveGithubProject(repoFull: string, map: Record<string, string> | undefined): { project: string } | { error: string } {
   const m = map ?? {};
-  if (Object.prototype.hasOwnProperty.call(m, repoFull)) return { project: m[repoFull] };
+  const repo = canonicalGithubRepo(repoFull);
+  if (Object.prototype.hasOwnProperty.call(m, repo) || Object.prototype.hasOwnProperty.call(m, repoFull))
+    return { project: (m[repo] ?? m[repoFull]) as string };
   if (Object.keys(m).length) return { error: `github repo "${repoFull}" is not in RETRACE_GITHUB_PROJECTS` };
-  return { project: repoFull };
+  return { project: repo };
 }
+
+/** Env mapping used as a routing candidate only (§7). Unlisted repos in a configured map are not candidates. */
+export function envProjectCandidate(repoFull: string, map: Record<string, string> | undefined): string | undefined {
+  const resolved = resolveGithubProject(repoFull, map);
+  return "project" in resolved ? resolved.project : undefined;
+}
+
+export { parseOwnerPrincipal };
 
 function publicShare(s: Share): Omit<Share, "created_by"> {
   const { created_by: _drop, ...rest } = s;
@@ -163,6 +177,8 @@ export interface RouterOptions {
    *  e.g. {type:"human", id:"jordan@example.com"} from RETRACE_OWNER. Unset → {type:"system", id:"worker"}, which says
    *  only that *the server* did it (security review 2026-08-21, audit-event actor). */
   ownerActor?: Actor;
+  /** Configured RETRACE_OWNER principal (`team:<id>` → {type:"team"}). Required for PUT /policy. */
+  ownerPrincipal?: OwnerPrincipal;
   /** Cron-precomputed signed full exports (503 CPU fix, option a). When set, GET …/export with no scope serves the
    *  stored bundle instead of rebuilding: exact bytes on a head match, labeled-stale bytes when the head has moved
    *  since the last cron pass (the cached bundle is still a complete signed export as of its own generated_at).
@@ -172,7 +188,7 @@ export interface RouterOptions {
   trailerPolicy?: TrailerPolicy;
 }
 
-const CORS = { "access-control-allow-origin": "*", "access-control-allow-headers": "authorization,content-type", "access-control-allow-methods": "GET,POST,DELETE,OPTIONS" };
+const CORS = { "access-control-allow-origin": "*", "access-control-allow-headers": "authorization,content-type,if-match", "access-control-allow-methods": "GET,POST,PUT,DELETE,OPTIONS" };
 const SHARE_CACHE = { "cache-control": "public, max-age=15" };
 const json = (data: unknown, status = 200, extra?: Record<string, string>) =>
   new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json", ...CORS, ...extra } });
@@ -426,9 +442,56 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
         try { payload = JSON.parse(raw); } catch { return json({ error: "invalid json" }, 400); }
         const repoFull = typeof payload?.repository?.full_name === "string" ? payload.repository.full_name : "";
         if (!repoFull) return json({ error: "github payload missing repository.full_name" }, 400);
-        const resolved = resolveGithubProject(repoFull, opts.githubRepoProjects);
-        if ("error" in resolved) return json({ error: resolved.error }, 403);
-        const project = resolved.project;
+        const repo = canonicalGithubRepo(repoFull);
+        const deliveryId = delivery ?? undefined;
+        if (deliveryId && store.getPendingDelivery) {
+          const existing = await store.getPendingDelivery(deliveryId);
+          if (existing) {
+            return json({
+              ok: true, pending: true, reused: true,
+              routing: existing.routing_state, project: existing.project, repo: existing.repo,
+            }, 202);
+          }
+        }
+        const route = store.getPolicyRoute ? await store.getPolicyRoute(repo) : null;
+        const envProject = envProjectCandidate(repo, opts.githubRepoProjects);
+        const envHasDoc = !!(envProject && store.getPolicy && await store.getPolicy(envProject, { current: true }));
+        const routing = routeGithubDelivery({ fullName: repo, route, envProject, envProjectHasDocument: envHasDoc });
+        if (routing.kind === "unresolved") {
+          if (store.insertPendingDelivery) {
+            await store.insertPendingDelivery({
+              delivery_id: delivery ?? `unresolved:${repo}:${Date.now()}`,
+              project: "",
+              raw_body: raw,
+              received_at: new Date().toISOString(),
+              repo,
+              routing_source: "unresolved",
+              routing_state: "unresolved",
+            });
+          }
+          return json({ ok: true, pending: true, routing: "unresolved", repo, reason: routing.reason }, 202);
+        }
+        const project = routing.project;
+        const hasDoc = !!(store.getPolicy && await store.getPolicy(project, { current: true }));
+        const mode = parseTrailerPolicy(opts.trailerPolicy);
+        if (routing.source === "env" && !hasDoc) {
+          const disp = missingPolicyDisposition(mode, false);
+          if (disp === "pending_loud") {
+            if (store.insertPendingDelivery) {
+              await store.insertPendingDelivery({
+                delivery_id: delivery ?? `pending:${repo}:${Date.now()}`,
+                project,
+                raw_body: raw,
+                received_at: new Date().toISOString(),
+                repo,
+                routing_source: "env",
+                routing_digest: routing.digest,
+                routing_state: "pending_policy",
+              });
+            }
+            return json({ ok: true, pending: true, reason: "policy_missing", hook: "queued", project, repo }, 202);
+          }
+        }
         const deliveryKey = delivery && inputs_needs_unique(ghEvent) ? `gh:${delivery}` : undefined;
         if (deliveryKey) {
           for (const p of await store.projects()) {
@@ -544,7 +607,7 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
         return json({ actor: opts.ownerActor, sealed_by: "owner", attribution_profile: "retrace-attribution/1" });
       }
       // Per-actor credentials may append and read; anything destructive or outward-facing stays owner-only.
-      if (principal?.kind === "credential" && (req.method === "DELETE" || (req.method === "POST" && parts[0] !== "events")))
+      if (principal?.kind === "credential" && (req.method === "DELETE" || req.method === "PUT" || (req.method === "POST" && parts[0] !== "events")))
         return json({ error: "forbidden: this route needs the owner token" }, 403);
       if (req.method === "POST" && parts[0] === "events" && parts.length === 1) {
         const body = await readJsonBody(req); if (!body.ok) return body.response;
@@ -568,11 +631,22 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
         // sign-as-yourself-submit-on-another's-credential into a plain signature failure (producer-sig.ts).
         const credential = principal?.kind === "credential" ? principal.credential : undefined;
         const resolvedInput = { ...parsed.data, actor: resolved.actor, method: parsed.data.method ? { ...parsed.data.method, params } : parsed.data.method };
-        // Step 1: the Worker does not read `.retrace.json` (design §9) and the step-2 policy document
-        // does not exist yet, so producerSigCheck is called without trustedHookStamps and never
-        // substitutes online. Acceptable: no withheld seal can exist before step 3; step 2 wires
-        // the stored policy document into both the Worker and the export bundle.
-        const producerCheck = await producerSigCheck(resolvedInput, credential?.public_key ?? null);
+        // Trusted hook stamps come from the named stored policy version only. No named digest →
+        // no trusted list. Named digest missing → unavailable, never CURRENT (§5A).
+        let trustedHookStamps: readonly string[] | undefined;
+        if (store.getPolicy) {
+          const cd = params[CLAIM_DECISION_PARAM];
+          const ctx = cd && typeof cd === "object" && !Array.isArray(cd) ? (cd as { context?: { policy_digest?: unknown } }).context : undefined;
+          if (typeof ctx?.policy_digest === "string") {
+            const named = await store.getPolicy(resolvedInput.project, { digest: ctx.policy_digest });
+            if (!named) return json({ error: "policy unavailable" }, 501);
+            trustedHookStamps = named.body.trusted_hook_stamps;
+          }
+        }
+        const producerCheck = await producerSigCheck(resolvedInput, credential?.public_key ?? null, {
+          trustedHookStamps,
+          project: resolvedInput.project,
+        });
         const producerVerdict = producerCheck.verdict;
         if (credential?.require_signature && producerVerdict !== "verified")
           // the verdict word only — never echo the signature or any kid
@@ -592,6 +666,16 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
         }
         if (producerVerdict === "verified" && producerCheck.format === PRODUCER_SIG_FORMAT_V2 && producerCheck.signed_actor)
           params[PRODUCER_SIGNED_ACTOR_PARAM] = producerCheck.signed_actor;
+        const isHookV2GitCommit =
+          principal?.kind === "credential"
+          && principal.credential.trust === "assert"
+          && producerSigFormatOf(resolvedInput) === PRODUCER_SIG_FORMAT_V2
+          && isGitCommitSeal(resolvedInput);
+        if (isHookV2GitCommit && store.getPolicy) {
+          const hasDoc = !!(await store.getPolicy(resolvedInput.project, { current: true }));
+          if (missingPolicyDisposition(trailerPolicy, hasDoc) === "pending_loud")
+            return json({ error: "policy_missing", pending: true, hook: "queued", project: resolvedInput.project }, 503);
+        }
         const location = parsed.data.location ? { ...parsed.data.location } : undefined;
         if (location && !resolved.relayed) delete location.client;
         let input = stampSealedBy({
@@ -652,7 +736,38 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
             });
           }
           if (sub === "verify") return json(await verifyProject(store, project));
-          if (sub === "status") return json(await buildProjectStatus(store, project, new Date(), undefined, opts.credentials));
+          if (sub === "status") return json(await buildProjectStatus(store, project, new Date(), undefined, opts.credentials, {
+            githubRepoProjects: opts.githubRepoProjects,
+          }));
+          if (sub === "policy") {
+            if (!store.getPolicy) return json({ error: "policy store not available" }, 501);
+            if (parts[3] === "history") {
+              const limit = q.limit ? Number(q.limit) : 50;
+              if (!Number.isFinite(limit) || limit < 1) return json({ error: "limit must be a positive number" }, 400);
+              return json(await store.listPolicies!(project, limit));
+            }
+            if (q.digest) {
+              const doc = await store.getPolicy(project, { digest: q.digest });
+              if (!doc) return json({ error: "not found" }, 404);
+              return json(doc);
+            }
+            if (q.version) {
+              const n = Number(q.version);
+              if (!Number.isInteger(n) || n < 1) return json({ error: "version must be an integer ≥ 1" }, 400);
+              const doc = await store.getPolicy(project, { version: n });
+              if (!doc) return json({ error: "not found" }, 404);
+              return json(doc);
+            }
+            const snap = store.readPolicySnapshot ? await store.readPolicySnapshot(project) : undefined;
+            if (snap === undefined || snap.unavailable) return json({ error: "policy unavailable" }, 501);
+            const doc = snap.document ?? null;
+            if (!doc) return json({ error: "not found" }, 404);
+            return json(doc);
+          }
+          if (sub === "routes") {
+            if (!store.listPolicyRoutes) return json({ error: "policy store not available" }, 501);
+            return json(await store.listPolicyRoutes(project));
+          }
           if (sub === "events") {
             const beforeRaw = q.before_seq;
             const before_seq = beforeRaw !== undefined && beforeRaw !== "" ? Number(beforeRaw) : undefined;
@@ -693,6 +808,56 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
             const b = await exportFor({ project, artifact_id: q.artifact_id });
             return html(renderReportHtml(b, await verifyExportBundle(b), { baseUrl: base }));
           }
+        }
+        if (req.method === "PUT" && sub === "policy") {
+          if (principal?.kind !== "owner") return json({ error: "forbidden: this route needs the owner token" }, 403);
+          const ownerPrincipal = opts.ownerPrincipal ?? parseOwnerPrincipal(opts.ownerActor?.type === "human" ? opts.ownerActor.id : undefined);
+          if (!ownerPrincipal) return json({ error: "no owner principal configured" }, 403);
+          if (!store.getPolicy || !store.applyPolicyWrite) return json({ error: "policy store not available" }, 501);
+          const rawBody = await req.text();
+          const ifMatchHeader = req.headers.get("if-match");
+          const reassignFrom = url.searchParams.get("reassign") ?? undefined;
+          for (let attempt = 0; attempt < 2; attempt++) {
+            if (store.readPolicySnapshot) {
+              const snap = await store.readPolicySnapshot(project);
+              if (snap.unavailable) return json({ error: "policy unavailable" }, 501);
+            }
+            const current = await store.getPolicy(project, { current: true });
+            const currentByProject: Record<string, typeof current> = { [project]: current };
+            const heads: Record<string, Awaited<ReturnType<EventStore["head"]>>> = { [project]: await store.head(project) };
+            if (reassignFrom) {
+              currentByProject[reassignFrom] = await store.getPolicy(reassignFrom, { current: true });
+              heads[reassignFrom] = await store.head(reassignFrom);
+            }
+            const planned = await planPolicyPut({
+              project,
+              rawBody,
+              ifMatchHeader,
+              reassignFrom,
+              ownerPrincipal,
+              current,
+              currentByProject,
+              routeByRepo: async (repo) => {
+                const row = await store.getPolicyRoute!(repo);
+                if (row && row.project !== project && !(row.project in currentByProject)) {
+                  currentByProject[row.project] = await store.getPolicy!(row.project, { current: true });
+                }
+                return row;
+              },
+              heads,
+            });
+            if (planned.status !== 201) return json(planned.status === 200 ? planned.document : { error: planned.error }, planned.status);
+            try {
+              await store.applyPolicyWrite(planned.write, planned.expectedHeads);
+              return json(planned.document, 201);
+            } catch (e: any) {
+              if (e instanceof RouteConflictError)
+                return json({ error: e.message }, 409);
+              if (!(isHeadMovedError(e) || /UNIQUE/i.test(String(e?.message))) || attempt >= 1)
+                return json({ error: "policy version collision" }, 409);
+            }
+          }
+          return json({ error: "policy version collision" }, 409);
         }
         if (req.method === "DELETE" && parts.length === 2) {
           if (!store.deleteProject) return json({ error: "project deletion not supported by this store" }, 501);

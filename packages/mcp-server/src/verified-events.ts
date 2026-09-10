@@ -30,7 +30,6 @@ export async function verifiedExportEvents(
   if (!trusted) throw new Error(NO_TRUSTED_KEY);
   const verdict = await verifyExportBundle(bundle, trusted.key, {
     project: opts?.project ?? bundle.scope.project,
-    ...(opts?.trustedHookStamps ? { trustedHookStamps: opts.trustedHookStamps } : {}),
   });
   if (!exportVerdictOk(verdict)) {
     throw new Error(`refusing to reconcile against an export that does not verify (signature ${verdict.signature}, events intact ${verdict.events_intact}, chain ${verdict.chain_ok_at_export}, coverage ${verdict.coverage.complete})${verdict.problems.length ? ": " + verdict.problems.join("; ") : ""}`);

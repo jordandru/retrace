@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { Event } from "@retrace-dev/core";
+import { POLICY_PROFILE, SCHEMA_SQL, RouteConflictError, planPolicyPut } from "@retrace-dev/core";
+import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { D1Store } from "./d1-store.js";
 
 class PreparedStatement {
@@ -80,14 +82,14 @@ test("deleteProject deletes checkpoint, export-cache, artifact index and pending
 
   assert.deepEqual(
     deletes.map((statement) => statement.sql.match(/^DELETE FROM (\w+)/)?.[1]),
-    ["events", "event_artifacts", "event_artifact_index", "pending_deliveries", "shares", "checkpoints", "export_cache"],
+    ["events", "event_artifacts", "event_artifact_index", "pending_deliveries", "shares", "checkpoints", "export_cache", "project_policies"],
   );
   for (const statement of deletes) {
     assert.match(statement.sql, /EXISTS \(SELECT 1 FROM events WHERE id = \?\)$/);
     assert.deepEqual(statement.params, [project, audit.id]);
   }
   assert.deepEqual(deleted, {
-    events: 1, event_artifacts: 1, event_artifact_index: 1, pending_deliveries: 1, shares: 1, checkpoints: 1, export_cache: 1,
+    events: 1, event_artifacts: 1, event_artifact_index: 1, pending_deliveries: 1, shares: 1, checkpoints: 1, export_cache: 1, project_policies: 1,
   });
 });
 
@@ -155,11 +157,107 @@ test("pending_deliveries insert/list/delete SQL", async () => {
   await store.insertPendingDelivery({
     delivery_id: "123", project: "retrace", raw_body: "{\"ok\":true}", received_at: "2026-09-08T00:00:00.000Z",
   });
-  assert.match(db.last!.sql, /INSERT OR REPLACE INTO pending_deliveries/);
-  assert.deepEqual(db.last!.params, ["123", "retrace", "{\"ok\":true}", "2026-09-08T00:00:00.000Z"]);
+  assert.match(db.last!.sql, /INSERT INTO pending_deliveries/);
+  assert.doesNotMatch(db.last!.sql, /OR REPLACE/);
+  assert.deepEqual(db.last!.params, ["123", "retrace", "{\"ok\":true}", "2026-09-08T00:00:00.000Z", null, null, null, null]);
   await store.listPendingDeliveriesOlderThan("2026-09-09T00:00:00.000Z");
   assert.match(db.last!.sql, /FROM pending_deliveries WHERE received_at < \?/);
   await store.deletePendingDelivery("123");
   assert.match(db.last!.sql, /DELETE FROM pending_deliveries WHERE delivery_id = \?/);
   assert.deepEqual(db.last!.params, ["123"]);
+});
+
+class SqliteD1Statement {
+  params: SQLInputValue[] = [];
+  constructor(private db: DatabaseSync, readonly sql: string) {}
+  bind(...params: unknown[]) {
+    this.params = params as SQLInputValue[];
+    return this;
+  }
+  private stmt() {
+    return this.db.prepare(this.sql);
+  }
+  async first() {
+    const row = this.params.length ? this.stmt().get(...this.params) : this.stmt().get();
+    return row ?? null;
+  }
+  async all() {
+    const results = this.params.length ? this.stmt().all(...this.params) : this.stmt().all();
+    return { results };
+  }
+  async run() {
+    const info = this.params.length ? this.stmt().run(...this.params) : this.stmt().run();
+    return { meta: { changes: Number(info.changes) } };
+  }
+}
+
+class SqliteD1 {
+  constructor(private db: DatabaseSync) {}
+  prepare(sql: string) {
+    return new SqliteD1Statement(this.db, sql);
+  }
+  async batch(statements: SqliteD1Statement[]) {
+    this.db.exec("BEGIN");
+    try {
+      const out: { meta: { changes: number } }[] = [];
+      for (const s of statements) {
+        if (/^\s*select/i.test(s.sql)) {
+          await s.all();
+          out.push({ meta: { changes: 0 } });
+        } else {
+          out.push(await s.run());
+        }
+      }
+      this.db.exec("COMMIT");
+      return out;
+    } catch (e) {
+      try { this.db.exec("ROLLBACK"); } catch { /* already rolled back */ }
+      throw e;
+    }
+  }
+}
+
+test("Codex-D1: a lost route CAS aborts the batch — loser has no policy row and no activation", async () => {
+  const sqlite = new DatabaseSync(":memory:");
+  sqlite.exec(SCHEMA_SQL);
+  const store = new D1Store(new SqliteD1(sqlite) as unknown as D1Database);
+  const owner = { type: "human" as const, id: "o" };
+  const bodyFor = (project: string) => JSON.stringify({
+    profile: POLICY_PROFILE, project, trusted_hook_stamps: [], unresolved_claims: "record",
+    repositories: [{ name: "acme/shared", aliases: [] }], github_repos: ["acme/shared"],
+  });
+  const plannedA = await planPolicyPut({
+    project: "a", rawBody: bodyFor("a"), ifMatchHeader: "none", ownerPrincipal: owner,
+    current: null, currentByProject: { a: null }, routeByRepo: async () => null, heads: { a: null },
+  });
+  assert.equal(plannedA.status, 201);
+  if (plannedA.status !== 201) throw new Error("plan A");
+  await store.applyPolicyWrite(plannedA.write, plannedA.expectedHeads);
+  assert.equal((await store.getPolicyRoute("acme/shared"))?.project, "a");
+  assert.ok(await store.getPolicy("a", { current: true }));
+  assert.equal((await store.all("a")).length, 1);
+
+  const plannedB = await planPolicyPut({
+    project: "b", rawBody: bodyFor("b"), ifMatchHeader: "none", ownerPrincipal: owner,
+    current: null, currentByProject: { b: null }, routeByRepo: async () => null, heads: { b: null },
+  });
+  assert.equal(plannedB.status, 201);
+  if (plannedB.status !== 201) throw new Error("plan B");
+  const origRoute = store.getPolicyRoute.bind(store);
+  let hideLiveRoute = true;
+  store.getPolicyRoute = async (repo) => hideLiveRoute ? null : origRoute(repo);
+  try {
+    await assert.rejects(
+      () => store.applyPolicyWrite(plannedB.write, plannedB.expectedHeads),
+      (e: unknown) => e instanceof RouteConflictError,
+    );
+  } finally {
+    hideLiveRoute = false;
+    store.getPolicyRoute = origRoute;
+  }
+  assert.equal(await store.getPolicy("b", { current: true }), null, "loser must not keep a policy row");
+  assert.equal((await store.all("b")).length, 0, "loser must not keep an activation event");
+  assert.equal((await store.getPolicyRoute("acme/shared"))?.project, "a");
+  assert.ok(await store.getPolicy("a", { current: true }));
+  assert.equal((await store.all("a")).length, 1);
 });

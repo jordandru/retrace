@@ -18,7 +18,7 @@
 import { createServer, IncomingMessage, Server } from "node:http";
 import { randomBytes } from "node:crypto";
 import { Readable } from "node:stream";
-import { createHandler, parseCredentials, parseGithubRepoProjects, parseSigningKey, parseTrailerPolicy, Credential } from "@retrace-dev/core";
+import { createHandler, parseCredentials, parseGithubRepoProjects, parseOwnerPrincipal, parseSigningKey, parseTrailerPolicy, Credential } from "@retrace-dev/core";
 import { loadSigningKey } from "./keys.js";
 import { makeStore } from "./index.js";
 import { isMainModule } from "./is-main.js";
@@ -86,6 +86,7 @@ export function startServer(over: Partial<Pick<ServeConfig, "host" | "port" | "t
     githubRepoProjects: parseGithubRepoProjects(env.RETRACE_GITHUB_PROJECTS),
     githubIncludePush: env.RETRACE_GITHUB_PUSH === "1",
     ownerActor: env.RETRACE_OWNER ? { type: "human", id: env.RETRACE_OWNER } : undefined,
+    ownerPrincipal: parseOwnerPrincipal(env.RETRACE_OWNER),
     trailerPolicy: parseTrailerPolicy(env.RETRACE_TRAILER_POLICY),
   });
   const server = createServer(async (req, res) => {

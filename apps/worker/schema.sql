@@ -1,6 +1,6 @@
 -- Idempotent D1 schema (CREATE IF NOT EXISTS / INSERT OR IGNORE).
 -- Applied by migrate.mjs via wrangler d1 execute --command (query API), not --file (import API / OAuth).
--- Step 2 half B adds project_policies; do not create that table here.
+-- project_policies + policy_routes are created below (step 2 half B).
 
 CREATE TABLE IF NOT EXISTS events (
   id TEXT PRIMARY KEY,
@@ -48,7 +48,11 @@ CREATE TABLE IF NOT EXISTS pending_deliveries (
   delivery_id TEXT PRIMARY KEY,
   project TEXT NOT NULL,
   raw_body TEXT NOT NULL,
-  received_at TEXT NOT NULL
+  received_at TEXT NOT NULL,
+  repo TEXT,
+  routing_source TEXT,
+  routing_digest TEXT,
+  routing_state TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_pending_deliveries_received ON pending_deliveries(received_at);
 
@@ -102,6 +106,30 @@ SELECT
 FROM events e, json_each(COALESCE(json_extract(e.body, '$.artifacts'), '[]')) AS a
 WHERE json_extract(a.value, '$.id') IS NOT NULL;
 
--- Step 2 half B (docs/design/project-policy-document.md) adds project_policies via SCHEMA_SQL.
--- Leave room; do not create that table in this half-A migrate.
+CREATE TABLE IF NOT EXISTS project_policies (
+  project TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  digest TEXT UNIQUE NOT NULL,
+  body TEXT NOT NULL,
+  envelope TEXT NOT NULL,
+  activation_seq INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (project, version)
+);
+CREATE INDEX IF NOT EXISTS idx_project_policies_activation ON project_policies(project, activation_seq);
+CREATE TABLE IF NOT EXISTS policy_routes (
+  repo TEXT PRIMARY KEY,
+  state TEXT NOT NULL CHECK (state IN ('active','revoked')),
+  project TEXT NOT NULL,
+  digest TEXT NOT NULL,
+  activation_seq INTEGER NOT NULL,
+  set_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_policy_routes_project ON policy_routes(project);
+
+-- Existing DBs created by half A lack routing columns on pending_deliveries.
+ALTER TABLE pending_deliveries ADD COLUMN repo TEXT;
+ALTER TABLE pending_deliveries ADD COLUMN routing_source TEXT;
+ALTER TABLE pending_deliveries ADD COLUMN routing_digest TEXT;
+ALTER TABLE pending_deliveries ADD COLUMN routing_state TEXT;
 
