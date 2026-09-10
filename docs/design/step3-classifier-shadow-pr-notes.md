@@ -40,7 +40,7 @@ Design text wins. These are implementation notes for reviewers, not silent spec 
 
 ## What this checkpoint contains vs what is still red
 
-Shipped on this branch (implementation):
+Shipped on this branch:
 
 - `packages/core/src/classify.ts` — derive, decide, would_write, context insert-if-absent, breaker helpers, attach
 - Store interface + Memory / Sqlite / D1: classification context, path lowers, breaker CAS, pending lease/outcomes
@@ -48,11 +48,6 @@ Shipped on this branch (implementation):
 - GitHub push mapping: `raw_message`, `author`, `parents`
 - Local git-hook: classify when `RETRACE_TRAILER_POLICY=shadow` (not `/1`)
 - Worker: drain on every scheduled run; `*/5 * * * *` cron added next to hourly `7 * * * *`; checkpoints still hourly
+- Tests: T1–T13 (table + classify), T17–T19, T22–T26, T28/T35/T37, T31, T36, T40, P4/P7/P8, A1–A5, two-connection insert-if-absent (Sqlite + D1)
 
-Still required before a green PR (do not rush; successor can finish from this commit):
-
-- Tests: T1–T13, T17–T19, T22–T26, T28, T31, T35–T37, T40, P4/P7/P8, A1–A5, two-connection insert-if-absent race
-- Update `deleteProject` expected table lists in `sqlite-store.test.ts` and `d1-store.test.ts` (added `classification_contexts`, `classification_path_lowers`, `classification_breakers`)
-- Prefer `packages/core/src/classify.test.ts` + `classify-http.test.ts`; MemoryEventStore + `createHandler` + PUT policy
-
-WIP push is allowed at first green build; Codex first pass is after 14 Sep 22:07. No review rounds before then.
+Suite green on this branch (`npm test` from the worktree). Codex first pass is after 14 Sep 22:07. No review rounds before then.

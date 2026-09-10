@@ -52,7 +52,7 @@ test("SqliteStore.deleteProject: deletes + audit insert commit together", async 
   await appendEvent(store, ev({ project: "keep" }));
   await store.createShare({ id: "sh_1", project: "junk", created_at: "2026-08-20T00:00:00Z" });
   const counts = await store.deleteProject("junk", await audit(store), (await store.head("junk"))!);
-  assert.deepEqual(counts, { events: 2, event_artifacts: 3, event_artifact_index: 3, pending_deliveries: 0, shares: 1, project_policies: 0 });
+  assert.deepEqual(counts, { events: 2, event_artifacts: 3, event_artifact_index: 3, pending_deliveries: 0, shares: 1, project_policies: 0, classification_contexts: 0, classification_path_lowers: 0, classification_breakers: 0 });
   assert.deepEqual(await store.projects(), ["keep", "ops"]);
   assert.equal((await store.all("ops")).length, 1);
   assert.equal((await verifyProject(store, "ops")).ok, true);
@@ -83,7 +83,7 @@ test("SqliteStore.deleteProject: a head that moved since the audit was sealed th
   assert.equal((await store.all("ops")).length, 0);
   // retry with the fresh head succeeds
   const counts = await store.deleteProject("junk", await audit(store), (await store.head("junk"))!);
-  assert.deepEqual(counts, { events: 2, event_artifacts: 2, event_artifact_index: 2, pending_deliveries: 0, shares: 1, project_policies: 0 });
+  assert.deepEqual(counts, { events: 2, event_artifacts: 2, event_artifact_index: 2, pending_deliveries: 0, shares: 1, project_policies: 0, classification_contexts: 0, classification_path_lowers: 0, classification_breakers: 0 });
   assert.equal((await store.all("ops")).length, 1);
 });
 
@@ -227,4 +227,35 @@ test("F15: readPolicySnapshot uses indexed getPolicyByActivationSeq, not all()",
   store.getPolicyByActivationSeq = async () => { throw new Error("disk on fire"); };
   const snap = await store.readPolicySnapshot("p", 0);
   assert.equal(snap.unavailable, "store_error");
+});
+
+test("A2: two SqliteStore connections racing insert-if-absent keep one context row", async () => {
+  const path = join(mkdtempSync(join(tmpdir(), "retrace-ctx-")), "ledger.db");
+  const a = new SqliteStore(path);
+  const b = new SqliteStore(path);
+  const row = {
+    project: "p",
+    canonical_repo: "acme/app",
+    sha: "a".repeat(40),
+    read_head_seq: 3,
+    read_head_hash: "h".repeat(64),
+    policy_digest: "d".repeat(64),
+    first_producer: "git-hook" as const,
+    first_F_digest: "f".repeat(64),
+    first_claim_digest: "c".repeat(64),
+    classifier_profile: "trailer-consistency/1",
+    rollout_mode: "shadow",
+    amendment_snapshot: "[]",
+    per_path_lower: { "a.ts": 0 },
+    created_at: "2026-09-10T12:00:00.000Z",
+  };
+  const later = { ...row, read_head_seq: 99, per_path_lower: { "a.ts": 8 } };
+  const [r1, r2] = await Promise.all([
+    a.insertClassificationContextIfAbsent(row),
+    b.insertClassificationContextIfAbsent(later),
+  ]);
+  assert.equal([r1, r2].filter((r) => r.inserted).length, 1);
+  assert.equal(r1.context.read_head_seq, r2.context.read_head_seq);
+  const got = await a.getClassificationContext("p", "acme/app", row.sha);
+  assert.equal(got?.read_head_seq, r1.context.read_head_seq);
 });

@@ -736,6 +736,19 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
               reason: classified.reason, pending: true, hook: "queued", project: resolvedInput.project,
             }, 503);
           if (classified.kind === "decision") params[CLAIM_DECISION_PARAM] = classified.record;
+        } else if (
+          trailerPolicy === "enforce"
+          && isGitCommitSeal(resolvedInput)
+          && !isLegacyClientCommitSeal(resolvedInput)
+          && producerCheck.format === PRODUCER_SIG_FORMAT_V2
+        ) {
+          const hasDoc = !!(store.getPolicy && await store.getPolicy(resolvedInput.project, { current: true }));
+          if (missingPolicyDisposition("enforce", hasDoc) === "pending_loud") {
+            return json({
+              error: "policy_missing", reason: "policy_missing", pending: true, hook: "queued",
+              project: resolvedInput.project,
+            }, 503);
+          }
         }
         const location = parsed.data.location ? { ...parsed.data.location } : undefined;
         if (location && !resolved.relayed) delete location.client;

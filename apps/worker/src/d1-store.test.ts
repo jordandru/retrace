@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Event } from "@retrace-dev/core";
 import { POLICY_PROFILE, SCHEMA_SQL, RouteConflictError, planPolicyPut } from "@retrace-dev/core";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
@@ -82,14 +85,14 @@ test("deleteProject deletes checkpoint, export-cache, artifact index and pending
 
   assert.deepEqual(
     deletes.map((statement) => statement.sql.match(/^DELETE FROM (\w+)/)?.[1]),
-    ["events", "event_artifacts", "event_artifact_index", "pending_deliveries", "shares", "checkpoints", "export_cache", "project_policies"],
+    ["events", "event_artifacts", "event_artifact_index", "pending_deliveries", "shares", "checkpoints", "export_cache", "project_policies", "classification_contexts", "classification_path_lowers", "classification_breakers"],
   );
   for (const statement of deletes) {
     assert.match(statement.sql, /EXISTS \(SELECT 1 FROM events WHERE id = \?\)$/);
     assert.deepEqual(statement.params, [project, audit.id]);
   }
   assert.deepEqual(deleted, {
-    events: 1, event_artifacts: 1, event_artifact_index: 1, pending_deliveries: 1, shares: 1, checkpoints: 1, export_cache: 1, project_policies: 1,
+    events: 1, event_artifacts: 1, event_artifact_index: 1, pending_deliveries: 1, shares: 1, checkpoints: 1, export_cache: 1, project_policies: 1, classification_contexts: 1, classification_path_lowers: 1, classification_breakers: 1,
   });
 });
 
@@ -260,4 +263,35 @@ test("Codex-D1: a lost route CAS aborts the batch — loser has no policy row an
   assert.equal((await store.getPolicyRoute("acme/shared"))?.project, "a");
   assert.ok(await store.getPolicy("a", { current: true }));
   assert.equal((await store.all("a")).length, 1);
+});
+
+test("A2 D1: two connections racing insert-if-absent keep one classification context", async () => {
+  const path = join(mkdtempSync(join(tmpdir(), "retrace-d1-ctx-")), "ledger.db");
+  const db1 = new DatabaseSync(path);
+  db1.exec(SCHEMA_SQL);
+  const db2 = new DatabaseSync(path);
+  const a = new D1Store(new SqliteD1(db1) as unknown as D1Database);
+  const b = new D1Store(new SqliteD1(db2) as unknown as D1Database);
+  const row = {
+    project: "p",
+    canonical_repo: "acme/app",
+    sha: "a".repeat(40),
+    read_head_seq: 3,
+    read_head_hash: "h".repeat(64),
+    policy_digest: "d".repeat(64),
+    first_producer: "git-hook" as const,
+    first_F_digest: "f".repeat(64),
+    first_claim_digest: "c".repeat(64),
+    classifier_profile: "trailer-consistency/1",
+    rollout_mode: "shadow",
+    amendment_snapshot: "[]",
+    per_path_lower: { "a.ts": 0 },
+    created_at: "2026-09-10T12:00:00.000Z",
+  };
+  const [r1, r2] = await Promise.all([
+    a.insertClassificationContextIfAbsent(row),
+    b.insertClassificationContextIfAbsent({ ...row, read_head_seq: 99 }),
+  ]);
+  assert.equal([r1, r2].filter((r) => r.inserted).length, 1);
+  assert.equal(r1.context.read_head_seq, r2.context.read_head_seq);
 });
