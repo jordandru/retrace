@@ -1,6 +1,6 @@
 {
   "name": "@retrace-dev/core",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "description": "Schemas, hash chains, causal status, exports, and renderers for Retrace provenance",
   "type": "module",
   "main": "dist/index.js",
@@ -18,7 +18,7 @@
     }
   },
   "scripts": {
-    "build": "node scripts/embed-ui.mjs && tsc -p tsconfig.json",
+    "build": "node scripts/embed-ui.mjs && tsc -p tsconfig.json && node -e \"import { cpSync } from 'node:fs'; cpSync('src/fixtures','dist/fixtures',{recursive:true})\"",
     "prepack": "npm run build",
     "test": "node --test dist/*.test.js"
   },

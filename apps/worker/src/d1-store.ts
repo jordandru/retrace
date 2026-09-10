@@ -1,4 +1,5 @@
-import { ArtifactIndexQuery, ArtifactIndexResult, ChainHead, Event, EventStore, HeadMovedError, HistoryQuery, HistoryPage, PendingDelivery, Share, artifactIndexRows, clampHistoryLimit, eventsReferencingArtifactsSql, historyPageFromNewestFirst, likeContains } from "@retrace-dev/core";
+import { ArtifactIndexQuery, ArtifactIndexResult, ChainHead, Event, EventStore, HeadMovedError, HistoryQuery, HistoryPage, PendingDelivery, Share, artifactIndexRows, clampHistoryLimit, eventsReferencingArtifactsSql, historyPageFromNewestFirst, likeContains, policyDocumentFromRow, policySnapshotFromIndex, assertRouteWriteConsistent, RouteConflictError } from "@retrace-dev/core";
+import type { PolicyRouteRow, PolicySnapshot, PolicySnapshotBudget, PolicyWrite } from "@retrace-dev/core";
 
 export class D1Store implements EventStore {
   constructor(private db: D1Database) {}
@@ -41,7 +42,7 @@ export class D1Store implements EventStore {
     if (audit.project === project) throw new Error("audit event must not live in the project being deleted");
     // Keep every project-owned row in this guarded transaction. In particular, leaving export_cache behind would
     // retain the deleted ledger bytes and could serve them as a stale bundle if the project name were recreated.
-    const tables = ["events", "event_artifacts", "event_artifact_index", "pending_deliveries", "shares", "checkpoints", "export_cache"];
+    const tables = ["events", "event_artifacts", "event_artifact_index", "pending_deliveries", "shares", "checkpoints", "export_cache", "project_policies"];
     const headMatches = {
       sql: "EXISTS (SELECT 1 FROM events WHERE project = ? AND seq = ? AND hash = ?) AND NOT EXISTS (SELECT 1 FROM events WHERE project = ? AND seq > ?)",
       params: [project, expectedHead.seq, expectedHead.hash, project, expectedHead.seq],
@@ -134,14 +135,24 @@ export class D1Store implements EventStore {
   }
 
   async insertPendingDelivery(row: PendingDelivery) {
-    await this.db.prepare(
-      "INSERT OR REPLACE INTO pending_deliveries (delivery_id, project, raw_body, received_at) VALUES (?, ?, ?, ?)",
-    ).bind(row.delivery_id, row.project, row.raw_body, row.received_at).run();
+    try {
+      await this.db.prepare(
+        "INSERT INTO pending_deliveries (delivery_id, project, raw_body, received_at, repo, routing_source, routing_digest, routing_state) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      ).bind(row.delivery_id, row.project, row.raw_body, row.received_at, row.repo ?? null, row.routing_source ?? null, row.routing_digest ?? null, row.routing_state ?? null).run();
+    } catch (e: unknown) {
+      if (!/UNIQUE/i.test(String((e as Error)?.message))) throw e;
+    }
+  }
+
+  async getPendingDelivery(delivery_id: string): Promise<PendingDelivery | null> {
+    return (await this.db.prepare(
+      "SELECT delivery_id, project, raw_body, received_at, repo, routing_source, routing_digest, routing_state FROM pending_deliveries WHERE delivery_id = ?",
+    ).bind(delivery_id).first<PendingDelivery>()) ?? null;
   }
 
   async listPendingDeliveriesOlderThan(received_at: string): Promise<PendingDelivery[]> {
     const { results } = await this.db.prepare(
-      "SELECT delivery_id, project, raw_body, received_at FROM pending_deliveries WHERE received_at < ? ORDER BY received_at ASC",
+      "SELECT delivery_id, project, raw_body, received_at, repo, routing_source, routing_digest, routing_state FROM pending_deliveries WHERE received_at < ? ORDER BY received_at ASC",
     ).bind(received_at).all<PendingDelivery>();
     return results;
   }
@@ -149,5 +160,113 @@ export class D1Store implements EventStore {
   async deletePendingDelivery(delivery_id: string): Promise<boolean> {
     const r = await this.db.prepare("DELETE FROM pending_deliveries WHERE delivery_id = ?").bind(delivery_id).run();
     return (r.meta.changes ?? 0) > 0;
+  }
+
+  async getPolicy(project: string, lookup: { digest?: string; version?: number; current?: boolean } = { current: true }) {
+    const row = lookup.digest
+      ? await this.db.prepare("SELECT body, envelope, digest FROM project_policies WHERE project = ? AND digest = ?").bind(project, lookup.digest).first<{ body: string; envelope: string; digest: string }>()
+      : lookup.version !== undefined
+        ? await this.db.prepare("SELECT body, envelope, digest FROM project_policies WHERE project = ? AND version = ?").bind(project, lookup.version).first<{ body: string; envelope: string; digest: string }>()
+        : await this.db.prepare("SELECT body, envelope, digest FROM project_policies WHERE project = ? ORDER BY version DESC LIMIT 1").bind(project).first<{ body: string; envelope: string; digest: string }>();
+    return row ? policyDocumentFromRow(row) : null;
+  }
+
+  async listPolicies(project: string, limit = 50) {
+    const { results } = await this.db.prepare("SELECT body, envelope, digest FROM project_policies WHERE project = ? ORDER BY version DESC LIMIT ?").bind(project, limit).all<{ body: string; envelope: string; digest: string }>();
+    return results.map(policyDocumentFromRow);
+  }
+
+  async getPolicyRoute(repo: string) {
+    return (await this.db.prepare("SELECT repo, state, project, digest, activation_seq, set_at FROM policy_routes WHERE repo = ?").bind(repo).first<PolicyRouteRow>()) ?? null;
+  }
+
+  async listPolicyRoutes(project: string) {
+    const { results } = await this.db.prepare("SELECT repo, state, project, digest, activation_seq, set_at FROM policy_routes WHERE project = ? ORDER BY repo").bind(project).all<PolicyRouteRow>();
+    return results;
+  }
+
+  async getPolicyByActivationSeq(project: string, throughSeq: number) {
+    const row = await this.db.prepare("SELECT body, envelope, digest FROM project_policies WHERE project = ? AND activation_seq <= ? ORDER BY activation_seq DESC LIMIT 1").bind(project, throughSeq).first<{ body: string; envelope: string; digest: string }>();
+    return row ? policyDocumentFromRow(row) : null;
+  }
+
+  async readPolicySnapshot(project: string, U?: number, budget?: PolicySnapshotBudget): Promise<PolicySnapshot> {
+    const head = await this.head(project);
+    return policySnapshotFromIndex({
+      project,
+      U,
+      budget,
+      headSeq: head?.seq,
+      getByActivationSeq: (p, seq) => this.getPolicyByActivationSeq(p, seq),
+      getEvent: (id) => this.get(id),
+    });
+  }
+
+  async applyPolicyWrite(write: PolicyWrite, expectedHeads: Record<string, ChainHead | null>) {
+    for (const [project, expected] of Object.entries(expectedHeads)) {
+      const head = await this.head(project);
+      if (expected === null) {
+        if (head) throw new HeadMovedError(project, { seq: -1, hash: "none" });
+      } else if (!head || head.seq !== expected.seq || head.hash !== expected.hash) {
+        throw new HeadMovedError(project, expected);
+      }
+    }
+    const liveByProject = new Map<string, import("@retrace-dev/core").PolicyDocument | null>();
+    const existingByRepo = new Map<string, PolicyRouteRow | null>();
+    for (const r of write.routes) {
+      if (r.state !== "active") continue;
+      const existing = await this.getPolicyRoute(r.repo);
+      existingByRepo.set(r.repo, existing);
+      if (existing && existing.project !== r.project && !liveByProject.has(existing.project))
+        liveByProject.set(existing.project, await this.getPolicy(existing.project, { current: true }));
+    }
+    assertRouteWriteConsistent(
+      write,
+      (repo) => existingByRepo.get(repo) ?? null,
+      (project) => write.documents.find((d) => d.body.project === project) ?? liveByProject.get(project) ?? null,
+    );
+    // Route CAS first. D1 cannot RAISE outside a trigger, so a lost upsert is a no-op;
+    // events and documents are INSERT…SELECT…WHERE the active routes now belong to us.
+    // If CAS lost, those writes insert nothing and the batch has no loser activation.
+    const activeRoutes = write.routes.filter((r) => r.state === "active");
+    const guard = activeRoutes.length
+      ? {
+        sql: activeRoutes.map(() => "EXISTS (SELECT 1 FROM policy_routes WHERE repo = ? AND project = ?)").join(" AND "),
+        params: activeRoutes.flatMap((r) => [r.repo, r.project]),
+      }
+      : undefined;
+    const stmts = [
+      ...write.routes.map((r) => this.db.prepare(
+        `INSERT INTO policy_routes (repo, state, project, digest, activation_seq, set_at) VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(repo) DO UPDATE SET state=excluded.state, project=excluded.project, digest=excluded.digest, activation_seq=excluded.activation_seq, set_at=excluded.set_at
+         WHERE policy_routes.project = excluded.project
+            OR policy_routes.state = 'revoked'
+            OR EXISTS (
+              SELECT 1 FROM project_policies pp
+              WHERE pp.project = policy_routes.project
+                AND pp.activation_seq = (SELECT MAX(activation_seq) FROM project_policies WHERE project = policy_routes.project)
+                AND NOT EXISTS (
+                  SELECT 1 FROM json_each(json_extract(pp.body, '$.github_repos')) je
+                  WHERE je.value = excluded.repo
+                )
+            )`,
+      ).bind(r.repo, r.state, r.project, r.digest, r.activation_seq, r.set_at)),
+      ...write.events.flatMap((e) => this.insertStatements(e, guard)),
+      ...write.documents.map((d) => {
+        const where = guard ? ` WHERE ${guard.sql}` : "";
+        const gp = guard?.params ?? [];
+        return this.db.prepare(
+          `INSERT INTO project_policies (project, version, digest, body, envelope, activation_seq, created_at)
+           SELECT ?, ?, ?, ?, ?, ?, ?${where}`,
+        ).bind(d.body.project, d.envelope.version, d.digest, JSON.stringify(d.body), JSON.stringify(d.envelope), d.envelope.activation.seq, d.envelope.created_at, ...gp);
+      }),
+    ];
+    await this.db.batch(stmts);
+    for (const r of write.routes) {
+      if (r.state !== "active") continue;
+      const landed = await this.getPolicyRoute(r.repo);
+      if (!landed || landed.project !== r.project)
+        throw new RouteConflictError(`repository ${r.repo} is already claimed`);
+    }
   }
 }

@@ -69,18 +69,20 @@ export function newId(): string {
   return "evt_" + cryptoImpl.randomUUID().replace(/-/g, "");
 }
 
-/** Build a full Event from input + previous chain head. */
+/** Build a full Event from input + previous chain head.
+ *  `reserved.id` is for the policy PUT path, which must name the activation event in the envelope before hashing it. */
 export async function sealEvent(
   input: EventInput,
   prev: { seq: number; hash: string } | null,
   now: Date = new Date(),
+  reserved?: { id?: string },
 ): Promise<Event> {
   const seq = prev ? prev.seq + 1 : 0;
   const prev_hash = prev ? prev.hash : GENESIS_HASH;
   const received_at = now.toISOString();
   const base = {
     ...input,
-    id: newId(),
+    id: reserved?.id ?? newId(),
     seq,
     timestamp: input.timestamp ?? received_at,
     prev_hash,

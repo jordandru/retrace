@@ -1,0 +1,26 @@
+{
+  "name": "v1-supersedes-null",
+  "body": {
+    "profile": "retrace-project-policy/1",
+    "project": "demo",
+    "trusted_hook_stamps": [],
+    "unresolved_claims": "withhold",
+    "repositories": [],
+    "github_repos": []
+  },
+  "envelope": {
+    "version": 1,
+    "created_at": "2026-09-10T03:45:00.000Z",
+    "set_by": {
+      "type": "team",
+      "id": "demo"
+    },
+    "supersedes": null,
+    "activation": {
+      "event_id": "evt_dddddddddddddddddddddddddddddddd",
+      "seq": 0
+    }
+  },
+  "canonical": "{\"activation\":{\"event_id\":\"evt_dddddddddddddddddddddddddddddddd\",\"seq\":0},\"created_at\":\"2026-09-10T03:45:00.000Z\",\"github_repos\":[],\"profile\":\"retrace-project-policy/1\",\"project\":\"demo\",\"repositories\":[],\"set_by\":{\"id\":\"demo\",\"type\":\"team\"},\"supersedes\":null,\"trusted_hook_stamps\":[],\"unresolved_claims\":\"withhold\",\"version\":1}",
+  "digest": "96cac528fec0a7c96c7560e23b8d4d3c9920cbca121b750499220e1bc5316470"
+}

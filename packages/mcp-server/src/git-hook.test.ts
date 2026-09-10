@@ -9,8 +9,8 @@ import { fileURLToPath } from "node:url";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { SqliteStore } from "./sqlite-store.js";
-import { appendEvent, generateSigningKey, PRODUCER_SIG_FORMAT_V2, publicFromPrivate, verifyProducerSig, verifyProject } from "@retrace-dev/core";
 import { hookScript, parseTrailers, resolveHookToken, resolveHookProducerKeyFile, retryableHookFailure, ttySurface, guardRemoteWrite, validCausedById, validActorId } from "./git-hook.js";
+import { appendEvent, generateSigningKey, PRODUCER_SIG_FORMAT_V2, publicFromPrivate, verifyProducerSig, verifyProject, createHandler, MemoryEventStore } from "@retrace-dev/core";
 import { RemoteApiError, RemoteCapabilityError } from "./remote-store.js";
 import { writeProducerPrivateKey } from "./producer-key.js";
 
@@ -890,4 +890,94 @@ test("git adapter: install writes post-merge too; a real merge is sealed live as
   assert.match(un, /removed post-commit hook/);
   assert.match(un, /removed post-merge hook/);
   assert.ok(!existsSync(join(dir, ".git/hooks/post-merge")));
+});
+
+test("F12: actual hook path — unbootstrapped project /2 seal queues under shadow/enforce and appends nothing", async () => {
+  async function run(mode: "off" | "shadow" | "enforce") {
+    const dir = mkdtempSync(join(tmpdir(), `retrace-git-f12-${mode}-`));
+    const kp = await generateSigningKey();
+    const keyFile = join(dir, "hook.jwk");
+    writeProducerPrivateKey(keyFile, kp.privateKey);
+    const store = new MemoryEventStore();
+    const h = createHandler(store, {
+      token: "owner-token-long-enough",
+      ownerPrincipal: { type: "human", id: "o" },
+      trailerPolicy: mode,
+      credentials: [{
+        token: "tok-git-hook-assert-00000",
+        name: "git hook (assert)",
+        trust: "assert",
+        actor: { type: "system", id: "retrace-git" },
+        projects: ["rpg"],
+        allowed_actors: [{ type: "human", id: "jordan@slcwitit.com" }],
+        public_key: publicFromPrivate(kp.privateKey),
+        require_signature: true,
+      }],
+    });
+    const server = createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (c) => chunks.push(Buffer.from(c)));
+      req.on("end", () => {
+        void (async () => {
+          const url = `http://127.0.0.1${req.url}`;
+          const headers = new Headers();
+          for (const [k, v] of Object.entries(req.headers)) {
+            if (typeof v === "string") headers.set(k, v);
+            else if (Array.isArray(v)) for (const item of v) headers.append(k, item);
+          }
+          const method = req.method ?? "GET";
+          const r = await h(new Request(url, {
+            method,
+            headers,
+            body: method === "GET" || method === "HEAD" ? undefined : Buffer.concat(chunks),
+          }));
+          const outHeaders: Record<string, string> = {};
+          r.headers.forEach((val, key) => { outHeaders[key] = val; });
+          res.writeHead(r.status, outHeaders);
+          res.end(Buffer.from(await r.arrayBuffer()));
+        })();
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+      const credFile = join(dir, "creds.json");
+      writeFileSync(credFile, JSON.stringify([{ token: "tok-git-hook-assert-00000", actor: { type: "system", id: "retrace-git" }, trust: "assert" }]));
+      sh(dir, "git", ["init", "-q", "-b", "main"]);
+      writeFileSync(join(dir, ".retrace.json"), JSON.stringify({ project: "rpg", url, credential: "retrace-git" }));
+      writeFileSync(join(dir, "a.ts"), "1\n");
+      sh(dir, "git", ["add", "."]);
+      sh(dir, "git", ["commit", "-qm", "initial"]);
+      const sha = sh(dir, "git", ["rev-parse", "HEAD"]).trim();
+      const env = {
+        RETRACE_URL: url,
+        RETRACE_CREDENTIALS_FILE: credFile,
+        RETRACE_HOOK_KEY_FILE: keyFile,
+      };
+      if (mode === "off") {
+        await shAsync(dir, "node", [bin, "commit", "--hook", "--repo", dir], env);
+        assert.equal(store.events.filter((e) => e.action === "committed").length, 1);
+        assert.ok(!existsSync(join(dir, ".git", "retrace-pending-seal")));
+      } else {
+        await assert.rejects(
+          promisify(execFile)("node", [bin, "commit", "--hook", "--repo", dir], {
+            cwd: dir,
+            encoding: "utf8",
+            env: { ...baseEnv, ...env },
+          }),
+          (error: any) => {
+            assert.equal(error.code, 1);
+            return true;
+          },
+        );
+        assert.equal(store.events.length, 0, mode);
+        assert.equal(readFileSync(join(dir, ".git", "retrace-pending-seal"), "utf8").trim(), sha);
+      }
+    } finally {
+      server.close();
+    }
+  }
+  await run("off");
+  await run("shadow");
+  await run("enforce");
 });
