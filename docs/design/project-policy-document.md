@@ -1,9 +1,11 @@
 # Project policy document — contract (trailer-consistency §15 step 2)
 
-**Status:** DRAFT v3, 2026-09-10, author claude-code. v1 (d3aec24) and v2 (91eb0fb) were design-reviewed by
-Codex (commit comments 2026-09-10T03:16Z and 03:23Z): both *request changes*. v2 closed F2 (selection ≠
-retrieval), project-bound retrieval, export coverage, Q3 (owner authority), F5 (bootstrap, drift labels).
-v3 folds the six remaining findings (V2-1…V2-6) and the §3/§8 clarifications; dispositions in §11.
+**Status:** DRAFT v4, 2026-09-10, author claude-code. v1 (d3aec24), v2 (91eb0fb) and v3 (41d5471) were
+design-reviewed by Codex (commit comments 2026-09-10T03:16Z, 03:23Z, 03:39Z): all *request changes*, each
+round narrower. v3 closed V2-1…V2-6 (serialisation, authentication, ordering via ledger activations, context
+key, routing, missing-policy). v4 folds V3-1…V3-4 — the **authoritative activation predicate**, deferral
+of `release-route`, corrected concurrency outcomes, and a schema-compatible audit actor for team owners —
+plus the non-blocking notes; dispositions in §11.
 Companion to `commit-trailer-consistency.md` §3.2/§3.5 (snapshot, context key, read budget), §5.3
 (pending), §6 rules 3–5, §9 (policy distribution, drift) and §15 step 2. Nothing here changes a
 classification rule or Jordan's `unresolved_claims: record` default.
@@ -44,8 +46,8 @@ policy_digest = sha256hex( canonical_v1( body ∪ envelope ) )
 **`canonical_v1` is RFC 8785 (JSON Canonicalization Scheme), with these `/1` constraints** (Codex V2-1):
 - Serialisation is exactly JCS: object members sorted by UTF-16 code units of the key; no whitespace;
   strings escaped per JCS §3.2.2.2 only (`\"`, `\\`, `\b`, `\f`, `\n`, `\r`, `\t`, other control characters
-  below U+0020 as `\u00xx` lower-case; **everything else literal**, so `"a"` and `"a"` have one
-  canonical spelling and non-ASCII is emitted as UTF-8, never escaped). Output bytes are UTF-8.
+  below U+0020 as `\u00xx` lower-case; **everything else literal**, so the input spellings `"a"` and `"\u0061"` have
+  one canonical spelling, `"a"`; non-ASCII is emitted as UTF-8, never escaped). Output bytes are UTF-8.
 - Numbers: **integers only** in `/1`, range `0 ≤ n ≤ 2^53−1`, serialised as decimal without sign, exponent
   or fraction. Any float, negative, or out-of-range integer → 400 (body) / internal error (envelope).
 - Strings must be valid Unicode scalar sequences: a lone surrogate anywhere → 400. Strings are compared and
@@ -53,7 +55,8 @@ policy_digest = sha256hex( canonical_v1( body ∪ envelope ) )
   `github_repos`) must arrive sorted by that comparator and unique, and `repositories` sorted by `name`;
   otherwise 400 — so array order can never vary between two representations of one document.
 - All fields are **required**; nothing is defaulted into the hash; unknown fields at any depth → 400.
-- Implementation: a dedicated `canonicalPolicyV1()` validated against the RFC 8785 test vectors; the
+- Implementation: a dedicated `canonicalPolicyV1()` validated against the RFC 8785 test vectors, which also
+  rejects duplicate object properties and performs **no** Unicode normalisation (RFC 8785 input rules); the
   hash chain's own `canonicalize()` (`chain.ts`) is not changed or relied on for this format.
 - **Golden vectors** `packages/core/src/fixtures/policy-v1/*.json`: at least five complete
   **body + envelope** inputs with expected canonical bytes and digests — ASCII; non-ASCII stamp and alias
@@ -73,9 +76,11 @@ A body may only route repositories to its own `project`.
   1. precondition: current digest ≠ `If-Match` → `412`, **even when the submitted body equals current**;
   2. validation (§2) → `400`; routing conflicts (§7) → `409`;
   3. no-op: body identical to current → `200` with the current document, nothing written;
-  4. otherwise assign the envelope (`version = current + 1`, `created_at`, `set_by`, `supersedes`), append
-     the **activation event** (§6) to the project's chain, write `project_policies` and every affected
-     `policy_routes` row, return `201` with the document (which now carries `activation`).
+  4. otherwise reserve the activation event's `id` and next `seq` (there is no digest cycle: the event hash
+     is not in the envelope, the envelope's `activation` back-reference is in the digest), assign the
+     envelope (`version = current + 1`, `created_at`, `set_by`, `supersedes`, `activation`), append the
+     **activation event** (§6) at exactly that seq, write `project_policies` and every affected
+     `policy_routes` row, and return `201` with the document — all in the one operation.
   A version collision under contention retries once from step 1, then `409`. Documents are never updated
   or deleted.
   - `set_by` is the Worker's configured owner principal (`RETRACE_OWNER`; already the identity used for
@@ -136,14 +141,44 @@ A policy version becomes **current** only when its **activation event** is appen
 chain — inside the same atomic `PUT` (§3). Shape:
 
 ```
-{ project, actor: <set_by principal>, action: "created",
+{ project,
+  actor: { type: "system", id: "retrace-api", on_behalf_of: "<set_by.type>:<set_by.id>" },   // honest: the API appended it for the owner principal
+  action: "created",
   artifacts: [ { id: "policy:<project>@<policy_digest>", kind: "policy", role: "generated",
                  derived_from: ["policy:<project>@<supersedes digest>"]? } ],
   intent: "policy v<version> activated",
-  method: { tool: "retrace-admin" | "retrace-api", params: { policy_profile, policy_version, policy_digest, supersedes,
-            routes_changed: [ { repo, from_project?, to_project?, state } ] } },
+  method: { tool: "retrace-api", params: { policy_profile, policy_version, policy_digest, supersedes,
+            set_by: { type: "human" | "team", id },                     // the principal, retained verbatim (Codex V3-4)
+            routes_changed: [ { repo, from_project?, to_project?, state } ],
+            sealed_by: "owner" } },                                      // server stamp, as for every owner write
   idempotency_key: "policy:<project>:<version>" }
 ```
+
+`set_by` may be a **team**; the Event `actor` schema allows only `human | agent | system`, so the audit
+actor is the system that appended the event, `on_behalf_of` names the principal, and `method.params.set_by`
+records the principal's own `{type,id}` — a team is never cast to a human and no individual operator is
+invented (Codex V3-4). Widening `ActorType` is a separate, explicitly designed change, not part of step 2.
+
+**Authoritative activation predicate** (Codex V3-1). An event is an activation of `(project, digest)` —
+online and offline, by the **same** rule — iff **all** hold:
+1. `idempotency_key` has the reserved prefix `policy:` — reserved at ingress exactly like `git:`, `gd:` and
+   `gh:` (`store.ts`): any `POST /events` carrying it is rejected `400`, from **any** credential including
+   the owner bearer; only the server's `PUT` path may append with it. So ordinary logging can neither claim
+   the namespace nor block a later `PUT`;
+2. `method.params.sealed_by` is the **owner** stamp — the Worker stamps it from the authenticated principal
+   and strips any client-supplied value, so a pinned or assert credential can never produce it;
+3. `action = "created"`, `method.tool = "retrace-api"`, one artifact `policy:<project>@<digest>` with
+   `event.project == project`;
+4. the referenced document exists, and its envelope's `activation.event_id` and `activation.seq` equal
+   **this** event, and its `profile`, `version`, `policy_digest` and `supersedes` equal the event's params
+   (back-references cross-checked both ways);
+5. `policy_version` is greater than that of every earlier eligible activation for the project (versions
+   are monotonic; a later event carrying an **older** digest — e.g. a copy of v1's after v2 — fails here).
+Selection = the eligible activation with the greatest `seq ≤ U`. Online, `project_policies.activation_seq`
+is the index for that bounded lookup and the event is the authority the index was written from; offline,
+the verifier applies the predicate to the exported events. An event that resembles an activation but fails
+any clause is an ordinary event and is ignored by selection. A reassignment audit (§7) is **not** an
+activation unless it also created a version under this predicate.
 
 Consequences:
 - **Currentness is a pure function of the ledger.** "Current at `U`" = the version whose activation event
@@ -159,8 +194,12 @@ Consequences:
   consumer that re-evaluates under a later mode labels the result as such. `/1`-signed events stay
   byte-preserved (§6 rule 5).
 - The verifier relationship: exported context + exported events (activations included) + `bundle.policies`
-  ⇒ the selection is **reconstructible**, not merely attested. Where a bundle lacks the activation events
-  (a scoped export), the verifier reports `policy_selection_unverifiable` rather than passing.
+  ⇒ the selection is **reconstructible**, not merely attested. Verifiability needs **completeness**, not
+  presence: only a bundle whose chain is complete for the project up to `context.read_head_seq` (a full
+  export, or a scoped one that carries the chain-verified range) can establish that no later eligible
+  activation was omitted. Otherwise the verifier reports `policy_selection_unverifiable`; a complete history
+  that disagrees with the context reports `policy_misselected`. Neither outcome permits an overall
+  "policy verified" result.
 
 **Context key** (Codex V2-4): the classification context is keyed by `(project, canonical repository R,
 full sha)` exactly as §3.2 accepted — v2's `(project, sha)` was a regression and is withdrawn. Forks and
@@ -187,9 +226,11 @@ domains. Rules:
 - Removing a repository from a document (a new version without it) sets its route to **`revoked`**, not
   absent: a stale env route can **never** be resurrected by a revocation. Codex's A/B case: env maps
   `org/repo` → B (no document); A's document claims it (route active→A); A later drops it → `revoked`;
-  B stays unbootstrapped and gets nothing. Only an explicit owner action re-enables the repo: a document
-  from some project claiming it (`?reassign=` semantics below), or `retrace-admin release-route <repo>`
-  which records a `released` activation on the owning project's chain and deletes nothing.
+  B stays unbootstrapped and gets nothing. A `revoked` row returns to `active` **only** through an owner
+  `PUT` whose document claims the repository (with `?reassign=` when another project's current document
+  still lists it) — that transition is part of the atomic `PUT` and is recorded in `routes_changed` of the
+  activation event. There is no separate release command: v3's `release-route` had no realisable transition
+  under never-deleted rows and is withdrawn (Codex V3-2); env eligibility is never restored.
 - **Reassignment is atomic across both projects.** `PUT …/A/policy?reassign=<from>` succeeds only if
   the route's current owner is exactly `<from>`; it appends a new version to **both** projects (`<from>`
   minus the repo, A plus it), two activation events, and the route row change, in one operation. A stale
@@ -222,9 +263,11 @@ server returned.
 
 P1 Authority and atomicity: pinned/assert/"admin"-named credential → 403; owner → 201 v1 with an
 activation event; identical body, correct `If-Match` → 200, nothing written; identical body, stale
-`If-Match` → 412; changed body → 201 v2, `supersedes` = v1, second activation event; concurrent different
-PUTs → versions 2 and 3 immutable (or one 409), never a lost write; concurrent identical PUTs with a valid
-precondition → one 201 one 200, same digest; `retrace-serve` without `RETRACE_OWNER` → 403.
+`If-Match` → 412; changed body → 201 v2, `supersedes` = v1, second activation event; two concurrent PUTs both carrying
+v1's digest as `If-Match` (same or different changed bodies) → exactly one 201 (v2) and one **412** — the
+second's precondition is stale even if its body now equals v2; resubmitting with v2's digest is a new
+request (200 if equal, 201 v3 if different); two concurrent **unchanged**-body PUTs against the still-current
+version → both 200, nothing written; `retrace-serve` without `RETRACE_OWNER` → 403.
 P2 Canonical form: golden body+envelope vectors byte-exact; `"a"` and `"a"` produce one digest;
 non-ASCII literal; control-character escapes; unsorted/duplicate arrays, floats, negative or 2^53 integers,
 lone surrogate, unknown nested field → 400.
@@ -235,15 +278,23 @@ P4 Ordering (V2-3): C1 created at head 100 selects v1; `PUT` v2 → activation a
 export both; offline recompute reproduces both selections; a context claiming v2 with `read_head_seq =
 100` → `policy_misselected`; a scoped bundle without the activation events → `policy_selection_unverifiable`.
 Later producers, retries, new paths and amendments of C1 all resolve v1; drift shown for C1.
+**Activation authority (V3-1):** an activation-shaped event POSTed by a pinned credential, an assert
+credential, and the owner bearer (`policy:` idempotency prefix) → 400 at ingress; an event that passes
+ingress without the prefix but otherwise resembles an activation → ignored by selection online and
+offline; a later event copying v1's digest after v2's activation → v2 still selected; a document whose
+`activation` back-reference names a different event, or an event whose params disagree with the
+document → `policy_misselected`; a team-owned PUT appends `actor system/retrace-api on_behalf_of
+team:<id>` with `params.set_by.type = "team"` and no human is invented.
 P5 Routing (V2-5): stored active route wins over env; env only for a no-row repo of an unbootstrapped
-project; A claims env-B's repo then drops it → `revoked`, B gets nothing; `release-route` re-enables
-explicitly; duplicate claim → 409; `?reassign=` atomic across both documents and the route row; stale
+project; A claims env-B's repo then drops it → `revoked`, B gets nothing; a later owner PUT claiming it
+reactivates it (and only that); duplicate claim → 409; `?reassign=` atomic across both documents and the route row; stale
 `?reassign=B` against C's route → 409; unroutable delivery has a durable unresolved row before 202;
 drained delivery after an env change keeps its recorded project and repo.
 P6 Bootstrap: declared-project mismatch refused; `--cross-project-copy` prints and proceeds; basename hint
 only; preview hash labelled and unequal to the returned digest; `local_config_drift` against the body.
 P7 Context key (V2-4): two repositories in one project sharing a sha with different evidence → two
-contexts; one repository reached by old and new alias → one context.
+contexts; one repository reached by old and new alias → one context — and still one context when a policy
+update renames the alias between two producers (R is the stable identity, not today's alias string).
 P8 Missing policy by mode (V2-6): valid env route, no document: `off` → sealed unclassified;
 `shadow`/`enforce` → webhook delivery pending, hook queued and loud, no seal.
 P9 Export and authentication (V2-2): every referenced digest and activation event present before the
@@ -276,3 +327,8 @@ team credentials (an authorisation extension, per Codex Q3).
 | v2→v3 | V2-6 (P1) missing policy must stay pending in shadow/enforce | §7 mode-dependent rule; P8 |
 | v2→v3 | §3 clarifications (one atomic op, recheck on retry, 412 even if equal) | §3 steps 1–4; P1 |
 | v2→v3 | §8 digest preview honesty; explicit `record` | §8; P6 |
+| v3→v4 | V3-1 (P1) authoritative activation predicate; forged/copied activations; back-references | §6 predicate (reserved `policy:` prefix at ingress, owner stamp, monotonic version, two-way back-reference); P4 |
+| v3→v4 | V3-2 (P2) `release-route` unrealisable | §7: withdrawn; revoked→active only via owner PUT/reassign; P5 |
+| v3→v4 | V3-3 (P2) concurrency outcomes contradict If-Match | P1 rewritten: one 201 + one 412 |
+| v3→v4 | V3-4 (P2) team principal not an Event actor | §6 shape: `system/retrace-api` on_behalf_of principal, `params.set_by` verbatim |
+| v3→v4 | non-blocking: reserve event id/seq before hashing; completeness for verifiability; alias stability; RFC input rules; escape example | §3 step 4; §6 consequences; P7; §2 |
