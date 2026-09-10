@@ -11,7 +11,7 @@
  *   GET /projects/:p/export|report|lineage · POST /projects/:p/share · GET /.well-known/retrace-pubkey
  *   POST /hooks/github  (GitHub webhook; HMAC-verified with RETRACE_GITHUB_SECRET; project from repo via RETRACE_GITHUB_PROJECTS)
  */
-import { createHandler, parseCheckpointProjectAllowlist, parseCredentials, parseGithubRepoProjects, parseOwnerPrincipal, parseSigningKey, parseTrailerPolicy, runCheckpointCron, refreshExportCache, exportBuilder, keyId } from "@retrace-dev/core";
+import { createHandler, parseCheckpointProjectAllowlist, parseCredentials, parseGithubRepoProjects, parseOwnerPrincipal, parseSigningKey, parseTrailerPolicy, runCheckpointCron, refreshExportCache, exportBuilder, keyId, drainPendingGithubDeliveries } from "@retrace-dev/core";
 import { D1Store } from "./d1-store.js";
 import { D1CheckpointLog } from "./checkpoint-log.js";
 import { D1ExportCache } from "./export-cache-d1.js";
@@ -89,7 +89,16 @@ export default {
   /** Hourly cron (wrangler.toml [triggers]): checkpoint explicitly opted-in moved heads and witness them in Rekor.
    *  Signed with the Worker's own signing key — the witness's authority is Rekor's log, not the key. No signing key
    *  configured → the run is skipped (an unsigned scheduled checkpoint asserts nothing worth storing). */
-  async scheduled(_controller: unknown, env: Env, ctx: { waitUntil(p: Promise<unknown>): void }): Promise<void> {
+  async scheduled(controller: { cron?: string }, env: Env, ctx: { waitUntil(p: Promise<unknown>): void }): Promise<void> {
+    const store = new D1Store(env.DB);
+    const trailerPolicy = parseTrailerPolicy(env.RETRACE_TRAILER_POLICY);
+    ctx.waitUntil(
+      drainPendingGithubDeliveries(store, { trailerPolicy }).then(
+        (r) => console.log("pending drain:", JSON.stringify(r)),
+        (e) => console.error("pending drain failed:", String((e as Error)?.message ?? e)),
+      ),
+    );
+    if (controller?.cron && controller.cron.includes("*/5") && !controller.cron.includes("7 *")) return;
     const projects = parseCheckpointProjectAllowlist(env.RETRACE_CHECKPOINT_PROJECTS);
     if (projects.length === 0) {
       console.log("checkpoint cron skipped: RETRACE_CHECKPOINT_PROJECTS has no opted-in projects");
@@ -97,7 +106,6 @@ export default {
     }
     const signingKey = parseSigningKey(env.RETRACE_SIGNING_KEY);
     if (!signingKey) return;
-    const store = new D1Store(env.DB);
     // Producers list matches what the fetch path embeds in live exports, so cached and live bundles verify alike.
     const producers = await Promise.all(
       allCredentials(env)

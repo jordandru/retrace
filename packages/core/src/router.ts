@@ -47,6 +47,10 @@ import {
   PRODUCER_SIG_V2_MIN_CLI_VERSION, PRODUCER_SIG_VERDICT_PARAM, ProducerKey, ProducerSigVerdict,
   TrailerPolicy, isGitCommitSeal, isLegacyClientCommitSeal, parseTrailerPolicy, producerSigCheck, producerSigFormatOf,
 } from "./producer-sig.js";
+import {
+  attachClaimDecision, classifyCommitClaim, PENDING_BUDGET_ATTEMPTS, PENDING_LEASE_MS,
+  recordWebhookClassifyOutcome, webhookBreakerAdmission,
+} from "./classify.js";
 import { renderReportHtml } from "./report.js";
 import { collectAttributionAmendments } from "./attribution.js";
 import { buildLineage, renderLineageDot, renderLineageMermaid } from "./lineage.js";
@@ -500,11 +504,58 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
               return json({ error: `github delivery already sealed in project "${p}"` }, 409);
           }
         }
+        const isShadowPush = mode === "shadow" && ghEvent === "push" && !!opts.githubIncludePush;
+        let probe = false;
+        if (isShadowPush && store.insertPendingDelivery) {
+          try {
+            await store.insertPendingDelivery({
+              delivery_id: delivery ?? `push:${repo}:${Date.now()}`,
+              project, raw_body: raw, received_at: new Date().toISOString(),
+              repo, routing_source: routing.source, routing_digest: routing.digest, routing_state: "received",
+            });
+          } catch {
+            return json({ error: "pending insert failed" }, 500);
+          }
+          const admit = await webhookBreakerAdmission(store, project, Date.now(), delivery ?? `probe:${repo}`);
+          if (admit === "pending") return json({ ok: true, pending: (payload.commits ?? []).map((c: any) => c.id), reason: "breaker_open" }, 202);
+          probe = admit === "probe";
+        }
         const inputs = mapGithubWebhook(ghEvent, payload, { project, includePush: opts.githubIncludePush, deliveryId: delivery && inputs_needs_unique(ghEvent) ? delivery : undefined });
         const results = [];
+        const pendingShas: string[] = [];
         for (const input of inputs) {
           const parsed = EventInput.safeParse(input);
           if (!parsed.success) { results.push({ error: parsed.error.issues }); continue; }
+          if (mode === "shadow" && isGitCommitSeal(parsed.data)) {
+            if (parsed.data.idempotency_key) {
+              const prior = await store.byIdempotencyKey(project, parsed.data.idempotency_key);
+              if (prior) { results.push({ id: prior.id, seq: prior.seq, deduped: true }); continue; }
+            }
+            const classified = await classifyCommitClaim({
+              store, input: parsed.data, producer: "github-push",
+              sealedBy: SEALED_BY_GITHUB_WEBHOOK, trailerPolicy: mode, canonicalR: repo,
+            });
+            if (classified.kind === "unavailable") {
+              if (isShadowPush) {
+                const reason = classified.reason === "deadline" || classified.reason === "store_error" || classified.reason === "budget" ? classified.reason : "store_error";
+                await recordWebhookClassifyOutcome(store, project, reason, Date.now(), probe);
+                pendingShas.push(String(parsed.data.method?.params?.sha ?? ""));
+                return json({ ok: true, pending: pendingShas.filter(Boolean), reason: classified.reason }, 202);
+              }
+            }
+            let toSeal = parsed.data;
+            if (classified.kind === "decision") toSeal = attachClaimDecision(parsed.data, classified.record);
+            const stamped = stampSealedBy(toSeal, SEALED_BY_GITHUB_WEBHOOK);
+            for (let attempt = 0; ; attempt++) {
+              try { const r = await appendEvent(store, stamped); results.push({ id: r.event.id, seq: r.event.seq, deduped: r.deduped }); break; }
+              catch (e: any) {
+                const client = writeClientError(e);
+                if (client) return json({ error: client }, 400);
+                if (!/UNIQUE/i.test(String(e?.message)) || attempt >= 4) throw e;
+              }
+            }
+            continue;
+          }
           const stamped = stampSealedBy(parsed.data, SEALED_BY_GITHUB_WEBHOOK);
           for (let attempt = 0; ; attempt++) {
             try { const r = await appendEvent(store, stamped); results.push({ id: r.event.id, seq: r.event.seq, deduped: r.deduped }); break; }
@@ -514,6 +565,10 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
               if (!/UNIQUE/i.test(String(e?.message)) || attempt >= 4) throw e;
             }
           }
+        }
+        if (isShadowPush) {
+          await recordWebhookClassifyOutcome(store, project, "ok", Date.now(), probe);
+          if (delivery && store.deletePendingDelivery) await store.deletePendingDelivery(delivery);
         }
         return json({ ok: true, event: ghEvent, project, logged: results }, 201);
       }
@@ -651,6 +706,8 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
         if (credential?.require_signature && producerVerdict !== "verified")
           // the verdict word only — never echo the signature or any kid
           return json({ error: `producer signature required by this credential (verdict: ${producerVerdict})` }, 401);
+        if (producerVerdict === "verified" && producerCheck.format === PRODUCER_SIG_FORMAT_V2 && producerCheck.signed_actor)
+          params[PRODUCER_SIGNED_ACTOR_PARAM] = producerCheck.signed_actor;
         const trailerPolicy = parseTrailerPolicy(opts.trailerPolicy);
         if (
           trailerPolicy === "enforce"
@@ -664,17 +721,21 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
             format: PRODUCER_SIG_FORMAT_V2,
           }, 426);
         }
-        if (producerVerdict === "verified" && producerCheck.format === PRODUCER_SIG_FORMAT_V2 && producerCheck.signed_actor)
-          params[PRODUCER_SIGNED_ACTOR_PARAM] = producerCheck.signed_actor;
-        const isHookV2GitCommit =
-          principal?.kind === "credential"
-          && principal.credential.trust === "assert"
-          && producerSigFormatOf(resolvedInput) === PRODUCER_SIG_FORMAT_V2
-          && isGitCommitSeal(resolvedInput);
-        if (isHookV2GitCommit && store.getPolicy) {
-          const hasDoc = !!(await store.getPolicy(resolvedInput.project, { current: true }));
-          if (missingPolicyDisposition(trailerPolicy, hasDoc) === "pending_loud")
-            return json({ error: "policy_missing", pending: true, hook: "queued", project: resolvedInput.project }, 503);
+        if (trailerPolicy === "shadow" && isGitCommitSeal(resolvedInput)) {
+          const classified = await classifyCommitClaim({
+            store,
+            input: resolvedInput,
+            producer: "git-hook",
+            sealedBy: sealedBy(principal),
+            trailerPolicy,
+            signedActor: producerCheck.signed_actor,
+          });
+          if (!isLegacyClientCommitSeal(resolvedInput) && classified.kind === "unavailable")
+            return json({
+              error: classified.reason === "policy_missing" ? "policy_missing" : "classification_unavailable",
+              reason: classified.reason, pending: true, hook: "queued", project: resolvedInput.project,
+            }, 503);
+          if (classified.kind === "decision") params[CLAIM_DECISION_PARAM] = classified.record;
         }
         const location = parsed.data.location ? { ...parsed.data.location } : undefined;
         if (location && !resolved.relayed) delete location.client;
@@ -924,4 +985,69 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
       return json({ error: `internal error (ref ${ref})` }, 500);
     }
   };
+}
+
+/** Drain pending GitHub push deliveries. Breaker is not consulted (brief §7(b)); drain failures do not trip it (§7(a)). */
+export async function drainPendingGithubDeliveries(store: EventStore, opts: {
+  trailerPolicy: TrailerPolicy;
+  now?: () => number;
+}): Promise<{ drained: number; failed: number }> {
+  if (!store.listDrainablePendingDeliveries) return { drained: 0, failed: 0 };
+  const now = opts.now ?? Date.now;
+  const rows = await store.listDrainablePendingDeliveries(new Date(now()).toISOString(), 20);
+  let drained = 0, failed = 0;
+  for (const row of rows) {
+    if (row.routing_state === "unresolved" || row.routing_state === "pending_policy") continue;
+    let payload: unknown;
+    try { payload = JSON.parse(row.raw_body); } catch { failed++; continue; }
+    const owner = `drain:${row.delivery_id}`;
+    const until = new Date(now() + PENDING_LEASE_MS).toISOString();
+    if (store.updatePendingDelivery) {
+      await store.updatePendingDelivery({ ...row, lease_owner: owner, lease_until: until });
+    }
+    const inputs = mapGithubWebhook("push", payload, { project: row.project, includePush: true });
+    const outcomes: Record<string, string> = row.outcomes ? JSON.parse(row.outcomes) as Record<string, string> : {};
+    let allDone = true;
+    let attempts = row.attempt_count ?? 0;
+    for (const input of inputs) {
+      const parsed = EventInput.safeParse(input);
+      if (!parsed.success) continue;
+      const sha = String(parsed.data.method?.params?.sha ?? "");
+      if (!sha || outcomes[sha] === "sealed" || outcomes[sha] === "budget_failed") continue;
+      if (parsed.data.idempotency_key && await store.byIdempotencyKey(row.project, parsed.data.idempotency_key)) {
+        outcomes[sha] = "sealed";
+        continue;
+      }
+      const classified = await classifyCommitClaim({
+        store, input: parsed.data, producer: "github-push",
+        sealedBy: SEALED_BY_GITHUB_WEBHOOK, trailerPolicy: opts.trailerPolicy, canonicalR: row.repo,
+      });
+      if (classified.kind === "unavailable") {
+        attempts += 1;
+        if (classified.reason === "budget" && attempts >= PENDING_BUDGET_ATTEMPTS) {
+          outcomes[sha] = "budget_failed";
+        } else {
+          allDone = false;
+        }
+        continue;
+      }
+      if (classified.kind === "decision" || classified.kind === "legacy") {
+        const withDecision = classified.kind === "decision" ? attachClaimDecision(parsed.data, classified.record) : parsed.data;
+        const stamped = {
+          ...withDecision,
+          method: { ...withDecision.method, params: { ...withDecision.method?.params, [SEALED_BY_PARAM]: SEALED_BY_GITHUB_WEBHOOK } },
+        };
+        await appendEvent(store, stamped);
+        outcomes[sha] = "sealed";
+      }
+    }
+    if (store.updatePendingDelivery) {
+      await store.updatePendingDelivery({ ...row, outcomes: JSON.stringify(outcomes), attempt_count: attempts, lease_owner: undefined, lease_until: undefined, state: allDone ? "done" : row.state });
+    }
+    if (allDone) {
+      if (store.deletePendingDelivery) await store.deletePendingDelivery(row.delivery_id);
+      drained++;
+    } else failed++;
+  }
+  return { drained, failed };
 }

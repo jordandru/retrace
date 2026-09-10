@@ -1,5 +1,4 @@
-import { ArtifactIndexQuery, ArtifactIndexResult, ChainHead, Event, EventStore, HeadMovedError, HistoryQuery, HistoryPage, PendingDelivery, Share, artifactIndexRows, clampHistoryLimit, eventsReferencingArtifactsSql, historyPageFromNewestFirst, likeContains, policyDocumentFromRow, policySnapshotFromIndex, assertRouteWriteConsistent, RouteConflictError } from "@retrace-dev/core";
-import type { PolicyRouteRow, PolicySnapshot, PolicySnapshotBudget, PolicyWrite } from "@retrace-dev/core";
+import type { BreakerRow, ClassificationContextRow, PolicyRouteRow, PolicySnapshot, PolicySnapshotBudget, PolicyWrite } from "@retrace-dev/core";
 
 export class D1Store implements EventStore {
   constructor(private db: D1Database) {}
@@ -42,7 +41,7 @@ export class D1Store implements EventStore {
     if (audit.project === project) throw new Error("audit event must not live in the project being deleted");
     // Keep every project-owned row in this guarded transaction. In particular, leaving export_cache behind would
     // retain the deleted ledger bytes and could serve them as a stale bundle if the project name were recreated.
-    const tables = ["events", "event_artifacts", "event_artifact_index", "pending_deliveries", "shares", "checkpoints", "export_cache", "project_policies"];
+    const tables = ["events", "event_artifacts", "event_artifact_index", "pending_deliveries", "shares", "checkpoints", "export_cache", "project_policies", "classification_contexts", "classification_path_lowers", "classification_breakers"];
     const headMatches = {
       sql: "EXISTS (SELECT 1 FROM events WHERE project = ? AND seq = ? AND hash = ?) AND NOT EXISTS (SELECT 1 FROM events WHERE project = ? AND seq > ?)",
       params: [project, expectedHead.seq, expectedHead.hash, project, expectedHead.seq],
@@ -268,5 +267,101 @@ export class D1Store implements EventStore {
       if (!landed || landed.project !== r.project)
         throw new RouteConflictError(`repository ${r.repo} is already claimed`);
     }
+  }
+
+  private async loadContext(project: string, repo: string, sha: string): Promise<ClassificationContextRow | null> {
+    const row = await this.db.prepare(
+      `SELECT project, canonical_repo, sha, read_head_seq, read_head_hash, policy_digest, first_producer, first_F_digest,
+              first_claim_digest, classifier_profile, rollout_mode, amendment_snapshot, legacy_client_decision, created_at
+       FROM classification_contexts WHERE project = ? AND canonical_repo = ? AND sha = ?`,
+    ).bind(project, repo, sha).first<Omit<ClassificationContextRow, "per_path_lower">>();
+    if (!row) return null;
+    const { results } = await this.db.prepare(
+      "SELECT path, lower_seq FROM classification_path_lowers WHERE project = ? AND canonical_repo = ? AND sha = ?",
+    ).bind(project, repo, sha).all<{ path: string; lower_seq: number }>();
+    const per_path_lower: Record<string, number> = {};
+    for (const l of results) per_path_lower[l.path] = l.lower_seq;
+    return { ...row, per_path_lower };
+  }
+
+  async getClassificationContext(project: string, canonicalRepo: string, sha: string) {
+    return this.loadContext(project, canonicalRepo, sha);
+  }
+
+  async insertClassificationContextIfAbsent(row: ClassificationContextRow) {
+    const ins = await this.db.prepare(
+      `INSERT OR IGNORE INTO classification_contexts
+       (project, canonical_repo, sha, read_head_seq, read_head_hash, policy_digest, first_producer, first_F_digest,
+        first_claim_digest, classifier_profile, rollout_mode, amendment_snapshot, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(row.project, row.canonical_repo, row.sha, row.read_head_seq, row.read_head_hash, row.policy_digest,
+      row.first_producer, row.first_F_digest, row.first_claim_digest, row.classifier_profile, row.rollout_mode,
+      row.amendment_snapshot, row.created_at).run();
+    const ctx = await this.loadContext(row.project, row.canonical_repo, row.sha);
+    if (!ctx) throw new Error("classification context insert vanished");
+    return { inserted: (ins.meta.changes ?? 0) > 0, context: ctx };
+  }
+
+  async ensureClassificationPathLowers(project: string, canonicalRepo: string, sha: string, derived: Record<string, number>) {
+    const stmts = Object.entries(derived).map(([path, lower]) =>
+      this.db.prepare(
+        "INSERT OR IGNORE INTO classification_path_lowers (project, canonical_repo, sha, path, lower_seq) VALUES (?, ?, ?, ?, ?)",
+      ).bind(project, canonicalRepo, sha, path, lower),
+    );
+    if (stmts.length) await this.db.batch(stmts);
+    const ctx = await this.loadContext(project, canonicalRepo, sha);
+    return ctx?.per_path_lower ?? {};
+  }
+
+  async setClassificationLegacyDecision(project: string, canonicalRepo: string, sha: string, decision: unknown) {
+    await this.db.prepare(
+      "UPDATE classification_contexts SET legacy_client_decision = ? WHERE project = ? AND canonical_repo = ? AND sha = ?",
+    ).bind(JSON.stringify(decision), project, canonicalRepo, sha).run();
+  }
+
+  async getBreaker(project: string) {
+    return (await this.db.prepare(
+      "SELECT project, state, failures, failure_window_start, last_failure_at, opened_at, probe_lease_until, probe_lease_owner FROM classification_breakers WHERE project = ?",
+    ).bind(project).first<BreakerRow>()) ?? null;
+  }
+
+  async casBreaker(expected: BreakerRow | null, next: BreakerRow) {
+    if (!expected) {
+      const r = await this.db.prepare(
+        `INSERT OR IGNORE INTO classification_breakers (project, state, failures, failure_window_start, last_failure_at, opened_at, probe_lease_until, probe_lease_owner)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).bind(next.project, next.state, next.failures, next.failure_window_start, next.last_failure_at, next.opened_at, next.probe_lease_until, next.probe_lease_owner).run();
+      return (r.meta.changes ?? 0) > 0;
+    }
+    const r = await this.db.prepare(
+      `UPDATE classification_breakers SET state=?, failures=?, failure_window_start=?, last_failure_at=?, opened_at=?, probe_lease_until=?, probe_lease_owner=?
+       WHERE project=? AND state=? AND failures=?
+         AND IFNULL(opened_at,'') = IFNULL(?, '')
+         AND IFNULL(probe_lease_until,'') = IFNULL(?, '')
+         AND IFNULL(probe_lease_owner,'') = IFNULL(?, '')`,
+    ).bind(next.state, next.failures, next.failure_window_start, next.last_failure_at, next.opened_at, next.probe_lease_until, next.probe_lease_owner,
+      next.project, expected.state, expected.failures, expected.opened_at, expected.probe_lease_until, expected.probe_lease_owner).run();
+    return (r.meta.changes ?? 0) > 0;
+  }
+
+  async listDrainablePendingDeliveries(nowIso: string, limit = 20) {
+    const { results } = await this.db.prepare(
+      `SELECT delivery_id, project, raw_body, received_at, repo, routing_source, routing_digest, routing_state,
+              lease_owner, lease_until, outcomes, attempt_count, state
+       FROM pending_deliveries
+       WHERE IFNULL(state, '') NOT IN ('done', 'budget_failed')
+         AND (lease_until IS NULL OR lease_until <= ?)
+       ORDER BY received_at ASC LIMIT ?`,
+    ).bind(nowIso, limit).all<PendingDelivery>();
+    return results;
+  }
+
+  async updatePendingDelivery(row: PendingDelivery) {
+    await this.db.prepare(
+      `UPDATE pending_deliveries SET project=?, raw_body=?, repo=?, routing_source=?, routing_digest=?, routing_state=?,
+              lease_owner=?, lease_until=?, outcomes=?, attempt_count=?, state=? WHERE delivery_id=?`,
+    ).bind(row.project, row.raw_body, row.repo ?? null, row.routing_source ?? null, row.routing_digest ?? null,
+      row.routing_state ?? null, row.lease_owner ?? null, row.lease_until ?? null, row.outcomes ?? null,
+      row.attempt_count ?? 0, row.state ?? null, row.delivery_id).run();
   }
 }
