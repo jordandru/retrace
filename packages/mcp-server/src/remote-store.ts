@@ -14,6 +14,21 @@ export class RemoteApiError extends Error {
   }
 }
 
+export class RemoteCapabilityError extends Error {
+  readonly kind = "capability_mismatch";
+  readonly retryable = true;
+
+  constructor(
+    public readonly method: string,
+    public readonly path: string,
+    public readonly status: number,
+    detail: string,
+  ) {
+    super(`${method} ${path} returned ${status}; ${detail}`);
+    this.name = "RemoteCapabilityError";
+  }
+}
+
 /** Consistent headers for CLI-originated requests, including runtimes that require an explicit user agent. */
 export function retraceHeaders(token?: string): Record<string, string> {
   return {

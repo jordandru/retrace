@@ -11,7 +11,7 @@ import type { AddressInfo } from "node:net";
 import { SqliteStore } from "./sqlite-store.js";
 import { appendEvent, generateSigningKey, PRODUCER_SIG_FORMAT_V2, publicFromPrivate, verifyProducerSig, verifyProject } from "@retrace-dev/core";
 import { hookScript, parseTrailers, resolveHookToken, resolveHookProducerKeyFile, retryableHookFailure, ttySurface, guardRemoteWrite, validCausedById, validActorId } from "./git-hook.js";
-import { RemoteApiError } from "./remote-store.js";
+import { RemoteApiError, RemoteCapabilityError } from "./remote-store.js";
 import { writeProducerPrivateKey } from "./producer-key.js";
 
 async function seedInstruct(db: string, project = "rpg"): Promise<string> {
@@ -37,6 +37,14 @@ const sh = (cwd: string, cmd: string, args: string[], env: Record<string, string
 // never answer the spawned hook and the test would hang.
 const shAsync = (cwd: string, cmd: string, args: string[], env: Record<string, string> = {}) =>
   promisify(execFile)(cmd, args, { cwd, encoding: "utf8", env: { ...baseEnv, GIT_AUTHOR_NAME: "Jordan", GIT_AUTHOR_EMAIL: "jordan@slcwitit.com", GIT_COMMITTER_NAME: "Jordan", GIT_COMMITTER_EMAIL: "jordan@slcwitit.com", ...env } }).then((r) => r.stdout);
+
+async function waitForFile(path: string, timeoutMs = 1_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!existsSync(path)) {
+    if (Date.now() >= deadline) throw new Error(`timed out waiting for ${path}`);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+}
 
 test("git adapter: install hook, human commit, agent commit with trailers, backfill idempotent", async () => {
   const dir = mkdtempSync(join(tmpdir(), "retrace-git-"));
@@ -206,7 +214,9 @@ test("hook end to end: the named credential is the bearer the server sees; a rej
     status = 403;
     writeFileSync(join(dir, "a.ts"), "4\n");
     await shAsync(dir, "git", ["commit", "-qam", "rejected path"], env);
-    const log = readFileSync(join(dir, ".git", "retrace-hook.log"), "utf8");
+    const logPath = join(dir, ".git", "retrace-hook.log");
+    await waitForFile(logPath);
+    const log = readFileSync(logPath, "utf8");
     assert.match(log, /^\d{4}-\d\d-\d\dT\S+ commit [0-9a-f]{12} in \S+ NOT logged: Retrace API POST \/events → 403: .*allowed_actors/m);
     assert.doesNotMatch(log, /tok-git-hook-assert|owner-token/);
     assert.ok(!existsSync(join(dir, ".git", "retrace-pending-seal")), "credential rejection is not retryable");
@@ -221,7 +231,8 @@ test("hook end to end: the named credential is the bearer the server sees; a rej
   }
 });
 
-test("HTTP 426 is retryable like 5xx; 403 is not", () => {
+test("capability mismatches and HTTP 426 are retryable like 5xx; 403 is not", () => {
+  assert.equal(retryableHookFailure(new RemoteCapabilityError("GET", "/api", 200, "schema lacks event.producer_sig")), true);
   assert.equal(retryableHookFailure(new RemoteApiError("POST", "/events", 426, new Headers(), "upgrade required")), true);
   assert.equal(retryableHookFailure(new RemoteApiError("POST", "/events", 403, new Headers(), "forbidden")), false);
   assert.equal(retryableHookFailure(new RemoteApiError("POST", "/events", 503, new Headers(), "unavailable")), true);
@@ -386,6 +397,51 @@ test("keyed hook 503 on GET /api queues pending-seal like POST 5xx", async () =>
       },
     );
     assert.equal(readFileSync(join(dir, ".git", "retrace-pending-seal"), "utf8"), `${sha}\n`);
+  } finally {
+    server.close();
+  }
+});
+
+test("keyed hook against an old Worker queues pending-seal when GET /api lacks producer_sig", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "retrace-git-probe-old-worker-"));
+  const kp = await generateSigningKey();
+  const keyFile = join(dir, "hook.jwk");
+  writeProducerPrivateKey(keyFile, kp.privateKey);
+  const server = createServer((req, res) => {
+    if (req.method === "GET") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ schema: { event: ["id", "hash"] } }));
+      return;
+    }
+    res.writeHead(201, { "content-type": "application/json" });
+    res.end("{}");
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    sh(dir, "git", ["init", "-q", "-b", "main"]);
+    writeFileSync(join(dir, ".retrace.json"), JSON.stringify({ project: "rpg", url }));
+    writeFileSync(join(dir, "a.ts"), "1\n");
+    sh(dir, "git", ["add", "."]);
+    sh(dir, "git", ["commit", "-qm", "initial"]);
+    const sha = sh(dir, "git", ["rev-parse", "HEAD"]).trim();
+    await assert.rejects(
+      promisify(execFile)("node", [bin, "commit", "--hook", "--repo", dir], {
+        cwd: dir,
+        encoding: "utf8",
+        env: { ...baseEnv, RETRACE_URL: url, RETRACE_TOKEN: "owner-token", RETRACE_HOOK_KEY_FILE: keyFile },
+      }),
+      (error: any) => {
+        assert.equal(error.code, 1);
+        const retraceLines = error.stderr.trim().split("\n").filter((line: string) => line.startsWith("retrace:"));
+        assert.deepEqual(retraceLines, [`retrace: commit ${sha} pending seal; details: ${join(dir, ".git", "retrace-hook.log")}`]);
+        return true;
+      },
+    );
+    assert.equal(readFileSync(join(dir, ".git", "retrace-pending-seal"), "utf8"), `${sha}\n`);
+    const log = readFileSync(join(dir, ".git", "retrace-hook.log"), "utf8");
+    assert.match(log, /GET \/api returned 200; schema lacks event\.producer_sig; client refuses to sign; deploy the Worker/);
+    assert.doesNotMatch(log, /→ 426/);
   } finally {
     server.close();
   }

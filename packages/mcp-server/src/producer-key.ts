@@ -10,7 +10,7 @@ import { dirname, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { EventInput, generateSigningKey, publicFromPrivate, keyId, signProducer, schemaSurface, PRODUCER_SIG_FORMAT, PRODUCER_SIG_FORMAT_V2, type ProducerSigFormat } from "@retrace-dev/core";
 import { keyPath } from "./keys.js";
-import { RemoteApiError } from "./remote-store.js";
+import { RemoteApiError, RemoteCapabilityError } from "./remote-store.js";
 
 export function defaultProducerKeysDir(env: NodeJS.ProcessEnv = process.env): string {
   return env.RETRACE_PRODUCER_KEYS_DIR ?? join(homedir(), ".retrace", "producer-keys");
@@ -116,7 +116,12 @@ export async function assertRemoteAcceptsProducerSig(
   const api = await res.json() as { schema?: Record<string, unknown>; capabilities?: unknown };
   const eventKeys = Array.isArray(api.schema?.event) ? api.schema!.event as unknown[] : [];
   if (!eventKeys.includes("producer_sig") && schemaSurface().event.includes("producer_sig")) {
-    throw new Error(`refusing to sign against ${base}: GET /api schema lacks event.producer_sig — deploy the Worker before any producer signs (an old Worker silently strips the signature)`);
+    throw new RemoteCapabilityError(
+      "GET",
+      "/api",
+      res.status,
+      "schema lacks event.producer_sig; client refuses to sign; deploy the Worker",
+    );
   }
   const caps = Array.isArray(api.capabilities) ? api.capabilities : [];
   const format = caps.includes("producer-sig/2") ? PRODUCER_SIG_FORMAT_V2 : PRODUCER_SIG_FORMAT;
