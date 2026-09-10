@@ -4,7 +4,7 @@ import {
   CLAIM_DECISION_PARAM, MemoryEventStore, POLICY_PROFILE, SEALED_BY_PARAM, appendEvent,
   applyBreakerFailure, applyBreakerSuccess, breakerIsOpen, breakerShouldOpen, classifyCommitClaim,
   createHandler, decideFromTable, emptyBreaker, reconstructWithheldPayload, wouldWrite,
-  type ClaimRecord, type EventInput,
+  type ClaimRecord, type EventInput, type HistoryQuery,
 } from "./index.js";
 
 const OWNER = { authorization: "Bearer owner-token-long-enough" };
@@ -187,6 +187,9 @@ test("T1+A1: shadow conflicting writes claim, would_write withheld, actor unchan
   assert.equal(got.record.decision.shadow, true);
   assert.equal(got.record.decision.would_write.actor_written, "withheld");
   assert.equal(got.record.claim.id, "codex");
+  assert.equal(typeof got.record.decision.classification_ms, "number");
+  assert.ok(got.record.decision.classification_ms >= 0);
+  assert.equal("classification_ms" in got.record, false);
   const sealed = { ...input, method: { ...input.method, params: { ...input.method?.params, [CLAIM_DECISION_PARAM]: got.record, [SEALED_BY_PARAM]: "assert:git hook (assert)" } } };
   assert.equal(reconstructWithheldPayload(sealed, { trustedHookStamps: ["assert:git hook (assert)"], project: "p" }), undefined);
 });
@@ -520,4 +523,147 @@ test("A5/Q4: reassign + different canonical R → a second context, no (project,
   assert.ok(store.contexts.has("p\0acme/app\0" + SHA));
   assert.ok(store.contexts.has("b\0acme/app\0" + SHA));
   assert.ok(store.contexts.has("p\0acme/other\0" + SHA));
+});
+
+async function attributionFixture(store: MemoryEventStore, opts: {
+  targetPaths: string[];
+  amendPaths?: string[];
+  reject?: boolean;
+}) {
+  const root = await appendEvent(store, {
+    project: "p",
+    actor: { type: "human", id: "jordan@example.com" },
+    action: "instructed",
+    artifacts: [{ id: "task:amend", kind: "task", role: "generated" }],
+    timestamp: "2026-09-10T10:00:00.000Z",
+  });
+  const evidencePaths = opts.amendPaths ?? opts.targetPaths;
+  const evidence = await appendEvent(store, {
+    project: "p",
+    actor: { type: "agent", id: "other" },
+    action: "edited",
+    artifacts: evidencePaths.map((p) => ({ id: `repo:acme/app#${p}`, kind: "file", role: "generated" as const })),
+    timestamp: "2026-09-10T10:01:00.000Z",
+    method: { tool: "editor", params: { [SEALED_BY_PARAM]: "assert:other" } },
+    caused_by: root.event.id,
+  });
+  const target = await appendEvent(store, {
+    project: "p",
+    actor: { type: "agent", id: "codex" },
+    action: "edited",
+    artifacts: opts.targetPaths.map((p) => ({ id: `repo:acme/app#${p}`, kind: "file", role: "generated" as const })),
+    timestamp: "2026-09-10T10:02:00.000Z",
+    method: { tool: "editor", params: { [SEALED_BY_PARAM]: "pinned:codex" } },
+    caused_by: root.event.id,
+  });
+  const scope = opts.amendPaths?.map((p) => `repo:acme/app#${p}`);
+  const amend = await appendEvent(store, {
+    project: "p",
+    actor: { type: "human", id: "jordan@example.com" },
+    action: "other",
+    action_detail: "amended",
+    tags: ["amendment", "attribution"],
+    intent: "corroborated human correction",
+    caused_by: root.event.id,
+    artifacts: [
+      { id: `event:${target.event.id}`, role: "used" },
+      { id: `event:${evidence.event.id}`, role: "used" },
+    ],
+    timestamp: "2026-09-10T10:03:00.000Z",
+    method: {
+      tool: "retrace_amend",
+      automated: false,
+      params: {
+        sealed_by: opts.reject ? "pinned:jordan@example.com" : "owner",
+        target_event_id: target.event.id,
+        attribution: {
+          from: { type: "agent", id: "codex" },
+          to: { type: "agent", id: "other" },
+          ...(scope ? { artifacts: scope } : {}),
+          evidence: [evidence.event.id],
+        },
+      },
+    },
+  });
+  return { root: root.event, evidence: evidence.event, target: target.event, amend: amend.event };
+}
+
+test("T13: effective whole-event amendment excludes the target; snapshot is the effective set", async () => {
+  const store = new MemoryEventStore();
+  await putPolicy(store);
+  const { target, amend } = await attributionFixture(store, { targetPaths: ["a.ts"] });
+  const got = await classify(store, commitInput({ files: ["a.ts"] }));
+  assert.equal(got.kind, "decision", JSON.stringify(got));
+  if (got.kind !== "decision") return;
+  assert.equal(got.record.decision.witnesses.some((w) => w.id === target.id), false);
+  assert.equal(got.record.decision.status, "unresolved");
+  const ctx = [...store.contexts.values()][0]!;
+  assert.notEqual(ctx.amendment_snapshot, "[]");
+  const snap = JSON.parse(ctx.amendment_snapshot) as { effective?: { id: string; target: string }[]; unavailable?: string };
+  assert.equal(snap.unavailable, undefined);
+  assert.ok(snap.effective?.some((a) => a.id === amend.id && a.target === target.id));
+});
+
+test("rejected amendment does not exclude a witness v7 would still accept", async () => {
+  const store = new MemoryEventStore();
+  await putPolicy(store);
+  const { target } = await attributionFixture(store, { targetPaths: ["a.ts"], reject: true });
+  const got = await classify(store, commitInput({ files: ["a.ts"] }));
+  assert.equal(got.kind, "decision");
+  if (got.kind !== "decision") return;
+  assert.equal(got.record.decision.witnesses.some((w) => w.id === target.id), true);
+  assert.equal(got.record.decision.status, "supported");
+  const ctx = [...store.contexts.values()][0]!;
+  const snap = JSON.parse(ctx.amendment_snapshot) as { effective?: unknown[] };
+  assert.deepEqual(snap.effective, []);
+});
+
+test("partial amendment excludes only the amended path", async () => {
+  const store = new MemoryEventStore();
+  await putPolicy(store);
+  const { target } = await attributionFixture(store, { targetPaths: ["a.ts", "b.ts"], amendPaths: ["a.ts"] });
+  const onlyA = await classify(store, commitInput({ files: ["a.ts"] }));
+  assert.equal(onlyA.kind, "decision");
+  if (onlyA.kind !== "decision") return;
+  assert.equal(onlyA.record.decision.witnesses.some((w) => w.id === target.id), false);
+  const both = await classify(store, commitInput({ files: ["a.ts", "b.ts"] }));
+  assert.equal(both.kind, "decision");
+  if (both.kind !== "decision") return;
+  const wit = both.record.decision.witnesses.find((w) => w.id === target.id);
+  assert.ok(wit);
+  assert.deepEqual(wit!.paths, ["b.ts"]);
+});
+
+test("amendment exclusion is not a bounded action=other page", async () => {
+  const inner = new MemoryEventStore();
+  await putPolicy(inner);
+  const { target } = await attributionFixture(inner, { targetPaths: ["a.ts"] });
+  for (let i = 0; i < 3; i++) {
+    await appendEvent(inner, {
+      project: "p",
+      actor: { type: "system", id: "noise" },
+      action: "other",
+      artifacts: [{ id: `task:noise-${i}`, kind: "task" }],
+      timestamp: `2026-09-10T10:1${i}:00.000Z`,
+    });
+  }
+  const store = new Proxy(inner, {
+    get(t, prop, recv) {
+      if (prop === "history") {
+        return async (q: HistoryQuery) => {
+          const page = await inner.history(q);
+          if (q.action === "other") {
+            const recent = page.events.filter((e) => e.action_detail !== "amended");
+            return { events: recent.slice(0, 1), truncated: true, next_before_seq: 0 };
+          }
+          return page;
+        };
+      }
+      return Reflect.get(t, prop, recv);
+    },
+  }) as MemoryEventStore;
+  const got = await classify(store, commitInput({ files: ["a.ts"] }));
+  assert.equal(got.kind, "decision");
+  if (got.kind !== "decision") return;
+  assert.equal(got.record.decision.witnesses.some((w) => w.id === target.id), false);
 });

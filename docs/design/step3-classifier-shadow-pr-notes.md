@@ -28,7 +28,7 @@ Design text wins. These are implementation notes for reviewers, not silent spec 
 
 1. **`previousCaptureTouch` returns `-1` if none; persisted lower is `0`.** Brief §1.4 says `lower(p) = previousCaptureTouch(p, before = U)` (0 if none). `capture.ts` returns `-1`. Classification maps `prev < 0 ? 0 : prev` before insert-if-absent so the stored window matches the brief. Do not change `capture.ts`.
 
-2. **Amendment filter is history `action=other`, not a full v7 git-facts walk.** Witnesses drop events that are the target of an effective attribution amendment at `U`, found via `store.history({ action: "other" })` + `isAttributionAmendment`. That is cheaper than reconstituting the amendment snapshot the design names; if a later review needs the exact snapshot bytes on the context row, that is more than this WIP stored (`amendment_snapshot` is currently `"[]"`).
+2. **Amendment effectiveness is `collectAttributionAmendments` on the complete prefix at `U`, not a history page.** `store.all(project)` filtered to `seq ≤ U` (same 20,000-row / 500 ms budget as §3.5). A single `history({ action: "other", limit })` page is not used — that class is unbounded and would silently drop older amendments. Effectiveness uses attribution.ts (`effective` / `superseded` / `rejected`); a PARTIAL amendment excludes only its amended artifacts. Context `amendment_snapshot` is `{"effective":[{id,target,artifacts,whole_event},…]}` at `U`, or `{"unavailable":…}` if the prefix cannot be evaluated inside the budget. Never the literal `"[]"` (a false empty set). Full v7 git-facts are not reconstituted at ingest (Worker has no checkout); the ledger-only capture context feeds the same collector. Over-budget / store failure → classification `unavailable` (fail closed).
 
 3. **Unsigned `/2`-shaped commit seals in shadow require a selected policy**, same as `/2`. Missing policy → pending / hook 503 queued loud. `/1` seals stay byte-preserved: they may populate a context (`legacy` kind) but the event is sealed **without** `claim_decision` even if classify is unavailable (T38 counting unchanged).
 
@@ -36,7 +36,9 @@ Design text wins. These are implementation notes for reviewers, not silent spec 
 
 5. **RemoteStore still has no context readers** (fail closed in `classifyCommitClaim` via `ClassificationStoreError` → `unavailable`). Classification runs on Worker D1 / local SQLite / MemoryEventStore. Do not stub empty.
 
-6. **Webhook `canonicalR` is the routed repo string** passed into `classifyCommitClaim`; facts then run it through `canonicalRepositoryR`. A5 depends on that, not on a `(project, sha)` index.
+6. **Webhook and drain `canonicalR` are the routed repo string.** The hook path now passes the same pin via `routedCanonicalRForHook` (the project's one active policy route, else the sole `github_repos` entry). `canonicalRForFacts` still gives a supplied pin precedence. A hook artifact repo that is not a policy alias therefore shares the webhook context (T11). A5 still depends on an explicit pin, not a `(project, sha)` index.
+
+7. **`decision.classification_ms`** is server-derived elapsed ms inside `claim_decision` (already in `RESERVED_METHOD_PARAMS_V2`; no `/3` bump). Informational; never a selector. Rule 3 still keys only on `decision.actor_written === "withheld"`.
 
 ## What this checkpoint contains vs what is still red
 

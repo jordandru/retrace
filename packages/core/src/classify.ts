@@ -5,7 +5,13 @@
  * the builder brief. Shadow records `claim_decision` and leaves `actor` unchanged
  * (`actor_written: "claim"`, `shadow: true`). Nothing is withheld; 426 is not introduced here.
  */
-import { isAttributionAmendment } from "./attribution-context.js";
+import {
+  collectAttributionAmendments, type AttributionAmendment, type AttributionCollection,
+} from "./attribution.js";
+import {
+  isAttributionAmendment, verifiedAttributionSnapshot,
+  type AttributionCaptureContext, type AttributionDomain, type AttributionSnapshot, type AttributionUnit,
+} from "./attribution-context.js";
 import { canonicalize, sha256Hex } from "./chain.js";
 import {
   CommitActorResolution, resolveCommitActor, validCausedById,
@@ -132,6 +138,8 @@ export interface ClaimDecision {
     witness_actors: { type: string; id: string }[];
     loose_hints: number;
     harness: { marker?: string; marker_actor?: string; witness_clients: string[]; mismatch: boolean };
+    /** Server-derived elapsed ms. Informational; never a selector. */
+    classification_ms: number;
   };
 }
 
@@ -254,6 +262,144 @@ export function causedBySourceOf(input: EventInput, trailers: Record<string, str
 
 export async function digestOf(value: unknown): Promise<string> {
   return sha256Hex(canonicalize(value));
+}
+
+/** Routed GitHub identity for the hook path (T11). One active route or one github_repos entry. */
+export async function routedCanonicalRForHook(store: EventStore, project: string): Promise<string | undefined> {
+  const routes = store.listPolicyRoutes ? await store.listPolicyRoutes(project) : [];
+  const active = [...new Set(routes.filter((r) => r.state === "active").map((r) => r.repo))];
+  if (active.length === 1) return active[0];
+  const doc = store.getPolicy ? await store.getPolicy(project, { current: true }) : null;
+  const repos = [...new Set(doc?.body.github_repos ?? [])];
+  if (repos.length === 1) return repos[0];
+  return undefined;
+}
+
+export type AmendmentSnapshotRecord =
+  | { effective: { id: string; target: string; artifacts: string[]; whole_event: boolean }[] }
+  | { unavailable: string };
+
+export function amendmentSnapshotJson(record: AmendmentSnapshotRecord): string {
+  return JSON.stringify(record);
+}
+
+function emptyAmendmentCollection(): AttributionCollection {
+  return collectAttributionAmendments([]);
+}
+
+function effectiveAmendmentRecord(collection: AttributionCollection): AmendmentSnapshotRecord {
+  if (collection.unavailable) return { unavailable: collection.unavailable };
+  const effective = [...collection.effective.values()]
+    .flat()
+    .map((a) => ({ id: a.amendment_id, target: a.target_id, artifacts: a.artifacts, whole_event: a.whole_event }))
+    .sort((a, b) => a.id.localeCompare(b.id) || a.target.localeCompare(b.target));
+  return { effective };
+}
+
+function classifierCanonicalArtifact(policy: PolicyBody, id: string): string | undefined {
+  const match = /^repo:([^#]+)#(.+)$/.exec(id);
+  if (match) {
+    const name = canonicalRepositoryR(policy, match[1]) ?? match[1];
+    return `repo:${name}#${match[2]}`;
+  }
+  if (/^(commit|event|actor|file):/.test(id) || !/^[a-z][a-z0-9+.-]*:/i.test(id)) return undefined;
+  return id;
+}
+
+async function classifierLedgerAttributionContext(
+  snapshot: AttributionSnapshot,
+  policy: PolicyBody,
+  policyDigest: string,
+): Promise<AttributionCaptureContext> {
+  const canonicalArtifact = (id: string, _seq: number) => classifierCanonicalArtifact(policy, id);
+  const domains = new Map<string, AttributionDomain>();
+  const byId = new Map(snapshot.events.map((e) => [e.id, e]));
+  for (const e of snapshot.events.filter(isAttributionAmendment)) {
+    const target = byId.get(String(e.method?.params?.target_event_id));
+    if (!target || domains.has(target.id)) continue;
+    const units: AttributionUnit[] = [];
+    target.artifacts.forEach((a, index) => {
+      if (/^(commit|event|actor):/.test(a.id) || ["commit", "event", "actor"].includes(a.kind ?? "")) return;
+      const output = a.role !== undefined
+        ? a.role === "generated" || a.role === "both"
+        : ["created", "edited", "deleted", "renamed", "moved", "committed", "merged"].includes(target.action);
+      if (!output) return;
+      const id = canonicalArtifact(a.id, target.seq);
+      if (!id) return;
+      const existing = units.find((u) => u.id === id);
+      if (existing) existing.refs.push(index);
+      else units.push({ id, refs: [index], names: [id], after: -1, before: target.seq });
+    });
+    domains.set(target.id, { units: units.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)), complete: true });
+  }
+  return {
+    profile: "retrace-attribution/1",
+    project: snapshot.project,
+    head_seq: snapshot.head.seq,
+    head_hash: snapshot.head.hash,
+    policy_digest: policyDigest,
+    git_facts_digest: await sha256Hex("classifier-ledger-only"),
+    domains,
+    diagnostics: [],
+    canonicalArtifact,
+  };
+}
+
+export type AmendmentEval =
+  | { ok: true; collection: AttributionCollection; snapshotJson: string }
+  | { ok: false; reason: "deadline" | "budget" | "store_error"; snapshotJson: string };
+
+/** Complete prefix at U — never a single history page. Effectiveness via collectAttributionAmendments. */
+export async function evaluateAmendmentsAtU(opts: {
+  store: EventStore;
+  project: string;
+  U: number;
+  policy: PolicyBody;
+  policyDigest: string;
+  deadline: number;
+  now: () => number;
+}): Promise<AmendmentEval> {
+  const fail = (reason: "deadline" | "budget" | "store_error"): AmendmentEval => ({
+    ok: false,
+    reason,
+    snapshotJson: amendmentSnapshotJson({ unavailable: reason }),
+  });
+  if (opts.now() >= opts.deadline) return fail("deadline");
+  if (opts.U < 0) {
+    const collection = emptyAmendmentCollection();
+    return { ok: true, collection, snapshotJson: amendmentSnapshotJson({ effective: [] }) };
+  }
+  let events: Event[];
+  try {
+    events = await opts.store.all(opts.project);
+  } catch {
+    return fail("store_error");
+  }
+  if (opts.now() >= opts.deadline) return fail("deadline");
+  const prefix = events.filter((e) => e.seq <= opts.U).sort((a, b) => a.seq - b.seq || a.id.localeCompare(b.id));
+  if (prefix.length > CLASSIFY_ROW_CAP) return fail("budget");
+  if (!prefix.some(isAttributionAmendment)) {
+    return { ok: true, collection: emptyAmendmentCollection(), snapshotJson: amendmentSnapshotJson({ effective: [] }) };
+  }
+  try {
+    const head = prefix.at(-1)!;
+    const snapshot = await verifiedAttributionSnapshot(prefix, opts.project, { seq: head.seq, hash: head.hash });
+    if (opts.now() >= opts.deadline) return fail("deadline");
+    const context = await classifierLedgerAttributionContext(snapshot, opts.policy, opts.policyDigest);
+    const collection = collectAttributionAmendments(prefix, { snapshot, context });
+    if (collection.unavailable) {
+      return { ok: false, reason: "store_error", snapshotJson: amendmentSnapshotJson({ unavailable: collection.unavailable }) };
+    }
+    return { ok: true, collection, snapshotJson: amendmentSnapshotJson(effectiveAmendmentRecord(collection)) };
+  } catch {
+    return fail("store_error");
+  }
+}
+
+function witnessAmendmentScope(eventId: string, collection: AttributionCollection): { excludeAll: boolean; artifacts: Set<string> } {
+  const list: AttributionAmendment[] = collection.effective.get(eventId) ?? [];
+  if (list.some((a) => a.whole_event)) return { excludeAll: true, artifacts: new Set() };
+  return { excludeAll: false, artifacts: new Set(list.flatMap((a) => a.artifacts)) };
 }
 
 export function canonicalRForFacts(policy: PolicyBody, files: { repo: string }[], pinnedR?: string): string {
@@ -455,7 +601,8 @@ export async function classifyCommitClaim(opts: ClassifyOpts): Promise<ClassifyR
   if (!isGitCommitSeal(opts.input)) return { kind: "skip", reason: "not_commit" };
 
   const now = opts.now ?? Date.now;
-  const deadline = opts.deadline ?? now() + CLASSIFY_DEADLINE_MS;
+  const started = now();
+  const deadline = opts.deadline ?? started + CLASSIFY_DEADLINE_MS;
   const legacy = isLegacyClientCommitSeal(opts.input);
 
   try {
@@ -493,13 +640,22 @@ export async function classifyCommitClaim(opts: ClassifyOpts): Promise<ClassifyR
 
   if (!policyDoc) return { kind: "unavailable", reason: "policy_missing" };
 
-  const canonicalR = canonicalRForFacts(policyDoc.body, files, opts.canonicalR);
+  const pin = opts.canonicalR ?? (policyDoc.body.github_repos.length === 1 ? policyDoc.body.github_repos[0] : undefined);
+  const canonicalR = canonicalRForFacts(policyDoc.body, files, pin);
   const Fids = artifactIdsForRepo(canonicalR, files, policyDoc.body);
   const paths = [...new Set(files.filter((f) => Fids.includes(f.id) || Fids.includes(`repo:${canonicalR}#${f.path}`)).map((f) => f.path))];
   const Fdigest = await digestOf([...new Set(paths)].sort());
   const claimDigest = await digestOf({ type: derived.claim.type, id: derived.claim.id, source: derived.claim.source });
 
   const found = await opts.store.getClassificationContext(opts.input.project, canonicalR, sha);
+  let amendEval: AmendmentEval | null = null;
+  if (!found) {
+    amendEval = await evaluateAmendmentsAtU({
+      store: opts.store, project: opts.input.project, U: Utry, policy: policyDoc.body,
+      policyDigest: policyDoc.digest, deadline, now,
+    });
+    if (!amendEval.ok) return { kind: "unavailable", reason: amendEval.reason };
+  }
   const candidate: ClassificationContextRow = {
     project: opts.input.project,
     canonical_repo: canonicalR,
@@ -512,7 +668,7 @@ export async function classifyCommitClaim(opts: ClassifyOpts): Promise<ClassifyR
     first_claim_digest: claimDigest,
     classifier_profile: CLASSIFIER_PROFILE,
     rollout_mode: policyMode,
-    amendment_snapshot: "[]",
+    amendment_snapshot: amendEval?.snapshotJson ?? amendmentSnapshotJson({ unavailable: "pending" }),
     per_path_lower: {},
     created_at: new Date(now()).toISOString(),
   };
@@ -530,6 +686,14 @@ export async function classifyCommitClaim(opts: ClassifyOpts): Promise<ClassifyR
   }
 
   const U = ctx.read_head_seq;
+  const evaluated: AmendmentEval = (!amendEval || U !== Utry)
+    ? await evaluateAmendmentsAtU({
+      store: opts.store, project: opts.input.project, U, policy: policyDoc.body,
+      policyDigest: policyDoc.digest, deadline, now,
+    })
+    : amendEval;
+  if (!evaluated.ok) return { kind: "unavailable", reason: evaluated.reason };
+  const amendmentCollection = evaluated.collection;
   const thisShaShort = sha.slice(0, 12);
   const keys = paths.map((p) => `repo:${canonicalR}#${p}`);
 
@@ -584,13 +748,6 @@ export async function classifyCommitClaim(opts: ClassifyOpts): Promise<ClassifyR
   }
   const per_path_lower = await opts.store.ensureClassificationPathLowers(opts.input.project, canonicalR, sha, derivedLowers);
 
-  const amendPage = await opts.store.history({ project: opts.input.project, action: "other", limit: CLASSIFY_ROW_CAP });
-  const amendedTargets = new Set(
-    amendPage.events
-      .filter((e) => e.seq <= U && isAttributionAmendment(e))
-      .map((e) => String(e.method?.params?.target_event_id ?? "")),
-  );
-
   const windowEvents = index.events.filter((e) => e.seq <= U);
   const loose_hints = countLooseHints(windowEvents, paths.map((p) => ({ path: p })));
 
@@ -603,12 +760,14 @@ export async function classifyCommitClaim(opts: ClassifyOpts): Promise<ClassifyR
     if (!isPinnedIngress(sealedBy)) continue;
     if (e.actor.type !== "agent") continue;
     if (NON_WITNESS_ACTIONS.has(e.action) || e.action_detail === "amended") continue;
-    if (amendedTargets.has(e.id)) continue;
+    const scope = witnessAmendmentScope(e.id, amendmentCollection);
+    if (scope.excludeAll) continue;
     const hitPaths: string[] = [];
     for (const p of paths) {
       const lower = per_path_lower[p] ?? 0;
       if (!(lower < e.seq && e.seq <= U)) continue;
       const art = `repo:${canonicalR}#${p}`;
+      if (scope.artifacts.has(art)) continue;
       if (outputClaimOnPath(e, art, policyDoc.body, canonicalR)) hitPaths.push(p);
     }
     if (!hitPaths.length) continue;
@@ -673,6 +832,7 @@ export async function classifyCommitClaim(opts: ClassifyOpts): Promise<ClassifyR
       witness_actors: wall,
       loose_hints,
       harness: { ...harness, witness_clients: witnessClients, mismatch },
+      classification_ms: Math.max(0, now() - started),
     },
   };
 

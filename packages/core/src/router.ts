@@ -49,7 +49,7 @@ import {
 } from "./producer-sig.js";
 import {
   attachClaimDecision, classifyCommitClaim, PENDING_BUDGET_ATTEMPTS, PENDING_LEASE_MS,
-  recordWebhookClassifyOutcome, webhookBreakerAdmission,
+  recordWebhookClassifyOutcome, routedCanonicalRForHook, webhookBreakerAdmission,
 } from "./classify.js";
 import { renderReportHtml } from "./report.js";
 import { collectAttributionAmendments } from "./attribution.js";
@@ -729,6 +729,7 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
             sealedBy: sealedBy(principal),
             trailerPolicy,
             signedActor: producerCheck.signed_actor,
+            canonicalR: await routedCanonicalRForHook(store, resolvedInput.project),
           });
           if (!isLegacyClientCommitSeal(resolvedInput) && classified.kind === "unavailable")
             return json({

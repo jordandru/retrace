@@ -300,6 +300,40 @@ test("T25 HTTP: shadow conflicting keeps submitted actor", async () => {
   assert.equal(cd?.decision?.would_write?.actor_written, "withheld");
 });
 
+test("T11 hook: non-alias repo string shares the webhook context", async () => {
+  const { store, h } = handler();
+  await putPolicy(h);
+  await appendEvent(store, {
+    project: "p",
+    actor: { type: "agent", id: "codex" },
+    action: "edited",
+    artifacts: [{ id: "repo:acme/app#a.ts", kind: "file", role: "generated" }],
+    timestamp: "2026-09-10T11:00:00.000Z",
+    method: { tool: "editor", params: { [SEALED_BY_PARAM]: "pinned:codex" } },
+  });
+  const hook = await h(new Request("http://test/events", {
+    method: "POST",
+    headers: { authorization: `Bearer ${HOOK}`, "content-type": "application/json" },
+    body: JSON.stringify(commitBody({
+      artifacts: [
+        { id: `commit:local-checkout@${SHA.slice(0, 12)}`, kind: "commit", role: "generated" },
+        { id: "repo:local-checkout#a.ts", kind: "file", role: "generated" },
+      ],
+    })),
+  }));
+  assert.equal(hook.status, 201, await hook.clone().text());
+  const push = await postPush(h, pushPayload(), "d-t11-alias");
+  assert.equal(push.status, 201, await push.clone().text());
+  assert.equal(store.contexts.size, 1);
+  assert.ok(store.contexts.has(`p\0acme/app\0${SHA}`));
+  const hookEv = store.events.find((e) => e.action === "committed" && e.method?.params?.sealed_by !== "webhook:github");
+  const pushEv = store.events.find((e) => e.action === "committed" && e.method?.params?.sealed_by === "webhook:github");
+  const hookCd = hookEv?.method?.params?.[CLAIM_DECISION_PARAM] as { decision?: { context?: { read_head_seq?: number }; window?: { upper_seq?: number } } };
+  const pushCd = pushEv?.method?.params?.[CLAIM_DECISION_PARAM] as { decision?: { context?: { read_head_seq?: number }; window?: { upper_seq?: number } } };
+  assert.equal(hookCd?.decision?.context?.read_head_seq, pushCd?.decision?.context?.read_head_seq);
+  assert.equal(hookCd?.decision?.window?.upper_seq, pushCd?.decision?.window?.upper_seq);
+});
+
 test("breaker (a)/(b): drain failures do not increment the breaker", async () => {
   const { store, h } = handler();
   await putPolicy(h);
