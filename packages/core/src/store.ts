@@ -15,7 +15,13 @@ export interface HistoryQuery {
   action?: string;
   since?: string;
   until?: string;
-  text?: string; // matches intent / action_detail / change.summary / tags
+  /**
+   * Substring match over the **whole serialised event**, not a named subset of fields: the SQL stores
+   * apply it as `e.body LIKE ?` (`likeContains`) and `pageHistoryNewest` as `JSON.stringify(e).includes`.
+   * Callers rely on this — `doctor`'s routing-event walk finds adoption by matching `"tool":"routing"`
+   * inside `method`, which no field-scoped search would return. Narrowing it is a breaking change.
+   */
+  text?: string;
   limit?: number;
   /** Exclusive upper bound: only events with `seq < before_seq`. Walks older pages of a newest-first window. */
   before_seq?: number;
