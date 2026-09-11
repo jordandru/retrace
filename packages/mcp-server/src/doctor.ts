@@ -4,7 +4,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, lstatSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
-import { isAttributionAmendment, Actor, Credential, Event, ProjectStatus, ReconcileReport, asHistoryPage, causalRootState, localConfigDrift, renderProjectStatus, schemaSurface } from "@retrace-dev/core";
+import { isAttributionAmendment, Actor, Credential, Event, EventStore, HistoryQuery, ProjectStatus, ReconcileReport, asHistoryPage, causalRootState, localConfigDrift, renderProjectStatus, schemaSurface } from "@retrace-dev/core";
 import { Cfg, commitToEvent, resolveHookToken } from "./git-hook.js";
 import { ReconcileCfg, commitFacts, reconcileOptionsFrom, reconcileWithGit, repoNamesFor } from "./reconcile.js";
 import { RemoteStore, retraceHeaders } from "./remote-store.js";
@@ -310,6 +310,49 @@ export function reviewEffortFindings(events: Event[], models: RoutingModelRegist
     ));
   }
   return findings;
+}
+
+/** Newest-first window for advisory review checks. Must stay well under Worker CPU limits. */
+export const REVIEW_EFFORT_RECENT_LIMIT = 200;
+/** Page size for the targeted routing-event walk (adoption lives at the oldest page). */
+export const REVIEW_EFFORT_ROUTING_PAGE = 50;
+export const REVIEW_EFFORT_ROUTING_TEXT = '"tool":"routing"';
+
+/**
+ * Non-gate review checks cannot afford RemoteStore.all (O(ledger)). Fetch a bounded recent
+ * window plus every routing event (targeted text query, paged) so adoptionSeq is still defined
+ * when the first routing event sits outside the recent window.
+ */
+export async function loadReviewEffortEvents(store: Pick<EventStore, "history">, project: string): Promise<Event[]> {
+  const routing = await collectRoutingEvents(store, project);
+  const recent = await store.history({ project, limit: REVIEW_EFFORT_RECENT_LIMIT });
+  const byId = new Map<string, Event>();
+  for (const event of routing) byId.set(event.id, event);
+  for (const event of recent.events) byId.set(event.id, event);
+  return [...byId.values()].sort((a, b) => a.seq - b.seq);
+}
+
+async function collectRoutingEvents(store: Pick<EventStore, "history">, project: string): Promise<Event[]> {
+  const out: Event[] = [];
+  const seen = new Set<string>();
+  let before_seq: number | undefined;
+  for (let page = 0; page < 64; page++) {
+    const query: HistoryQuery = {
+      project,
+      text: REVIEW_EFFORT_ROUTING_TEXT,
+      limit: REVIEW_EFFORT_ROUTING_PAGE,
+      before_seq,
+    };
+    const result = await store.history(query);
+    for (const event of result.events) {
+      if (event.method?.tool !== "routing" || seen.has(event.id)) continue;
+      seen.add(event.id);
+      out.push(event);
+    }
+    if (!result.truncated || result.next_before_seq === undefined) break;
+    before_seq = result.next_before_seq;
+  }
+  return out;
 }
 
 export function loadRoutingModels(repo: string): RoutingModelRegistry | undefined {
@@ -648,7 +691,7 @@ async function main() {
       } else {
         if (routingModels) {
           try {
-            const reviewFindings = reviewEffortFindings(await new RemoteStore(url, auth.token).all(project), routingModels);
+            const reviewFindings = reviewEffortFindings(await loadReviewEffortEvents(new RemoteStore(url, auth.token), project), routingModels);
             findings.push(...reviewFindings.map((finding) => ({ ...finding, detail: `${finding.detail} (unsigned history; --gate uses the verified ledger)` })));
           } catch (e: any) {
             findings.push(result("warn", "review routing", `${e.message}; advisory review history not checked`));

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { Credential, Event, EventInput, EventStore, Share, appendEvent, buildExportBundle, generateSigningKey, pageHistoryNewest, schemaSurface, signCanonical } from "@retrace-dev/core";
-import { attributionFinding, cliVersionGap, credentialAuthorization, doctorHistoryEvents, gateRemoteAuthorization, headDelivery, instructRootFinding, issuanceFindingsFromStatus, missingSchema, parseDoctorArgs, pendingSealsFinding, pinSessionFinding, remoteCaptureCoverage, reviewEffortFindings, sealedCommitEvent, sealedLooksAgent } from "./doctor.js";
+import { Credential, Event, EventInput, EventStore, HistoryQuery, Share, appendEvent, buildExportBundle, generateSigningKey, pageHistoryNewest, schemaSurface, signCanonical } from "@retrace-dev/core";
+import { attributionFinding, cliVersionGap, credentialAuthorization, doctorHistoryEvents, gateRemoteAuthorization, headDelivery, instructRootFinding, issuanceFindingsFromStatus, loadReviewEffortEvents, missingSchema, parseDoctorArgs, pendingSealsFinding, pinSessionFinding, remoteCaptureCoverage, REVIEW_EFFORT_RECENT_LIMIT, REVIEW_EFFORT_ROUTING_PAGE, reviewEffortFindings, sealedCommitEvent, sealedLooksAgent } from "./doctor.js";
 import { RemoteStore } from "./remote-store.js";
 import { SqliteStore } from "./sqlite-store.js";
 
@@ -103,6 +103,60 @@ test("doctor: un-routed review finding count does not grow with ledger size", ()
   assert.equal(five[0]?.level, "warn");
   assert.match(five[0]!.detail, /5 of 5 reviews since adoption cite no routing_event_id \(oldest evt_unrouted_0\)/);
   assert.match(fifty[0]!.detail, /50 of 50 reviews since adoption cite no routing_event_id \(oldest evt_unrouted_0\)/);
+});
+
+test("doctor: review-routing history is bounded and still fires when adoption is outside the recent window", async () => {
+  const project = "retrace";
+  const models = { "gpt-6-astra": { supports_effort: true, levels: ["low", "medium", "high", "xhigh"] } };
+  const evt = (over: Partial<Event> & { id: string; seq: number }): Event => commitEvt({
+    project, ...over,
+  });
+  const ledger: Event[] = [
+    evt({
+      id: "evt_adopt", seq: 1, action: "other", action_detail: "routed",
+      actor: { type: "agent", id: "claude-code" },
+      method: { tool: "routing", params: { target: { agent: "codex", model: "gpt-6-astra", effort: "high" } } },
+    }),
+  ];
+  for (let seq = 2; seq <= 400; seq++) {
+    ledger.push(evt({
+      id: `evt_filler_${seq}`, seq, action: "edited",
+      actor: { type: "agent", id: "codex" },
+      method: { tool: "edit", params: {} },
+    }));
+  }
+  ledger.push(evt({
+    id: "evt_unrouted_recent", seq: 401, action: "approved",
+    actor: { type: "agent", id: "codex", model: "gpt-6-astra" },
+    tags: ["review"], method: { tool: "review", params: {} },
+  }));
+
+  const queries: HistoryQuery[] = [];
+  const store = {
+    async all() { throw new Error("review-routing must not read the whole ledger"); },
+    async history(q: HistoryQuery) {
+      queries.push({ ...q });
+      assert.ok(typeof q.limit === "number" && q.limit <= REVIEW_EFFORT_RECENT_LIMIT, `unbounded history limit: ${q.limit}`);
+      return pageHistoryNewest(ledger, q);
+    },
+  };
+
+  const loaded = await loadReviewEffortEvents(store, project);
+  assert.ok(loaded.length < ledger.length, "loaded set must be smaller than the full ledger");
+  assert.ok(loaded.some((event) => event.id === "evt_adopt"), "adoption event must be fetched even when it is outside the recent window");
+  assert.ok(!loaded.some((event) => event.id === "evt_filler_2"), "old non-routing rows stay outside the recent window");
+  assert.equal(queries.some((q) => q.text?.includes("routing")), true);
+  assert.equal(queries.every((q) => typeof q.limit === "number" && q.limit <= REVIEW_EFFORT_RECENT_LIMIT), true);
+  assert.equal(queries.filter((q) => q.text).every((q) => q.limit === REVIEW_EFFORT_ROUTING_PAGE), true);
+  assert.equal(queries.filter((q) => !q.text).every((q) => q.limit === REVIEW_EFFORT_RECENT_LIMIT), true);
+  const returned = queries.reduce((sum, q) => sum + (q.limit ?? 0), 0);
+  assert.ok(returned < ledger.length, "request shape must request fewer rows than the ledger");
+
+  const findings = reviewEffortFindings(loaded, models);
+  assert.equal(findings.length, 1);
+  assert.equal(findings[0]?.label, "review routing");
+  assert.equal(findings[0]?.level, "warn");
+  assert.match(findings[0]!.detail, /1 of 1 reviews since adoption cite no routing_event_id \(oldest evt_unrouted_recent\)/);
 });
 
 test("doctor: CLI version gap when Worker advertises min_cli_version above the running CLI", () => {

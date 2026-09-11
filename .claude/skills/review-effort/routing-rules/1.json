@@ -5,7 +5,7 @@
     "highest_class_wins": true,
     "class_order": ["S", "D", "C", "T", "F"],
     "reclassify_on_head_change": true,
-    "default_surface_class": "C"
+    "default_surface_class": "S"
   },
   "surface_classes": {
     "S": {
@@ -90,7 +90,8 @@
       "surface_class",
       "target",
       "pin_event",
-      "escalated_from"
+      "escalated_from",
+      "unmatched_paths"
     ],
     "target_fields": ["agent", "model", "effort"]
   },

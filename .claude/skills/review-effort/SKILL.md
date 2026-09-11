@@ -22,8 +22,9 @@ digest of the exact bytes of each file. Do not route from an unstamped copy or o
 
 1. Confirm the current head still equals `head_sha`.
 2. Classify `git diff --name-only <base_sha>..<head_sha>` with `routing-rules/1.json`. The highest class
-   touched wins. Unmatched paths take `default_surface_class`; never leave a path unclassified. Class F
-   requires evidence of no semantic change; it is not a filename fallback.
+   touched wins. Unmatched paths take `default_surface_class` (S — fail closed) and must be listed on the
+   routing event as `unmatched_paths`; never leave a path unclassified. Class F requires evidence of no
+   semantic change; it is not a filename fallback.
 3. Select the rubric effort for the round. Class S first passes are never below `high`.
 4. If a pin was supplied, fetch the ledger event and verify all of the following before using it:
    - it is owner-stamped or pinned-credential-stamped;
@@ -48,6 +49,7 @@ Call `retrace_log` with action `other`, tool `routing`, the review PR as a used 
   "target": {"agent": "<agent>", "model": "<model id>", "effort": "<level>"},
   "pin_event": null,
   "escalated_from": null,
+  "unmatched_paths": [],
   "why": "<paths/signals that selected the class and effort>"
 }
 ```
