@@ -1,13 +1,14 @@
 # Credential store — contract (credentials out of the Worker secret)
 
-**Status:** DRAFT v1, 2026-09-12, author grok (architect). Not built. Not a claim that anything here
-runs. Jordan's instruction via the coordinator (`evt_ce34a1763db64f1a9e9d21f86ecb5166`); item 13 in
-the 13 → 3 → 4 build order (the secret-ceiling workaround; PR 40 `docs/agent-ops.md` rule 15). Design
-gate: Codex, Nemotron, Claude (agent-rules 12 class (a)). Companion to `producer-signing-plan.md`
-rung 5 (public keys on credentials; private keys never on the Worker),
-`commit-trailer-consistency.md` §10 (principal + never-reissue), and `credential-status.ts` (T21,
-T29). **This note does not change the hash chain or the seal format.** If a reviewer finds that it
-must, the build stops.
+**Status:** DRAFT v1.1, 2026-09-12, author grok (architect). Not built. v1 was `b2f2751` (PR 42).
+v1.1 folds the NOOA/Nemotron design read (coordinator-verified): D1-write as the relocated secret
+trust boundary; import entropy floor from `mintToken`; `import_done` marker defined; 32 bytes = 256
+bits. Round-2 instruction `evt_15f13661297146babad259fcfd5de839`. Not a claim that anything here
+runs. Jordan's item 13 in the 13 → 3 → 4 build order (PR 40 `docs/agent-ops.md` rule 15). Design
+gate: Codex (Astra, high) reviews this head after PR 34; Nemotron landed; Claude last. Companion to
+`producer-signing-plan.md` rung 5, `commit-trailer-consistency.md` §10, and `credential-status.ts`
+(T21, T29). **This note does not change the hash chain or the seal format.** If a reviewer finds
+that it must, the build stops.
 
 No live token, no live JWK `d`, and no production `kid` appears in this file or in any fixture it
 requires. Tests use the existing `tok-` / in-memory JWK pattern.
@@ -32,12 +33,15 @@ change to `producer_sig` bytes, and not packed-CLI work (ops 3 and 4).
 
 ## 1. Principles
 
-1. **Fail closed.** An unreadable store, a failed lookup, a dual-source config, or an empty store
-   after cutover is `503` on every authenticated write and on credential-gated reads. It is never
-   open, never owner-inferred, never "fall back to the secret".
+1. **Fail closed.** An unreadable store, a failed lookup, a dual-source config, or cutover without
+   a completed import marker is `503` on every authenticated write and on credential-gated reads. It
+   is never open, never owner-inferred, never "fall back to the secret".
 2. **One source of truth.** After cutover the two credential secrets are unset. If they are set
    while the store is D1, the Worker refuses to start serving writes (`503`, dual-source). The secret
    retires; it does not linger as a fallback.
+2a. **D1-write is the trust boundary the Worker secret used to be.** An INSERT of a `credentials`
+   row whose `token_hash` is SHA-256 of a token the attacker knows *is minting*, and it does not
+   go through the owner token. v1 does not MAC or owner-sign rows. See §2.1.
 3. **Hashed tokens, public keys, no private keys.** Compromise of the store must not yield a usable
    bearer token or a producer private JWK.
 4. **Kid binds to the credential, not to `event.actor`.** `producerSigCheck` already verifies
@@ -80,6 +84,39 @@ D1 is already the ledger's store (`events`, `project_policies`, `policy_routes`,
 batch as `appendEvent`). Local `retrace-serve` gets the same tables on SQLite so the contract is one
 code path (`EventStore` grows credential methods; `MemoryEventStore` for tests).
 
+### 2.1 D1-write is minting (v1.1)
+
+v1 modelled a **dump** (read of the table) and not a **write**. That was a hole. With credentials in
+D1, anyone who can `INSERT` a row with `token_hash = SHA-256(token they chose)` has minted a live
+credential without the owner token. Retire and rotate are the same: a `UPDATE` is the act.
+
+**Decision: v1 accepts D1-write as equivalent to today's secret-write, and says so.** It does not
+MAC rows and does not owner-sign them. The Worker does not verify a row signature on read.
+
+Why equivalent, not weaker:
+
+- Today's mint path that the Worker honours is `wrangler secret put RETRACE_CREDENTIALS`. That is
+  Cloudflare-account (or API-token) write to this Worker's bindings. `wrangler d1 execute` / the
+  D1 dashboard / a D1 API token scoped to this database are the **same account surface**. An
+  attacker who can INSERT into this D1 could already replace the secret.
+- The *application* mint path stays owner-token HTTP (`POST /credentials`). Direct D1 writes are
+  outside the application, as direct secret edits are today. `retrace-admin` is not a second
+  gate on wrangler; it never was.
+- A row MAC or owner signature, verified on every auth read, would defend only the narrower case
+  "D1 write without the MAC/signing key" (dashboard editor, stolen D1-only token). The MAC key
+  or signing key would be another Worker secret — the class of object this move is shrinking —
+  and Worker compromise (the threat that already stamps `sealed_by`) forges the MAC. v1 will not
+  pretend that construction raises the bar that matters.
+
+What a D1-write attacker gets that a dump attacker does not: a token they know, bound to an actor
+they chose, until someone notices. Same as a secret-write attacker. Compensating: Cloudflare
+account ACL, D1 audit logs (Cloudflare's, not Retrace's), and the issuance event that *application*
+mints still write — a console INSERT will not have a matching `credential-minted` event. Doctor
+can warn on live rows with null `mint_event_id` after cutover (T15). That is detective, not
+prevention.
+
+Overrule: Jordan. A later version that MACs rows is a new decision, not a builder extra.
+
 ### Read path per request (after cutover)
 
 1. Read `Authorization: Bearer`. No bearer and no owner `?token=` on GET → unauthenticated (today's
@@ -96,9 +133,11 @@ code path (`EventStore` grows credential methods; `MemoryEventStore` for tests).
 Owner routes (DELETE project, PUT policy, share create, credential admin) still require the owner
 token. A credential never becomes owner.
 
-**Unproven:** D1 point-query wall-clock on this Worker. If it is too slow in production, the
-remediation is not "read the secret again"; it is a follow-up cache of `{token_hash, credential_id}`
-with retire deleting the entry in the same batch. v1 ships without that cache.
+**Unproven:** D1 point-query wall-clock on this Worker. v1 ships **without** an isolate cache of
+live-ness. If a later version adds `{token_hash → credential_id}` caching, it is **write-through**:
+retire and rotate delete or replace the entry in the **same D1 batch** as the row change; a cache
+miss falls back to D1; a cache hit that disagrees with D1 is discarded. Serving a stale live entry
+after retire is a failed retire. The cache is not a second source of truth.
 
 ## 3. Decision 2 — what the Worker holds at runtime
 
@@ -112,13 +151,29 @@ Overrule: Jordan, one instructed event.
   `tokenEquals` already computes on each side (`router.ts`). After cutover the stored value *is* that
   digest; compare by SHA-256(presented) ⊕ stored (constant-time, same XOR loop). Do not SHA-256 a
   hash.
-- No salt, no pepper. Salting is for low-entropy secrets (passwords). Tokens are minted as 32
-  random bytes, hex-encoded (64 chars, 128 bits). A rainbow table of SHA-256 is useless at that
-  entropy. A pepper would be another Worker secret — the thing this move is shrinking — and would
-  not change the threat that matters (Worker compromise already sees `RETRACE_TOKEN` and can stamp
-  `sealed_by`).
-- Existing tokens (schema minimum 16 chars) are hashed as-is at import. New mints are 32 bytes.
-  Import does not reject short historical tokens; it does not mint new ones that short.
+- No salt, no pepper. Salting is for low-entropy secrets (passwords). **Fact, from
+  `packages/mcp-server/src/admin.ts` `mintToken`:** `rand(32).toString("base64url")` with
+  `rand = node:crypto.randomBytes`. That is **32 CSPRNG bytes = 256 bits**, encoded as 43 base64url
+  characters (the comment on that function says 43 chars; v1 wrongly called this 128 bits and
+  hex). A rainbow table of SHA-256 is useless at 256 bits. A pepper would be another Worker secret
+  and would not change Worker compromise. The no-salt conclusion stands; the arithmetic is
+  corrected in v1.1.
+- **Import entropy floor (v1.1), not hash-as-is for anything ≥ 16 chars.** Unsalted SHA-256 is
+  sound only above an entropy floor. The Worker schema minimum (16 chars) is **not** that floor
+  (16 base64url chars is 96 bits; 16 hex is 64). Import cannot see generation method — only the
+  token string — and this note does not inspect live tokens.
+
+  **Decision: import accepts a token only if it matches `mintToken`'s shape** (exactly 32 bytes
+  when base64url-decoded; equivalently 43-char base64url). Those are treated as 256-bit CSPRNG
+  outputs of `mintToken` or an equivalent `randomBytes(32)` and are hashed as-is. **Any other
+  token is refused (400)**; the operator re-mints that seat (`rotate` / `add-agent`), which goes
+  through `mintToken` and writes a `credential-rotated` / `credential-minted` event. Empty import
+  is 400.
+
+  Whether every live dogfood token matches that shape is **unproven here** (reading live tokens
+  is forbidden). Import will name the rows that need rotation. Local `retrace-serve`'s ephemeral
+  token (`randomBytes(24)` in `serve.ts`, 192 bits) is not a Worker credential and is not
+  imported.
 
 ### Compromise of the store (D1 dump, SQLite file, replica)
 
@@ -128,12 +183,13 @@ issuance event ids, `token_hash`.
 
 Does not yield: the bearer token, any producer private JWK (`d`), the owner token.
 
-An attacker with the dump cannot authenticate (they do not have a preimage of `token_hash`). They
-can enumerate who is bound to whom — `/status` issuance already reports a projection of that. They
-cannot re-issue an actor id (the bindings table is still there, and mint is owner-only). They cannot
-change `sealed_by` on already-sealed events. A compromised *Worker process* can still stamp
-`sealed_by` on new events; producer signatures still fail closed for seats with
-`require_signature: true`. That limit is rung 5, not this note.
+An attacker with the dump cannot authenticate (no preimage of a 256-bit `token_hash`). They can
+enumerate who is bound to whom — `/status` issuance already reports a projection of that. They
+cannot change `sealed_by` on already-sealed events. **They can mint if they can WRITE D1** (§2.1)
+— dump is not write. A compromised *Worker process* can still stamp `sealed_by` on new events;
+producer signatures still fail closed for seats with `require_signature: true`. That limit is
+rung 5, not this note. Bindings still block application-path re-issue (T29); a console INSERT
+can still create a row that authenticates until detected (T15).
 
 ### Public keys and kid → credential
 
@@ -221,6 +277,15 @@ metadata + `producer_key_file` paths + the plaintext token the hook needs to sen
 uploaded. Losing the mirror does not lose never-reissue (that is in D1); it does lose the hook's
 token, which is a rotate.
 
+**Residual (v1.1):** the Worker no longer stores plaintext tokens; the 0600 mirror (and every
+harness env that holds `RETRACE_TOKEN` / `RETRACE_MCP_TOKEN`) still does. A bearer protocol
+requires the client to hold the secret. Compensating controls, all already true and not new
+crypto: mode 0600; `.retrace.json` names the credential *id* not the token; ops 14 (never print,
+copy, or commit the file); rotate on machine compromise. Residual, stated: anyone who can read
+that file can authenticate as the hook. That is the same residual as today, except after cutover
+it is the *only* plaintext copy on the operator side of the Worker. v1 does not add a second
+factor on the hook.
+
 ## 5. Store contract
 
 ### Tables (sketch; builder names columns in the PR)
@@ -239,7 +304,20 @@ token, which is a rotate.
 - `retired_at`, `created_at`
 - `mint_event_id`, `retire_event_id`
 
-`credential_bindings` — Decision 2. Primary key `(project, actor_type, actor_id)`.
+`credential_bindings` — Decision 2. Primary key `(project, actor_type, actor_id)`. Identity for
+never-reissue is `{project, type, id}` → principal (trailer-consistency §10). `actor_model` and
+`on_behalf_of` are **not** in the key. A 409 on a different principal is the rule working.
+
+`credential_store_state` — **exactly one row** (v1.1). Written in the **same D1/SQLite batch** as
+the imported credential rows (and their bindings):
+
+- `import_completed_at` (RFC 3339 UTC)
+- `import_event_id` (the ops-project event `credential-store-imported`)
+- `live_count_at_import` (integer, ≥ 1)
+
+This is the cutover latch, not a defense against D1-write (an attacker who can INSERT credentials
+can INSERT this row). It exists so `credential_store=d1` cannot serve auth against a partial or
+unfinished import.
 
 Indexes: unique live `token_hash`; unique live `public_key_kid`; `(actor_type, actor_id)`.
 
@@ -253,19 +331,24 @@ Indexes: unique live `token_hash`; unique live `public_key_kid`; `(actor_type, a
 - `POST /credentials/:id/rotate` — new `token_hash` and/or new `public_key`.
 - `POST /credentials/:id/set-principal` — missing principal only.
 - `POST /credentials/import` — one-shot cutover helper: array of rows already hashed. Fails if the
-  table is non-empty. Fails closed on any T29 / batch conflict. Does not read Worker secrets.
+  table is non-empty. Fails if the array is empty (400). Fails closed on any T29 / batch conflict.
+  Does not read Worker secrets. Does not accept a `token` field (400). **The Worker cannot see
+  entropy from a hash**; the `mintToken` shape check is `retrace-admin`'s, on the plaintext, before
+  POST. On success the same batch writes `credential_store_state` and one ops-project event
+  `credential-store-imported`.
 
 All of the above are 403 for a per-actor credential. All fail closed on store errors (503).
 
-`GET /api` grows `credential_store: "d1" | "secret"` and `credentials: <live count>` so doctor can
-see dual-source and empty-store without dumping rows.
+`GET /api` grows `credential_store: "d1" | "secret"`, `credential_import: "done" | "pending"`, and
+`credentials: <live count>` so doctor can see dual-source, missing latch, and empty-store without
+dumping rows.
 
 ### `EventStore`
 
 `getCredentialByTokenHash(hash)`, `insertCredential`, `retireCredential`, `rotateCredential`,
-`listCredentials`, `getBinding`, `insertBinding`. Implementations: D1, SQLite, memory. The router
-stops taking `opts.credentials: Credential[]` as the live set after cutover; tests construct a
-memory store.
+`listCredentials`, `getBinding`, `insertBinding`, `getStoreState`, `completeImport`.
+Implementations: D1, SQLite, memory. The router stops taking `opts.credentials: Credential[]` as
+the live set after cutover; tests construct a memory store.
 
 ## 6. Migration — the secret retires
 
@@ -275,15 +358,24 @@ No dual-source window in production.
    the secret (`credential_store=secret`). Admin routes may write D1 while auth still reads the
    secret, **or** they may refuse until step 2; v1 refuses mint-to-D1 while auth is still secret so
    the two sources cannot diverge. Only `POST /credentials/import` writes D1 in this phase.
-2. **Import.** Operator runs `retrace-admin import-store` from the local mirror: hash every token,
-   POST `/credentials/import`, confirm `GET /api` shows the live count. Never logs a token. On
-   conflict (T29, duplicate hash, duplicate kid) the import is 409 and the secret stays authoritative.
+2. **Import.** Operator runs `retrace-admin import-store` from the local mirror: each token is
+   checked against the `mintToken` shape **on the plaintext, locally**; matching tokens are
+   hashed; others are listed by credential name/actor (never the token) and the POST is **not
+   sent** until those seats are re-minted. POST `/credentials/import` (hashes only). The same
+   D1 batch inserts the rows, the bindings, and `credential_store_state`. Confirm `GET /api`
+   shows `credential_import: "done"` and the live count. Never logs a token. On conflict (T29,
+   duplicate hash, duplicate kid, empty array) the import is 4xx and the secret stays
+   authoritative. Partial failure rolls back the batch; the marker is not written.
 3. **Cut over.** Set `RETRACE_CREDENTIAL_STORE=d1` (Worker var, not a secret). **Unset**
    `RETRACE_CREDENTIALS` and `RETRACE_CREDENTIALS_EXTRA`. Deploy. Auth reads D1 only.
-4. **Refuse dual-source.** If `credential_store=d1` and either credential secret is non-empty →
-   every write 503 `"credential store: dual source"`. If `credential_store=d1` and the table has zero
-   live rows and import has not been marked done → 503 `"credential store: empty"`. There is no
-   implicit owner-open mode (`requireAuth` stays true).
+4. **Guards, all 503, fail closed, no owner-open mode** (`requireAuth` stays true):
+   - `credential_store=d1` and either credential secret is non-empty → `"credential store: dual source"`.
+   - `credential_store=d1` and `credential_store_state.import_completed_at` is null →
+     `"credential store: import not completed"` (**even if live rows exist** — unfinished or
+     console-inserted rows without the latch).
+   - `credential_store=d1`, marker present, zero live rows → owner-token-only. That is allowed
+     (every seat retired). Import of zero rows is 400, so this state is post-retire, not
+     pre-import.
 
 Rollback is a Worker var flip back to `secret` **plus** restoring the secrets from the operator's
 mirror, not "read both". A rollback after new D1-only mints would drop those mints from auth — so
@@ -337,7 +429,9 @@ other than ordinary issuance `EventInput`, **stop**.
 
 T1. Dual-source: `credential_store=d1` and `RETRACE_CREDENTIALS` set → every `POST /events` is 503,
     never 200, never a secret match.
-T2. Empty D1 after cutover, no import → 503 on writes, not open.
+T2. `credential_store=d1` and `credential_store_state` missing (no import latch), even if live
+    credential rows exist → 503 `"import not completed"`, not 200.
+T2b. Import of an empty array → 400; marker not written.
 T3. Store throw (injected D1 error) on lookup → 503, not 401, not a secret fallback.
 T4. Live row: presented token SHA-256-matches `token_hash` → principal is that credential;
     `producerSigCheck` uses **that row's** `public_key`. A signature whose kid is another
@@ -360,6 +454,15 @@ T13. EXTRA unset after cutover: a credential that today lives only in EXTRA auth
      after import; there is no EXTRA parse branch in the D1 auth path.
 T14. Export `producers[]` includes retired kids; a historical event signed with a rotated key still
      verifies against that bundle.
+T15. After cutover, a live row with null `mint_event_id` is a doctor **warn** (console INSERT, not
+     an application mint). It still authenticates until retired — D1-write is minting (§2.1).
+T16. `retrace-admin import-store` refuses a 16-char fixture token (below `mintToken` shape) without
+     POSTing; a 43-char base64url 32-byte token is hashed and POSTed. The Worker never sees the
+     plaintext.
+T17. Successful import writes `credential_store_state` in the same batch as the rows; a mid-batch
+     failure leaves neither rows nor marker.
+T18. Binding key is `(project, actor_type, actor_id)` only. Mint of the same actor with a different
+     `actor_model` / `on_behalf_of` and a different principal is still 409.
 
 ## 9. Open questions
 
@@ -371,7 +474,10 @@ Q1. In-place rotate vs retire+mint for producer keys. v1 says in-place on the sa
 Q2. Whether unscoped dogfood credentials (no `projects`) are forced through a one-time
     `projects: ["retrace"]` at import. v1 imports them unscoped and writes issuance events to
     `RETRACE_OPS_PROJECT`. Tightening scope is a mint-time choice, not an import rewrite.
-Q3. Isolate-memory cache of live `token_hash → id` after a measured D1 p95. v1 has none.
+Q3. *(closed as constraint, v1.1)* Isolate-memory cache of live `token_hash → id` is out of v1.
+    If a later version adds one after a measured D1 p95, it is write-through: invalidate or replace
+    in the same batch as retire/rotate; miss falls back to D1; never serve a stale live entry.
+    Not an open product question.
 
 ## 10. How to overrule
 
@@ -384,4 +490,15 @@ land in §11.
 
 ## 11. Dispositions
 
-_(empty — design reviews have not landed)_
+NOOA / Nemotron design read of v1 (`b2f2751`), coordinator-verified, round 2
+(`evt_15f13661297146babad259fcfd5de839`):
+
+| # | Sev | Item | Disposition |
+|---|---|---|---|
+| 1 | HIGH | D1 dump modelled, not D1 write; INSERT is minting | **Accepted.** §2.1: v1 treats D1-write as equivalent to secret-write. No row MAC, no owner signature on read. T15 detective on null `mint_event_id`. |
+| 2 | HIGH | Import hashes 16-char tokens as-is; entropy unstated | **Accepted.** Facts: `mintToken` = `randomBytes(32).toString("base64url")` = 256 bits. Import accepts only that shape; anything else is refused and re-minted. Shape check is admin-side (Worker sees only hashes). |
+| 3 | HIGH | `import done` marker never defined | **Accepted.** `credential_store_state` one row, same batch as import. Guard reads `import_completed_at`; missing latch → 503 even if rows exist. |
+| 4 | MED | 32 bytes called 128 bits | **Accepted.** 256 bits. No-salt stands. |
+| 5 | — | Extend never-reissue key with `actor_model` / `on_behalf_of` | **Rejected, no change.** Identity is `{project, type, id}` → principal (trailer-consistency §10). A 409 is the rule working. T18. |
+| 6 | LOW | Post-cutover mirror still holds the hook plaintext | **Taken.** Residual stated; compensating controls named; no new factor in v1. |
+| 7 | LOW | Future `token_hash` cache stale-after-retire | **Taken.** Q3 closed as a write-through constraint. v1 has no cache. |
