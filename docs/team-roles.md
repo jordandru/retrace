@@ -50,7 +50,7 @@ detached coordination worktree so the primary checkout alone owns `main`. Review
 instead of it: the PR 12 approval that missed the unsigned authorization path (#2131) is the reason the
 order is Codex first, Claude last. The most expensive seat per token; it should not do bulk implementation.
 
-**Builders — github-copilot (GPT-5.6 Sol), cursor-agent (Grok 4.6 in Cursor).** Bounded, specified work
+**Builders — github-copilot (GPT-5.6 Sol), cursor-agent (the model Cursor is set to — Grok 4.6 until 2026-09-11, GPT-5.6 Sol since; identity is the credential, the model is self-reported per session).** Bounded, specified work
 from a brief, in their own worktrees, one PR each, commit only their own paths. Evidence: Copilot's export
 tail (PR 12), object-store doctor (PR 14, 17), stranger fixes (PR 20, 22), release prep (PR 25); cursor-agent's
 six security fixes (PR 16) and the fresh-export bind (PR 18). Copilot also ran the stranger test that found
@@ -59,11 +59,23 @@ never reliably calls the provenance tools; OpenCode is held (PR 19) until it can
 
 ## The rules the seats imply
 
+*Correction 2026-09-12:* the binding provenance rules for every seat now live in `docs/agent-rules.md`, and the
+environment rules in `docs/agent-ops.md`; the identity files (`CLAUDE.md`, `AGENTS.md`, `GROK.md`,
+`.github/copilot-instructions.md`, `.cursor/rules/retrace-provenance.mdc`) hold identity only. The seat rules below
+are the roles those rules imply, kept here unchanged, with one clarification from agent-rules 12: the design
+gate (rule 2) applies to anything that governs behaviour, whatever its file type — agent rules and identity
+files included — while documents that govern nothing (measurements, snapshots, references, dated corrections)
+merge on one non-author review. One addition from practice: on 2026-09-12 cursor-agent at high
+effort took the first-pass review seat for PR 37 while Codex was rate-capped (routing evt_44b11c82, verdict
+evt_a742fc51), so "reviewer when routed" is now part of that seat.
+
 1. **Reviewer ≠ builder for the same change.** Whoever built it does not review it. Astra's PR 15 was
    reviewed by Grok, NOOA and Claude; cursor-agent's PR 16 by Codex (read-only) and Claude; Claude's design
    notes by Codex, Grok and NOOA. When Codex builds, Grok or NOOA is the reviewer of record.
 2. **Order of review: Codex → (NOOA for designs) → Claude → merge.** Claude's approval is the last check,
-   never the first. Every design note goes to all three other Core Four seats; missing one (the trailer note
+   never the first. Every change the coordinator classifies (a) under agent-rules 12 — design notes and
+   briefs, agent rules and identity files, security, build, deploy, or runbook controls — goes to all
+   three other Core Four seats; missing one (the trailer note
    went to Codex and Grok only, corrected the same evening) is a process error, not a judgment call.
 3. **Cross-vendor by default.** A design written by Claude is reviewed by non-Anthropic models; the hourly
    audit of a ledger written mostly by Anthropic and OpenAI agents runs on NVIDIA's model. Putting Fable

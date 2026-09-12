@@ -82,7 +82,7 @@ the ways out: `retrace-git install` (writes the file), `RETRACE_DB=<path>` to wr
 `RETRACE_ALLOW_REMOTE=1` for env-only setups such as CI backfill. Local writes are not gated — a stray row in a SQLite
 file is cheap to discard; a sealed event in a shared append-only ledger costs a `DELETE /projects/:p`.
 
-Tip for agents (put in `AGENTS.md` / `CLAUDE.md` / `GEMINI.md` / `GROK.md` / `.cursor/rules/retrace-provenance.mdc`): *when committing, add trailers `Retrace-Actor: <your harness id>`, `Retrace-Model: <model>`, and `Retrace-Caused-By: <instruction event id>`.* Do not copy another harness's actor id.
+Tip for agents (in this repo the binding set is `docs/agent-rules.md`, which every seat's identity file — `AGENTS.md`, `CLAUDE.md`, `GROK.md`, `.github/copilot-instructions.md`, `.cursor/rules/retrace-provenance.mdc` — points at): *when committing, add trailers `Retrace-Actor: <your harness id>`, `Retrace-Model: <model>`, and `Retrace-Caused-By: <instruction event id>`.* Do not copy another harness's actor id.
 
 ### GitHub PR adapter — PRs, reviews, comments, CI runs become events
 
@@ -149,7 +149,7 @@ Toggle **Graph** in the UI (or `?view=graph`). Nodes are artifacts, laid out lef
 | `retrace_lineage` | artifact lineage (text / DOT / Mermaid / JSON) |
 | `retrace_projects` | list projects |
 
-Suggested instruction to put in your project's `CLAUDE.md` so agents log automatically:
+Suggested instruction to put in your project's `CLAUDE.md` so agents log automatically (this repository's own, fuller set — the same rule for every seat, plus the environment rules kept separately — is `docs/agent-rules.md` and `docs/agent-ops.md`):
 
 > At the start of each task call `retrace_instruct` with my request. After each file edit, command run, or decision, call `retrace_log` with `caused_by` set to the instruction id, a one-sentence `intent`, and the artifact ids you touched.
 

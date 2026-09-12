@@ -1,19 +1,15 @@
-# Retrace workspace instructions
+# Claude Code — identity
 
-This repository records verifiable provenance through the `retrace` MCP server.
+This repository records verifiable provenance through the `retrace` MCP server. The rules are
+`docs/agent-rules.md` (binding, identical for every seat) and `docs/agent-ops.md` (this environment).
+Read both before working. This file holds only what is specific to the Claude Code seat.
 
-- At the start of a task, call `retrace_instruct` with the user's request and `human_id` set to `jordansboxing@gmail.com`. Keep the returned event id.
-- After each meaningful edit, command, or decision, call `retrace_log` with that event id as `caused_by`, a concise `intent`, and the artifact ids touched — **every file you changed**, as `repo:jordandru/retrace#<path>`. Reconciliation (`retrace-export reconcile`, the gate's `capture coverage` finding) compares each commit's files against logged edits; a file you changed but did not log is `uncovered`, and a file whose only logged edits are another agent's is `misattributed`.
-- On every `retrace_log`, report the Claude model actually running in `actor.model`. Do not invent a model value if it is unavailable.
-- Do not log `committed` actions through MCP; the Git hook records real commits with authoritative metadata.
-- Before committing, run `npm exec --package=@retrace-dev/cli -- retrace doctor` (or the local `node packages/mcp-server/dist/doctor.js doctor`) and resolve failures.
-- Add commit trailers `Retrace-Actor: claude-code`, `Retrace-Model: <actual model>`, and `Retrace-Caused-By: <instruction event id>`.
-- These instructions are authoritative for Claude Code. Do not copy another agent's `Retrace-Actor` from `AGENTS.md`, `GROK.md`, `.github/copilot-instructions.md`, or `.cursor/rules/retrace-provenance.mdc`. (`GEMINI.md` was removed 2026-09-10: the Gemini credential is retired; `agent/gemini` stays bound to its principal under never-reissue.)
-- Packages are `@retrace-dev/core` and `@retrace-dev/cli` (the workspace folder is still `packages/mcp-server`).
-- Producer signing: when this agent's private JWK exists, set `RETRACE_PRODUCER_KEY_FILE` on the MCP server (mode 0600). Do not put that file in the Worker secret.
-
-## Operational notes (multi-agent, multi-clone)
-
-- **If the `retrace` MCP tools vanish mid-session, restart Claude Code** (`claude --continue`). A running session does not respawn a project-scoped MCP server that has died, and the `/mcp` dialog's reconnect does not either. The `~/.claude.json` entry is fine — it is the server *process* that dropped (consistent with WSL2 fetch/stdio flakiness). Confirmed by investigation 2026-08-29 (evt_130f6e9c): the config was present in every snapshot; only a restart brought the tools back.
-- **One checkout now:** `/home/jordandrumiler/provenance/retrace` (WSL) is the only clone and Orca's primary worktree since 2026-08-30; the Windows clone (`C:\Users\drumi\orca\retrace`) was removed because the two drifted apart. Orca child worktrees inherit `.retrace.json` and the post-commit hook, so each one is a live ledger producer: one branch per worktree, commit only your own paths, PR to main, `worktree rm` when merged. Still: run `git rev-parse --short HEAD` before working, and never `pull`/`reset`/`checkout` a tree that carries another agent's uncommitted changes.
-- **This checkout is shared by five agents** (claude-code, codex, grok, github-copilot, cursor-agent; gemini retired 2026-09-10 — the last runs the Grok model inside Cursor but seals as its own pinned identity). Uncommitted work in the tree gets swept into whichever agent commits next (this happened — bfe87c3, corrected by c375ed4). Finish a task by committing only your own paths (`git commit --only <paths>`); never `git commit -a`/`git add -A` when another agent's changes are staged or unstaged in the tree.
+- Actor id `claude-code`. Trailers on every commit and merge: `Retrace-Actor: claude-code`,
+  `Retrace-Model: <the exact model id this session reports, e.g. claude-fable-5-1>`,
+  `Retrace-Caused-By: <instruction event id>`.
+- `actor.model` on every log is the model actually running this session, verbatim (agent-rules 4).
+- Seat: coordinator, spec author, reviewer of last resort, merger (`docs/team-roles.md`). Merges only
+  from `/home/jordandrumiler/provenance/retrace-main`. The coordinator's own documents reach main by
+  pull request like everyone else's (agent-rules 12).
+- Producer key: `RETRACE_PRODUCER_KEY_FILE` on this seat's MCP server (agent-rules 13).
+- This identity block is for Claude Code only. Any other harness that reads this file must not adopt it.
