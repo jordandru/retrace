@@ -113,13 +113,19 @@ test("review effort R4: class S cannot route below high and pins cannot lower th
 });
 
 test("review effort R2/R3: registry has the specified capability shape and skill requires truthful linked reviews", () => {
-  const models = json<Record<string, { supports_effort: boolean; levels: string[] }>>("routing-rules/models.json");
+  const models = json<Record<string, { supports_effort: boolean; levels: string[]; aliases?: string[] }>>("routing-rules/models.json");
   assert.ok(Object.keys(models).length > 0);
   for (const value of Object.values(models)) {
     assert.equal(typeof value.supports_effort, "boolean");
     assert.ok(Array.isArray(value.levels));
+    assert.equal(value.aliases === undefined || (
+      Array.isArray(value.aliases) && value.aliases.every((alias) => typeof alias === "string")
+    ), true);
     assert.equal(value.supports_effort || value.levels.length === 0, true);
   }
+  assert.deepEqual(models["claude-opus-4-8"]?.aliases, ["claude-opus-4.8"]);
+  assert.deepEqual(models["grok-4.6"]?.aliases, ["Cursor Grok 4.6"]);
+  assert.deepEqual(models["gpt-5.6-sol"]?.aliases, ["GPT-5.6 Sol"]);
   const skill = read("SKILL.md").toString("utf8");
   assert.match(skill, /recorded before launch/i);
   assert.match(skill, /reasoning_effort/);

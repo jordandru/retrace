@@ -1,18 +1,32 @@
 {
   "gpt-6": {
     "supports_effort": true,
-    "levels": ["low", "medium", "high", "xhigh"]
+    "levels": ["low", "medium", "high", "xhigh"],
+    "aliases": []
   },
   "gpt-5.6-sol": {
     "supports_effort": true,
-    "levels": ["low", "medium", "high", "xhigh"]
+    "levels": ["low", "medium", "high", "xhigh"],
+    "aliases": ["GPT-5.6 Sol"]
   },
   "claude-fable-5-1": {
     "supports_effort": true,
-    "levels": ["low", "medium", "high", "xhigh"]
+    "levels": ["low", "medium", "high", "xhigh"],
+    "aliases": []
+  },
+  "claude-opus-4-8": {
+    "supports_effort": true,
+    "levels": ["low", "medium", "high", "xhigh"],
+    "aliases": ["claude-opus-4.8"]
+  },
+  "grok-4.6": {
+    "supports_effort": true,
+    "levels": ["low", "medium", "high", "xhigh"],
+    "aliases": ["Cursor Grok 4.6"]
   },
   "nvidia_nim/nvidia/nemotron-3-ultra-550b-a55b": {
     "supports_effort": false,
-    "levels": []
+    "levels": [],
+    "aliases": []
   }
 }

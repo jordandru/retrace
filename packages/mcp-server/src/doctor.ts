@@ -14,7 +14,8 @@ type Level = "pass" | "warn" | "fail";
 export type Finding = { level: Level; label: string; detail: string };
 export type DoctorArgs = { command: "doctor" | "status"; gate: boolean; json: boolean; local: boolean; repo?: string; statusProject?: string };
 type RepoConfig = ReconcileCfg & { credential?: string };
-export type RoutingModelRegistry = Record<string, { supports_effort: boolean; levels: string[] }>;
+export type RoutingModel = { supports_effort: boolean; levels: string[]; aliases?: string[] };
+export type RoutingModelRegistry = Record<string, RoutingModel>;
 
 const git = (repo: string, args: string[]) => execFileSync("git", ["-C", repo, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 const result = (level: Level, label: string, detail: string): Finding => ({ level, label, detail });
@@ -254,6 +255,8 @@ export function reviewEffortFindings(events: Event[], models: RoutingModelRegist
   if (adoptionSeq === undefined) return [];
   const findings: Finding[] = [];
   const unrouted: Event[] = [];
+  const missingModels: Event[] = [];
+  const missingEfforts: Event[] = [];
   let reviewCount = 0;
   for (const review of events.filter((event) => event.seq > adoptionSeq && isReviewEvent(event))) {
     reviewCount++;
@@ -261,19 +264,16 @@ export function reviewEffortFindings(events: Event[], models: RoutingModelRegist
     const effort = typeof params.reasoning_effort === "string" ? params.reasoning_effort : undefined;
     const routingId = typeof params.routing_event_id === "string" ? params.routing_event_id : undefined;
     const model = review.actor.model;
-    const capability = model ? models[model] : undefined;
+    const registeredModel = model ? resolveRoutingModel(models, model) : undefined;
+    const capability = registeredModel?.capability;
 
     if (!routingId) {
       unrouted.push(review);
       continue;
     }
-    if (!model) {
-      findings.push(result("warn", "review model", `${review.id}: review did not self-report actor.model`));
-    } else if (!capability) {
-      findings.push(result("warn", "review model", `${review.id}: ${model} is not listed in the routing model registry`));
-    }
+    if (!model || !capability) missingModels.push(review);
     if (capability?.supports_effort && !effort) {
-      findings.push(result("warn", "review reasoning effort", `${review.id}: ${model} supports effort but the review did not self-report method.params.reasoning_effort`));
+      missingEfforts.push(review);
     }
     const routing = byId.get(routingId);
     if (!routing) {
@@ -294,22 +294,35 @@ export function reviewEffortFindings(events: Event[], models: RoutingModelRegist
     if (routedAgent && routedAgent !== review.actor.id) {
       findings.push(result("warn", "review agent mismatch", `${review.id}: routed ${routedAgent} · ran ${review.actor.id} (${routingId})`));
     }
-    if (routedModel && model && routedModel !== model) {
+    const routedModelId = routedModel ? resolveRoutingModel(models, routedModel)?.id ?? routedModel : undefined;
+    const reviewModelId = registeredModel?.id ?? model;
+    if (routedModelId && reviewModelId && routedModelId !== reviewModelId) {
       findings.push(result("warn", "review model mismatch", `${review.id}: routed ${routedModel} · ran ${model} (${routingId})`));
     }
     if (effort && routedEffort && effort !== routedEffort) {
       findings.push(result("warn", "review effort mismatch", `${review.id}: routed ${routedEffort} · ran ${effort} (${routingId})`));
     }
   }
-  if (unrouted.length) {
-    const oldest = unrouted.reduce((a, b) => (a.seq < b.seq ? a : b));
-    findings.unshift(result(
-      "warn",
-      "review routing",
-      `${unrouted.length} of ${reviewCount} reviews since adoption cite no routing_event_id (oldest ${oldest.id})`,
-    ));
+  const summary = (reviews: Event[], label: string, detail: string): Finding | undefined => {
+    if (!reviews.length) return undefined;
+    const oldest = reviews.reduce((a, b) => (a.seq < b.seq ? a : b));
+    return result("warn", label, `${reviews.length} of ${reviewCount} reviews since adoption ${detail} (oldest ${oldest.id})`);
+  };
+  return [
+    summary(unrouted, "review routing", "cite no routing_event_id"),
+    summary(missingModels, "review model", "do not report an actor.model listed in the routing model registry"),
+    summary(missingEfforts, "review reasoning effort", "use an effort-capable model but do not self-report method.params.reasoning_effort"),
+    ...findings,
+  ].filter((finding): finding is Finding => finding !== undefined);
+}
+
+/** Model ids are exact, case-sensitive keys or aliases. */
+export function resolveRoutingModel(models: RoutingModelRegistry, model: string): { id: string; capability: RoutingModel } | undefined {
+  if (models[model]) return { id: model, capability: models[model] };
+  for (const [id, capability] of Object.entries(models)) {
+    if (capability.aliases?.includes(model)) return { id, capability };
   }
-  return findings;
+  return undefined;
 }
 
 /** Newest-first window for advisory review checks. Must stay well under Worker CPU limits. */
@@ -360,11 +373,24 @@ export function loadRoutingModels(repo: string): RoutingModelRegistry | undefine
   if (!existsSync(path)) return undefined;
   const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error(`${path}: expected an object`);
-  for (const [model, value] of Object.entries(parsed)) {
+  const rows = Object.entries(parsed);
+  const keys = new Set(rows.map(([model]) => model));
+  const aliases = new Map<string, string>();
+  for (const [model, value] of rows) {
     if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${path}: ${model} must be an object`);
     const row = value as Record<string, unknown>;
     if (typeof row.supports_effort !== "boolean" || !Array.isArray(row.levels) || row.levels.some((level) => typeof level !== "string")) {
       throw new Error(`${path}: ${model} must contain supports_effort:boolean and levels:string[]`);
+    }
+    if (row.aliases !== undefined && (!Array.isArray(row.aliases) || row.aliases.some((alias) => typeof alias !== "string"))) {
+      throw new Error(`${path}: ${model}.aliases must be a string[]`);
+    }
+    for (const alias of (row.aliases as string[] | undefined) ?? []) {
+      const owner = aliases.get(alias);
+      if (keys.has(alias) || owner !== undefined) {
+        throw new Error(`${path}: alias ${alias} for ${model} collides with ${keys.has(alias) ? "a model key" : `an alias for ${owner}`}`);
+      }
+      aliases.set(alias, model);
     }
   }
   return parsed as RoutingModelRegistry;
