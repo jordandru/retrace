@@ -62,7 +62,9 @@ test("git adapter: install hook, human commit, agent commit with trailers, backf
   assert.equal(JSON.parse(readFileSync(join(dir, ".retrace.json"), "utf8")).project, "rpg");
 
   writeFileSync(join(dir, "a.ts"), "export const a = 2;\nexport const b = 3;\n");
+  const liveStartedAt = Date.now();
   sh(dir, "git", ["commit", "-qam", "bump a and add b"], env); // hook runs with env
+  const liveElapsed = Date.now() - liveStartedAt;
 
   writeFileSync(join(dir, "fight.ts"), "export const jab = () => 1;\n");
   sh(dir, "git", ["add", "."]);
@@ -82,6 +84,9 @@ test("git adapter: install hook, human commit, agent commit with trailers, backf
   assert.ok(human.artifacts.some((a) => a.id.endsWith("#a.ts")));
   assert.equal(human.artifacts[0].kind, "commit");
   assert.equal(human.artifacts[0].derived_from?.length, 1, "commit derived_from parent commit");
+  assert.equal(Number.isInteger(human.duration_ms), true, "live hook stamps integer elapsed time");
+  assert.ok(human.duration_ms! >= 0);
+  assert.ok(human.duration_ms! <= liveElapsed, `hook-local ${human.duration_ms}ms must fit inside test-observed ${liveElapsed}ms`);
   // PROV role: the hook is authoritative — commit + every changed file are outputs
   for (const e of [human, agent]) {
     assert.ok(e.artifacts.length >= 2);
@@ -167,6 +172,9 @@ test("hook signs committed events when RETRACE_HOOK_KEY_FILE is set", async () =
   assert.deepEqual(commit!.method?.params?.author, { name: "Jordan", email: "jordan@slcwitit.com" });
   assert.ok(Array.isArray(commit!.method?.params?.parents));
   assert.equal(await verifyProducerSig(commit!, publicFromPrivate(kp.privateKey)), true);
+  assert.equal(commit!.producer_sig!.format, "retrace-producer-sig/2");
+  assert.equal(Number.isInteger(commit!.duration_ms), true);
+  assert.equal(await verifyProducerSig({ ...commit!, duration_ms: commit!.duration_ms! + 1 }, publicFromPrivate(kp.privateKey)), false, "duration_ms is inside the signed bytes");
 });
 
 test("hook end to end: the named credential is the bearer the server sees; a rejection is appended to .git/retrace-hook.log", async () => {
@@ -277,12 +285,14 @@ test("two hook commits during a 5xx are queued, then the next run drains them be
   const dir = mkdtempSync(join(tmpdir(), "retrace-git-pending-"));
   let status = 503;
   const seen: string[] = [];
+  const durationPresence: boolean[] = [];
   const server = createServer((req, res) => {
     let body = "";
     req.on("data", (chunk) => (body += chunk));
     req.on("end", () => {
       const input = JSON.parse(body);
       seen.push(input.change.after_hash);
+      durationPresence.push("duration_ms" in input);
       if (status === 503) {
         res.writeHead(503, { "content-type": "application/json" });
         res.end(JSON.stringify({ error: "temporarily unavailable" }));
@@ -348,6 +358,11 @@ test("two hook commits during a 5xx are queued, then the next run drains them be
       seen,
       [sha, sha, sha, secondSha, secondSha],
       "both pending commits are retried first, then the current sha dedupes",
+    );
+    assert.deepEqual(
+      durationPresence,
+      [true, false, false, false, true],
+      "live attempts carry duration_ms, while every pending-seal drain leaves the key absent",
     );
   } finally {
     server.close();
@@ -743,6 +758,7 @@ test("git adapter: replay paths (backfill, `commit <sha>`) never stamp the repla
   for (const e of events) {
     assert.equal(e.location?.system, "git", "the fields the replay DOES know are still stamped");
     assert.equal(e.location?.path, dir);
+    assert.ok(!("duration_ms" in e), "backfill and `commit <sha>` replay must leave duration_ms absent");
     for (const k of ["session", "ide", "workspace", "surface"]) {
       assert.ok(!(k in (e.location ?? {})), `replay must not stamp location.${k} (got ${JSON.stringify(e.location?.[k as "session"])})`);
     }
@@ -756,6 +772,7 @@ test("git adapter: replay paths (backfill, `commit <sha>`) never stamp the repla
   const live = (await new SqliteStore(db).all("rpg"))[2];
   assert.equal(live.location?.session, "sess-now");
   assert.equal(live.location?.workspace, "wt_now");
+  assert.ok("duration_ms" in live, "the live hook path stamps duration_ms");
 });
 
 // ---- Remote-write guard (2026-08-28: six junk events reached the live Worker from /tmp scratch repos) ----

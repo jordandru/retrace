@@ -47,6 +47,8 @@ import { RemoteApiError, RemoteCapabilityError, RemoteStore } from "./remote-sto
 import { loadProducerPrivateKeyFromFile, sealForAppend } from "./producer-key.js";
 import { isMainModule } from "./is-main.js";
 
+const HOOK_PROCESS_STARTED_AT = Date.now();
+
 export type Cfg = { project?: string; db?: string; url?: string; token?: string; credential?: string; environment?: string; repoName?: string;
   /** Resolved from --allow-remote / RETRACE_ALLOW_REMOTE, not from .retrace.json — a repo that HAS the file is already
    *  permitted, so setting it there would be a no-op. See guardRemoteWrite. */
@@ -286,6 +288,10 @@ async function logCommit(repo: string, sha: string, cfg: Cfg, live = false): Pro
   // The single choke point for every write path (hook, `commit <sha>`, backfill) — so a new caller cannot forget it.
   guardRemoteWrite(repo, cfg);
   let input = commitToEvent(repo, sha, cfg, live);
+  // Like live-only location context above, duration is truthful only for the hook process that produced this commit.
+  // Replay (`commit <sha>`, backfill, pending drain) measures another process, so leave it absent. Stamp before signing:
+  // duration_ms is producer-signed and therefore can cover hook-local work only, never the POST round trip.
+  if (live) input.duration_ms = Date.now() - HOOK_PROCESS_STARTED_AT;
   const keyFile = resolveHookProducerKeyFile({ credential: cfg.credential });
   if (keyFile) input = await sealForAppend(input, { privateKey: loadProducerPrivateKeyFromFile(keyFile), remoteUrl: cfg.url, format: PRODUCER_SIG_FORMAT_V2, deadlineMs: hookDeadlineMs() });
   const store = cfg.url ? new RemoteStore(cfg.url, cfg.token, { deadlineMs: hookDeadlineMs() }) : makeStore();
