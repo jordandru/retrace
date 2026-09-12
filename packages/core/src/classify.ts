@@ -314,9 +314,30 @@ async function classifierLedgerAttributionContext(
   const canonicalArtifact = (id: string, _seq: number) => classifierCanonicalArtifact(policy, id);
   const domains = new Map<string, AttributionDomain>();
   const byId = new Map(snapshot.events.map((e) => [e.id, e]));
+  const seals = new Map<string, { key: string; seq: number; paths: Set<string> }>();
+  for (const repository of policy.repositories) {
+    for (const seal of captureSeals(snapshot.events, {
+      repoName: repository.name,
+      aliases: repository.aliases,
+      hookSealedBy: policy.trusted_hook_stamps,
+      ownerSeals: true,
+    })) {
+      const existing = seals.get(seal.key);
+      const value = existing ?? { key: seal.key, seq: seal.seq, paths: new Set<string>() };
+      value.seq = Math.min(value.seq, seal.seq);
+      for (const artifact of seal.event.artifacts) {
+        const id = canonicalArtifact(artifact.id, seal.event.seq);
+        if (id) value.paths.add(id);
+      }
+      seals.set(seal.key, value);
+    }
+  }
   for (const e of snapshot.events.filter(isAttributionAmendment)) {
     const target = byId.get(String(e.method?.params?.target_event_id));
     if (!target || domains.has(target.id)) continue;
+    const ownCommit = target.artifacts.find((a) => a.id.startsWith("commit:"))?.id;
+    const ownKey = ownCommit ? /^commit:[^@]+@([0-9a-f]{7,40})$/i.exec(ownCommit)?.[1]?.slice(0, 12) : undefined;
+    const before = Math.min(target.seq, ownKey ? seals.get(ownKey)?.seq ?? target.seq : target.seq);
     const units: AttributionUnit[] = [];
     target.artifacts.forEach((a, index) => {
       if (/^(commit|event|actor):/.test(a.id) || ["commit", "event", "actor"].includes(a.kind ?? "")) return;
@@ -328,7 +349,10 @@ async function classifierLedgerAttributionContext(
       if (!id) return;
       const existing = units.find((u) => u.id === id);
       if (existing) existing.refs.push(index);
-      else units.push({ id, refs: [index], names: [id], after: -1, before: target.seq });
+      else {
+        const touches = [...seals.values()].filter((seal) => seal.key !== ownKey);
+        units.push({ id, refs: [index], names: [id], after: previousCaptureTouch(touches, id, before), before });
+      }
     });
     domains.set(target.id, { units: units.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)), complete: true });
   }
@@ -429,6 +453,28 @@ export function artifactIdsForRepo(canonicalR: string, files: { id: string; path
   return [...ids];
 }
 
+function submittedPathsForRepo(
+  canonicalR: string,
+  files: { id: string; path: string; repo: string }[],
+  policy: PolicyBody,
+  routed: boolean,
+): string[] {
+  if (routed) return [...new Set(files.map((f) => f.path))];
+  const ids = artifactIdsForRepo(canonicalR, files, policy);
+  return [...new Set(files.filter((f) => ids.includes(f.id) || ids.includes(`repo:${canonicalR}#${f.path}`)).map((f) => f.path))];
+}
+
+function artifactKeysForPaths(canonicalR: string, paths: string[], policy: PolicyBody): string[] {
+  const repos = new Set([canonicalR, canonicalGithubRepo(canonicalR)]);
+  for (const repository of policy.repositories) {
+    if (repository.name === canonicalR || canonicalGithubRepo(repository.name) === canonicalGithubRepo(canonicalR)) {
+      repos.add(repository.name);
+      for (const alias of repository.aliases) repos.add(alias);
+    }
+  }
+  return [...new Set(paths.flatMap((path) => [...repos].map((repo) => `repo:${repo}#${path}`)))];
+}
+
 export function wouldWrite(status: DecisionStatus, unresolvedPolicy: "record" | "withhold", reason?: DecisionReason): WouldWrite {
   if (status === "conflicting") return { actor_written: "withheld", reason: reason ?? "no_match" };
   if (status === "unresolved") {
@@ -498,11 +544,12 @@ function outputClaimOnPath(e: Event, pathArtifact: string, policy: PolicyBody, c
   }
   for (const a of e.artifacts) {
     const m = REPO_ARTIFACT.exec(a.id);
-    if (m && aliases.has(m[1]) && sameArtifact(a.id, pathArtifact)) {
+    const canonical = classifierCanonicalArtifact(policy, a.id);
+    if (m && aliases.has(m[1]) && canonical === pathArtifact) {
       if (generatesArtifact(e, a)) return true;
       if (a.role === undefined && WRITING_ACTIONS.has(e.action)) return true;
     }
-    if (sameArtifact(a.id, pathArtifact) && (generatesArtifact(e, a) || (a.role === undefined && WRITING_ACTIONS.has(e.action)))) {
+    if (canonical === pathArtifact && (generatesArtifact(e, a) || (a.role === undefined && WRITING_ACTIONS.has(e.action)))) {
       const mm = REPO_ARTIFACT.exec(a.id);
       if (mm && aliases.has(mm[1])) return true;
     }
@@ -594,7 +641,7 @@ export interface ClassifyOpts {
   signedActor?: { type: Actor["type"]; id: string; on_behalf_of?: string };
 }
 
-export async function classifyCommitClaim(opts: ClassifyOpts): Promise<ClassifyResult> {
+async function classifyCommitClaimInner(opts: ClassifyOpts): Promise<ClassifyResult> {
   const policyMode = parseTrailerPolicy(opts.trailerPolicy);
   if (policyMode === "off") return { kind: "skip", reason: "policy_off" };
   if (policyMode !== "shadow") return { kind: "skip", reason: "policy_off" };
@@ -617,6 +664,7 @@ export async function classifyCommitClaim(opts: ClassifyOpts): Promise<ClassifyR
   const files = fileArtifacts(opts.input);
   const parents = extractParents(opts.input);
   const caused = await resolveCausedBy(opts.store, opts.input, derived.resolved.trailers);
+  if (now() >= deadline) return { kind: "unavailable", reason: "deadline" };
 
   const head = await opts.store.head(opts.input.project);
   const Utry = head?.seq ?? -1;
@@ -642,12 +690,12 @@ export async function classifyCommitClaim(opts: ClassifyOpts): Promise<ClassifyR
 
   const pin = opts.canonicalR ?? (policyDoc.body.github_repos.length === 1 ? policyDoc.body.github_repos[0] : undefined);
   const canonicalR = canonicalRForFacts(policyDoc.body, files, pin);
-  const Fids = artifactIdsForRepo(canonicalR, files, policyDoc.body);
-  const paths = [...new Set(files.filter((f) => Fids.includes(f.id) || Fids.includes(`repo:${canonicalR}#${f.path}`)).map((f) => f.path))];
-  const Fdigest = await digestOf([...new Set(paths)].sort());
+  let paths = submittedPathsForRepo(canonicalR, files, policyDoc.body, pin !== undefined);
+  let Fdigest = await digestOf([...paths].sort());
   const claimDigest = await digestOf({ type: derived.claim.type, id: derived.claim.id, source: derived.claim.source });
 
   const found = await opts.store.getClassificationContext(opts.input.project, canonicalR, sha);
+  if (now() >= deadline) return { kind: "unavailable", reason: "deadline" };
   let amendEval: AmendmentEval | null = null;
   if (!found) {
     amendEval = await evaluateAmendmentsAtU({
@@ -676,6 +724,7 @@ export async function classifyCommitClaim(opts: ClassifyOpts): Promise<ClassifyR
   const inserted = found
     ? { inserted: false, context: found }
     : await opts.store.insertClassificationContextIfAbsent(candidate);
+  if (now() >= deadline) return { kind: "unavailable", reason: "deadline" };
   const ctx = inserted.context;
 
   // Existing context: retrieve the *exact* policy named by the context, never latest (P4).
@@ -683,6 +732,8 @@ export async function classifyCommitClaim(opts: ClassifyOpts): Promise<ClassifyR
     const named = opts.store.getPolicy ? await opts.store.getPolicy(opts.input.project, { digest: ctx.policy_digest }) : null;
     if (!named) return { kind: "unavailable", reason: "store_error" };
     policyDoc = named;
+    paths = submittedPathsForRepo(ctx.canonical_repo, files, policyDoc.body, opts.canonicalR !== undefined);
+    Fdigest = await digestOf([...paths].sort());
   }
 
   const U = ctx.read_head_seq;
@@ -695,7 +746,9 @@ export async function classifyCommitClaim(opts: ClassifyOpts): Promise<ClassifyR
   if (!evaluated.ok) return { kind: "unavailable", reason: evaluated.reason };
   const amendmentCollection = evaluated.collection;
   const thisShaShort = sha.slice(0, 12);
-  const keys = paths.map((p) => `repo:${canonicalR}#${p}`);
+  const canonicalKeys = artifactKeysForPaths(canonicalR, paths, policyDoc.body);
+  const looseKeys = paths.flatMap((p) => [`file:${p}`, p]);
+  const keys = [...new Set([...canonicalKeys, ...looseKeys])];
 
   if (now() >= deadline) return { kind: "unavailable", reason: "deadline" };
 
@@ -730,7 +783,14 @@ export async function classifyCommitClaim(opts: ClassifyOpts): Promise<ClassifyR
     ownerSeals: true,
   });
   const touches = seals
-    .filter((s) => !s.key.endsWith(`@${thisShaShort}`) && !s.key.endsWith(`@${sha}`))
+    .filter((s) => {
+      const sealSha = extractSha(s.event);
+      return sealSha?.toLowerCase() !== sha.toLowerCase()
+        && s.key.toLowerCase() !== thisShaShort.toLowerCase()
+        && s.key.toLowerCase() !== sha.toLowerCase()
+        && !s.key.toLowerCase().endsWith(`@${thisShaShort.toLowerCase()}`)
+        && !s.key.toLowerCase().endsWith(`@${sha.toLowerCase()}`);
+    })
     .map((s) => ({
       seq: s.seq,
       paths: new Set([...s.paths].map((id) => {
@@ -747,6 +807,7 @@ export async function classifyCommitClaim(opts: ClassifyOpts): Promise<ClassifyR
     }
   }
   const per_path_lower = await opts.store.ensureClassificationPathLowers(opts.input.project, canonicalR, sha, derivedLowers);
+  if (now() >= deadline) return { kind: "unavailable", reason: "deadline" };
 
   const windowEvents = index.events.filter((e) => e.seq <= U);
   const loose_hints = countLooseHints(windowEvents, paths.map((p) => ({ path: p })));
@@ -756,6 +817,7 @@ export async function classifyCommitClaim(opts: ClassifyOpts): Promise<ClassifyR
   const witnessClients: string[] = [];
 
   for (const e of windowEvents) {
+    if (now() >= deadline) return { kind: "unavailable", reason: "deadline" };
     const sealedBy = e.method?.params?.[SEALED_BY_PARAM];
     if (!isPinnedIngress(sealedBy)) continue;
     if (e.actor.type !== "agent") continue;
@@ -786,7 +848,8 @@ export async function classifyCommitClaim(opts: ClassifyOpts): Promise<ClassifyR
   }
 
   const wall = [...wallMap.values()];
-  const isMergeNoFiles = (opts.input.action === "merged" || derived.resolved.isMerge) && paths.length === 0;
+  const parentFactsIncomplete = opts.input.method?.params?.parents_complete === false;
+  const isMergeNoFiles = (opts.input.action === "merged" || derived.resolved.isMerge || parentFactsIncomplete) && paths.length === 0;
   const table = decideFromTable({
     claim: derived.claim,
     wall,
@@ -800,6 +863,7 @@ export async function classifyCommitClaim(opts: ClassifyOpts): Promise<ClassifyR
   const ww = wouldWrite(table.status, unresolved_policy, table.reason);
   const harness = harnessOf(opts.input, derived.claim.id);
   const mismatch = harnessMismatch(derived.claim.id, harness.marker, witnessClients);
+  if (now() >= deadline) return { kind: "unavailable", reason: "deadline" };
 
   const signed = opts.signedActor ?? (derived.claim.type && derived.claim.id
     ? { type: derived.claim.type, id: derived.claim.id, ...(derived.resolved.actor.on_behalf_of ? { on_behalf_of: derived.resolved.actor.on_behalf_of } : {}) }
@@ -840,9 +904,19 @@ export async function classifyCommitClaim(opts: ClassifyOpts): Promise<ClassifyR
     if (opts.store.setClassificationLegacyDecision) {
       await opts.store.setClassificationLegacyDecision(opts.input.project, canonicalR, sha, record);
     }
+    if (now() >= deadline) return { kind: "unavailable", reason: "deadline" };
     return { kind: "legacy", record };
   }
+  if (now() >= deadline) return { kind: "unavailable", reason: "deadline" };
   return { kind: "decision", record };
+}
+
+export async function classifyCommitClaim(opts: ClassifyOpts): Promise<ClassifyResult> {
+  try {
+    return await classifyCommitClaimInner(opts);
+  } catch {
+    return { kind: "unavailable", reason: "store_error" };
+  }
 }
 
 export function attachClaimDecision(input: EventInput, record: ClaimDecision): EventInput {
@@ -873,9 +947,14 @@ export function breakerProbeExpired(row: BreakerRow, nowMs: number): boolean {
 }
 
 export function applyBreakerFailure(row: BreakerRow | null, project: string, nowIso: string, nowMs: number): BreakerRow {
-  const fresh = !row || !row.last_failure_at || nowMs - Date.parse(row.last_failure_at) > BREAKER_WINDOW_MS;
-  const failures = fresh ? 1 : row.failures + 1;
-  const failure_window_start = fresh ? nowIso : (row.failure_window_start ?? nowIso);
+  const lastMs = row?.last_failure_at ? Date.parse(row.last_failure_at) : Number.NaN;
+  const windowStartMs = row?.failure_window_start ? Date.parse(row.failure_window_start) : Number.NaN;
+  const isolated = !row || !Number.isFinite(lastMs) || nowMs - lastMs > BREAKER_WINDOW_MS;
+  const expiredWindow = !isolated && (!Number.isFinite(windowStartMs) || nowMs - windowStartMs > BREAKER_WINDOW_MS);
+  // When the old window expires but its last failure is still recent, retain that last failure as
+  // the first point in the restarted window. This lets a sparse failure followed by a burst open.
+  const failures = isolated ? 1 : expiredWindow ? 2 : row.failures + 1;
+  const failure_window_start = isolated ? nowIso : expiredWindow ? row!.last_failure_at : (row!.failure_window_start ?? nowIso);
   const next: BreakerRow = {
     project,
     state: "closed",
@@ -899,7 +978,7 @@ export function applyBreakerSuccess(row: BreakerRow | null, project: string): Br
     state: "closed",
     failures: 0,
     failure_window_start: null,
-    last_failure_at: row?.last_failure_at ?? null,
+    last_failure_at: null,
     opened_at: null,
     probe_lease_until: null,
     probe_lease_owner: null,
@@ -937,7 +1016,7 @@ export async function webhookBreakerAdmission(
   const row = await store.getBreaker(project);
   if (!row || row.state !== "open") return "live";
   if (breakerIsOpen(row, nowMs)) return "pending";
-  if (!breakerProbeExpired(row, nowMs) && row.probe_lease_owner && row.probe_lease_owner !== probeOwner) return "pending";
+  if (!breakerProbeExpired(row, nowMs) && row.probe_lease_owner) return "pending";
   const until = new Date(nowMs + BREAKER_PROBE_LEASE_MS).toISOString();
   const next = applyBreakerProbeOpen(row, probeOwner, until);
   const won = await store.casBreaker(row, next);
@@ -953,16 +1032,19 @@ export async function recordWebhookClassifyOutcome(
 ): Promise<void> {
   if (!store.getBreaker || !store.casBreaker) return;
   if (outcome === "budget") return; // budget is not a breaker failure (§2)
-  const row = await store.getBreaker(project);
   const iso = new Date(nowMs).toISOString();
-  let next: BreakerRow;
-  if (outcome === "ok") next = applyBreakerSuccess(row, project);
-  else if (probe && (outcome === "deadline" || outcome === "store_error")) next = applyBreakerProbeFailure(row ?? {
-    project, state: "open", failures: BREAKER_CONSECUTIVE_FAILURES, failure_window_start: iso, last_failure_at: iso,
-    opened_at: iso, probe_lease_until: null, probe_lease_owner: null,
-  }, iso);
-  else next = applyBreakerFailure(row, project, iso, nowMs);
-  await store.casBreaker(row, next);
+  for (let attempt = 0; attempt < 32; attempt++) {
+    const row = await store.getBreaker(project);
+    let next: BreakerRow;
+    if (outcome === "ok") next = applyBreakerSuccess(row, project);
+    else if (probe && (outcome === "deadline" || outcome === "store_error")) next = applyBreakerProbeFailure(row ?? {
+      project, state: "open", failures: BREAKER_CONSECUTIVE_FAILURES, failure_window_start: iso, last_failure_at: iso,
+      opened_at: iso, probe_lease_until: null, probe_lease_owner: null,
+    }, iso);
+    else next = applyBreakerFailure(row, project, iso, nowMs);
+    if (await store.casBreaker(row, next)) return;
+  }
+  throw new ClassificationStoreError("breaker CAS remained contended");
 }
 
 export function emptyBreaker(project: string): BreakerRow {

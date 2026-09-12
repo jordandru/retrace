@@ -183,8 +183,30 @@ export class MemoryEventStore implements EventStore {
   }
   async listDrainablePendingDeliveries(nowIso: string, limit = 20) {
     return this.pending
-      .filter((p) => p.state !== "done" && p.state !== "budget_failed" && (!p.lease_until || p.lease_until <= nowIso))
+      .filter((p) => p.routing_state !== "unresolved" && p.routing_state !== "pending_policy")
+      .filter((p) => p.state !== "done" && p.state !== "terminal_failure" && (!p.lease_until || p.lease_until <= nowIso))
       .slice(0, limit);
+  }
+  async claimPendingDeliveryLease(delivery_id: string, owner: string, nowIso: string, untilIso: string) {
+    return this.enqueue(() => {
+      const i = this.pending.findIndex((p) => p.delivery_id === delivery_id);
+      if (i < 0) return null;
+      const row = this.pending[i]!;
+      if (row.routing_state === "unresolved" || row.routing_state === "pending_policy"
+        || row.state === "done" || row.state === "terminal_failure"
+        || (row.lease_until !== undefined && row.lease_until > nowIso)) return null;
+      const claimed = { ...row, lease_owner: owner, lease_until: untilIso };
+      this.pending[i] = claimed;
+      return { ...claimed };
+    });
+  }
+  async updatePendingDeliveryIfLeaseOwner(row: PendingDelivery, owner: string) {
+    return this.enqueue(() => {
+      const i = this.pending.findIndex((p) => p.delivery_id === row.delivery_id);
+      if (i < 0 || this.pending[i]!.lease_owner !== owner) return false;
+      this.pending[i] = { ...row };
+      return true;
+    });
   }
   async updatePendingDelivery(row: PendingDelivery) {
     const i = this.pending.findIndex((p) => p.delivery_id === row.delivery_id);

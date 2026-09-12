@@ -146,13 +146,17 @@ export class D1Store implements EventStore {
 
   async getPendingDelivery(delivery_id: string): Promise<PendingDelivery | null> {
     return (await this.db.prepare(
-      "SELECT delivery_id, project, raw_body, received_at, repo, routing_source, routing_digest, routing_state FROM pending_deliveries WHERE delivery_id = ?",
+      `SELECT delivery_id, project, raw_body, received_at, repo, routing_source, routing_digest, routing_state,
+              lease_owner, lease_until, outcomes, attempt_count, state
+       FROM pending_deliveries WHERE delivery_id = ?`,
     ).bind(delivery_id).first<PendingDelivery>()) ?? null;
   }
 
   async listPendingDeliveriesOlderThan(received_at: string): Promise<PendingDelivery[]> {
     const { results } = await this.db.prepare(
-      "SELECT delivery_id, project, raw_body, received_at, repo, routing_source, routing_digest, routing_state FROM pending_deliveries WHERE received_at < ? ORDER BY received_at ASC",
+      `SELECT delivery_id, project, raw_body, received_at, repo, routing_source, routing_digest, routing_state,
+              lease_owner, lease_until, outcomes, attempt_count, state
+       FROM pending_deliveries WHERE received_at < ? ORDER BY received_at ASC`,
     ).bind(received_at).all<PendingDelivery>();
     return results;
   }
@@ -337,11 +341,14 @@ export class D1Store implements EventStore {
     const r = await this.db.prepare(
       `UPDATE classification_breakers SET state=?, failures=?, failure_window_start=?, last_failure_at=?, opened_at=?, probe_lease_until=?, probe_lease_owner=?
        WHERE project=? AND state=? AND failures=?
+         AND IFNULL(failure_window_start,'') = IFNULL(?, '')
+         AND IFNULL(last_failure_at,'') = IFNULL(?, '')
          AND IFNULL(opened_at,'') = IFNULL(?, '')
          AND IFNULL(probe_lease_until,'') = IFNULL(?, '')
          AND IFNULL(probe_lease_owner,'') = IFNULL(?, '')`,
     ).bind(next.state, next.failures, next.failure_window_start, next.last_failure_at, next.opened_at, next.probe_lease_until, next.probe_lease_owner,
-      next.project, expected.state, expected.failures, expected.opened_at, expected.probe_lease_until, expected.probe_lease_owner).run();
+      next.project, expected.state, expected.failures, expected.failure_window_start, expected.last_failure_at,
+      expected.opened_at, expected.probe_lease_until, expected.probe_lease_owner).run();
     return (r.meta.changes ?? 0) > 0;
   }
 
@@ -350,11 +357,40 @@ export class D1Store implements EventStore {
       `SELECT delivery_id, project, raw_body, received_at, repo, routing_source, routing_digest, routing_state,
               lease_owner, lease_until, outcomes, attempt_count, state
        FROM pending_deliveries
-       WHERE IFNULL(state, '') NOT IN ('done', 'budget_failed')
+       WHERE IFNULL(routing_state, '') NOT IN ('unresolved', 'pending_policy')
+         AND IFNULL(state, '') NOT IN ('done', 'terminal_failure')
          AND (lease_until IS NULL OR lease_until <= ?)
        ORDER BY received_at ASC LIMIT ?`,
     ).bind(nowIso, limit).all<PendingDelivery>();
     return results;
+  }
+
+  async claimPendingDeliveryLease(delivery_id: string, owner: string, nowIso: string, untilIso: string) {
+    const changed = await this.db.prepare(
+      `UPDATE pending_deliveries SET lease_owner=?, lease_until=?
+       WHERE delivery_id=?
+         AND IFNULL(routing_state, '') NOT IN ('unresolved', 'pending_policy')
+         AND IFNULL(state, '') NOT IN ('done', 'terminal_failure')
+         AND (lease_until IS NULL OR lease_until <= ?)`,
+    ).bind(owner, untilIso, delivery_id, nowIso).run();
+    const row = await this.db.prepare(
+      `SELECT delivery_id, project, raw_body, received_at, repo, routing_source, routing_digest, routing_state,
+              lease_owner, lease_until, outcomes, attempt_count, state
+       FROM pending_deliveries WHERE delivery_id=? AND lease_owner=?`,
+    ).bind(delivery_id, owner).first<PendingDelivery>();
+    if ((changed.meta.changes ?? (row ? 1 : 0)) < 1) return null;
+    return row ?? null;
+  }
+
+  async updatePendingDeliveryIfLeaseOwner(row: PendingDelivery, owner: string) {
+    const changed = await this.db.prepare(
+      `UPDATE pending_deliveries SET project=?, raw_body=?, repo=?, routing_source=?, routing_digest=?, routing_state=?,
+              lease_owner=?, lease_until=?, outcomes=?, attempt_count=?, state=?
+       WHERE delivery_id=? AND lease_owner=?`,
+    ).bind(row.project, row.raw_body, row.repo ?? null, row.routing_source ?? null, row.routing_digest ?? null,
+      row.routing_state ?? null, row.lease_owner ?? null, row.lease_until ?? null, row.outcomes ?? null,
+      row.attempt_count ?? 0, row.state ?? null, row.delivery_id, owner).run();
+    return (changed.meta.changes ?? 0) > 0;
   }
 
   async updatePendingDelivery(row: PendingDelivery) {

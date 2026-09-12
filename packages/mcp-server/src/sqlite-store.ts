@@ -13,6 +13,7 @@ export class SqliteStore implements EventStore {
   constructor(path: string) {
     this.db = new DatabaseSync(path);
     this.db.exec("PRAGMA journal_mode = WAL;");
+    this.db.exec("PRAGMA busy_timeout = 5000;");
     this.db.exec(SCHEMA_SQL);
     for (const sql of SCHEMA_PENDING_ROUTE_COLUMNS_SQL) {
       try { this.db.exec(sql); } catch { /* column already present */ }
@@ -174,13 +175,17 @@ export class SqliteStore implements EventStore {
 
   async getPendingDelivery(delivery_id: string): Promise<PendingDelivery | null> {
     return (this.db.prepare(
-      "SELECT delivery_id, project, raw_body, received_at, repo, routing_source, routing_digest, routing_state FROM pending_deliveries WHERE delivery_id = ?",
+      `SELECT delivery_id, project, raw_body, received_at, repo, routing_source, routing_digest, routing_state,
+              lease_owner, lease_until, outcomes, attempt_count, state
+       FROM pending_deliveries WHERE delivery_id = ?`,
     ).get(delivery_id) as PendingDelivery | undefined) ?? null;
   }
 
   async listPendingDeliveriesOlderThan(received_at: string): Promise<PendingDelivery[]> {
     return this.db.prepare(
-      "SELECT delivery_id, project, raw_body, received_at, repo, routing_source, routing_digest, routing_state FROM pending_deliveries WHERE received_at < ? ORDER BY received_at ASC",
+      `SELECT delivery_id, project, raw_body, received_at, repo, routing_source, routing_digest, routing_state,
+              lease_owner, lease_until, outcomes, attempt_count, state
+       FROM pending_deliveries WHERE received_at < ? ORDER BY received_at ASC`,
     ).all(received_at) as unknown as PendingDelivery[];
   }
 
@@ -326,7 +331,11 @@ export class SqliteStore implements EventStore {
   async casBreaker(expected: BreakerRow | null, next: BreakerRow) {
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      const cur = await this.getBreaker(next.project);
+      // Keep the transaction synchronous: yielding while holding BEGIN IMMEDIATE lets another
+      // connection block this event loop on its own BEGIN and prevents this owner from committing.
+      const cur = (this.db.prepare(
+        "SELECT project, state, failures, failure_window_start, last_failure_at, opened_at, probe_lease_until, probe_lease_owner FROM classification_breakers WHERE project = ?",
+      ).get(next.project) as BreakerRow | undefined) ?? null;
       if (!sameBreaker(cur, expected)) { this.db.exec("ROLLBACK"); return false; }
       this.db.prepare(
         `INSERT INTO classification_breakers (project, state, failures, failure_window_start, last_failure_at, opened_at, probe_lease_until, probe_lease_owner)
@@ -347,10 +356,37 @@ export class SqliteStore implements EventStore {
       `SELECT delivery_id, project, raw_body, received_at, repo, routing_source, routing_digest, routing_state,
               lease_owner, lease_until, outcomes, attempt_count, state
        FROM pending_deliveries
-       WHERE IFNULL(state, '') NOT IN ('done', 'budget_failed')
+       WHERE IFNULL(routing_state, '') NOT IN ('unresolved', 'pending_policy')
+         AND IFNULL(state, '') NOT IN ('done', 'terminal_failure')
          AND (lease_until IS NULL OR lease_until <= ?)
        ORDER BY received_at ASC LIMIT ?`,
     ).all(nowIso, limit) as unknown as PendingDelivery[];
+  }
+
+  async claimPendingDeliveryLease(delivery_id: string, owner: string, nowIso: string, untilIso: string) {
+    const changed = this.db.prepare(
+      `UPDATE pending_deliveries SET lease_owner=?, lease_until=?
+       WHERE delivery_id=?
+         AND IFNULL(routing_state, '') NOT IN ('unresolved', 'pending_policy')
+         AND IFNULL(state, '') NOT IN ('done', 'terminal_failure')
+         AND (lease_until IS NULL OR lease_until <= ?)`,
+    ).run(owner, untilIso, delivery_id, nowIso).changes;
+    if (changed < 1) return null;
+    return (this.db.prepare(
+      `SELECT delivery_id, project, raw_body, received_at, repo, routing_source, routing_digest, routing_state,
+              lease_owner, lease_until, outcomes, attempt_count, state
+       FROM pending_deliveries WHERE delivery_id=? AND lease_owner=?`,
+    ).get(delivery_id, owner) as PendingDelivery | undefined) ?? null;
+  }
+
+  async updatePendingDeliveryIfLeaseOwner(row: PendingDelivery, owner: string) {
+    return this.db.prepare(
+      `UPDATE pending_deliveries SET project=?, raw_body=?, repo=?, routing_source=?, routing_digest=?, routing_state=?,
+              lease_owner=?, lease_until=?, outcomes=?, attempt_count=?, state=?
+       WHERE delivery_id=? AND lease_owner=?`,
+    ).run(row.project, row.raw_body, row.repo ?? null, row.routing_source ?? null, row.routing_digest ?? null,
+      row.routing_state ?? null, row.lease_owner ?? null, row.lease_until ?? null, row.outcomes ?? null,
+      row.attempt_count ?? 0, row.state ?? null, row.delivery_id, owner).changes > 0;
   }
 
   async updatePendingDelivery(row: PendingDelivery) {

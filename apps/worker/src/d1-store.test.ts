@@ -4,7 +4,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Event } from "@retrace-dev/core";
-import { POLICY_PROFILE, SCHEMA_SQL, RouteConflictError, planPolicyPut } from "@retrace-dev/core";
+import { POLICY_PROFILE, SCHEMA_PENDING_LEASE_COLUMNS_SQL, SCHEMA_SQL, RouteConflictError, planPolicyPut } from "@retrace-dev/core";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { D1Store } from "./d1-store.js";
 
@@ -294,4 +294,57 @@ test("A2 D1: two connections racing insert-if-absent keep one classification con
   ]);
   assert.equal([r1, r2].filter((r) => r.inserted).length, 1);
   assert.equal(r1.context.read_head_seq, r2.context.read_head_seq);
+});
+
+test("F11 D1: lease acquisition is atomic across connections and stale owners cannot complete", async () => {
+  const path = join(mkdtempSync(join(tmpdir(), "retrace-d1-lease-")), "ledger.db");
+  const db1 = new DatabaseSync(path);
+  db1.exec(SCHEMA_SQL);
+  for (const sql of SCHEMA_PENDING_LEASE_COLUMNS_SQL) db1.exec(sql);
+  const db2 = new DatabaseSync(path);
+  const a = new D1Store(new SqliteD1(db1) as unknown as D1Database);
+  const b = new D1Store(new SqliteD1(db2) as unknown as D1Database);
+  await a.insertPendingDelivery({
+    delivery_id: "delivery", project: "p", raw_body: "{}", received_at: "2026-09-10T12:00:00.000Z",
+    repo: "acme/app", routing_state: "received",
+  });
+  const [one, two] = await Promise.all([
+    a.claimPendingDeliveryLease("delivery", "owner-a", "2026-09-10T12:00:00.000Z", "2026-09-10T12:01:00.000Z"),
+    b.claimPendingDeliveryLease("delivery", "owner-b", "2026-09-10T12:00:00.000Z", "2026-09-10T12:01:00.000Z"),
+  ]);
+  assert.equal([one, two].filter(Boolean).length, 1);
+  const winner = one ? "owner-a" : "owner-b";
+  const loser = one ? "owner-b" : "owner-a";
+  const reclaimed = await b.claimPendingDeliveryLease("delivery", loser, "2026-09-10T12:01:01.000Z", "2026-09-10T12:02:01.000Z");
+  assert.equal(reclaimed?.lease_owner, loser);
+  assert.equal(await a.updatePendingDeliveryIfLeaseOwner({ ...(one ?? two)!, state: "done" }, winner), false);
+  assert.equal(await b.updatePendingDeliveryIfLeaseOwner({
+    ...reclaimed!, state: "terminal_failure", outcomes: '{"sha":{"status":"budget_failed","attempt_count":3}}',
+  }, loser), true);
+  assert.equal((await a.getPendingDelivery("delivery"))?.state, "terminal_failure");
+  assert.match((await a.getPendingDelivery("delivery"))?.outcomes ?? "", /budget_failed/);
+});
+
+test("F14 D1: breaker CAS rejects stale failure timestamps", async () => {
+  const path = join(mkdtempSync(join(tmpdir(), "retrace-d1-breaker-")), "ledger.db");
+  const db1 = new DatabaseSync(path);
+  db1.exec(SCHEMA_SQL);
+  const db2 = new DatabaseSync(path);
+  const a = new D1Store(new SqliteD1(db1) as unknown as D1Database);
+  const b = new D1Store(new SqliteD1(db2) as unknown as D1Database);
+  const initial = {
+    project: "p", state: "closed" as const, failures: 1,
+    failure_window_start: "2026-09-10T12:00:00.000Z", last_failure_at: "2026-09-10T12:00:00.000Z",
+    opened_at: null, probe_lease_until: null, probe_lease_owner: null,
+  };
+  assert.equal(await a.casBreaker(null, initial), true);
+  const stale = await a.getBreaker("p");
+  assert.ok(stale);
+  const moved = {
+    ...initial, failures: 2,
+    last_failure_at: "2026-09-10T12:01:00.000Z",
+  };
+  assert.equal(await b.casBreaker(stale, moved), true);
+  assert.equal(await a.casBreaker(stale, { ...moved, failures: 3 }), false);
+  assert.equal((await a.getBreaker("p"))?.failures, 2);
 });

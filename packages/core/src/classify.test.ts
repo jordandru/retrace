@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 import {
   CLAIM_DECISION_PARAM, MemoryEventStore, POLICY_PROFILE, SEALED_BY_PARAM, appendEvent,
   applyBreakerFailure, applyBreakerSuccess, breakerIsOpen, breakerShouldOpen, classifyCommitClaim,
-  createHandler, decideFromTable, emptyBreaker, reconstructWithheldPayload, wouldWrite,
+  collectAttributionAmendments, createHandler, decideFromTable, emptyBreaker, prepareAttributionContext,
+  recordWebhookClassifyOutcome, reconstructWithheldPayload, verifiedAttributionSnapshot,
+  webhookBreakerAdmission, wouldWrite,
   type ClaimRecord, type EventInput, type HistoryQuery,
 } from "./index.js";
 
@@ -171,6 +173,30 @@ test("breaker (c): three failures in window open; success resets; aged failure s
   assert.equal(aged.failures, 1);
   assert.equal(aged.state, "closed");
   assert.equal(breakerIsOpen(emptyBreaker("p"), t0), false);
+});
+
+test("F14/F15/F16: breaker CAS retries, sparse window restarts, and a live probe has one owner", async () => {
+  const t0 = 1_000;
+  let sparse = applyBreakerFailure(null, "p", new Date(t0).toISOString(), t0);
+  sparse = applyBreakerFailure(sparse, "p", new Date(t0 + 4 * 60_000).toISOString(), t0 + 4 * 60_000);
+  sparse = applyBreakerFailure(sparse, "p", new Date(t0 + 6 * 60_000).toISOString(), t0 + 6 * 60_000);
+  assert.equal(sparse.failures, 2);
+  assert.equal(sparse.failure_window_start, new Date(t0 + 4 * 60_000).toISOString());
+  sparse = applyBreakerFailure(sparse, "p", new Date(t0 + 7 * 60_000).toISOString(), t0 + 7 * 60_000);
+  assert.equal(sparse.state, "open");
+
+  const store = new MemoryEventStore();
+  await Promise.all([1, 2, 3].map(() => recordWebhookClassifyOutcome(store, "p", "deadline", t0, false)));
+  assert.equal(store.breakers.get("p")?.failures, 3);
+  assert.equal(store.breakers.get("p")?.state, "open");
+
+  const probeTime = t0 + 20 * 60_000;
+  const first = await webhookBreakerAdmission(store, "p", probeTime, "same-delivery");
+  const duplicate = await webhookBreakerAdmission(store, "p", probeTime, "same-delivery");
+  assert.equal(first, "probe");
+  assert.equal(duplicate, "pending");
+  const recovered = await webhookBreakerAdmission(store, "p", probeTime + 60_001, "recovery");
+  assert.equal(recovered, "probe");
 });
 
 test("T1+A1: shadow conflicting writes claim, would_write withheld, actor unchanged, rule 3 silent", async () => {
@@ -666,4 +692,211 @@ test("amendment exclusion is not a bounded action=other page", async () => {
   assert.equal(got.kind, "decision");
   if (got.kind !== "decision") return;
   assert.equal(got.record.decision.witnesses.some((w) => w.id === target.id), false);
+});
+
+test("F1: classifier amendment cascade matches v7 capture-boundary effectiveness", async () => {
+  const store = new MemoryEventStore();
+  await putPolicy(store, "p", { repositories: [{ name: "acme/app", aliases: ["app", "old-name"] }] });
+  const root = (await appendEvent(store, {
+    project: "p", actor: { type: "human", id: "jordan@example.com" }, action: "instructed",
+    artifacts: [{ id: "task:cascade", role: "generated" }], timestamp: "2026-09-10T10:00:00.000Z",
+  })).event;
+  const edit = async (actor: string, stamp: string) => (await appendEvent(store, {
+    project: "p", actor: { type: "agent", id: actor }, action: "edited", caused_by: root.id,
+    artifacts: [{ id: "repo:acme/app#a.ts", role: "generated" }],
+    timestamp: "2026-09-10T10:01:00.000Z", method: { tool: "editor", params: { sealed_by: stamp } },
+  })).event;
+  const stale = await edit("B", "assert:B");
+  const capture = (await appendEvent(store, commitInput({
+    idempotency_key: "git:capture",
+    artifacts: [
+      { id: `commit:acme/app@${SHA2.slice(0, 12)}`, role: "generated" },
+      { id: "repo:acme/app#a.ts", role: "generated" },
+    ],
+    method: { tool: "git", params: {
+      sha: SHA2, parents: [], raw_message: "capture\n\nRetrace-Actor: codex\n",
+      author: { name: "Jordan", email: "jordan@example.com" }, sealed_by: "assert:git hook (assert)",
+    } },
+  }))).event;
+  const a = await edit("A", "pinned:A");
+  const c = await edit("C", "pinned:C");
+  const amend = async (target: typeof a, to: string, evidence: typeof a) => (await appendEvent(store, {
+    project: "p", actor: { type: "human", id: "jordan@example.com" }, action: "other",
+    action_detail: "amended", caused_by: root.id, intent: "correction",
+    artifacts: [{ id: `event:${target.id}`, role: "used" }, { id: `event:${evidence.id}`, role: "used" }],
+    timestamp: "2026-09-10T10:02:00.000Z",
+    method: { tool: "retrace_amend", params: { sealed_by: "owner", target_event_id: target.id,
+      attribution: { from: { type: "agent", id: target.actor.id }, to: { type: "agent", id: to }, evidence: [evidence.id] } } },
+  })).event;
+  const valid = await amend(c, "A", a);
+  await amend(a, "B", stale);
+
+  const events = await store.all("p");
+  const head = await store.head("p");
+  assert.ok(head);
+  const snapshot = await verifiedAttributionSnapshot(events, "p", head!);
+  const context = await prepareAttributionContext(snapshot, {
+    profile: "retrace-attribution/1",
+    repositories: [{ name: "acme/app", aliases: ["app", "old-name"], from_seq: 0, hook_sealed_by: ["assert:git hook (assert)"] }],
+    non_git: [],
+  }, {
+    resolutions: { [`commit:acme/app@${SHA2.slice(0, 12)}`]: { repo: "acme/app", oid: SHA2 } },
+    commits: [{ repo: "acme/app", oid: SHA2, parents: [], diff_profile: "first-parent-M-C/1", files: [{ path: "a.ts", status: "M" }] }],
+    excluded: [], refs: [], object_format: "sha1",
+  });
+  const v7 = collectAttributionAmendments(events, { snapshot, context });
+  assert.deepEqual([...v7.effective.keys()], [c.id]);
+  assert.ok(v7.rejected.some((x) => x.event.id !== valid.id && x.reason === "uncorroborated"));
+
+  const got = await classify(store, commitInput({ actorId: "C", raw: "work\n\nRetrace-Actor: C\n" }));
+  assert.equal(got.kind, "decision");
+  if (got.kind !== "decision") return;
+  assert.equal(got.record.decision.witnesses.some((w) => w.id === c.id), false);
+  const classifier = JSON.parse([...store.contexts.values()][0]!.amendment_snapshot) as { effective: { target: string }[] };
+  assert.deepEqual(classifier.effective.map((x) => x.target), [...v7.effective.keys()]);
+  assert.equal(capture.seq, 3);
+});
+
+test("F2: deadline crossing during lower persistence returns unavailable and no decision", async () => {
+  const store = new MemoryEventStore();
+  await putPolicy(store);
+  await pinnedEdit(store, { actor: "codex", path: "a.ts" });
+  let clock = 0;
+  const ensure = store.ensureClassificationPathLowers.bind(store);
+  store.ensureClassificationPathLowers = async (...args) => {
+    const result = await ensure(...args);
+    clock = 501;
+    return result;
+  };
+  const got = await classify(store, commitInput(), { now: () => clock });
+  assert.deepEqual(got, { kind: "unavailable", reason: "deadline" });
+});
+
+test("F2: deadline crossing during post-query witness processing returns unavailable", async () => {
+  const store = new MemoryEventStore();
+  await putPolicy(store);
+  await pinnedEdit(store, { actor: "codex", path: "a.ts" });
+  const query = store.eventsReferencingArtifacts!.bind(store);
+  let queried = false;
+  let postQueryChecks = 0;
+  store.eventsReferencingArtifacts = async (...args) => {
+    const result = await query(...args);
+    queried = true;
+    return result;
+  };
+  const got = await classify(store, commitInput(), {
+    now: () => !queried ? 0 : (++postQueryChecks === 1 ? 499 : 501),
+  });
+  assert.deepEqual(got, { kind: "unavailable", reason: "deadline" });
+});
+
+test("F3/F4: saved policy aliases determine submitted F, witnesses, and previous captures", async () => {
+  const store = new MemoryEventStore();
+  const v1 = await putPolicy(store, "p", { repositories: [{ name: "acme/app", aliases: ["old-name"] }] });
+  await appendEvent(store, {
+    project: "p", actor: { type: "agent", id: "codex" }, action: "edited",
+    artifacts: [{ id: "repo:old-name#a.ts", role: "generated" }],
+    timestamp: "2026-09-10T10:00:00.000Z", method: { tool: "editor", params: { sealed_by: "pinned:codex" } },
+  });
+  const aliasInput = commitInput({ artifacts: [
+    { id: `commit:old-name@${SHA.slice(0, 12)}`, role: "generated" },
+    { id: "repo:old-name#a.ts", role: "generated" },
+  ] });
+  const first = await classify(store, aliasInput);
+  const { h } = handler(store);
+  const changed = await h(new Request("http://test/projects/p/policy", {
+    method: "PUT", headers: { ...OWNER, "content-type": "application/json", "if-match": v1.digest },
+    body: JSON.stringify(policyBody({ repositories: [{ name: "acme/app", aliases: [] }] })),
+  }));
+  assert.equal(changed.status, 201);
+  const second = await classify(store, aliasInput);
+  assert.equal(first.kind, "decision");
+  assert.equal(second.kind, "decision");
+  if (first.kind !== "decision" || second.kind !== "decision") return;
+  assert.equal(first.record.decision.status, "supported");
+  assert.equal(second.record.decision.status, "supported");
+  assert.equal(second.record.decision.submitted.F_digest, first.record.decision.submitted.F_digest);
+  assert.deepEqual(second.record.decision.witnesses.map((w) => w.id), first.record.decision.witnesses.map((w) => w.id));
+
+  const reverse = new MemoryEventStore();
+  const noAlias = await putPolicy(reverse, "p", { repositories: [{ name: "acme/app", aliases: [] }] });
+  await pinnedEdit(reverse, { actor: "codex", path: "a.ts" });
+  const beforeAdd = await classify(reverse, aliasInput);
+  const { h: reverseHandler } = handler(reverse);
+  assert.equal((await reverseHandler(new Request("http://test/projects/p/policy", {
+    method: "PUT", headers: { ...OWNER, "content-type": "application/json", "if-match": noAlias.digest },
+    body: JSON.stringify(policyBody({ repositories: [{ name: "acme/app", aliases: ["old-name"] }] })),
+  }))).status, 201);
+  const afterAdd = await classify(reverse, aliasInput);
+  assert.equal(beforeAdd.kind, "decision");
+  assert.equal(afterAdd.kind, "decision");
+  if (beforeAdd.kind === "decision" && afterAdd.kind === "decision") {
+    assert.equal(afterAdd.record.decision.submitted.F_digest, beforeAdd.record.decision.submitted.F_digest);
+    assert.deepEqual(afterAdd.record.decision.witnesses, beforeAdd.record.decision.witnesses);
+  }
+
+  const captureStore = new MemoryEventStore();
+  await putPolicy(captureStore, "p", { repositories: [{ name: "acme/app", aliases: ["old-name"] }] });
+  const beforeCapture = (await appendEvent(captureStore, {
+    project: "p", actor: { type: "agent", id: "codex" }, action: "edited",
+    artifacts: [{ id: "repo:old-name#a.ts", role: "generated" }],
+    timestamp: "2026-09-10T10:00:00.000Z", method: { tool: "editor", params: { sealed_by: "pinned:codex" } },
+  })).event;
+  const capture = (await appendEvent(captureStore, commitInput({
+    idempotency_key: "git:alias-capture",
+    artifacts: [
+      { id: `commit:old-name@${SHA2.slice(0, 12)}`, role: "generated" },
+      { id: "repo:old-name#a.ts", role: "generated" },
+    ],
+    method: { tool: "git", params: {
+      sha: SHA2, parents: [], raw_message: "capture\n\nRetrace-Actor: codex\n",
+      author: { name: "Jordan", email: "jordan@example.com" }, sealed_by: "assert:git hook (assert)",
+    } },
+  }))).event;
+  const afterCapture = (await appendEvent(captureStore, {
+    project: "p", actor: { type: "agent", id: "codex" }, action: "edited",
+    artifacts: [{ id: "repo:old-name#a.ts", role: "generated" }],
+    timestamp: "2026-09-10T10:02:00.000Z", method: { tool: "editor", params: { sealed_by: "pinned:codex" } },
+  })).event;
+  const bounded = await classify(captureStore, aliasInput);
+  assert.equal(bounded.kind, "decision");
+  if (bounded.kind === "decision") {
+    assert.equal(bounded.record.decision.window.per_path_lower["a.ts"], capture.seq);
+    assert.equal(bounded.record.decision.witnesses.some((w) => w.id === beforeCapture.id), false);
+    assert.equal(bounded.record.decision.witnesses.some((w) => w.id === afterCapture.id), true);
+  }
+});
+
+test("F6: a pre-existing seal for this SHA is excluded from lower-bound touches", async () => {
+  const store = new MemoryEventStore();
+  await putPolicy(store);
+  await pinnedEdit(store, { actor: "codex", path: "a.ts" });
+  await appendEvent(store, commitInput({
+    idempotency_key: "git:existing",
+    method: { ...commitInput().method, params: { ...commitInput().method?.params, sealed_by: "assert:git hook (assert)" } },
+  }));
+  await pinnedEdit(store, { actor: "other", path: "noise.ts" });
+  const got = await classify(store, commitInput());
+  assert.equal(got.kind, "decision");
+  if (got.kind !== "decision") return;
+  assert.equal(got.record.decision.window.per_path_lower["a.ts"], 0);
+  assert.equal(got.record.decision.status, "supported");
+});
+
+test("F18: bare-only and file-only evidence remains diagnostic, never a witness", async () => {
+  for (const id of ["a.ts", "file:a.ts"]) {
+    const store = new MemoryEventStore();
+    await putPolicy(store);
+    await appendEvent(store, {
+      project: "p", actor: { type: "agent", id: "codex" }, action: "edited",
+      artifacts: [{ id, role: "generated" }], timestamp: "2026-09-10T11:00:00.000Z",
+      method: { tool: "editor", params: { sealed_by: "pinned:codex" } },
+    });
+    const got = await classify(store, commitInput());
+    assert.equal(got.kind, "decision");
+    if (got.kind !== "decision") continue;
+    assert.equal(got.record.decision.reason, "loose_evidence_only");
+    assert.equal(got.record.decision.loose_hints, 1);
+    assert.deepEqual(got.record.decision.witnesses, []);
+  }
 });

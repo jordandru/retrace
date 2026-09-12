@@ -159,6 +159,10 @@ export interface EventStore {
   getBreaker?(project: string): Promise<import("./classify.js").BreakerRow | null>;
   casBreaker?(expected: import("./classify.js").BreakerRow | null, next: import("./classify.js").BreakerRow): Promise<boolean>;
   listDrainablePendingDeliveries?(nowIso: string, limit?: number): Promise<PendingDelivery[]>;
+  /** Atomically acquire an expired/unowned ready delivery lease and return the owned row. */
+  claimPendingDeliveryLease?(delivery_id: string, owner: string, nowIso: string, untilIso: string): Promise<PendingDelivery | null>;
+  /** Update outcomes/release only while `owner` still owns the live row. */
+  updatePendingDeliveryIfLeaseOwner?(row: PendingDelivery, owner: string): Promise<boolean>;
   updatePendingDelivery?(row: PendingDelivery): Promise<void>;
 }
 

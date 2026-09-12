@@ -53,3 +53,27 @@ Shipped on this branch:
 - Tests: T1–T13 (table + classify), T17–T19, T22–T26, T28/T35/T37, T31, T36, T40, P4/P7/P8, A1–A5, two-connection insert-if-absent (Sqlite + D1)
 
 Suite green on this branch (`npm test` from the worktree). Codex first pass is after 14 Sep 22:07. No review rounds before then.
+
+## Round 3 correction — 2026-09-12
+
+The builder runtime for this round is **GPT-5.6 Sol**, not the model named in the original header.
+The blanket test-coverage sentence above is superseded: it overstated what the named fixtures establish.
+In particular, this PR no longer claims T3/T4, T7, T12/T13, T18, T19/T36, T23, T24,
+T26/A2, T35/T37, or T40 beyond the assertions actually present in each test. Step-4 consumer,
+report, certificate, and `may_downgrade` behavior is not a step-3 deliverable and is not claimed.
+
+Round-3 finding disposition and pinning tests:
+
+- F1 fixed — `F1: classifier amendment cascade matches v7 capture-boundary effectiveness`
+- F2 fixed — `F2: deadline crossing during lower persistence returns unavailable and no decision`; `F2 HTTP: lower-bound deadline returns hook 503/webhook 202 and seals nothing`
+- F3/F4 fixed — `F3/F4: saved policy aliases determine submitted F, witnesses, and previous captures`
+- F5 fixed — expanded `T11 hook: non-alias repo string shares the webhook context` compares digest, bounds, witnesses, and decision on both seals
+- F6 fixed (Codex's repro was valid: `captureSeals` returns a bare 12-character SHA key, so checks for keys ending in `@<sha>` did not match it) — `F6: a pre-existing seal for this SHA is excluded from lower-bound touches`
+- F7 fixed — `F7: pinned client commit claim cannot create or freeze the producer context`
+- F8 fixed — `F8: one 2s delivery budget returns 202 with current and remaining shas`
+- F9/F10 fixed — `F9/F10: drain budgets are per-sha and terminal/policy-off work stays durable`
+- F11/F12 fixed — `F11/F12: one atomic drainer wins and unresolved rows cannot starve ready work`; SQLite and D1 F11 connection tests
+- F13 fixed — `F13: success resets per commit; classifier store errors are 202; pending insert failure is 500`
+- F14/F15/F16 fixed — `F14/F15/F16: breaker CAS retries, sparse window restarts, and a live probe has one owner`; `F16 HTTP: duplicate delivery ids cannot execute the same half-open probe`
+- F17 fixed — `F17: push mapping records explicit parents and never invents ancestry from array order`; `F17: fileless push with incomplete parent facts is sealed as merge_unclassified`
+- F18 fixed — `F18: bare-only and file-only evidence remains diagnostic, never a witness`
