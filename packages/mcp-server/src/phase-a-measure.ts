@@ -331,7 +331,7 @@ export function measureEvents(events: Event[], window: MeasureWindow = {}): Omit
   // bound may sit outside the window (kept).
   for (let i = 1; i < commits.length; i++) {
     const curr = commits[i];
-    if (!curr.seals.some((s) => inWindow(s.received_at, window))) continue;
+    if (!inWindow(curr.bound.received_at, window)) continue;
     const prev = commits[i - 1];
     const lo = prev.bound.seq;
     const hi = curr.bound.seq;
@@ -387,7 +387,7 @@ export function measureEvents(events: Event[], window: MeasureWindow = {}): Omit
     },
     logs_per_commit: {
       kind: "census",
-      note: "agent events strictly between consecutive COMMITS (unique full sha), by actor.id. Dual-producer hook+webhook seals of one sha are one commit. Each interval is bounded by the earliest trusted seal of the previous commit (assert: or webhook:github; else earliest git seal). The first commit in the chain is dropped — it has no previous commit. Includes NOOA audits and every other agent; do not filter them out — the by_actor split is the measurement.",
+      note: "agent events strictly between consecutive COMMITS (unique full sha), by actor.id. Dual-producer hook+webhook seals of one sha are one commit. Each interval is bounded by the earliest trusted seal of the previous commit (assert: or webhook:github; else earliest git seal). The window selects the current commit's earliest trusted seal by received_at, so a later duplicate producer cannot recount an old interval. The first commit in the chain is dropped — it has no previous commit. Includes NOOA audits and every other agent; do not filter them out — the by_actor split is the measurement.",
       intervals: intervals.length,
       unique_shas: commits.length,
       first_commit_dropped: true,
@@ -586,7 +586,7 @@ export function renderMarkdown(report: MeasureReport): string {
   lines.push("");
   lines.push(row(["metric", "value", "kind"]));
   lines.push(row(["---", "---:", "---"]));
-  lines.push(row(["unique SHAs (git commit seals grouped)", String(report.logs_per_commit.unique_shas), "census"]));
+  lines.push(row(["unique SHAs in full bundle (including interval context)", String(report.logs_per_commit.unique_shas), "census"]));
   lines.push(row(["intervals (unique SHA with a previous commit, in scope)", String(report.logs_per_commit.intervals), "census"]));
   lines.push(row(["p50 agent events / commit", fmt(report.logs_per_commit.p50), "census"]));
   lines.push(row(["p95 agent events / commit", fmt(report.logs_per_commit.p95), "census"]));

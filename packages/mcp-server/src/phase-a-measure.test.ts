@@ -185,6 +185,25 @@ test("invalid or reversed measurement windows fail instead of reporting an all-t
   assert.throws(() => measureEvents([], { since: "2026-09-13", until: "2026-09-12" }), /--since must not be later/);
 });
 
+test("a late second producer does not recount an old commit interval in a new window", () => {
+  const events = [
+    seal({ id: "evt_previous", seq: 1, actor: { type: "agent", id: "codex" }, received_at: "2026-09-10T00:00:00Z" }),
+    ev({ id: "evt_edit", seq: 2, action: "edited", actor: { type: "agent", id: "codex" } }),
+    seal({
+      id: "evt_hook", seq: 3, actor: { type: "agent", id: "codex" }, received_at: "2026-09-11T00:00:00Z",
+      method: { tool: "git", params: { sha: "b".repeat(40), sealed_by: "assert:git hook (assert)" } },
+    }),
+    seal({
+      id: "evt_webhook", seq: 4, actor: { type: "system", id: "webhook:github" }, received_at: "2026-09-12T01:00:00Z",
+      method: { tool: "git", params: { sha: "b".repeat(40), sealed_by: "webhook:github" } },
+    }),
+  ];
+  const r = measureEvents(events, { since: "2026-09-12T00:00:00Z" });
+  assert.equal(r.histogram.seals, 1, "the newly received webhook seal still belongs in the histogram");
+  assert.equal(r.logs_per_commit.intervals, 0, "the commit interval belongs to its first trusted receipt");
+  assert.equal(r.tokens.stored_canonical_bytes.n, 0);
+});
+
 test("CLI boolean flags work before or after the bundle; malformed options fail", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "phase-a-cli-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
