@@ -31,8 +31,9 @@ The provenance rules themselves are `docs/agent-rules.md`.
    `orca worktree create`.
 2. Commit only your own paths (`git commit --only <paths>`); never `git commit -a` or `git add -A`.
    Uncommitted work in a shared tree is swept into whoever commits next (bfe87c3, corrected c375ed4).
-   → unnecessary when [specific]: the `misattributed` reconcile finding becomes a hard gate — it does not prevent
-   the sweep, it makes it cost a red build instead of a correction after the fact.
+   → unnecessary when [direction]: a **pre-commit** check refuses to stage any path this seat has no logged
+   edit for — prevention, bound to authenticated edit evidence. A hard `misattributed` gate (detection)
+   does not retire this rule: it makes a sweep cost a red build, and the manual rule still has to stop it.
 3. Git runs hooks from the common `.git/hooks`, so every worktree's commits are sealed by the **primary
    checkout's** built `dist`. Never build or test in the primary checkout mid-session; rebuild its dist
    only after a hook change merges, and only when every pane is idle (aeab15b, 2026-09-09).
@@ -105,9 +106,9 @@ The provenance rules themselves are `docs/agent-rules.md`.
 14. One coordinator at a time dispatches builders and merges. Other seats' task boards are their own
     tracking — read by the coordinator, not duplicated. A seat that finds itself coordinating in
     parallel asks the coordinator to stand by and waits for the acknowledgement (2026-09-10, 09-12).
-    → unnecessary when [direction]: merging and `retrace-admin` are gated to one merger credential and Orca's task
-    dispatch is the only way a builder session starts — then two coordinators cannot both act, and the
-    rule becomes an enforced fact instead of an agreement.
+    → unnecessary when [direction]: a **coordinator lease** held in the Worker — dispatch, merge and
+    `retrace-admin` actions require holding it, and a second session cannot take it while it is held.
+    A single merger credential is identity, not mutual exclusion: two sessions can use one credential.
 15. Cursor pins effort inside the model id (`cursor-agent --model gpt-5.6-sol-high`); an explicit Orca
     `terminal create --command` bypasses the launcher's `--yolo`, so pass it explicitly or every shell
     command stalls on an approval. (That reviewer effort is routed and recorded is provenance —

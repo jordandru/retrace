@@ -25,7 +25,11 @@ each one names the product change that would make it unnecessary.
 3. **Name every file you changed** on the log for that change, as `repo:jordandru/retrace#<path>`.
    Reconciliation compares each commit's files against logged edits: a changed file with no logged edit
    is `uncovered`; a file whose only logged edits belong to another seat is `misattributed`. Files you
-   only read go on as `role: used`.
+   only read go on as `role: used`. **Known gap, stated:** reconcile does not evaluate file coverage on
+   merge commits (`packages/core/src/reconcile.ts`, the merge branch), so a change introduced inside a
+   merge — a conflict resolution, a manual edit before committing the merge — is uncovered by
+   construction. That is why merges are the merger's alone, `--no-ff`, with no manual edits (rule 12,
+   agent-ops 12), until reconcile evaluates merge-introduced content.
 
 4. **Report the model verbatim.** `actor.model` is the exact string your harness reports for the
    running session — not shortened, not normalised, not a nicer name. If the harness exposes nothing,
@@ -40,8 +44,10 @@ each one names the product change that would make it unnecessary.
    `Retrace-Actor: <your seat>`, `Retrace-Model: <verbatim model>`, `Retrace-Caused-By: <instruction
    event id>`. `Retrace-Model` follows rule 4: when the runtime exposes no identifier the trailer is
    omitted, never guessed. The ledger classifies that claim against pinned edit evidence
-   (`docs/design/commit-trailer-consistency.md`, §15 step 3 onward): a trailer the evidence does not
-   support is recorded as unsupported, and after step 6 the actor it names is withheld.
+   (`docs/design/commit-trailer-consistency.md`, §4 decision table, §15 step 3 onward): a claim the
+   evidence **contradicts** is `conflicting` and, after step 6, the actor it names is withheld; a claim
+   with **no** evidence is `unresolved` and stays written, labelled, under the default `record` policy
+   (§9 Phase C, Jordan's decision). Only contradiction withholds.
 
 7. **Identity is the pinned credential.** Each seat has one credential, one producer key, and one
    identity block in its own file. Never adopt another seat's `Retrace-Actor` or actor id, whatever file
@@ -65,7 +71,11 @@ each one names the product change that would make it unnecessary.
     self-reports `method.params.reasoning_effort` from the reviewer's own configuration and cites the
     coordinator's routing decision as `method.params.routing_event_id`. The GitHub review is a copy of
     that verdict and is a COMMENT: `gh` runs as the repository owner for every seat, and GitHub refuses
-    request-changes on the owner's own pull request.
+    request-changes on the owner's own pull request. **A verdict binds to the head it reviewed:** the
+    routing event records the head sha, the verdict cites the routing event. Any push after a verdict
+    needs a new routing event against the new head and a new review; an older verdict cannot fulfil it
+    (`docs/design/effort-model-routing.md`, R7). The merger compares the current head, the routing
+    head, and the review head before merging, and merges only when all three agree.
 
 12. **Every change to main arrives by pull request** — design notes and briefs included, the
     coordinator's included. The only direct commits to main are the merger's merge commits. The review a
@@ -79,7 +89,8 @@ each one names the product change that would make it unnecessary.
     reassignment is recorded. **The coordinator classifies every pull request before review** and
     records the class in the routing event (rule 11); the builder states that class in the pull request
     body. Where categories overlap or the class is uncertain, the higher gate applies. A pull request that
-    touches a governing file under a class-(b) routing fails the gate. `docs/team-roles.md` says who sits
+    touches a governing file under a class-(b) routing fails the gate. A push after classification
+    re-opens the gate against the new head (rule 11). `docs/team-roles.md` says who sits
     where; this file says what gate a change takes; where they disagree, this file wins and `team-roles`
     is corrected.
 
