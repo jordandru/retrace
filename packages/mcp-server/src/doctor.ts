@@ -246,8 +246,10 @@ function isReviewEvent(event: Event): boolean {
   );
 }
 
+export type ReviewEffortScope = { recentEventLimit: number; reachesAdoption: boolean };
+
 /** Advisory R2/R3 checks: routing is intent; the review event remains the truth about what ran. */
-export function reviewEffortFindings(events: Event[], models: RoutingModelRegistry): Finding[] {
+export function reviewEffortFindings(events: Event[], models: RoutingModelRegistry, scope?: ReviewEffortScope): Finding[] {
   const byId = new Map(events.map((event) => [event.id, event]));
   const adoptionSeq = events
     .filter((event) => event.method?.tool === "routing")
@@ -306,7 +308,10 @@ export function reviewEffortFindings(events: Event[], models: RoutingModelRegist
   const summary = (reviews: Event[], label: string, detail: string): Finding | undefined => {
     if (!reviews.length) return undefined;
     const oldest = reviews.reduce((a, b) => (a.seq < b.seq ? a : b));
-    return result("warn", label, `${reviews.length} of ${reviewCount} reviews since adoption ${detail} (oldest ${oldest.id})`);
+    const counted = scope
+      ? `reviews in the inspected window (last ${scope.recentEventLimit} events; adoption seq ${adoptionSeq}; window ${scope.reachesAdoption ? "reaches" : "does not reach"} adoption)`
+      : "reviews since adoption";
+    return result("warn", label, `${reviews.length} of ${reviewCount} ${counted} ${detail} (oldest ${oldest.id})`);
   };
   return [
     summary(unrouted, "review routing", "cite no routing_event_id"),
@@ -336,13 +341,31 @@ export const REVIEW_EFFORT_ROUTING_TEXT = '"tool":"routing"';
  * window plus every routing event (targeted text query, paged) so adoptionSeq is still defined
  * when the first routing event sits outside the recent window.
  */
-export async function loadReviewEffortEvents(store: Pick<EventStore, "history">, project: string): Promise<Event[]> {
+export async function loadReviewEffortEvents(
+  store: Pick<EventStore, "history">,
+  project: string,
+): Promise<{ events: Event[]; scope: ReviewEffortScope }> {
   const routing = await collectRoutingEvents(store, project);
   const recent = await store.history({ project, limit: REVIEW_EFFORT_RECENT_LIMIT });
   const byId = new Map<string, Event>();
   for (const event of routing) byId.set(event.id, event);
   for (const event of recent.events) byId.set(event.id, event);
-  return [...byId.values()].sort((a, b) => a.seq - b.seq);
+  const adoptionSeq = routing.reduce<number | undefined>(
+    (first, event) => first === undefined ? event.seq : Math.min(first, event.seq),
+    undefined,
+  );
+  const oldestRecentSeq = recent.events.reduce<number | undefined>(
+    (oldest, event) => oldest === undefined ? event.seq : Math.min(oldest, event.seq),
+    undefined,
+  );
+  return {
+    events: [...byId.values()].sort((a, b) => a.seq - b.seq),
+    scope: {
+      recentEventLimit: REVIEW_EFFORT_RECENT_LIMIT,
+      reachesAdoption: adoptionSeq === undefined || !recent.truncated
+        || (oldestRecentSeq !== undefined && oldestRecentSeq <= adoptionSeq),
+    },
+  };
 }
 
 async function collectRoutingEvents(store: Pick<EventStore, "history">, project: string): Promise<Event[]> {
@@ -717,7 +740,8 @@ async function main() {
       } else {
         if (routingModels) {
           try {
-            const reviewFindings = reviewEffortFindings(await loadReviewEffortEvents(new RemoteStore(url, auth.token), project), routingModels);
+            const loaded = await loadReviewEffortEvents(new RemoteStore(url, auth.token), project);
+            const reviewFindings = reviewEffortFindings(loaded.events, routingModels, loaded.scope);
             findings.push(...reviewFindings.map((finding) => ({ ...finding, detail: `${finding.detail} (unsigned history; --gate uses the verified ledger)` })));
           } catch (e: any) {
             findings.push(result("warn", "review routing", `${e.message}; advisory review history not checked`));

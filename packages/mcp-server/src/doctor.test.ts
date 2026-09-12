@@ -222,9 +222,10 @@ test("doctor: review-routing history is bounded and still fires when adoption is
   };
 
   const loaded = await loadReviewEffortEvents(store, project);
-  assert.ok(loaded.length < ledger.length, "loaded set must be smaller than the full ledger");
-  assert.ok(loaded.some((event) => event.id === "evt_adopt"), "adoption event must be fetched even when it is outside the recent window");
-  assert.ok(!loaded.some((event) => event.id === "evt_filler_2"), "old non-routing rows stay outside the recent window");
+  assert.ok(loaded.events.length < ledger.length, "loaded set must be smaller than the full ledger");
+  assert.ok(loaded.events.some((event) => event.id === "evt_adopt"), "adoption event must be fetched even when it is outside the recent window");
+  assert.ok(!loaded.events.some((event) => event.id === "evt_filler_2"), "old non-routing rows stay outside the recent window");
+  assert.deepEqual(loaded.scope, { recentEventLimit: REVIEW_EFFORT_RECENT_LIMIT, reachesAdoption: false });
   assert.equal(queries.some((q) => q.text?.includes("routing")), true);
   assert.equal(queries.every((q) => typeof q.limit === "number" && q.limit <= REVIEW_EFFORT_RECENT_LIMIT), true);
   assert.equal(queries.filter((q) => q.text).every((q) => q.limit === REVIEW_EFFORT_ROUTING_PAGE), true);
@@ -232,11 +233,12 @@ test("doctor: review-routing history is bounded and still fires when adoption is
   const returned = queries.reduce((sum, q) => sum + (q.limit ?? 0), 0);
   assert.ok(returned < ledger.length, "request shape must request fewer rows than the ledger");
 
-  const findings = reviewEffortFindings(loaded, models);
+  const findings = reviewEffortFindings(loaded.events, models, loaded.scope);
   assert.equal(findings.length, 1);
   assert.equal(findings[0]?.label, "review routing");
   assert.equal(findings[0]?.level, "warn");
-  assert.match(findings[0]!.detail, /1 of 1 reviews since adoption cite no routing_event_id \(oldest evt_unrouted_recent\)/);
+  assert.match(findings[0]!.detail, /1 of 1 reviews in the inspected window \(last 200 events; adoption seq 1; window does not reach adoption\) cite no routing_event_id \(oldest evt_unrouted_recent\)/);
+  assert.doesNotMatch(findings[0]!.detail, /reviews since adoption/);
 });
 
 test("doctor: CLI version gap when Worker advertises min_cli_version above the running CLI", () => {
