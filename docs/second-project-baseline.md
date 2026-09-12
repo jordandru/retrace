@@ -36,3 +36,54 @@ review process, verify hook/push capture on real work, and measure a new range a
 this HEAD. Record the Git range and ledger head with each result. Sustained coverage
 requires consecutive real changes to carry edit events before their commit seals;
 another snapshot of this unchanged history cannot establish it.
+
+## 2026-09-12 snapshot (wiring vs live coverage)
+
+Measured from `/home/jordandrumiler/provenance/slc-wit-it` HEAD
+`295d26fb97d2291ab757fc582437f7ebbdd07e74` (`v0.11.26`, 2026-09-09), ledger
+`boxing-rpg` 137 events verified. This is still not a sustained-coverage
+demonstration. It records that the Sep 7 wiring gap closed, and that edit
+capture did not.
+
+| Check | 2026-09-07 | 2026-09-12 |
+|---|---|---|
+| `.retrace.json` `reconcile.hook_sealed_by` | missing | `assert:git hook (assert)` |
+| `retrace doctor` | not recorded here | READY, 15 passed, 0 warnings, 0 failures |
+| HEAD in ledger | — | `commit:jordandru/slc-wit-it@295d26fb97d2` is event #134 |
+| Causal coverage (`retrace_status`) | — | 19% (83/93 unlinked commits) |
+| Last 20 commits sealed | — | 20/20 (`missing_commit` 0) |
+| Uncovered file transitions (last 20) | 57 of 68 on last 30 | 137 |
+| Misattributions / producer disagreements | 0 / 0 | 0 / 0 |
+| Last Claude Code activity on this project | — | 2026-09-04 |
+
+Reproduce:
+
+```sh
+cd /home/jordandrumiler/provenance/slc-wit-it
+RETRACE_PROJECT=boxing-rpg retrace-export reconcile \
+  --repo . --limit 20 \
+  --hook-sealed-by 'assert:git hook (assert)' --json
+```
+
+`CLAUDE.md` already requires `retrace_instruct` / `retrace_log` with every
+changed file as `repo:jordandru/slc-wit-it#<path>`. Project `.mcp.json` pins
+only `claude-code` to `boxing-rpg`. Other harnesses are not a producer here
+until they have a project-scoped credential.
+
+### Live window (the 95% bar)
+
+Historical uncovered counts cannot be repaired by another snapshot of the
+same commits. The metric that can still be earned:
+
+1. Record `start_sha` = current HEAD (`295d26fb97d2`) and ledger seq at start.
+2. Do real `slc-wit-it` work with a logging producer. Do not invent game
+   features for the sake of the number.
+3. After N agent commits (`N ≥ 5`, consecutive, no backfill), reconcile
+   `--since <start_sha>` and compute
+   `covered / (covered + uncovered)` over evaluated file transitions.
+4. Pass: that ratio ≥ 0.95, `missing_commit` 0, `misattributed` 0.
+5. Fail: a silent producer, a commit with no per-file `retrace_log`, or
+   work logged to the wrong project.
+
+Grok measures. Jordan (or a named next feature he authorizes) supplies the
+commits. Agents must not spawn on this repo without `RETRACE_PROJECT=boxing-rpg`.
