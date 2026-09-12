@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { writeFileSync, mkdtempSync } from "node:fs";
+import { writeFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Event } from "@retrace-dev/core";
+import { buildExportBundle, MemoryEventStore, type Event } from "@retrace-dev/core";
 import {
   claimDecisionOf,
   measureEvents,
@@ -13,6 +13,7 @@ import {
   percentile,
   renderMarkdown,
   inWindow,
+  runCli,
   CLASSIFIER_STATUSES,
 } from "./phase-a-measure.js";
 
@@ -35,7 +36,7 @@ function ev(partial: Partial<Event> & Pick<Event, "id" | "seq" | "action" | "act
     timestamp: `2026-09-11T00:00:${String(partial.seq).padStart(2, "0")}.000Z`,
     prev_hash: "0".repeat(64),
     hash: "a".repeat(64),
-    received_at: `2026-09-11T00:00:${String(partial.seq).padStart(2, "0")}.000Z`,
+    received_at: partial.timestamp ?? `2026-09-11T00:00:${String(partial.seq).padStart(2, "0")}.000Z`,
     ...partial,
   } as Event;
 }
@@ -155,6 +156,68 @@ test("pending-seal file and hook-log failures are per-machine counts", () => {
   writeFileSync(join(dir, "retrace-hook.log"), "2026-09-11T00:00:00.000Z commit aaa in /repo NOT logged: 503\nok\n");
   assert.deepEqual(parsePendingSealFile(join(dir, "retrace-pending-seal")).sort(), ["aaa", "bbb"]);
   assert.equal(countHookLogFailures(join(dir, "retrace-hook.log")), 1);
+});
+
+test("shadow windows count newly received seals even when Git author dates are older", () => {
+  const events = [
+    seal({
+      id: "evt_previous", seq: 1, actor: { type: "agent", id: "grok" },
+      timestamp: "2026-09-12T01:00:00Z", received_at: "2026-09-11T23:00:00Z",
+    }),
+    ev({ id: "evt_edit", seq: 2, action: "edited", actor: { type: "agent", id: "codex" } }),
+    seal({
+      id: "evt_delayed", seq: 3, actor: { type: "agent", id: "codex" },
+      timestamp: "2026-09-01T00:00:00Z", received_at: "2026-09-12T01:00:00Z",
+      method: { tool: "git", params: { sha: "a".repeat(40), claim_decision: { decision: { status: "conflicting" } } } },
+    }),
+  ];
+  const r = measureEvents(events, { since: "2026-09-12T00:00:00Z", until: "2026-09-13T00:00:00Z" });
+  assert.equal(r.histogram.seals, 1);
+  assert.equal(r.histogram.by_status.conflicting, 1);
+  assert.equal(r.histogram.by_status.absent, 0);
+  assert.equal(r.logs_per_commit.intervals, 1);
+  assert.deepEqual(r.logs_per_commit.by_actor, { codex: 1 });
+});
+
+test("invalid or reversed measurement windows fail instead of reporting an all-time census", () => {
+  assert.throws(() => measureEvents([], { since: "not-a-date" }), /--since must be a valid date/);
+  assert.throws(() => measureEvents([], { until: "not-a-date" }), /--until must be a valid date/);
+  assert.throws(() => measureEvents([], { since: "2026-09-13", until: "2026-09-12" }), /--since must not be later/);
+});
+
+test("a late second producer does not recount an old commit interval in a new window", () => {
+  const events = [
+    seal({ id: "evt_previous", seq: 1, actor: { type: "agent", id: "codex" }, received_at: "2026-09-10T00:00:00Z" }),
+    ev({ id: "evt_edit", seq: 2, action: "edited", actor: { type: "agent", id: "codex" } }),
+    seal({
+      id: "evt_hook", seq: 3, actor: { type: "agent", id: "codex" }, received_at: "2026-09-11T00:00:00Z",
+      method: { tool: "git", params: { sha: "b".repeat(40), sealed_by: "assert:git hook (assert)" } },
+    }),
+    seal({
+      id: "evt_webhook", seq: 4, actor: { type: "system", id: "webhook:github" }, received_at: "2026-09-12T01:00:00Z",
+      method: { tool: "git", params: { sha: "b".repeat(40), sealed_by: "webhook:github" } },
+    }),
+  ];
+  const r = measureEvents(events, { since: "2026-09-12T00:00:00Z" });
+  assert.equal(r.histogram.seals, 1, "the newly received webhook seal still belongs in the histogram");
+  assert.equal(r.logs_per_commit.intervals, 0, "the commit interval belongs to its first trusted receipt");
+  assert.equal(r.tokens.stored_canonical_bytes.n, 0);
+});
+
+test("CLI boolean flags work before or after the bundle; malformed options fail", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "phase-a-cli-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const path = join(dir, "bundle.json");
+  writeFileSync(path, JSON.stringify(await buildExportBundle(new MemoryEventStore(), { project: "p" })));
+  for (const args of [["--json", "--no-handshake", path], [path, "--json", "--no-handshake"], ["--json", path, "--no-handshake"]]) {
+    const report = JSON.parse(await runCli(args));
+    assert.equal(report.bundle.project, "p");
+    assert.equal(report.histogram.seals, 0);
+    assert.equal(report.handshake, undefined);
+  }
+  await assert.rejects(runCli([path, "--since"]), /argument missing/i);
+  await assert.rejects(runCli([path, "--untill", "2026-09-13"]), /unknown option/i);
+  await assert.rejects(runCli([path, "--since", "not-a-date", "--no-handshake"]), /--since must be a valid date/);
 });
 
 test("renderMarkdown refuses to present a proxy as a census", () => {

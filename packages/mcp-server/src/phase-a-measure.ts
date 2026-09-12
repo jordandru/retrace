@@ -10,6 +10,7 @@
  *     [--hook-log path] [--pending-seal path] [--json] [--no-handshake]
  */
 import { readFileSync, existsSync } from "node:fs";
+import { parseArgs } from "node:util";
 import {
   canonicalize,
   isGitCommitSeal,
@@ -38,6 +39,7 @@ export type Kind = "census" | "proxy" | "bench" | "missing" | "per-machine";
 
 export type Labeled<T> = { value: T; kind: Kind; note?: string };
 
+/** Seal receipt times, not Git author dates: shadow measures newly received seals. */
 export type MeasureWindow = { since?: string; until?: string };
 
 export type HandshakeTool = { name: string; bytes: number; description_bytes: number; schema_bytes: number };
@@ -177,6 +179,17 @@ export function inWindow(timestamp: string, window: MeasureWindow): boolean {
   return true;
 }
 
+function validateWindow(window: MeasureWindow): void {
+  for (const [name, value] of Object.entries(window)) {
+    if (value !== undefined && !Number.isFinite(Date.parse(value))) {
+      throw new Error(`--${name} must be a valid date/time, got ${JSON.stringify(value)}`);
+    }
+  }
+  if (window.since && window.until && Date.parse(window.since) > Date.parse(window.until)) {
+    throw new Error("--since must not be later than --until");
+  }
+}
+
 export function claimDecisionOf(event: Event): ClaimDecisionView | undefined {
   // Design §6 rule 5: a /1-signed event stores a caller-supplied claim_decision byte-for-byte.
   // That block is never a server decision and must not enter the histogram.
@@ -252,9 +265,10 @@ function stats(values: number[]): { p50: number | null; p95: number | null; mean
 }
 
 export function measureEvents(events: Event[], window: MeasureWindow = {}): Omit<MeasureReport, "generated_at" | "bundle" | "window" | "handshake" | "pending_seals"> {
+  validateWindow(window);
   const ordered = [...events].sort((a, b) => a.seq - b.seq);
   const seals = ordered.filter(isGitCommitSeal);
-  const scopedSeals = seals.filter((e) => inWindow(e.timestamp, window));
+  const scopedSeals = seals.filter((e) => inWindow(e.received_at, window));
 
   const by_status: Record<string, number> = { absent: 0 };
   for (const s of CLASSIFIER_STATUSES) by_status[s] = 0;
@@ -317,7 +331,7 @@ export function measureEvents(events: Event[], window: MeasureWindow = {}): Omit
   // bound may sit outside the window (kept).
   for (let i = 1; i < commits.length; i++) {
     const curr = commits[i];
-    if (!curr.seals.some((s) => inWindow(s.timestamp, window))) continue;
+    if (!inWindow(curr.bound.received_at, window)) continue;
     const prev = commits[i - 1];
     const lo = prev.bound.seq;
     const hi = curr.bound.seq;
@@ -373,7 +387,7 @@ export function measureEvents(events: Event[], window: MeasureWindow = {}): Omit
     },
     logs_per_commit: {
       kind: "census",
-      note: "agent events strictly between consecutive COMMITS (unique full sha), by actor.id. Dual-producer hook+webhook seals of one sha are one commit. Each interval is bounded by the earliest trusted seal of the previous commit (assert: or webhook:github; else earliest git seal). The first commit in the chain is dropped — it has no previous commit. Includes NOOA audits and every other agent; do not filter them out — the by_actor split is the measurement.",
+      note: "agent events strictly between consecutive COMMITS (unique full sha), by actor.id. Dual-producer hook+webhook seals of one sha are one commit. Each interval is bounded by the earliest trusted seal of the previous commit (assert: or webhook:github; else earliest git seal). The window selects the current commit's earliest trusted seal by received_at, so a later duplicate producer cannot recount an old interval. The first commit in the chain is dropped — it has no previous commit. Includes NOOA audits and every other agent; do not filter them out — the by_actor split is the measurement.",
       intervals: intervals.length,
       unique_shas: commits.length,
       first_commit_dropped: true,
@@ -519,7 +533,7 @@ export function renderMarkdown(report: MeasureReport): string {
   lines.push("");
   lines.push(`Bundle project: \`${report.bundle.project ?? "?"}\` · events: ${report.bundle.events} · head seq: ${report.bundle.head_seq ?? "∅"} · bundle generated: ${report.bundle.generated_at ?? "?"}`);
   if (report.window.since || report.window.until) {
-    lines.push(`Window: ${report.window.since ?? "…"} → ${report.window.until ?? "…"}`);
+    lines.push(`Window (seal received_at, not Git author date): ${report.window.since ?? "…"} → ${report.window.until ?? "…"}`);
   } else {
     lines.push("Window: all seals in the bundle (no --since/--until).");
   }
@@ -572,7 +586,7 @@ export function renderMarkdown(report: MeasureReport): string {
   lines.push("");
   lines.push(row(["metric", "value", "kind"]));
   lines.push(row(["---", "---:", "---"]));
-  lines.push(row(["unique SHAs (git commit seals grouped)", String(report.logs_per_commit.unique_shas), "census"]));
+  lines.push(row(["unique SHAs in full bundle (including interval context)", String(report.logs_per_commit.unique_shas), "census"]));
   lines.push(row(["intervals (unique SHA with a previous commit, in scope)", String(report.logs_per_commit.intervals), "census"]));
   lines.push(row(["p50 agent events / commit", fmt(report.logs_per_commit.p50), "census"]));
   lines.push(row(["p95 agent events / commit", fmt(report.logs_per_commit.p95), "census"]));
@@ -654,16 +668,27 @@ function fmtShare(n: number | null | undefined): string {
 }
 
 export async function runCli(argv: string[]): Promise<string> {
-  const { flags, pos } = parseArgs(argv);
-  if (!pos[0]) {
+  const { values: flags, positionals: pos } = parseArgs({
+    args: argv,
+    allowPositionals: true,
+    options: {
+      since: { type: "string" },
+      until: { type: "string" },
+      "hook-log": { type: "string" },
+      "pending-seal": { type: "string" },
+      json: { type: "boolean" },
+      "no-handshake": { type: "boolean" },
+    },
+  });
+  if (pos.length !== 1) {
     throw new Error("usage: phase-a-measure <bundle.json> [--since ISO] [--until ISO] [--hook-log path] [--pending-seal path] [--json] [--no-handshake]");
   }
   const bundle = parseExportBundle(readFileSync(pos[0], "utf8"));
   const measured = measureBundle(bundle, {
-    since: flags.since as string | undefined,
-    until: flags.until as string | undefined,
-    hookLog: flags["hook-log"] as string | undefined,
-    pendingSeal: flags["pending-seal"] as string | undefined,
+    since: flags.since,
+    until: flags.until,
+    hookLog: flags["hook-log"],
+    pendingSeal: flags["pending-seal"],
   });
   const handshake = flags["no-handshake"] === true ? undefined : await measureHandshakeSchemas();
   const report: MeasureReport = {
@@ -673,19 +698,4 @@ export async function runCli(argv: string[]): Promise<string> {
   };
   if (flags.json === true) return JSON.stringify(report, null, 2);
   return renderMarkdown(report);
-}
-
-function parseArgs(argv: string[]): { flags: Record<string, string | boolean>; pos: string[] } {
-  const flags: Record<string, string | boolean> = {};
-  const pos: string[] = [];
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i];
-    if (a.startsWith("--")) {
-      const k = a.slice(2);
-      const nxt = argv[i + 1];
-      if (nxt && !nxt.startsWith("--")) { flags[k] = nxt; i++; }
-      else flags[k] = true;
-    } else pos.push(a);
-  }
-  return { flags, pos };
 }
