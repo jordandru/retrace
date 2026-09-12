@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { Credential, Event, EventInput, EventStore, Share, appendEvent, buildExportBundle, generateSigningKey, pageHistoryNewest, schemaSurface, signCanonical } from "@retrace-dev/core";
-import { attributionFinding, cliVersionGap, credentialAuthorization, doctorHistoryEvents, gateRemoteAuthorization, headDelivery, instructRootFinding, issuanceFindingsFromStatus, missingSchema, parseDoctorArgs, pendingSealsFinding, pinSessionFinding, remoteCaptureCoverage, sealedCommitEvent, sealedLooksAgent } from "./doctor.js";
+import { Credential, Event, EventInput, EventStore, HistoryQuery, Share, appendEvent, buildExportBundle, generateSigningKey, pageHistoryNewest, schemaSurface, signCanonical } from "@retrace-dev/core";
+import { attributionFinding, cliVersionGap, credentialAuthorization, doctorHistoryEvents, gateRemoteAuthorization, headDelivery, instructRootFinding, issuanceFindingsFromStatus, loadReviewEffortEvents, loadRoutingModels, missingSchema, parseDoctorArgs, pendingSealsFinding, pinSessionFinding, remoteCaptureCoverage, REVIEW_EFFORT_RECENT_LIMIT, REVIEW_EFFORT_ROUTING_PAGE, reviewEffortFindings, sealedCommitEvent, sealedLooksAgent } from "./doctor.js";
 import { RemoteStore } from "./remote-store.js";
 import { SqliteStore } from "./sqlite-store.js";
 
@@ -18,6 +18,227 @@ test("doctor: schema comparison names only fields the deployment would drop", ()
   remote.location = remote.location.filter((k) => k !== "workspace");
   assert.deepEqual(missingSchema(remote), ["location.workspace"]);
   assert.deepEqual(missingSchema({ ...local, future: ["x"] }), []);
+});
+
+test("doctor: review effort warns only when the model supports effort, routing is absent, or routed and run effort differ", () => {
+  const routing = commitEvt({
+    id: "evt_route", seq: 1, action: "other", action_detail: "routed",
+    actor: { type: "agent", id: "claude-code" },
+    method: { tool: "routing", params: { target: { agent: "codex", model: "gpt-6-astra", effort: "high" } } },
+  });
+  const review = (id: string, model: string, params: Record<string, unknown>): Event => commitEvt({
+    id, seq: 2, action: "approved", actor: { type: "agent", id: "codex", model },
+    tags: ["review"], method: { tool: "review", params },
+  });
+  const models = {
+    "gpt-6-astra": { supports_effort: true, levels: ["low", "medium", "high", "xhigh"] },
+    "nvidia/nemotron-3-ultra": { supports_effort: false, levels: [] },
+  };
+
+  assert.deepEqual(reviewEffortFindings([routing, review("evt_ok", "gpt-6-astra", {
+    reasoning_effort: "high", routing_event_id: routing.id,
+  })], models), []);
+
+  const missing = reviewEffortFindings([review("evt_missing", "gpt-6-astra", {})], models);
+  assert.deepEqual(missing, [], "reviews before routing adoption are not retroactively warned");
+
+  const adoptedMissing = reviewEffortFindings([
+    routing,
+    { ...review("evt_missing", "gpt-6-astra", {}), seq: 2 },
+  ], models);
+  assert.deepEqual(adoptedMissing.map((finding) => finding.label), ["review routing"]);
+  assert.ok(adoptedMissing.every((finding) => finding.level === "warn"));
+  assert.match(adoptedMissing[0]!.detail, /1 of 1 reviews since adoption cite no routing_event_id \(oldest evt_missing\)/);
+
+  const mismatch = reviewEffortFindings([routing, review("evt_mismatch", "gpt-6-astra", {
+    reasoning_effort: "medium", routing_event_id: routing.id,
+  })], models);
+  assert.equal(mismatch[0]?.label, "review effort mismatch");
+  assert.match(mismatch[0]!.detail, /routed high · ran medium/);
+
+  const unsupported = reviewEffortFindings([routing, review("evt_nemotron", "nvidia/nemotron-3-ultra", {
+    routing_event_id: routing.id,
+  })], models);
+  assert.equal(unsupported[0]?.label, "review model mismatch");
+
+  const wrongTarget = reviewEffortFindings([routing, {
+    ...review("evt_wrong", "unlisted-model", { reasoning_effort: "high", routing_event_id: routing.id }),
+    actor: { type: "agent", id: "other-reviewer", model: "unlisted-model" },
+  }], models);
+  assert.deepEqual(wrongTarget.map((finding) => finding.label), [
+    "review model",
+    "review agent mismatch",
+    "review model mismatch",
+  ]);
+
+  const lateRouting = reviewEffortFindings([
+    { ...routing, id: "evt_adopt", seq: 0 },
+    review("evt_early", "gpt-6-astra", { reasoning_effort: "high", routing_event_id: "evt_late" }),
+    { ...routing, id: "evt_late", seq: 3 },
+  ], models);
+  assert.equal(lateRouting[0]?.label, "review routing");
+  assert.match(lateRouting[0]!.detail, /recorded before the review/);
+});
+
+test("doctor: un-routed review finding count does not grow with ledger size", () => {
+  const routing = commitEvt({
+    id: "evt_route", seq: 1, action: "other", action_detail: "routed",
+    actor: { type: "agent", id: "claude-code" },
+    method: { tool: "routing", params: { target: { agent: "codex", model: "gpt-6-astra", effort: "high" } } },
+  });
+  const models = {
+    "gpt-6-astra": { supports_effort: true, levels: ["low", "medium", "high", "xhigh"] },
+  };
+  const unrouted = (count: number): Event[] => Array.from({ length: count }, (_, i) => commitEvt({
+    id: `evt_unrouted_${i}`, seq: 2 + i, action: "approved",
+    actor: { type: "agent", id: "codex", model: "gpt-6-astra" },
+    tags: ["review"], method: { tool: "review", params: {} },
+  }));
+
+  const five = reviewEffortFindings([routing, ...unrouted(5)], models);
+  const fifty = reviewEffortFindings([routing, ...unrouted(50)], models);
+  assert.equal(five.length, fifty.length, "finding count must be independent of un-routed review volume");
+  assert.equal(five.length, 1);
+  assert.equal(five[0]?.label, "review routing");
+  assert.equal(five[0]?.level, "warn");
+  assert.match(five[0]!.detail, /5 of 5 reviews since adoption cite no routing_event_id \(oldest evt_unrouted_0\)/);
+  assert.match(fifty[0]!.detail, /50 of 50 reviews since adoption cite no routing_event_id \(oldest evt_unrouted_0\)/);
+});
+
+test("doctor: routed missing-metadata finding count does not grow with ledger size", () => {
+  const routing = commitEvt({
+    id: "evt_route", seq: 1, action: "other", action_detail: "routed",
+    actor: { type: "agent", id: "claude-code" },
+    method: { tool: "routing", params: { target: { agent: "codex", model: "unregistered-model", effort: "high" } } },
+  });
+  const models = {
+    "gpt-6-astra": { supports_effort: true, levels: ["low", "medium", "high", "xhigh"] },
+  };
+  const reviews = (count: number): Event[] => Array.from({ length: count }, (_, i) => commitEvt({
+    id: `evt_unregistered_${i}`, seq: 2 + i, action: "approved",
+    actor: { type: "agent", id: "codex", model: "unregistered-model" },
+    tags: ["review"], method: { tool: "review", params: { routing_event_id: routing.id } },
+  }));
+
+  const five = reviewEffortFindings([routing, ...reviews(5)], models);
+  const fifty = reviewEffortFindings([routing, ...reviews(50)], models);
+  assert.equal(five.length, fifty.length, "finding count must be independent of missing-metadata review volume");
+  assert.equal(five.length, 1);
+  assert.equal(five[0]?.label, "review model");
+  assert.equal(five[0]?.level, "warn");
+  assert.match(five[0]!.detail, /5 of 5 reviews since adoption .+ \(oldest evt_unregistered_0\)/);
+  assert.match(fifty[0]!.detail, /50 of 50 reviews since adoption .+ \(oldest evt_unregistered_0\)/);
+
+  const effortRouting = commitEvt({
+    ...routing,
+    id: "evt_effort_route",
+    method: { tool: "routing", params: { target: { agent: "codex", model: "gpt-6-astra", effort: "high" } } },
+  });
+  const missingEffort = (count: number): Event[] => Array.from({ length: count }, (_, i) => commitEvt({
+    id: `evt_missing_effort_${i}`, seq: 2 + i, action: "approved",
+    actor: { type: "agent", id: "codex", model: "gpt-6-astra" },
+    tags: ["review"], method: { tool: "review", params: { routing_event_id: effortRouting.id } },
+  }));
+  const fiveEfforts = reviewEffortFindings([effortRouting, ...missingEffort(5)], models);
+  const fiftyEfforts = reviewEffortFindings([effortRouting, ...missingEffort(50)], models);
+  assert.equal(fiveEfforts.length, fiftyEfforts.length, "finding count must be independent of missing-effort review volume");
+  assert.deepEqual(fiveEfforts.map((finding) => finding.label), ["review reasoning effort"]);
+  assert.deepEqual(fiftyEfforts.map((finding) => finding.label), ["review reasoning effort"]);
+  assert.match(fiveEfforts[0]!.detail, /5 of 5 reviews since adoption .+ \(oldest evt_missing_effort_0\)/);
+  assert.match(fiftyEfforts[0]!.detail, /50 of 50 reviews since adoption .+ \(oldest evt_missing_effort_0\)/);
+});
+
+test("doctor: routing model aliases resolve exactly and remain case-sensitive", () => {
+  const routing = commitEvt({
+    id: "evt_route", seq: 1, action: "other", action_detail: "routed",
+    actor: { type: "agent", id: "claude-code" },
+    method: { tool: "routing", params: { target: { agent: "codex", model: "canonical-model", effort: "high" } } },
+  });
+  const review = (id: string, model: string): Event => commitEvt({
+    id, seq: 2, action: "approved", actor: { type: "agent", id: "codex", model },
+    tags: ["review"], method: { tool: "review", params: { routing_event_id: routing.id, reasoning_effort: "high" } },
+  });
+  const models = {
+    "canonical-model": { supports_effort: true, levels: ["high"], aliases: ["Exact Alias"] },
+  };
+
+  assert.deepEqual(reviewEffortFindings([routing, review("evt_alias", "Exact Alias")], models), []);
+  assert.deepEqual(reviewEffortFindings([routing, review("evt_wrong_case", "exact alias")], models)
+    .map((finding) => finding.label), ["review model", "review model mismatch"]);
+});
+
+test("doctor: routing model registry rejects invalid and colliding aliases", () => {
+  const writeRegistry = (models: unknown): string => {
+    const repo = mkTemp(joinP(tmpD(), "retrace-routing-models-"));
+    const dir = joinP(repo, ".claude", "skills", "review-effort", "routing-rules");
+    mkdirSync(dir, { recursive: true });
+    writeF(joinP(dir, "models.json"), JSON.stringify(models));
+    return repo;
+  };
+  const row = { supports_effort: true, levels: ["high"] };
+
+  assert.throws(() => loadRoutingModels(writeRegistry({ a: { ...row, aliases: [1] } })), /aliases must be a string\[\]/);
+  assert.throws(() => loadRoutingModels(writeRegistry({ a: { ...row, aliases: ["b"] }, b: row })), /collides with a model key/);
+  assert.throws(() => loadRoutingModels(writeRegistry({
+    a: { ...row, aliases: ["shared"] },
+    b: { ...row, aliases: ["shared"] },
+  })), /collides with an alias for a/);
+});
+
+test("doctor: review-routing history is bounded and still fires when adoption is outside the recent window", async () => {
+  const project = "retrace";
+  const models = { "gpt-6-astra": { supports_effort: true, levels: ["low", "medium", "high", "xhigh"] } };
+  const evt = (over: Partial<Event> & { id: string; seq: number }): Event => commitEvt({
+    project, ...over,
+  });
+  const ledger: Event[] = [
+    evt({
+      id: "evt_adopt", seq: 1, action: "other", action_detail: "routed",
+      actor: { type: "agent", id: "claude-code" },
+      method: { tool: "routing", params: { target: { agent: "codex", model: "gpt-6-astra", effort: "high" } } },
+    }),
+  ];
+  for (let seq = 2; seq <= 400; seq++) {
+    ledger.push(evt({
+      id: `evt_filler_${seq}`, seq, action: "edited",
+      actor: { type: "agent", id: "codex" },
+      method: { tool: "edit", params: {} },
+    }));
+  }
+  ledger.push(evt({
+    id: "evt_unrouted_recent", seq: 401, action: "approved",
+    actor: { type: "agent", id: "codex", model: "gpt-6-astra" },
+    tags: ["review"], method: { tool: "review", params: {} },
+  }));
+
+  const queries: HistoryQuery[] = [];
+  const store = {
+    async all() { throw new Error("review-routing must not read the whole ledger"); },
+    async history(q: HistoryQuery) {
+      queries.push({ ...q });
+      assert.ok(typeof q.limit === "number" && q.limit <= REVIEW_EFFORT_RECENT_LIMIT, `unbounded history limit: ${q.limit}`);
+      return pageHistoryNewest(ledger, q);
+    },
+  };
+
+  const loaded = await loadReviewEffortEvents(store, project);
+  assert.ok(loaded.events.length < ledger.length, "loaded set must be smaller than the full ledger");
+  assert.ok(loaded.events.some((event) => event.id === "evt_adopt"), "adoption event must be fetched even when it is outside the recent window");
+  assert.ok(!loaded.events.some((event) => event.id === "evt_filler_2"), "old non-routing rows stay outside the recent window");
+  assert.deepEqual(loaded.scope, { recentEventLimit: REVIEW_EFFORT_RECENT_LIMIT, reachesAdoption: false });
+  assert.equal(queries.some((q) => q.text?.includes("routing")), true);
+  assert.equal(queries.every((q) => typeof q.limit === "number" && q.limit <= REVIEW_EFFORT_RECENT_LIMIT), true);
+  assert.equal(queries.filter((q) => q.text).every((q) => q.limit === REVIEW_EFFORT_ROUTING_PAGE), true);
+  assert.equal(queries.filter((q) => !q.text).every((q) => q.limit === REVIEW_EFFORT_RECENT_LIMIT), true);
+  const returned = queries.reduce((sum, q) => sum + (q.limit ?? 0), 0);
+  assert.ok(returned < ledger.length, "request shape must request fewer rows than the ledger");
+
+  const findings = reviewEffortFindings(loaded.events, models, loaded.scope);
+  assert.equal(findings.length, 1);
+  assert.equal(findings[0]?.label, "review routing");
+  assert.equal(findings[0]?.level, "warn");
+  assert.match(findings[0]!.detail, /1 of 1 reviews in the inspected window \(last 200 events; adoption seq 1; window does not reach adoption\) cite no routing_event_id \(oldest evt_unrouted_recent\)/);
+  assert.doesNotMatch(findings[0]!.detail, /reviews since adoption/);
 });
 
 test("doctor: CLI version gap when Worker advertises min_cli_version above the running CLI", () => {

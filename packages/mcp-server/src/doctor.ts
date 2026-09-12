@@ -4,7 +4,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, lstatSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
-import { isAttributionAmendment, Actor, Credential, Event, ProjectStatus, ReconcileReport, asHistoryPage, causalRootState, localConfigDrift, renderProjectStatus, schemaSurface } from "@retrace-dev/core";
+import { isAttributionAmendment, Actor, Credential, Event, EventStore, HistoryQuery, ProjectStatus, ReconcileReport, asHistoryPage, causalRootState, localConfigDrift, renderProjectStatus, schemaSurface } from "@retrace-dev/core";
 import { Cfg, commitToEvent, resolveHookToken } from "./git-hook.js";
 import { ReconcileCfg, commitFacts, reconcileOptionsFrom, reconcileWithGit, repoNamesFor } from "./reconcile.js";
 import { RemoteStore, retraceHeaders } from "./remote-store.js";
@@ -14,6 +14,8 @@ type Level = "pass" | "warn" | "fail";
 export type Finding = { level: Level; label: string; detail: string };
 export type DoctorArgs = { command: "doctor" | "status"; gate: boolean; json: boolean; local: boolean; repo?: string; statusProject?: string };
 type RepoConfig = ReconcileCfg & { credential?: string };
+export type RoutingModel = { supports_effort: boolean; levels: string[]; aliases?: string[] };
+export type RoutingModelRegistry = Record<string, RoutingModel>;
 
 const git = (repo: string, args: string[]) => execFileSync("git", ["-C", repo, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 const result = (level: Level, label: string, detail: string): Finding => ({ level, label, detail });
@@ -229,6 +231,192 @@ export function captureCoverageFinding(report: ReconcileReport): Finding {
   }
   const top = live.filter((f) => f.level === worst);
   return result(worst, "capture coverage", top.map((f) => `${f.kind}: ${f.detail}`).join("; "));
+}
+
+function paramsOf(event: Event): Record<string, unknown> {
+  return event.method?.params ?? {};
+}
+
+function isReviewEvent(event: Event): boolean {
+  return event.actor.type === "agent" && (
+    event.action === "approved"
+    || event.action === "rejected"
+    || event.action_detail === "reviewed"
+    || event.tags?.includes("review") === true
+  );
+}
+
+export type ReviewEffortScope = { recentEventLimit: number; reachesAdoption: boolean };
+
+/** Advisory R2/R3 checks: routing is intent; the review event remains the truth about what ran. */
+export function reviewEffortFindings(events: Event[], models: RoutingModelRegistry, scope?: ReviewEffortScope): Finding[] {
+  const byId = new Map(events.map((event) => [event.id, event]));
+  const adoptionSeq = events
+    .filter((event) => event.method?.tool === "routing")
+    .reduce<number | undefined>((first, event) => first === undefined ? event.seq : Math.min(first, event.seq), undefined);
+  if (adoptionSeq === undefined) return [];
+  const findings: Finding[] = [];
+  const unrouted: Event[] = [];
+  const missingModels: Event[] = [];
+  const missingEfforts: Event[] = [];
+  let reviewCount = 0;
+  for (const review of events.filter((event) => event.seq > adoptionSeq && isReviewEvent(event))) {
+    reviewCount++;
+    const params = paramsOf(review);
+    const effort = typeof params.reasoning_effort === "string" ? params.reasoning_effort : undefined;
+    const routingId = typeof params.routing_event_id === "string" ? params.routing_event_id : undefined;
+    const model = review.actor.model;
+    const registeredModel = model ? resolveRoutingModel(models, model) : undefined;
+    const capability = registeredModel?.capability;
+
+    if (!routingId) {
+      unrouted.push(review);
+      continue;
+    }
+    if (!model || !capability) missingModels.push(review);
+    if (capability?.supports_effort && !effort) {
+      missingEfforts.push(review);
+    }
+    const routing = byId.get(routingId);
+    if (!routing) {
+      findings.push(result("warn", "review routing", `${review.id}: cited routing event ${routingId} is not in the inspected ledger`));
+      continue;
+    }
+    if (routing.method?.tool !== "routing" || routing.seq >= review.seq) {
+      findings.push(result("warn", "review routing", `${review.id}: ${routingId} is not a routing event recorded before the review`));
+      continue;
+    }
+    const target = paramsOf(routing).target;
+    const routed = target && typeof target === "object" ? target as Record<string, unknown> : {};
+    const routedAgent = typeof routed.agent === "string" ? routed.agent : undefined;
+    const routedModel = typeof routed.model === "string" ? routed.model : undefined;
+    const routedEffort = typeof routed.effort === "string"
+      ? routed.effort
+      : undefined;
+    if (routedAgent && routedAgent !== review.actor.id) {
+      findings.push(result("warn", "review agent mismatch", `${review.id}: routed ${routedAgent} · ran ${review.actor.id} (${routingId})`));
+    }
+    const routedModelId = routedModel ? resolveRoutingModel(models, routedModel)?.id ?? routedModel : undefined;
+    const reviewModelId = registeredModel?.id ?? model;
+    if (routedModelId && reviewModelId && routedModelId !== reviewModelId) {
+      findings.push(result("warn", "review model mismatch", `${review.id}: routed ${routedModel} · ran ${model} (${routingId})`));
+    }
+    if (effort && routedEffort && effort !== routedEffort) {
+      findings.push(result("warn", "review effort mismatch", `${review.id}: routed ${routedEffort} · ran ${effort} (${routingId})`));
+    }
+  }
+  const summary = (reviews: Event[], label: string, detail: string): Finding | undefined => {
+    if (!reviews.length) return undefined;
+    const oldest = reviews.reduce((a, b) => (a.seq < b.seq ? a : b));
+    const counted = scope
+      ? `reviews in the inspected window (last ${scope.recentEventLimit} events; adoption seq ${adoptionSeq}; window ${scope.reachesAdoption ? "reaches" : "does not reach"} adoption)`
+      : "reviews since adoption";
+    return result("warn", label, `${reviews.length} of ${reviewCount} ${counted} ${detail} (oldest ${oldest.id})`);
+  };
+  return [
+    summary(unrouted, "review routing", "cite no routing_event_id"),
+    summary(missingModels, "review model", "do not report an actor.model listed in the routing model registry"),
+    summary(missingEfforts, "review reasoning effort", "use an effort-capable model but do not self-report method.params.reasoning_effort"),
+    ...findings,
+  ].filter((finding): finding is Finding => finding !== undefined);
+}
+
+/** Model ids are exact, case-sensitive keys or aliases. */
+export function resolveRoutingModel(models: RoutingModelRegistry, model: string): { id: string; capability: RoutingModel } | undefined {
+  if (models[model]) return { id: model, capability: models[model] };
+  for (const [id, capability] of Object.entries(models)) {
+    if (capability.aliases?.includes(model)) return { id, capability };
+  }
+  return undefined;
+}
+
+/** Newest-first window for advisory review checks. Must stay well under Worker CPU limits. */
+export const REVIEW_EFFORT_RECENT_LIMIT = 200;
+/** Page size for the targeted routing-event walk (adoption lives at the oldest page). */
+export const REVIEW_EFFORT_ROUTING_PAGE = 50;
+export const REVIEW_EFFORT_ROUTING_TEXT = '"tool":"routing"';
+
+/**
+ * Non-gate review checks cannot afford RemoteStore.all (O(ledger)). Fetch a bounded recent
+ * window plus every routing event (targeted text query, paged) so adoptionSeq is still defined
+ * when the first routing event sits outside the recent window.
+ */
+export async function loadReviewEffortEvents(
+  store: Pick<EventStore, "history">,
+  project: string,
+): Promise<{ events: Event[]; scope: ReviewEffortScope }> {
+  const routing = await collectRoutingEvents(store, project);
+  const recent = await store.history({ project, limit: REVIEW_EFFORT_RECENT_LIMIT });
+  const byId = new Map<string, Event>();
+  for (const event of routing) byId.set(event.id, event);
+  for (const event of recent.events) byId.set(event.id, event);
+  const adoptionSeq = routing.reduce<number | undefined>(
+    (first, event) => first === undefined ? event.seq : Math.min(first, event.seq),
+    undefined,
+  );
+  const oldestRecentSeq = recent.events.reduce<number | undefined>(
+    (oldest, event) => oldest === undefined ? event.seq : Math.min(oldest, event.seq),
+    undefined,
+  );
+  return {
+    events: [...byId.values()].sort((a, b) => a.seq - b.seq),
+    scope: {
+      recentEventLimit: REVIEW_EFFORT_RECENT_LIMIT,
+      reachesAdoption: adoptionSeq === undefined || !recent.truncated
+        || (oldestRecentSeq !== undefined && oldestRecentSeq <= adoptionSeq),
+    },
+  };
+}
+
+async function collectRoutingEvents(store: Pick<EventStore, "history">, project: string): Promise<Event[]> {
+  const out: Event[] = [];
+  const seen = new Set<string>();
+  let before_seq: number | undefined;
+  for (let page = 0; page < 64; page++) {
+    const query: HistoryQuery = {
+      project,
+      text: REVIEW_EFFORT_ROUTING_TEXT,
+      limit: REVIEW_EFFORT_ROUTING_PAGE,
+      before_seq,
+    };
+    const result = await store.history(query);
+    for (const event of result.events) {
+      if (event.method?.tool !== "routing" || seen.has(event.id)) continue;
+      seen.add(event.id);
+      out.push(event);
+    }
+    if (!result.truncated || result.next_before_seq === undefined) break;
+    before_seq = result.next_before_seq;
+  }
+  return out;
+}
+
+export function loadRoutingModels(repo: string): RoutingModelRegistry | undefined {
+  const path = join(repo, ".claude", "skills", "review-effort", "routing-rules", "models.json");
+  if (!existsSync(path)) return undefined;
+  const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error(`${path}: expected an object`);
+  const rows = Object.entries(parsed);
+  const keys = new Set(rows.map(([model]) => model));
+  const aliases = new Map<string, string>();
+  for (const [model, value] of rows) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${path}: ${model} must be an object`);
+    const row = value as Record<string, unknown>;
+    if (typeof row.supports_effort !== "boolean" || !Array.isArray(row.levels) || row.levels.some((level) => typeof level !== "string")) {
+      throw new Error(`${path}: ${model} must contain supports_effort:boolean and levels:string[]`);
+    }
+    if (row.aliases !== undefined && (!Array.isArray(row.aliases) || row.aliases.some((alias) => typeof alias !== "string"))) {
+      throw new Error(`${path}: ${model}.aliases must be a string[]`);
+    }
+    for (const alias of (row.aliases as string[] | undefined) ?? []) {
+      const owner = aliases.get(alias);
+      if (keys.has(alias) || owner !== undefined) {
+        throw new Error(`${path}: alias ${alias} for ${model} collides with ${keys.has(alias) ? "a model key" : `an alias for ${owner}`}`);
+      }
+      aliases.set(alias, model);
+    }
+  }
+  return parsed as RoutingModelRegistry;
 }
 
 /** Walk caused_by inside an already-verified event set. Same project + depth bound as explainEvent. */
@@ -465,6 +653,9 @@ async function main() {
   if (!existsSync(cfgPath)) findings.push(result("fail", "repository wiring", `${cfgPath} is missing; run retrace-git install --repo ${repo}`));
   else try { cfg = JSON.parse(readFileSync(cfgPath, "utf8")); findings.push(result("pass", "repository wiring", cfgPath)); }
   catch (e: any) { findings.push(result("fail", "repository wiring", `${cfgPath} is invalid JSON: ${e.message}`)); }
+  let routingModels: RoutingModelRegistry | undefined;
+  try { routingModels = loadRoutingModels(repo); }
+  catch (e: any) { findings.push(result("warn", "review routing registry", e.message)); }
 
   if (!gate) {
     findings.push(...hookFindings(repo));
@@ -541,11 +732,21 @@ async function main() {
           const remote = new RemoteStore(url, auth.token);
           const { findings: authFindings, verified } = await gateRemoteAuthorization(commit, remote, project, undefined, url, { project });
           findings.push(...authFindings);
+          if (routingModels) findings.push(...reviewEffortFindings(verified.events, routingModels));
           try {
             findings.push(await remoteCaptureCoverage(repo, project, remote, cfg, args, undefined, url, verified));
           } catch (e: any) { findings.push(result("fail", "capture coverage", e.message)); }
         } catch (e: any) { findings.push(result("fail", "HEAD delivery", e.message)); }
       } else {
+        if (routingModels) {
+          try {
+            const loaded = await loadReviewEffortEvents(new RemoteStore(url, auth.token), project);
+            const reviewFindings = reviewEffortFindings(loaded.events, routingModels, loaded.scope);
+            findings.push(...reviewFindings.map((finding) => ({ ...finding, detail: `${finding.detail} (unsigned history; --gate uses the verified ledger)` })));
+          } catch (e: any) {
+            findings.push(result("warn", "review routing", `${e.message}; advisory review history not checked`));
+          }
+        }
         try {
           const action = headEvent.action === "merged" ? "merged" : "committed";
           const res = await fetch(`${url}/projects/${encodeURIComponent(project)}/events?artifact_id=${encodeURIComponent(commit ?? "")}&action=${action}`, { headers });
