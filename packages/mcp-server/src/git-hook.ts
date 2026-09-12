@@ -41,7 +41,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync, appendFileSync, chmodSync, unlinkSync, mkdirSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { basename, join, resolve } from "node:path";
-import { EventInput, appendEvent, describeEvent, Event, PRODUCER_SIG_FORMAT_V2, resolveCommitActor } from "@retrace-dev/core";
+import { EventInput, appendEvent, describeEvent, Event, PRODUCER_SIG_FORMAT_V2, resolveCommitActor, classifyCommitClaim, attachClaimDecision, ClassificationUnavailableError, parseTrailerPolicy, isGitCommitSeal, isLegacyClientCommitSeal, routedCanonicalRForHook } from "@retrace-dev/core";
 import { makeStore, detectIde, harnessSession } from "./index.js";
 import { RemoteApiError, RemoteCapabilityError, RemoteStore } from "./remote-store.js";
 import { loadProducerPrivateKeyFromFile, sealForAppend } from "./producer-key.js";
@@ -125,6 +125,7 @@ export function removePendingSeal(gitDir: string, sha: string): void {
 }
 
 export function retryableHookFailure(error: unknown): boolean {
+  if (error instanceof ClassificationUnavailableError) return true;
   if (error instanceof RemoteCapabilityError) return error.retryable;
   if (error instanceof RemoteApiError) return error.status === 426 || error.status >= 500;
   if (!(error instanceof Error)) return false;
@@ -295,6 +296,14 @@ async function logCommit(repo: string, sha: string, cfg: Cfg, live = false): Pro
   const keyFile = resolveHookProducerKeyFile({ credential: cfg.credential });
   if (keyFile) input = await sealForAppend(input, { privateKey: loadProducerPrivateKeyFromFile(keyFile), remoteUrl: cfg.url, format: PRODUCER_SIG_FORMAT_V2, deadlineMs: hookDeadlineMs() });
   const store = cfg.url ? new RemoteStore(cfg.url, cfg.token, { deadlineMs: hookDeadlineMs() }) : makeStore();
+  if (!(store instanceof RemoteStore) && parseTrailerPolicy(process.env.RETRACE_TRAILER_POLICY) === "shadow" && isGitCommitSeal(input) && !isLegacyClientCommitSeal(input)) {
+    const classified = await classifyCommitClaim({
+      store, input, producer: "git-hook", sealedBy: "unstamped", trailerPolicy: "shadow",
+      canonicalR: await routedCanonicalRForHook(store, input.project),
+    });
+    if (classified.kind === "unavailable") throw new ClassificationUnavailableError(classified.reason);
+    if (classified.kind === "decision") input = attachClaimDecision(input, classified.record);
+  }
   return store instanceof RemoteStore ? store.append(input) : appendEvent(store, input);
 }
 

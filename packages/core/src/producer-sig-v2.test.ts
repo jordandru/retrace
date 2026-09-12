@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { Event, EventInput, EventStore, Share, appendEvent, canonicalize, createHandler, generateSigningKey, pageHistoryNewest } from "./index.js";
+import { Event, EventInput, EventStore, MemoryEventStore, POLICY_PROFILE, Share, appendEvent, canonicalize, createHandler, generateSigningKey, pageHistoryNewest } from "./index.js";
 import {
   CLAIM_DECISION_PARAM, PRODUCER_HOOK_SYSTEM_ACTOR, PRODUCER_SIG_FORMAT, PRODUCER_SIG_FORMAT_V2, PRODUCER_SIG_V2_MIN_CLI_VERSION,
   PRODUCER_SIG_VERDICT_PARAM, PRODUCER_SIGNED_ACTOR_PARAM, PRODUCER_WEBHOOK_SYSTEM_ACTOR, RESERVED_METHOD_PARAMS, RESERVED_METHOD_PARAMS_V2,
@@ -155,18 +155,54 @@ test("T27: /2 tampered signed field is invalid; /1 legacy commit verifies under 
 
 test("T27 online: /2 record (off) and shadow stamp derived producer_signed_actor; /1 stays byte-compatible", async () => {
   const key = await generateSigningKey();
-  for (const policy of ["off", "shadow"] as const) {
-    const { store, handle } = await hookHandler(policy, key.publicKey);
+  const run = async (policy: "off" | "shadow") => {
+    let store: MemoryEventStore | EventStore;
+    let handle: (r: Request) => Promise<Response>;
+    if (policy === "shadow") {
+      store = new MemoryEventStore();
+      handle = createHandler(store, {
+        token: "owner-tok-0123456789",
+        ownerPrincipal: { type: "human", id: "jordan@example.com" },
+        ownerActor: { type: "human", id: "jordan@example.com" },
+        trailerPolicy: "shadow",
+        credentials: [{
+          token: HOOK_TOKEN,
+          actor: { type: "system", id: "retrace-git" },
+          trust: "assert",
+          allowed_actors: [
+            { type: "agent", id: "claude-code" },
+            { type: "agent", id: "codex" },
+            { type: "human", id: "jordan@example.com" },
+          ],
+          public_key: key.publicKey,
+        }],
+      });
+      const put = await handle(new Request("http://test/projects/p/policy", {
+        method: "PUT",
+        headers: { authorization: "Bearer owner-tok-0123456789", "content-type": "application/json", "if-match": "none" },
+        body: JSON.stringify({
+          profile: POLICY_PROFILE, project: "p", trusted_hook_stamps: ["assert:git hook (assert)"],
+          unresolved_claims: "record", repositories: [{ name: "acme/app", aliases: ["p"] }], github_repos: ["acme/app"],
+        }),
+      }));
+      assert.equal(put.status, 201, await put.text());
+    } else {
+      const wired = await hookHandler(policy, key.publicKey);
+      store = wired.store;
+      handle = wired.handle;
+    }
     const signed = await signProducer(commitInput(), key.privateKey, { format: PRODUCER_SIG_FORMAT_V2 });
     const res = await post(handle, "/events", signed, HOOK_TOKEN);
     assert.equal(res.status, 201, policy);
-    const sealed = store.events.at(-1)!;
+    const sealed = (await store.all("p")).at(-1)!;
     assert.equal(await verifyProducerSig(sealed, key.publicKey), true, `${policy} offline`);
     assert.deepEqual(sealed.method?.params?.[PRODUCER_SIGNED_ACTOR_PARAM], {
       type: "agent", id: "claude-code", on_behalf_of: "jordan@example.com",
     });
     assert.equal(canonicalize(producerSignedPayload(signed)), canonicalize(producerSignedPayload(sealed)));
-  }
+  };
+  await run("off");
+  await run("shadow");
 
   const { store, handle } = await hookHandler("shadow", key.publicKey);
   const legacy = await signProducer({

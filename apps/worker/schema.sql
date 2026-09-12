@@ -127,9 +127,50 @@ CREATE TABLE IF NOT EXISTS policy_routes (
 );
 CREATE INDEX IF NOT EXISTS idx_policy_routes_project ON policy_routes(project);
 
+CREATE TABLE IF NOT EXISTS classification_contexts (
+  project TEXT NOT NULL,
+  canonical_repo TEXT NOT NULL,
+  sha TEXT NOT NULL,
+  read_head_seq INTEGER NOT NULL,
+  read_head_hash TEXT NOT NULL,
+  policy_digest TEXT NOT NULL,
+  first_producer TEXT NOT NULL,
+  first_F_digest TEXT NOT NULL,
+  first_claim_digest TEXT NOT NULL,
+  classifier_profile TEXT NOT NULL,
+  rollout_mode TEXT NOT NULL,
+  amendment_snapshot TEXT NOT NULL DEFAULT '[]',
+  legacy_client_decision TEXT,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (project, canonical_repo, sha)
+);
+CREATE TABLE IF NOT EXISTS classification_path_lowers (
+  project TEXT NOT NULL,
+  canonical_repo TEXT NOT NULL,
+  sha TEXT NOT NULL,
+  path TEXT NOT NULL,
+  lower_seq INTEGER NOT NULL,
+  PRIMARY KEY (project, canonical_repo, sha, path)
+);
+CREATE TABLE IF NOT EXISTS classification_breakers (
+  project TEXT PRIMARY KEY,
+  state TEXT NOT NULL CHECK (state IN ('closed','open')),
+  failures INTEGER NOT NULL DEFAULT 0,
+  failure_window_start TEXT,
+  last_failure_at TEXT,
+  opened_at TEXT,
+  probe_lease_until TEXT,
+  probe_lease_owner TEXT
+);
+
 -- Existing DBs created by half A lack routing columns on pending_deliveries.
 ALTER TABLE pending_deliveries ADD COLUMN repo TEXT;
 ALTER TABLE pending_deliveries ADD COLUMN routing_source TEXT;
 ALTER TABLE pending_deliveries ADD COLUMN routing_digest TEXT;
 ALTER TABLE pending_deliveries ADD COLUMN routing_state TEXT;
+ALTER TABLE pending_deliveries ADD COLUMN lease_owner TEXT;
+ALTER TABLE pending_deliveries ADD COLUMN lease_until TEXT;
+ALTER TABLE pending_deliveries ADD COLUMN outcomes TEXT;
+ALTER TABLE pending_deliveries ADD COLUMN attempt_count INTEGER;
+ALTER TABLE pending_deliveries ADD COLUMN state TEXT;
 
