@@ -62,7 +62,10 @@ never reliably calls the provenance tools; OpenCode is held (PR 19) until it can
 *Correction 2026-09-12:* the binding provenance rules for every seat now live in `docs/agent-rules.md`, and the
 environment rules in `docs/agent-ops.md`; the identity files (`CLAUDE.md`, `AGENTS.md`, `GROK.md`,
 `.github/copilot-instructions.md`, `.cursor/rules/retrace-provenance.mdc`) hold identity only. The seat rules below
-are the roles those rules imply, kept here unchanged. One addition from practice: on 2026-09-12 cursor-agent at high
+are the roles those rules imply, kept here unchanged, with one clarification from agent-rules 12: the design
+gate (rule 2) applies to anything that governs behaviour, whatever its file type — agent rules and identity
+files included — while documents that govern nothing (measurements, snapshots, references, dated corrections)
+merge on one non-author review. One addition from practice: on 2026-09-12 cursor-agent at high
 effort took the first-pass review seat for PR 37 while Codex was rate-capped (routing evt_44b11c82, verdict
 evt_a742fc51), so "reviewer when routed" is now part of that seat.
 

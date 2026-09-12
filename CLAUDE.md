@@ -11,5 +11,5 @@ Read both before working. This file holds only what is specific to the Claude Co
 - Seat: coordinator, spec author, reviewer of last resort, merger (`docs/team-roles.md`). Merges only
   from `/home/jordandrumiler/provenance/retrace-main`. The coordinator's own documents reach main by
   pull request like everyone else's (agent-rules 12).
-- Producer key: `RETRACE_PRODUCER_KEY_FILE` on this seat's MCP server (agent-ops 13).
+- Producer key: `RETRACE_PRODUCER_KEY_FILE` on this seat's MCP server (agent-rules 13).
 - This identity block is for Claude Code only. Any other harness that reads this file must not adopt it.

@@ -6,7 +6,8 @@ rules that were duplicated — and drifting — across `CLAUDE.md`, `AGENTS.md`,
 identity only and point here.
 
 These rules are identical for every seat, because the ledger measures every seat the same way. If a rule
-here and a sentence in an identity file ever disagree, this file wins. Rules that exist because of this
+here and a sentence in an identity file ever disagree, this file wins; for what gate a change takes,
+this file also wins over `docs/team-roles.md` (rule 12). Rules that exist because of this
 laptop, this shared checkout, or a harness quirk are **not** here: they live in `docs/agent-ops.md`, and
 each one names the product change that would make it unnecessary.
 
@@ -30,14 +31,15 @@ each one names the product change that would make it unnecessary.
    running session — not shortened, not normalised, not a nicer name. If the harness exposes nothing,
    omit the field; never pin a value and never guess. Spelling differences between harnesses
    (`gpt-5.6-sol` / `GPT-5.6 Sol`, `claude-opus-4-8` / `claude-opus-4.8`) are the routing registry's job
-   to alias, not yours to fix.
+   to alias (`.claude/skills/review-effort/routing-rules/models.json`, PR 35), not yours to fix.
 
 5. **Never log a commit through MCP.** The Git hook seals commits and merges with authoritative
    metadata, and the GitHub webhook seals them again. Two producers, one sha: that agreement is the check.
 
 6. **Commit trailers are a claim, not the proof.** Every commit — merges included — carries
    `Retrace-Actor: <your seat>`, `Retrace-Model: <verbatim model>`, `Retrace-Caused-By: <instruction
-   event id>`. The ledger classifies that claim against pinned edit evidence
+   event id>`. `Retrace-Model` follows rule 4: when the runtime exposes no identifier the trailer is
+   omitted, never guessed. The ledger classifies that claim against pinned edit evidence
    (`docs/design/commit-trailer-consistency.md`, §15 step 3 onward): a trailer the evidence does not
    support is recorded as unsupported, and after step 6 the actor it names is withheld.
 
@@ -66,11 +68,24 @@ each one names the product change that would make it unnecessary.
     request-changes on the owner's own pull request.
 
 12. **Every change to main arrives by pull request** — design notes and briefs included, the
-    coordinator's included. The only direct commits to main are the merger's merge commits. A docs-only
-    pull request merges on one non-author review; code follows the review order in
-    `docs/team-roles.md`.
+    coordinator's included. The only direct commits to main are the merger's merge commits. The review a
+    pull request needs is decided by **consequence, not file type**: (a) anything that governs behaviour
+    — a design note or brief, these rules or an identity file, a security, build, deploy, or runbook
+    control — takes the design gate in `docs/team-roles.md`, whatever its extension; (b) documents that
+    govern nothing — measurements, snapshots, references, dated in-place corrections that change no rule
+    — merge on one non-author review; (c) code follows the code order in `docs/team-roles.md`. When a
+    gate seat is capped, absent, or the author, the coordinator routes a substitute and records the
+    routing (rule 11); Jordan may reassign any seat, including for an emergency fix, and the
+    reassignment is recorded. `docs/team-roles.md` says who sits where; this file says what gate a
+    change takes; where they disagree, this file wins and `team-roles` is corrected.
 
-13. **Outward actions are Jordan's.** Merge, deploy, publish, credential minting or rotation, secret
+13. **Keys and tokens stay with the seat that owns them.** Never read, print, copy, or commit a
+    credential file (`~/.retrace/*.env`, `~/.retrace/worker-credentials*.json`,
+    `~/.copilot/mcp-config.json`) or any token. A seat's private signing key is set on that seat's own
+    MCP server (`RETRACE_PRODUCER_KEY_FILE`, mode 0600) and never placed in a shared secret. Never borrow
+    another seat's token to keep working.
+
+14. **Outward actions are Jordan's.** Merge, deploy, publish, credential minting or rotation, secret
     changes, webhook changes, and correction seals wait for an explicit go, one at a time; approval in
     one context does not carry to the next.
 

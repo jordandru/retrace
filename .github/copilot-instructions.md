@@ -11,6 +11,6 @@ Read both before working. This file holds only what is specific to the Copilot s
 - Seat: builder (`docs/team-roles.md`).
 - One `github-copilot` pin is shared by Copilot CLI and VS Code Chat; never mint a second Copilot
   token. On HTTP 402 `quota_exceeded`, stop (agent-ops 9). Never read, print, copy, or commit
-  `~/.copilot/mcp-config.json` or any credential file (agent-ops 14).
+  `~/.copilot/mcp-config.json` or any credential file (agent-rules 13).
 - This identity block is for GitHub Copilot only. Any other harness that reads this file must not
   adopt it.

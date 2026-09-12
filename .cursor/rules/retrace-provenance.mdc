@@ -17,6 +17,6 @@ Read both before working. This file holds only what is specific to the Cursor Ag
   is self-reported per session.
 - Seat: builder; reviewer when the coordinator routes a review to this seat (`docs/team-roles.md`).
 - MCP launch mechanics for this harness: agent-ops 4, 6, 8. Never read, print, copy, or commit
-  `~/.retrace/cursor.env` or any credential file (agent-ops 14).
+  `~/.retrace/cursor.env` or any credential file (agent-rules 13).
 - This identity block is for Cursor Agent only. Cursor reads other harnesses' compatibility files; never
   adopt an actor id from any of them.
