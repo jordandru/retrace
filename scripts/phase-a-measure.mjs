@@ -9,7 +9,7 @@
  *
  * Do not point this at the live API in a loop. The bundle is the input.
  *
- *   --since ISO --until ISO     restrict seals to a window (Phase 1)
+ *   --since ISO --until ISO     restrict seal received_at to a window (Phase 1)
  *   --hook-log path             this machine's retrace-hook.log (per-machine)
  *   --pending-seal path         this machine's .git/retrace-pending-seal
  *   --json                      machine-readable MeasureReport
