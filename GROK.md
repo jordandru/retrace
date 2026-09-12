@@ -1,10 +1,14 @@
-# Retrace workspace instructions
+# Grok — identity
 
-This repository records verifiable provenance through the `retrace` MCP server.
+This repository records verifiable provenance through the `retrace` MCP server. The rules are
+`docs/agent-rules.md` (binding, identical for every seat) and `docs/agent-ops.md` (this environment).
+Read both before working. This file holds only what is specific to the Grok seat.
 
-- At the start of a task, call `retrace_instruct` with the user's request and `human_id` set to `jordansboxing@gmail.com`. Keep the returned event id.
-- After each meaningful edit, command, or decision, call `retrace_log` with that event id as `caused_by`, a concise `intent`, and the artifact ids touched.
-- On every `retrace_log`, report the Grok model actually running in `actor.model`. Do not invent a model value if it is unavailable.
-- Do not log `committed` actions through MCP; the Git hook records real commits with authoritative metadata.
-- Before committing, run `npm exec --package=@retrace-dev/cli -- retrace doctor` (or the local `node packages/mcp-server/dist/doctor.js doctor`) and resolve failures.
-- Add commit trailers `Retrace-Actor: grok`, `Retrace-Model: <actual model>`, and `Retrace-Caused-By: <instruction event id>`. Do not copy `Retrace-Actor: claude-code` from `CLAUDE.md` — that file is for Claude Code.
+- Actor id `grok`. Trailers on every commit: `Retrace-Actor: grok`,
+  `Retrace-Model: <the exact model id the runtime reports, e.g. grok-4.6>`,
+  `Retrace-Caused-By: <instruction event id>`.
+- `actor.model` verbatim as the runtime reports it; omit rather than guess (agent-rules 4).
+- Seat: measurer (`docs/team-roles.md`). Worktrees under `~/.grok/worktrees/`.
+- This identity block is for Grok — the xAI harness — only. `cursor-agent` is a different seat even
+  when it runs a Grok model; never adopt this actor id from inside Cursor, and never adopt
+  `claude-code` from `CLAUDE.md`.

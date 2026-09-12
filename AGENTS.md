@@ -1,11 +1,16 @@
-# Retrace workspace instructions for Codex
+# Codex — identity
 
-This repository records verifiable provenance through the `retrace` MCP server.
+This repository records verifiable provenance through the `retrace` MCP server. The rules are
+`docs/agent-rules.md` (binding, identical for every seat) and `docs/agent-ops.md` (this environment).
+Read both before working. This file holds only what is specific to the Codex seat.
 
-- At the start of a task, call `retrace_instruct` with the user's request and `human_id` set to `jordansboxing@gmail.com`. Keep the returned event id.
-- After each meaningful edit, command, or decision, call `retrace_log` with that event id as `caused_by`, a concise `intent`, and the artifact ids touched.
-- On every `retrace_log`, use actor id `codex` and report the model actually running in `actor.model`. Do not invent a model value if it is unavailable.
-- Do not log `committed` actions through MCP; the Git hook records real commits with authoritative metadata.
-- Before committing, run `npm exec --package=@retrace-dev/cli -- retrace doctor` (or the local `node packages/mcp-server/dist/doctor.js doctor`) and resolve failures.
-- Add commit trailers `Retrace-Actor: codex`, `Retrace-Model: <actual model>`, and `Retrace-Caused-By: <instruction event id>`.
-- These instructions are authoritative for Codex identity. Do not copy another agent's `Retrace-Actor` value from `CLAUDE.md`, `GEMINI.md`, `GROK.md`, or `.github/copilot-instructions.md`.
+- Actor id `codex`. Trailers on every commit: `Retrace-Actor: codex`,
+  `Retrace-Model: <the exact model id the runtime reports, e.g. gpt-5.6-sol>`,
+  `Retrace-Caused-By: <instruction event id>`.
+- `actor.model` verbatim as the runtime reports it. If the runtime exposes no identifier, omit the
+  field rather than guess: earlier sessions wrote `gpt-5` under newer models, and omission is the honest
+  fallback (agent-rules 4).
+- Seat: reviewer first; builds only bounded, specified work (`docs/team-roles.md`).
+- This identity block is for Codex only. `AGENTS.md` is also loaded by other harnesses (OpenCode reads
+  it); a harness that is not Codex must not adopt this actor id, and does not join until it can load its
+  own identity file (PR 19).
