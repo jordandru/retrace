@@ -46,8 +46,7 @@ import { makeStore, detectIde, harnessSession } from "./index.js";
 import { RemoteApiError, RemoteCapabilityError, RemoteStore } from "./remote-store.js";
 import { loadProducerPrivateKeyFromFile, sealForAppend } from "./producer-key.js";
 import { isMainModule } from "./is-main.js";
-
-const HOOK_PROCESS_STARTED_AT = Date.now();
+import { performance } from "node:perf_hooks";
 
 export type Cfg = { project?: string; db?: string; url?: string; token?: string; credential?: string; environment?: string; repoName?: string;
   /** Resolved from --allow-remote / RETRACE_ALLOW_REMOTE, not from .retrace.json — a repo that HAS the file is already
@@ -291,7 +290,8 @@ async function logCommit(repo: string, sha: string, cfg: Cfg, live = false): Pro
   // Like live-only location context above, duration is truthful only for the hook process that produced this commit.
   // Replay (`commit <sha>`, backfill, pending drain) measures another process, so leave it absent. Stamp before signing:
   // duration_ms is producer-signed and therefore can cover hook-local work only, never the POST round trip.
-  if (live) input.duration_ms = Date.now() - HOOK_PROCESS_STARTED_AT;
+  // Node's monotonic clock starts with the process, before this module and its dependencies load.
+  if (live) input.duration_ms = Math.floor(performance.now());
   const keyFile = resolveHookProducerKeyFile({ credential: cfg.credential });
   if (keyFile) input = await sealForAppend(input, { privateKey: loadProducerPrivateKeyFromFile(keyFile), remoteUrl: cfg.url, format: PRODUCER_SIG_FORMAT_V2, deadlineMs: hookDeadlineMs() });
   const store = cfg.url ? new RemoteStore(cfg.url, cfg.token, { deadlineMs: hookDeadlineMs() }) : makeStore();

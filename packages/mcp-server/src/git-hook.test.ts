@@ -46,6 +46,27 @@ async function waitForFile(path: string, timeoutMs = 1_000): Promise<void> {
   }
 }
 
+test("live hook duration includes startup before the hook module loads", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "retrace-git-startup-"));
+  const db = join(dir, "ledger.db");
+  sh(dir, "git", ["init", "-q", "-b", "main"]);
+  sh(dir, "git", ["config", "core.hooksPath", "/dev/null"]);
+  writeFileSync(join(dir, "a.txt"), "fixture\n");
+  sh(dir, "git", ["add", "a.txt"]);
+  sh(dir, "git", ["commit", "-qm", "fixture"]);
+  const preload = join(dir, "startup.mjs");
+  writeFileSync(preload, `
+    const until = performance.now() + 100;
+    while (performance.now() < until) await new Promise(resolve => setTimeout(resolve, 10));
+  `);
+  sh(dir, "node", ["--import", preload, bin, "commit", "--hook", "--repo", dir], {
+    RETRACE_DB: db, RETRACE_PROJECT: "rpg",
+  });
+  const [commit] = await new SqliteStore(db).all("rpg");
+  assert.ok(Number.isInteger(commit.duration_ms));
+  assert.ok(commit.duration_ms! >= 100, `process-start duration omitted startup: ${commit.duration_ms}ms`);
+});
+
 test("git adapter: install hook, human commit, agent commit with trailers, backfill idempotent", async () => {
   const dir = mkdtempSync(join(tmpdir(), "retrace-git-"));
   const db = join(dir, "ledger.db");
