@@ -17,6 +17,7 @@ import {
   parseExportBundle,
   producerSignedPayload,
   producerSigFormatOf,
+  sealedByKind,
   PRODUCER_SIG_FORMAT,
   PRODUCER_SIG_FORMAT_V2,
   type Event,
@@ -101,6 +102,8 @@ export type MeasureReport = {
     kind: Kind;
     note: string;
     intervals: number;
+    unique_shas: number;
+    first_commit_dropped: true;
     p50: number | null;
     p95: number | null;
     mean: number | null;
@@ -160,29 +163,42 @@ export function utf8Bytes(value: unknown): number {
 }
 
 export function inWindow(timestamp: string, window: MeasureWindow): boolean {
-  if (window.since && timestamp < window.since) return false;
-  if (window.until && timestamp > window.until) return false;
+  if (!window.since && !window.until) return true;
+  const t = Date.parse(timestamp);
+  if (!Number.isFinite(t)) return false;
+  if (window.since) {
+    const s = Date.parse(window.since);
+    if (Number.isFinite(s) && t < s) return false;
+  }
+  if (window.until) {
+    const u = Date.parse(window.until);
+    if (Number.isFinite(u) && t > u) return false;
+  }
   return true;
 }
 
 export function claimDecisionOf(event: Event): ClaimDecisionView | undefined {
+  // Design §6 rule 5: a /1-signed event stores a caller-supplied claim_decision byte-for-byte.
+  // That block is never a server decision and must not enter the histogram.
+  if (isLegacyClientCommitSeal(event)) return undefined;
   const params = event.method?.params as Record<string, unknown> | undefined;
   const raw = params?.claim_decision;
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
   const rec = raw as Record<string, unknown>;
-  const decision = rec.decision && typeof rec.decision === "object" && !Array.isArray(rec.decision)
-    ? rec.decision as Record<string, unknown>
-    : rec;
-  const would = decision.would_write && typeof decision.would_write === "object" && !Array.isArray(decision.would_write)
-    ? decision.would_write as Record<string, unknown>
+  const decision = rec.decision;
+  if (!decision || typeof decision !== "object" || Array.isArray(decision)) return undefined;
+  const d = decision as Record<string, unknown>;
+  if (typeof d.status !== "string") return undefined;
+  const would = d.would_write && typeof d.would_write === "object" && !Array.isArray(d.would_write)
+    ? d.would_write as Record<string, unknown>
     : undefined;
   return {
-    status: typeof decision.status === "string" ? decision.status : undefined,
-    reason: typeof decision.reason === "string" ? decision.reason : undefined,
-    classification_ms: typeof decision.classification_ms === "number" ? decision.classification_ms : undefined,
-    actor_written: typeof decision.actor_written === "string" ? decision.actor_written : undefined,
+    status: d.status,
+    reason: typeof d.reason === "string" ? d.reason : undefined,
+    classification_ms: typeof d.classification_ms === "number" ? d.classification_ms : undefined,
+    actor_written: typeof d.actor_written === "string" ? d.actor_written : undefined,
     would_write: would && typeof would.actor_written === "string" ? { actor_written: would.actor_written } : undefined,
-    shadow: decision.shadow === true,
+    shadow: d.shadow === true,
   };
 }
 
@@ -191,6 +207,37 @@ export function commitShaOf(event: Event): string | undefined {
   if (fromParams) return fromParams;
   const commit = event.artifacts?.find((a) => a.kind === "commit" || a.id.startsWith("commit:"));
   return commit?.id;
+}
+
+/** Grouping key for one git COMMIT (hook+webhook seals of the same sha). Prefers method.params.sha. */
+export function commitShaKey(event: Event): string {
+  const raw = event.method?.params && typeof event.method.params.sha === "string" ? event.method.params.sha : undefined;
+  if (raw && /^[0-9a-f]{7,40}$/i.test(raw)) return raw.toLowerCase();
+  const commit = event.artifacts?.find((a) => a.kind === "commit" || a.id.startsWith("commit:"));
+  const m = commit?.id.match(/@([0-9a-f]{7,40})$/i);
+  if (m) return m[1].toLowerCase();
+  return `event:${event.id}`;
+}
+
+/** assert: hook stamps and webhook:github are trusted producers; pinned client commit claims are not. */
+export function isTrustedCommitSeal(event: Event): boolean {
+  const kind = sealedByKind(event.method?.params?.sealed_by);
+  return kind === "assert" || kind === "webhook";
+}
+
+function canonicalSha(sha: string, all: string[]): string {
+  if (sha.startsWith("event:")) return sha;
+  let best = sha;
+  for (const other of all) {
+    if (other.startsWith("event:")) continue;
+    if ((other.startsWith(sha) || sha.startsWith(other)) && other.length > best.length) best = other;
+  }
+  return best;
+}
+
+function earliestBoundSeal(seals: Event[]): Event {
+  const trusted = seals.filter(isTrustedCommitSeal).sort((a, b) => a.seq - b.seq);
+  return trusted[0] ?? [...seals].sort((a, b) => a.seq - b.seq)[0];
 }
 
 function bump(map: Record<string, number>, key: string, n = 1): void {
@@ -251,12 +298,30 @@ export function measureEvents(events: Event[], window: MeasureWindow = {}): Omit
   const signedBytes: number[] = [];
   const methodTokens: number[] = [];
 
-  for (let i = 0; i < scopedSeals.length; i++) {
-    const curr = scopedSeals[i];
-    // Previous seal in the full chain (may sit outside the window) so "between consecutive seals" is well-defined.
-    const prev = seals.filter((s) => s.seq < curr.seq).at(-1);
-    const lo = prev ? prev.seq : -1;
-    const between = ordered.filter((e) => e.seq > lo && e.seq < curr.seq && e.actor.type === "agent" && !isGitCommitSeal(e));
+  const rawKeys = seals.map(commitShaKey);
+  const groups = new Map<string, Event[]>();
+  for (const s of seals) {
+    const key = canonicalSha(commitShaKey(s), rawKeys);
+    const list = groups.get(key) ?? [];
+    list.push(s);
+    groups.set(key, list);
+  }
+  const commits = [...groups.entries()].map(([sha, list]) => ({
+    sha,
+    seals: [...list].sort((a, b) => a.seq - b.seq),
+    bound: earliestBoundSeal(list),
+  })).sort((a, b) => a.bound.seq - b.bound.seq || a.seals[0].seq - b.seals[0].seq);
+
+  // One interval per unique SHA. The first commit has no previous commit — drop it
+  // rather than invent a pair bounded by ledger start (lo = -1). Previous-commit
+  // bound may sit outside the window (kept).
+  for (let i = 1; i < commits.length; i++) {
+    const curr = commits[i];
+    if (!curr.seals.some((s) => inWindow(s.timestamp, window))) continue;
+    const prev = commits[i - 1];
+    const lo = prev.bound.seq;
+    const hi = curr.bound.seq;
+    const between = ordered.filter((e) => e.seq > lo && e.seq < hi && e.actor.type === "agent" && !isGitCommitSeal(e));
     const by_actor: Record<string, number> = {};
     for (const e of between) {
       bump(by_actor, e.actor.id);
@@ -269,12 +334,13 @@ export function measureEvents(events: Event[], window: MeasureWindow = {}): Omit
       }
       if (typeof e.method?.tokens === "number") methodTokens.push(e.method.tokens);
     }
+    const end = curr.bound;
     intervals.push({
-      commit_id: curr.id,
-      commit_seq: curr.seq,
-      sha: commitShaOf(curr),
-      timestamp: curr.timestamp,
-      actor: `${curr.actor.type}:${curr.actor.id}`,
+      commit_id: end.id,
+      commit_seq: end.seq,
+      sha: curr.sha.startsWith("event:") ? commitShaOf(end) : curr.sha,
+      timestamp: end.timestamp,
+      actor: `${end.actor.type}:${end.actor.id}`,
       agent_events: between.length,
       by_actor,
     });
@@ -286,8 +352,8 @@ export function measureEvents(events: Event[], window: MeasureWindow = {}): Omit
   const tokenStats = stats(methodTokens);
 
   const histogramNote = withDecision === 0
-    ? "census of recorded claim_decision: none present. Pre-shadow seals have no classifier output; do not read this as a status histogram of the classifier."
-    : "census of claim_decision.decision.status on git commit seals in scope. Seals without the block are 'absent' (legacy / pre-shadow / /1).";
+    ? "census of recorded claim_decision.decision.status: none present. /1-signed seals are always absent (§6 rule 5: a client-supplied claim_decision is not a server decision). Pre-shadow unsigned//2 seals have no classifier output."
+    : "census of claim_decision.decision.status on unsigned and /2 git commit seals in scope. /1-signed seals are always absent (§6 rule 5). Top-level claim_decision.status without .decision is ignored.";
 
   return {
     histogram: {
@@ -307,8 +373,10 @@ export function measureEvents(events: Event[], window: MeasureWindow = {}): Omit
     },
     logs_per_commit: {
       kind: "census",
-      note: "agent events strictly between consecutive git commit seals, by actor.id. Includes NOOA audits and every other agent; do not filter them out — the by_actor split is the measurement.",
+      note: "agent events strictly between consecutive COMMITS (unique full sha), by actor.id. Dual-producer hook+webhook seals of one sha are one commit. Each interval is bounded by the earliest trusted seal of the previous commit (assert: or webhook:github; else earliest git seal). The first commit in the chain is dropped — it has no previous commit. Includes NOOA audits and every other agent; do not filter them out — the by_actor split is the measurement.",
       intervals: intervals.length,
+      unique_shas: commits.length,
+      first_commit_dropped: true,
       p50: countStats.p50,
       p95: countStats.p95,
       mean: countStats.mean,
@@ -504,7 +572,8 @@ export function renderMarkdown(report: MeasureReport): string {
   lines.push("");
   lines.push(row(["metric", "value", "kind"]));
   lines.push(row(["---", "---:", "---"]));
-  lines.push(row(["intervals (commits in scope)", String(report.logs_per_commit.intervals), "census"]));
+  lines.push(row(["unique SHAs (git commit seals grouped)", String(report.logs_per_commit.unique_shas), "census"]));
+  lines.push(row(["intervals (unique SHA with a previous commit, in scope)", String(report.logs_per_commit.intervals), "census"]));
   lines.push(row(["p50 agent events / commit", fmt(report.logs_per_commit.p50), "census"]));
   lines.push(row(["p95 agent events / commit", fmt(report.logs_per_commit.p95), "census"]));
   lines.push(row(["mean", fmt(report.logs_per_commit.mean), "census"]));

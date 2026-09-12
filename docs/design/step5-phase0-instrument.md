@@ -26,6 +26,7 @@ Checked in:
 | sealed_by.owner | 57 | **57** | 1 | **1** |
 | sealed_by.unstamped | 947 | **947** | 90 | **90** |
 | agent_events_not_pinned | (not quoted) | **1095** | (not quoted) | **75** |
+| pinned agent events (`agent_events − agent_events_not_pinned`) | (misquoted as sealed_by.pinned) | **1224** | (brief said 15; that was sealed_by.pinned) | **8** |
 | legacy_client | (not quoted) | **4** | (not quoted) | **0** |
 | causal coverage | (not quoted) | **98.2%** | (not quoted) | **19%** |
 | policy | live v1 | **v1 `97dc1469…`** | live v1 | **v1 `e2adcebe…`** |
@@ -52,7 +53,7 @@ Witnesses are **pinned** agent events only (`sealed_by` starts with `pinned:`). 
 pinned_agent_events ≈ pinned − (pinned humans/system, if any) ≤ sealed_by.pinned
 ```
 
-On these snapshots almost all `pinned` mass is agent ingress. boxing-rpg has **15 pinned events and 93 commits**. retrace has **1714 pinned events and 545 commits**.
+Witnesses are pinned **agent** events, not `sealed_by.pinned` across all actors. boxing-rpg: **8 pinned agent events** (83 agent − 75 not pinned) against **93 commits**. The 15 in the 09-10 brief (and in v1 of this doc) was `sealed_by.pinned` for every actor; corrected here from PR 37 round-1, slightly stronger density case. retrace: **1224 pinned agent events** (2319 − 1095) against **545 commits** (`sealed_by.pinned` is 1714).
 
 Shadow classifies **new** seals going forward. Existing seals are not retroactively annotated. The window histogram is therefore a prediction about **the next week of commits, at today's evidence density**, not a retrospective of the whole chain. A retrospective classify of all 545 / 93 historical commits would mix pre-capture history with current practice and is not what step 5 publishes.
 
@@ -60,11 +61,11 @@ Shadow classifies **new** seals going forward. Existing seals are not retroactiv
 
 Evidence density, not a classifier defect:
 
-- Wall = ∅ on nearly every new commit. 15 pinned events cannot cover 93 commits' files except on the handful of paths those 15 events actually named, and only inside each path's window.
+- Wall = ∅ on nearly every new commit. 8 pinned agent events cannot cover 93 commits' files except on the handful of paths those 8 events actually named, and only inside each path's window.
 - If the commit carries an agent trailer (recorded WHO on recent boxing-rpg commits is often `agent:claude-code`): **`unresolved`**, reason `unrooted` / `root_only` / `loose_evidence_only` depending on `caused_by`. Causal coverage on this project is 19% with 83 unlinked commits of 93 — **census**, and it already says most commits have no rooted chain, so `unrooted` should dominate the unresolved reasons.
 - If the commit is a human/bot author and Wall = ∅: **`no_agent_evidence`**.
 - **`supported`**: rare. Requires C ∈ Wall, i.e. a pinned agent event covering this commit's files, and the trailer naming that same agent.
-- **`conflicting`**: rarer still. Requires Wall ≠ ∅ **and** C ∉ Wall. At most the files touched by those 15 pinned events can even have a non-empty Wall. A non-zero conflicting count here would be interesting; a large one would be a surprise.
+- **`conflicting`**: rarer still. Requires Wall ≠ ∅ **and** C ∉ Wall. At most the files touched by those 8 pinned agent events can even have a non-empty Wall. A non-zero conflicting count here would be interesting; a large one would be a surprise.
 - **`merge_unclassified`**: merge commits that emit no files, if any occur in the window.
 - Last ledger event is 2026-09-10. If boxing-rpg is quiet during the window, the histogram is small-n and must be published as small-n, not padded with history.
 
@@ -76,7 +77,7 @@ A window that comes back mostly `supported` on boxing-rpg is either a capture ch
 
 ### retrace — PREDICTION
 
-Density is different: ~3.1 pinned events per commit, six live agent seats logging (codex 889, claude-code 661, grok 263, github-copilot 210, cursor-agent 160, nooa 117 — **census** of actor.events, which includes non-edit actions). The team rule is "commit only your own paths."
+Density is different: ~2.2 pinned **agent** events per commit (1224/545), six live agent seats logging (codex 889, claude-code 661, grok 263, github-copilot 210, cursor-agent 160, nooa 117 — **census** of actor.events, which includes non-edit actions). The team rule is "commit only your own paths."
 
 For **new** seals during the window, if agents keep logging pinned edits before they commit:
 
@@ -111,15 +112,15 @@ Implementation: `packages/mcp-server/src/phase-a-measure.ts` (tested). It prints
 
 | Brief §1 table | Source in the script | Kind |
 |---|---|---|
-| Status histogram | `claim_decision.decision.status` on git commit seals; `absent` if the block is missing | census (once shadow writes it; pre-shadow this column is almost all `absent`) |
+| Status histogram | `claim_decision.decision.status` on unsigned and `/2` git commit seals; `/1` always `absent` (§6 rule 5); top-level `status` ignored | census (once shadow writes it; pre-shadow this column is almost all `absent`) |
 | Conflicting by hand | **not printed** | — |
 | `legacy_client` | `isLegacyClientCommitSeal` (`/1`-signed git seals) | census |
 | Hook producer-sig split | unsigned / `/1` / `/2` | census (design §6 asked for this in step 5) |
-| `retrace_log` calls per commit, by actor | agent events strictly between consecutive git commit seals | census |
+| `retrace_log` calls per commit, by actor | agent events between consecutive unique-SHA commits, bound by the previous commit's earliest trusted seal; first commit dropped | census |
 | `method.tokens` | stored field if present | census if present, else missing |
 | Bytes per call | `canonicalize(stored event)` and producer-signed payload | **proxy** — stored JSON minus transport framing, not MCP-boundary bytes |
 | Tool-schema bytes at handshake | in-process `tools/list` on this checkout's 11-tool MCP | census, constant per harness version |
-| Hook wall-clock p50/p95 | `duration_ms` on git commit seals | missing today; census of hook-local elapsed **if D1 lands**; never commit-to-sealed-response (see §4) |
+| Hook wall-clock p50/p95 | `duration_ms` on git commit seals | missing until PR 38 (D1) merges; then census of hook-local elapsed, never commit-to-sealed-response (see §4) |
 | Pending-seal retries | `--pending-seal` / `--hook-log` | per-machine |
 | Worker classification time | `claim_decision.decision.classification_ms` | **census once shadow runs** (D2 decided and built in PR 34 at `94d38bb`; informational, never a selector) |
 
@@ -193,7 +194,7 @@ I am not implementing D1 in this PR. It is Jordan's decision.
 
 **Confirmation, not a change.** I did not re-run `retrace-git install` (it would not fix the live path, and this is another repo).
 
-Facts, all **census** of the machine as of 2026-09-11:
+Facts, all **per-machine** (this host, 2026-09-11). Naming the host does not make them a fleet or export census.
 
 | Item | Value |
 |---|---|
@@ -246,16 +247,16 @@ Git commit seals (`method.tool = "git"`) are fewer than `/status` `capture.commi
 
 Recorded WHO on those seals (still not `claim_decision`):
 
-- boxing-rpg: 70 agent (claude-opus-5 32, claude-code 30, claude-fable-5 8) / 21 human. Combined with 15 pinned events, this is why §2 puts `unresolved` above `no_agent_evidence` for that project.
+- boxing-rpg: 70 agent (claude-opus-5 32, claude-code 30, claude-fable-5 8) / 21 human. Combined with 8 pinned agent events, this is why §2 puts `unresolved` above `no_agent_evidence` for that project.
 - retrace: 482 agent / 16 human / 12 system. Window seats will mostly be agent-trailer claims.
 
-`retrace_log` calls per commit (census of agent events between consecutive git seals):
+`retrace_log` calls per commit, round 2 (census, unique SHA, first commit dropped). v1 counted per seal and dual-producer pairs deflated it (published p50 1 / mean 3.58 / zero-share 44.1%). Same export, unique-SHA:
 
-- boxing-rpg: p50 **0**, p95 **1**, mean **0.14**, max **4**, **91.2%** of commits have zero agent events in the interval. by_actor: claude-code 13.
-- retrace: p50 **1**, p95 **13.5**, mean **3.58**, max **161**, **44.1%** zero. by_actor: codex 838, claude-code 387, grok 236, github-copilot 164, nooa 109, cursor-agent 85, gemini 7, claude-cowork 1.
+- boxing-rpg: 91 seals → 84 unique SHAs → 83 intervals. p50 **0**, p95 **1**, mean **0.16**, max **4**, **90.4%** zero. by_actor: claude-code 13.
+- retrace: 510 seals → **338 unique SHAs** → 337 intervals. p50 **3**, p95 **16.4**, mean **5.42**, max **161**, **20.2%** zero. by_actor: codex 838, claude-code 387, grok 236, github-copilot 164, nooa 109, cursor-agent 85, gemini 7, claude-cowork 1. Matches the round-1 re-derivation.
 
 Bytes per those agent events (proxy): boxing-rpg stored canonical p50 1302 / p95 2135 (n=13); retrace p50 1455 / p95 2385 (n=1827). `method.tokens` is **missing** on both (0 present). Do not publish the proxy as a token count.
 
 Hook producer-sig: boxing-rpg's 91 seals are all unsigned (historical). The `retrace-git` credential on this machine now has `producer_key_file` pointing at an existing 0600 JWK, and the live dist signs `/2`, so the **next** boxing-rpg commit should be `/2` if that path keeps working. retrace already has 39 `/2` seals. Unsigned is not `legacy_client`; `/1` is.
 
-The instrument did what Phase 0 needed: every §1 table except the by-hand review prints, every number is labelled, and there is nothing to discover missing on day 7 except the classifier output itself (and D1, if Jordan says no).
+The instrument did what Phase 0 needed: every §1 table except the by-hand review prints, every number is labelled. D1 is decided and built as PR 38; once PR 37 and PR 38 both merge, the hook wall-clock row goes from missing to census (hook-side). Phase 1 still waits for Worker `shadow`.

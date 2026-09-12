@@ -12,6 +12,7 @@ import {
   countHookLogFailures,
   percentile,
   renderMarkdown,
+  inWindow,
   CLASSIFIER_STATUSES,
 } from "./phase-a-measure.js";
 
@@ -114,12 +115,14 @@ test("measureEvents labels pre-shadow seals absent, counts /1 as legacy_client, 
   assert.equal(r.legacy_client.kind, "census");
   assert.equal(r.hook_producer_sig.v1_legacy_client, 1);
   assert.equal(r.hook_producer_sig.v2, 1);
-  assert.equal(r.logs_per_commit.intervals, 2);
-  assert.equal(r.logs_per_commit.by_actor.grok, 2);
-  assert.equal(r.logs_per_commit.by_actor.codex, 1);
-  assert.equal(r.logs_per_commit.max, 2);
+  assert.equal(r.logs_per_commit.unique_shas, 2);
+  assert.equal(r.logs_per_commit.intervals, 1);
+  assert.equal(r.logs_per_commit.first_commit_dropped, true);
+  assert.equal(r.logs_per_commit.by_actor.grok, 1);
+  assert.equal(r.logs_per_commit.by_actor.codex, undefined);
+  assert.equal(r.logs_per_commit.max, 1);
   assert.equal(r.tokens.stored_canonical_bytes.kind, "proxy");
-  assert.ok((r.tokens.stored_canonical_bytes.n ?? 0) >= 3);
+  assert.ok((r.tokens.stored_canonical_bytes.n ?? 0) >= 1);
   assert.equal(r.tokens.method_tokens.kind, "missing");
   assert.equal(r.hook_wall_clock.kind, "census");
   assert.equal(r.hook_wall_clock.present, 1);
@@ -170,6 +173,109 @@ test("renderMarkdown refuses to present a proxy as a census", () => {
   assert.match(md, /legacy_client/);
   assert.match(md, /Kind: \*\*missing\*\*/);
   assert.doesNotMatch(md, /item 2 is printed/);
+});
+
+test("/1-signed seal with a client-supplied supported is absent, never a server decision", () => {
+  const events = [
+    seal({
+      id: "evt_v1",
+      seq: 1,
+      actor: { type: "agent", id: "grok" },
+      producer_sig: { kid: "k".repeat(8), sig: "s".repeat(40) },
+      method: {
+        tool: "git",
+        params: {
+          sha: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+          claim_decision: { decision: { status: "supported" } },
+        },
+      },
+    }),
+  ];
+  const r = measureEvents(events);
+  assert.equal(r.legacy_client.count, 1);
+  assert.equal(r.histogram.by_status.supported, 0);
+  assert.equal(r.histogram.by_status.absent, 1);
+  assert.equal(r.histogram.with_claim_decision, 0);
+  assert.equal(claimDecisionOf(events[0]), undefined);
+});
+
+test("unsigned seal with only a top-level conflicting does not count — require decision.status", () => {
+  const events = [
+    seal({
+      id: "evt_top",
+      seq: 1,
+      actor: { type: "agent", id: "grok" },
+      method: {
+        tool: "git",
+        params: {
+          sha: "aa".repeat(20),
+          claim_decision: { status: "conflicting" },
+        },
+      },
+    }),
+  ];
+  const r = measureEvents(events);
+  assert.equal(r.hook_producer_sig.unsigned, 1);
+  assert.equal(r.histogram.by_status.conflicting, 0);
+  assert.equal(r.histogram.by_status.absent, 1);
+  assert.equal(r.histogram.with_claim_decision, 0);
+});
+
+test("inWindow compares epoch time so mixed-offset git author dates sit on the correct side of both edges", () => {
+  const since = "2026-09-11T06:00:00.000Z";
+  const until = "2026-09-12T00:00:00.000Z";
+  // 00:30-06:00 = 06:30Z: AFTER 06:00Z, IN the window. Lexical string compare would exclude it.
+  assert.equal(inWindow("2026-09-11T00:30:00-06:00", { since, until }), true);
+  // 23:47-06:00 = 05:47Z next day: AFTER until midnight Z, OUT. Lexical would include (09-11 < 09-12).
+  assert.equal(inWindow("2026-09-11T23:47:18-06:00", { since, until }), false);
+  assert.equal(inWindow("2026-09-11T06:00:00.000Z", { since, until }), true);
+  assert.equal(inWindow("2026-09-10T23:59:59-06:00", { since, until }), false);
+});
+
+test("calls-per-commit is one interval per unique SHA; hook+webhook of the same sha do not deflate the count", () => {
+  const shaA = "a".repeat(40);
+  const shaB = "b".repeat(40);
+  const events = [
+    ev({ id: "evt_e1", seq: 1, action: "edited", actor: { type: "agent", id: "grok" } }),
+    seal({
+      id: "evt_hook_a", seq: 2, actor: { type: "agent", id: "grok" },
+      method: { tool: "git", params: { sha: shaA, sealed_by: "assert:git hook (assert)" } },
+    }),
+    seal({
+      id: "evt_wh_a", seq: 3, actor: { type: "system", id: "webhook:github" },
+      method: { tool: "git", params: { sha: shaA, sealed_by: "webhook:github" } },
+    }),
+    ev({ id: "evt_e2", seq: 4, action: "edited", actor: { type: "agent", id: "codex" } }),
+    ev({ id: "evt_e3", seq: 5, action: "edited", actor: { type: "agent", id: "codex" } }),
+    seal({
+      id: "evt_hook_b", seq: 6, actor: { type: "agent", id: "codex" },
+      method: { tool: "git", params: { sha: shaB, sealed_by: "assert:git hook (assert)" } },
+    }),
+    seal({
+      id: "evt_wh_b", seq: 7, actor: { type: "system", id: "webhook:github" },
+      method: { tool: "git", params: { sha: shaB, sealed_by: "webhook:github" } },
+    }),
+  ];
+  const r = measureEvents(events);
+  assert.equal(r.histogram.seals, 4);
+  assert.equal(r.logs_per_commit.unique_shas, 2);
+  assert.equal(r.logs_per_commit.intervals, 1);
+  assert.equal(r.logs_per_commit.by_actor.codex, 2);
+  assert.equal(r.logs_per_commit.by_actor.grok, undefined);
+  assert.equal(r.logs_per_commit.max, 2);
+  assert.equal(r.logs_per_commit.zero_share, 0);
+});
+
+test("the first commit has no previous commit so it does not get a ledger-start interval", () => {
+  const events = [
+    ev({ id: "evt_e", seq: 1, action: "edited", actor: { type: "agent", id: "grok" } }),
+    seal({ id: "evt_c", seq: 2, actor: { type: "agent", id: "grok" } }),
+  ];
+  const r = measureEvents(events);
+  assert.equal(r.logs_per_commit.unique_shas, 1);
+  assert.equal(r.logs_per_commit.intervals, 0);
+  assert.equal(r.logs_per_commit.by_actor.grok, undefined);
+  assert.equal(r.logs_per_commit.first_commit_dropped, true);
 });
 
 test("handshake schema census lists 11 local tools and the 9-tool Worker subset", async () => {
