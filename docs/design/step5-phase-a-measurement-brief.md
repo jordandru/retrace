@@ -49,8 +49,12 @@ So your work splits in two, and **Phase 0 is the part that is ready now**:
 3. **Build the harness against an export, not the live API** — `retrace-export export <project>` gives a
    verifiable bundle you can re-run offline and hand to a reader. Everything in §1 except the by-hand review
    should be one reproducible script, committed to the repo, that takes a bundle and prints the tables.
-4. **Confirm boxing-rpg's hook is on 0.1.9** (`retrace-git install` re-run in `slc-wit-it`; its repo routes by
-   policy as `jordandru/slc-wit-it`). A stale hook there produces `/1` seals and blocks item 3 above.
+4. **Confirm boxing-rpg's hook is on 0.1.9.** *Corrected 2026-09-11 (Grok, PR 37):* `slc-wit-it` runs its hooks
+   from `.githooks/` via `core.hooksPath`, executing the `~/provenance/retrace` dist — so `retrace-git install`
+   there would write an unreachable `.git/hooks/post-commit` and change nothing (the v1 text said to re-run it;
+   that was wrong). Check the dist that `.githooks/post-commit` executes. Verified in Phase 0: dist 0.1.9,
+   `/2`-capable, `legacy_client` 0. Its repo routes by policy as `jordandru/slc-wit-it`. A stale hook there
+   produces `/1` seals and blocks item 3 above.
 5. **Close the instrumentation gaps in §3 — the part that must happen before step 3 merges.**
 
 ## 3. Where each number actually comes from — census, bench, or missing
@@ -71,8 +75,11 @@ stores today. Label every published number with which of these it is; do not let
 | Worker classification time per seal | **nothing records it.** No duration field in the §6 seal record | **missing** — see decision D2 |
 
 **D1 — hook wall-clock.** `duration_ms` already exists on the event schema (`schema.ts:150`) and is inside the
-producer-signed field set (`producer-sig.ts:136`), so the hook can record its own commit-to-sealed elapsed time
-with **no schema change and no format bump**. Nothing sets it today. Either it is added (a small hook PR, and
+producer-signed field set (`producer-sig.ts:136`), so the hook can record elapsed time with **no schema change
+and no format bump**. *Corrected 2026-09-11 (Grok, PR 37 §4):* because the field is producer-signed, the hook
+signs it **before** `POST /events` — it can only carry **hook-local elapsed**, never commit-to-sealed-response.
+The v1 text said "commit-to-sealed"; that was wrong. If D1 lands, the census is hook-local time; the round trip
+stays a bench unless the Worker stamps a receipt time as a server annotation (a separate decision). Nothing sets it today. Either it is added (a small hook PR, and
 then p50/p95 is a census over every hooked machine), or you measure it as a **bench** — N controlled commits on
 one machine, timed — and the report says "one machine, N commits", never "the fleet".
 

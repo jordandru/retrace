@@ -157,7 +157,8 @@ deferred from PR 32 (`applyPolicyWrite` and the context insert-if-absent).
 
 Deploy Worker with `RETRACE_TRAILER_POLICY=shadow` for `retrace` and `boxing-rpg` only after: policies
 present for both (done), `/status` shows `legacy_client = 0` for new seals (all hooks on 0.1.9 — the
-main checkout is; `boxing-rpg`'s hook needs `retrace-git install` re-run), and a dry run against an export
+main checkout is; `boxing-rpg` runs `.githooks/` via `core.hooksPath` against the main dist and is on 0.1.9 —
+verified by Grok in PR 37; `retrace-git install` there would write an unreachable `.git/hooks/`), and a dry run against an export
 replays ≥ 50 recent commits with the expected histogram. Then §15 step 5 (Grok, ≥ 7 days; cost profile).
 
 ## 6. Review disposition — Nemotron 3 Ultra design pass (`review_38dea7e42d5c`)
