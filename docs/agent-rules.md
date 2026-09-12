@@ -76,14 +76,19 @@ each one names the product change that would make it unnecessary.
     — merge on one non-author review; (c) code follows the code order in `docs/team-roles.md`. When a
     gate seat is capped, absent, or the author, the coordinator routes a substitute and records the
     routing (rule 11); Jordan may reassign any seat, including for an emergency fix, and the
-    reassignment is recorded. `docs/team-roles.md` says who sits where; this file says what gate a
-    change takes; where they disagree, this file wins and `team-roles` is corrected.
+    reassignment is recorded. **The coordinator classifies every pull request before review** and
+    records the class in the routing event (rule 11); the builder states that class in the pull request
+    body. Where categories overlap or the class is uncertain, the higher gate applies. A pull request that
+    touches a governing file under a class-(b) routing fails the gate. `docs/team-roles.md` says who sits
+    where; this file says what gate a change takes; where they disagree, this file wins and `team-roles`
+    is corrected.
 
 13. **Keys and tokens stay with the seat that owns them.** Never read, print, copy, or commit a
     credential file (`~/.retrace/*.env`, `~/.retrace/worker-credentials*.json`,
     `~/.copilot/mcp-config.json`) or any token. A seat's private signing key is set on that seat's own
-    MCP server (`RETRACE_PRODUCER_KEY_FILE`, mode 0600) and never placed in a shared secret. Never borrow
-    another seat's token to keep working.
+    MCP server (`RETRACE_PRODUCER_KEY_FILE`, mode 0600) and never placed in a shared secret. One
+    credential per seat: never mint a second token for a seat that has one, and never borrow another
+    seat's token to keep working — on a quota error, stop.
 
 14. **Outward actions are Jordan's.** Merge, deploy, publish, credential minting or rotation, secret
     changes, webhook changes, and correction seals wait for an explicit go, one at a time; approval in

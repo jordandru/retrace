@@ -73,7 +73,9 @@ evt_a742fc51), so "reviewer when routed" is now part of that seat.
    reviewed by Grok, NOOA and Claude; cursor-agent's PR 16 by Codex (read-only) and Claude; Claude's design
    notes by Codex, Grok and NOOA. When Codex builds, Grok or NOOA is the reviewer of record.
 2. **Order of review: Codex → (NOOA for designs) → Claude → merge.** Claude's approval is the last check,
-   never the first. Every design note goes to all three other Core Four seats; missing one (the trailer note
+   never the first. Every change the coordinator classifies (a) under agent-rules 12 — design notes and
+   briefs, agent rules and identity files, security, build, deploy, or runbook controls — goes to all
+   three other Core Four seats; missing one (the trailer note
    went to Codex and Grok only, corrected the same evening) is a process error, not a judgment call.
 3. **Cross-vendor by default.** A design written by Claude is reviewed by non-Anthropic models; the hourly
    audit of a ledger written mostly by Anthropic and OpenAI agents runs on NVIDIA's model. Putting Fable
