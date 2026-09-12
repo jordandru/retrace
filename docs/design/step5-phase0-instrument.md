@@ -133,10 +133,10 @@ The brief's 09-10 table listed Worker classification time as **missing**. That i
 | Status histogram | `claim_decision.decision.status` on each seal in the export | census — available once shadow runs |
 | `conflicting` cases | same, plus `witnesses[]`, `claim`, `context` | census |
 | `legacy_client` | `/status` capture block and the export | census |
-| `retrace_log` calls per commit, by actor | ledger: agent events between consecutive commit seals | census |
+| `retrace_log` calls per commit, by actor | ledger: agent events between consecutive unique-SHA commits (earliest trusted seal of the previous commit; first commit dropped) | census |
 | Tokens/bytes per call | no MCP-boundary byte counter | **proxy** — canonical stored JSON / producer-signed payload |
 | Tool-schema bytes at handshake | 11 registered tool schemas | census — measured once per harness |
-| Hook wall-clock p50/p95 | `duration_ms` unset; `retrace-hook.log` is failures only | **missing** — D1 still undecided (recommendation in §4) |
+| Hook wall-clock p50/p95 | `duration_ms` on the live `--hook` path (PR 38) | **missing** until PR 38 merges, then **census** of hook-local elapsed (D1 decided and built; never commit-to-sealed-response) |
 | Pending-seal retries | `.git/retrace-pending-seal` + `retrace-hook.log` + doctor | **per-machine** |
 | Worker classification time per seal | `claim_decision.decision.classification_ms` (PR 34) | **census from the ledger once shadow runs**, not a Worker-log sample |
 
