@@ -42,8 +42,9 @@ So your work splits in two, and **Phase 0 is the part that is ready now**:
    webhook 549, owner 57, unstamped 947}; `boxing-rpg` 137 events / 93 commits / 83 agent events /
    sealed_by {pinned 15, assert 24, webhook 7, owner 1, unstamped 90}. Re-take both with
    `GET /projects/:p/status` and keep the JSON — a checked-in baseline file, not a screenshot.
-2. **Predict the histogram before you measure it, and write the prediction down.** boxing-rpg has 15 pinned
-   agent events against 93 commits, so nearly every commit there should classify `unresolved` (`Wall = ∅`) —
+2. **Predict the histogram before you measure it, and write the prediction down.** boxing-rpg has **8** pinned
+   agent events against 93 commits (*corrected 2026-09-12 from cursor-agent's review of PR 37, finding 5: v1 said
+   15, which is `sealed_by.pinned` across all actors; 83 agent events minus 75 not pinned is 8*), so nearly every commit there should classify `unresolved` (`Wall = ∅`) —
    that is the project's evidence density, **not** a classifier defect. Recording the prediction first is what
    lets the report distinguish the two. Design §4 already says as much.
 3. **Build the harness against an export, not the live API** — `retrace-export export <project>` gives a
