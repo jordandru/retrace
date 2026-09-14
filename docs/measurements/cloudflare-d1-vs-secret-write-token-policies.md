@@ -1,12 +1,13 @@
 # Minimum API Token Policies: D1-Only Mint vs Secret-Write
 
-**Status:** measurement, 2026-09-12. Author: grok (measurer). Instruction
-`evt_e27fafb81df84756ad95dcec7d22eeae`. Class (b) under agent-rules 12 —
-documents Cloudflare's published token permission model; does not govern
-Retrace behaviour. Companion evidence for credential-store §2.1 (PR 42
-Codex P1: D1-write and secret-write are distinct permissions). This is a
-public-docs check, not an account-specific permission test and not a live
-curl against this Cloudflare account.
+**Status:** measurement, 2026-09-12; **correction 2026-09-14**. Author: grok
+(measurer). Instruction `evt_e27fafb81df84756ad95dcec7d22eeae`; correction
+`evt_d87f9ab58ce14bec811721d645d08323` (Codex P2, `evt_e95567cd29134df08768fa122a626611`).
+Class (b) under agent-rules 12 — documents Cloudflare's published token
+permission model; does not govern Retrace behaviour. Companion evidence for
+credential-store §2.1 (PR 42 Codex P1: D1-write and secret-write are distinct
+permissions). This is a public-docs check, not an account-specific permission
+test and not a live curl against this Cloudflare account.
 
 **Date checked:** 2026-09-12
 **Scope:** Three minimum API token policy JSON objects for Cloudflare's create-token API. Primary sources only.
@@ -23,6 +24,18 @@ accept. Whether Edit and Write are two names for one UUID remains
 does not appear in the token-permission catalog (confirmed by search of
 the page). No 2026 D1 changelog entry consolidates D1 and Workers
 permissions.
+
+**Correction 2026-09-14:** the general catalog's omission does **not** mean
+Secrets Store is role-only. The Secrets Store access-control page documents
+API token permissions **Account Secrets Store Read** and **Account Secrets
+Store Edit**, independently of account roles, and Super Administrator can
+create/edit/delete secrets metadata and add a Secrets Store binding
+([Secrets Store access control](https://developers.cloudflare.com/secrets-store/access-control/)).
+The create-secret API accepts `Secrets Store Write`
+([create secret](https://developers.cloudflare.com/api/resources/secrets_store/subresources/stores/subresources/secrets/methods/create/)).
+Whether Read/Edit and Write are two names for one UUID is **unproven**
+without `GET /user/tokens/permission_groups`. Token JSON below uses the
+Write name because that is what the endpoint lists as accepted.
 
 ---
 
@@ -60,7 +73,7 @@ permissions.
 ```bash
 curl https://api.cloudflare.com/client/v4/user/tokens/permission_groups \
   -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" | \
-  python3 -c "import sys,json; [print(f'{g[\"id\"]} {g[\"name\"]}') for g in json.load(sys.stdin)['result'] if 'D1' in g['name']]"
+  python3 -c "import sys,json; [print(f'{g[\"id\"]} {g[\"name\"]}') for g in json.load(sys.stdin)['result'] if 'D1' in g['name'] or 'Secrets Store' in g['name'] or 'Workers Scripts' in g['name']]"
 ```
 
 ### Resources key
@@ -75,7 +88,8 @@ The `resources` format uses `com.cloudflare.api.account.<ACCOUNT_ID>` with `"*"`
 
 - `PUT /accounts/<ACCOUNT_ID>/workers/scripts/<SCRIPT_NAME>/secrets` — returns 403. Token A does not carry Workers Scripts Write ([Workers scripts secrets endpoint](https://developers.cloudflare.com/api/resources/workers/subresources/scripts/subresources/secrets/methods/update/)).
 - `PUT /accounts/<ACCOUNT_ID>/workers/scripts/<SCRIPT_NAME>` (script upload/deploy) — returns 403. Same permission gap ([Workers scripts upload endpoint](https://developers.cloudflare.com/api/resources/workers/subresources/scripts/methods/update/)).
-- Secrets Store: no Secrets Store permission group appears in the API token permissions catalog ([permissions reference](https://developers.cloudflare.com/fundamentals/api/reference/permissions/)). Endpoint/403 behavior is **unproven** — Secrets Store is managed via account roles, not token permissions ([account roles](https://developers.cloudflare.com/fundamentals/manage-members/roles/)).
+- Secrets Store: *(2026-09-12)* no Secrets Store permission group appears in the API token permissions catalog ([permissions reference](https://developers.cloudflare.com/fundamentals/api/reference/permissions/)). Endpoint/403 behavior is **unproven** — Secrets Store is managed via account roles, not token permissions ([account roles](https://developers.cloudflare.com/fundamentals/manage-members/roles/)).
+  **Correction 2026-09-14:** Token A still lacks Secrets Store Write / Account Secrets Store Edit, so it should not create or bind Secrets Store secrets. The 09-12 "roles, not token permissions" inference is **wrong**. Secrets Store is independently grantable on an API token ([access control](https://developers.cloudflare.com/secrets-store/access-control/); [create secret](https://developers.cloudflare.com/api/resources/secrets_store/subresources/stores/subresources/secrets/methods/create/) accepts `Secrets Store Write`). Live 403 on `POST /accounts/<ACCOUNT_ID>/secrets_store/stores/<STORE_ID>/secrets` with Token A remains **unproven** (no live curl).
 
 ### Dashboard D1 editor
 
@@ -137,7 +151,7 @@ Workers Scripts Write covers ([Node.js ref](https://developers.cloudflare.com/ap
 
 "Super Administrator" is an **account member role**, not an API token permission group ([account roles](https://developers.cloudflare.com/fundamentals/manage-members/roles/)). It "can edit any Cloudflare setting, make purchases, update billing, manage members, and create account-owned API tokens."
 
-For this threat surface (D1 + Workers Scripts + Secrets Store), an API-token equivalent would combine Token A + Token B:
+*(2026-09-12)* For this threat surface (D1 + Workers Scripts + Secrets Store), an API-token equivalent would combine Token A + Token B:
 
 ```json
 {
@@ -165,21 +179,34 @@ For this threat surface (D1 + Workers Scripts + Secrets Store), an API-token equ
 }
 ```
 
+**Correction 2026-09-14:** Token A + Token B is **not** equivalent on that threat surface. It grants D1 Write and Workers Scripts Write only. Secrets Store Write / Account Secrets Store Edit is a third, independently grantable token permission ([access control](https://developers.cloudflare.com/secrets-store/access-control/); [create secret](https://developers.cloudflare.com/api/resources/secrets_store/subresources/stores/subresources/secrets/methods/create/)). The JSON above is therefore **A+B only**. A token that also covers Secrets Store write would add:
+
+```json
+{
+  "id": "<SECRETS_STORE_WRITE_PERMISSION_GROUP_ID_FROM_GET_USER_TOKENS_PERMISSION_GROUPS>",
+  "name": "Secrets Store Write",
+  "meta": {}
+}
+```
+
+That UUID is unpublished in public docs, same as D1 Write. Super Administrator's Secrets Store powers are **documented**, not merely implied: that role can create, edit, duplicate, delete, and view secrets metadata, and can add a Secrets Store binding to a Worker ([access control](https://developers.cloudflare.com/secrets-store/access-control/)). A Super Administrator *role* is still not an API token; the token-side stand-in for this threat surface is A + B + Secrets Store Write, not A + B.
+
 ### What Token C implies
 
 - **Implies Token A** (D1 Write): can query/write D1 via REST API.
 - **Implies Token B** (Workers Scripts Write): can manage Worker secrets and deploy Worker code.
-- **Secrets Store**: no Secrets Store permission group appears in the API token permissions catalog ([permissions reference](https://developers.cloudflare.com/fundamentals/api/reference/permissions/)). Secrets Store is managed via account roles: Secrets Store Admin, Deployer, Reporter ([account roles](https://developers.cloudflare.com/fundamentals/manage-members/roles/)). Whether Super Administrator's "edit any Cloudflare setting" includes Secrets Store is **implied but unproven** from the role description alone.
+- **Secrets Store:** *(2026-09-12)* no Secrets Store permission group appears in the API token permissions catalog ([permissions reference](https://developers.cloudflare.com/fundamentals/api/reference/permissions/)). Secrets Store is managed via account roles: Secrets Store Admin, Deployer, Reporter ([account roles](https://developers.cloudflare.com/fundamentals/manage-members/roles/)). Whether Super Administrator's "edit any Cloudflare setting" includes Secrets Store is **implied but unproven** from the role description alone.
+  **Correction 2026-09-14:** the 09-12 role-only claim is **wrong**. Token C as A+B does **not** include Secrets Store Write. Super Administrator (the role) **can** manage Secrets Store, per the access-control page. Account roles Secrets Store Admin / Deployer / Reporter still exist alongside the token permissions.
 
 ---
 
 ## Permission Summary Table
 
-| Permission name | UUID | Token A | Token B | Token C | Cited URL |
-|---|---|---|---|---|---|
-| D1 Write | Unproven (not in public docs) | **Yes** | — | Yes | [permissions ref](https://developers.cloudflare.com/fundamentals/api/reference/permissions/) |
-| Workers Scripts Write | `e086da7e2179491d91ee5f35b3ca210a` | — | **Yes** | Yes | [permission_groups list](https://developers.cloudflare.com/api/resources/user/subresources/tokens/subresources/permission_groups/methods/list/) |
-| Secrets Store (token permission) | Not found in catalog | — | — | Via role, not token | [permissions ref](https://developers.cloudflare.com/fundamentals/api/reference/permissions/) |
+| Permission name | UUID | Token A | Token B | Token C as A+B (09-12) | A+B+Secrets Store Write | Cited URL |
+|---|---|---|---|---|---|---|
+| D1 Write | Unproven (not in public docs) | **Yes** | — | Yes | Yes | [permissions ref](https://developers.cloudflare.com/fundamentals/api/reference/permissions/) |
+| Workers Scripts Write | `e086da7e2179491d91ee5f35b3ca210a` | — | **Yes** | Yes | Yes | [permission_groups list](https://developers.cloudflare.com/api/resources/user/subresources/tokens/subresources/permission_groups/methods/list/) |
+| Secrets Store Write / Account Secrets Store Edit | Unproven (not in public docs). 09-12 row said "not found in catalog / via role, not token" — **corrected 2026-09-14** | — | — | — (A+B does not grant it) | **Yes** | [access control](https://developers.cloudflare.com/secrets-store/access-control/); [create secret](https://developers.cloudflare.com/api/resources/secrets_store/subresources/stores/subresources/secrets/methods/create/) |
 
 **UUID caveats:** The Workers Scripts Write UUID appears in the public example response of `GET /user/tokens/permission_groups`. The D1 Write UUID does not appear in any public doc or example. Whether these UUIDs are stable across all accounts or are account-specific is **unproven** — the docs do not state this.
 
@@ -211,7 +238,7 @@ For this threat surface (D1 + Workers Scripts + Secrets Store), an API-token equ
 
 | Role | Description | D1 Write? | Workers Scripts Write? |
 |---|---|---|---|
-| Super Administrator - All Privileges | Can edit any Cloudflare setting | Yes (implied) | Yes (implied) |
+| Super Administrator - All Privileges | Can edit any Cloudflare setting; **also** (2026-09-14) create/edit/delete Secrets Store metadata and add a Worker binding ([access control](https://developers.cloudflare.com/secrets-store/access-control/)) | Yes (implied for D1/Workers; Secrets Store **documented**) | Yes (implied) |
 | Administrator | Can access full account and edit subscriptions | Unproven | Unproven |
 | Workers Platform Admin | Edit/read to all Developer Platform products | Unproven (likely) | Unproven (likely) |
 | Workers Editor | Can use the Workers Playground | Unproven | Unproven |
@@ -224,6 +251,8 @@ No role matrix is public. All "implied" and "likely" entries are **unproven** fr
 ## Verdict
 
 Therefore a D1-only mint is **possible in Cloudflare's documented permission model** — D1 Write and Workers Scripts Write are separately named, independently grantable permission groups, and the D1 query endpoint accepts INSERT/UPDATE/DELETE SQL via REST API ([D1 query endpoint](https://developers.cloudflare.com/api/resources/d1/subresources/database/methods/query/); [permissions reference](https://developers.cloudflare.com/fundamentals/api/reference/permissions/)). The reviewer's claim is correct: a principal with D1 Write but not Workers Scripts Write can INSERT a hash of a token they know into the registry, and the Worker will treat it as a live credential on the next request (if the registry has no row-level MAC/signature). However, the exact Token A create-token JSON is **not fully constructible from public docs** — the D1 Write permission-group UUID is not published in any Cloudflare doc or example response. You must call `GET /user/tokens/permission_groups` with a valid API token to resolve it.
+
+**Correction 2026-09-14:** that D1-only mint conclusion is unchanged. Token A + Token B is **not** a Super Administrator / D1+Workers+Secrets Store equivalent: Secrets Store Write is a third independently grantable token permission. See Token C.
 
 ---
 
