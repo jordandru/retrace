@@ -66,6 +66,8 @@ test("D1 in workerd: the four-file classifier query is one statement and matches
       allMaxPrefix: { ...base, artifact_keys: [], artifact_prefixes: ["\u{10ffff}"] },
       twoKeysOneEventCap: { ...base, row_cap: 1, artifact_keys: ["task:85", "task:170"] },
       overlapCountsOnce: { ...base, row_cap: 1, artifact_keys: ["😀"], artifact_prefixes: ["😀"] },
+      sameKindOverlapOverBudget: { ...base, row_cap: 2, artifact_keys: [], artifact_prefixes: ["task:", "task:0"] },
+      sameKindOverlapSufficient: { ...base, row_cap: 5, artifact_keys: [], artifact_prefixes: ["task:", "task:0"] },
     };
     for (const [name, q] of Object.entries(cases)) {
       const statements = eventsReferencingArtifactsStatements(q);
@@ -80,6 +82,8 @@ test("D1 in workerd: the four-file classifier query is one statement and matches
     }
     assert.deepEqual(await store.eventsReferencingArtifacts(cases.twoKeysOneEventCap!), { ok: false, reason: "budget" }, "two matching artifact rows on one event exceed row_cap 1");
     assert.deepEqual(seqs(await store.eventsReferencingArtifacts(cases.overlapCountsOnce!)), [4], "one artifact reached by a key and a prefix counts once (seq 4 is the fifth event)");
+    assert.deepEqual(await store.eventsReferencingArtifacts(cases.sameKindOverlapOverBudget!), { ok: false, reason: "budget" }, "overlapping prefixes of one kind: five distinct task rows exceed row_cap 2 (round 7, Codex F5)");
+    assert.deepEqual(seqs(await store.eventsReferencingArtifacts(cases.sameKindOverlapSufficient!)), [2, 5], "overlapping prefixes of one kind: every event, not the first event's duplicates");
   });
 });
 

@@ -345,8 +345,8 @@ export function globLiteralPrefix(pattern: string): string {
  *  `idx_eai_project_key_seq (project, artifact_key, seq)` with the window inside the seek; literal prefixes are bound
  *  key ranges (`[prefix, prefixRangeUpperBound)`, or `>= prefix` alone when unbounded); the owner-less alias globs from
  *  `artifactLookup` (`repo:*\/name#path`) cannot be seeked on the key and stay window-scoped as before this PR. Every
- *  member yields `(seq, artifact_key)` so the row budget counts distinct matching artifact rows, as the in-memory spec
- *  does (round 6, Codex F5); the outer query joins `events` by its unique `(project, seq)` — `CROSS JOIN` so SQLite
+ *  member yields DISTINCT `(seq, artifact_key)` so the row budget counts distinct matching artifact rows, as the in-memory
+ *  spec does (round 6, Codex F5; round 7: overlapping same-kind terms in a single member); the outer query joins `events` by its unique `(project, seq)` — `CROSS JOIN` so SQLite
  *  keeps the matched seqs as the outer loop instead of walking the project's events. `LIMIT` is `row_cap + 1`;
  *  `runArtifactIndexStatements` enforces the budget, deduplicates rows and events across batches and checks the
  *  deadline between them. */
@@ -376,7 +376,10 @@ export function eventsReferencingArtifactsStatements(
     terms.push(upper === undefined ? { kind: "glob_unbounded", value: g } : { kind: "glob", value: [literal, upper, g] });
   }
 
-  const member = "SELECT i.seq, i.artifact_key FROM w CROSS JOIN json_each(?) t CROSS JOIN event_artifact_index i WHERE i.project = w.project AND ";
+  // DISTINCT inside every member: overlapping terms of one kind (prefixes `x`, `x:`, `x:o`) reach the same (seq, artifact_key)
+  // once per term, and a statement with a single member has no UNION to fold them, so without it duplicates would consume
+  // `LIMIT row_cap + 1` before the runner counts distinct rows (PR 51 round 7, Codex F5 regression).
+  const member = "SELECT DISTINCT i.seq, i.artifact_key FROM w CROSS JOIN json_each(?) t CROSS JOIN event_artifact_index i WHERE i.project = w.project AND ";
   const memberSql: Record<ArtifactIndexTerm["kind"], string> = {
     eq: `${member}i.artifact_key = t.value AND i.seq > w.after_seq AND i.seq <= w.through_seq`,
     prefix: `${member}i.artifact_key >= json_extract(t.value, '$[0]') AND i.artifact_key < json_extract(t.value, '$[1]') AND i.seq > w.after_seq AND i.seq <= w.through_seq`,

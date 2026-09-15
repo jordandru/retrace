@@ -151,7 +151,7 @@ test("eventsReferencingArtifacts SQL joins the index, binds keys, and uses row_c
   assert.equal(result.ok, true);
   const stmt = db.last!;
   assert.doesNotMatch(stmt.sql, /INDEXED BY/, "no forced index hint (PR 51 round 5, Codex F3)");
-  assert.match(stmt.sql, /^WITH w\(project, after_seq, through_seq\) AS \(SELECT \?, \?, \?\) SELECT e\.body, m\.seq, m\.artifact_key FROM \(SELECT i\.seq, i\.artifact_key FROM w CROSS JOIN json_each\(\?\) t CROSS JOIN event_artifact_index i WHERE i\.project = w\.project AND i\.artifact_key = t\.value AND i\.seq > w\.after_seq AND i\.seq <= w\.through_seq\) m CROSS JOIN events e ON e\.project = \? AND e\.seq = m\.seq ORDER BY m\.seq ASC, m\.artifact_key ASC LIMIT \?$/);
+  assert.match(stmt.sql, /^WITH w\(project, after_seq, through_seq\) AS \(SELECT \?, \?, \?\) SELECT e\.body, m\.seq, m\.artifact_key FROM \(SELECT DISTINCT i\.seq, i\.artifact_key FROM w CROSS JOIN json_each\(\?\) t CROSS JOIN event_artifact_index i WHERE i\.project = w\.project AND i\.artifact_key = t\.value AND i\.seq > w\.after_seq AND i\.seq <= w\.through_seq\) m CROSS JOIN events e ON e\.project = \? AND e\.seq = m\.seq ORDER BY m\.seq ASC, m\.artifact_key ASC LIMIT \?$/);
   assert.doesNotMatch(stmt.sql, / UNION /, "one kind of term, one member");
   assert.deepEqual(stmt.params, ["retrace", 1, 9, JSON.stringify(["repo:jordandru/retrace#a.ts", "repo:retrace#a.ts"]), "retrace", 21], "window bound once, owner/repo key and its basename alias in one JSON array, join project, row_cap + 1");
 });

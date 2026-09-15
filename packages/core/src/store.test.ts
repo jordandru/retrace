@@ -225,7 +225,7 @@ test("eventsReferencingArtifactsStatements binds the window once and one json_ea
   assert.match(sql, /^WITH w\(project, after_seq, through_seq\) AS \(SELECT \?, \?, \?\) SELECT e\.body, m\.seq, m\.artifact_key FROM \(/);
   assert.match(sql, /\) m CROSS JOIN events e ON e\.project = \? AND e\.seq = m\.seq ORDER BY m\.seq ASC, m\.artifact_key ASC LIMIT \?$/);
   assert.equal((sql.match(/ UNION /g) ?? []).length, 2, "equality member + prefix member + glob member, whatever the key count");
-  assert.equal((sql.match(/CROSS JOIN json_each\(\?\) t CROSS JOIN event_artifact_index i/g) ?? []).length, 3, "json_each is the outer loop of every member");
+  assert.equal((sql.match(/SELECT DISTINCT i\.seq, i\.artifact_key FROM w CROSS JOIN json_each\(\?\) t CROSS JOIN event_artifact_index i/g) ?? []).length, 3, "json_each is the outer loop of every member; DISTINCT folds overlapping terms of one kind before LIMIT");
   assert.match(sql, /i\.artifact_key = t\.value AND i\.seq > w\.after_seq AND i\.seq <= w\.through_seq/);
   assert.match(sql, /i\.artifact_key >= json_extract\(t\.value, '\$\[0\]'\) AND i\.artifact_key < json_extract\(t\.value, '\$\[1\]'\)/);
   assert.match(sql, /i\.artifact_key >= json_extract\(t\.value, '\$\[0\]'\) AND i\.artifact_key < json_extract\(t\.value, '\$\[1\]'\) AND i\.seq > w\.after_seq AND i\.seq <= w\.through_seq AND i\.artifact_key GLOB json_extract\(t\.value, '\$\[2\]'\)/, "an alias glob seeks the key range of its literal prefix, then filters");

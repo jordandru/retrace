@@ -305,6 +305,28 @@ test("SqliteStore matches the memory spec for keys that look like JSON numbers o
   }
 });
 
+test("SqliteStore folds overlapping prefixes of one kind before LIMIT so the budget and the result are complete (PR 51 round 7, Codex F5)", async () => {
+  const store = new SqliteStore(":memory:");
+  const memory = new MemoryEventStore();
+  for (const id of ["x:one", "x:two", "x:three"]) {
+    const input = ev({ artifacts: [{ id, role: "generated" }] });
+    await appendEvent(store, input);
+    await appendEvent(memory, input);
+  }
+  const q = { project: "junk", artifact_keys: [], artifact_prefixes: ["x", "x:", "x:o"], after_seq: -1, through_seq: 2, row_cap: 3, deadline: Date.now() + 5_000 };
+  const [only] = eventsReferencingArtifactsStatements(q);
+  assert.doesNotMatch(only!.sql, / UNION /, "one kind of term: a single member, nothing else deduplicates before LIMIT");
+  assert.deepEqual(await store.eventsReferencingArtifacts({ ...q, row_cap: 2 }), { ok: false, reason: "budget" }, "three distinct rows exceed row_cap 2");
+  assert.deepEqual(await memory.eventsReferencingArtifacts({ ...q, row_cap: 2 }), { ok: false, reason: "budget" });
+  const sql = await store.eventsReferencingArtifacts(q);
+  const mem = await memory.eventsReferencingArtifacts(q);
+  assert.equal(sql.ok, true); assert.equal(mem.ok, true);
+  if (sql.ok && mem.ok) {
+    assert.deepEqual(mem.events.map((e) => e.seq), [0, 1, 2]);
+    assert.deepEqual(sql.events.map((e) => e.seq), [0, 1, 2], "row_cap 3 returns every event, not the first event's duplicates");
+  }
+});
+
 test("SqliteStore backfills event_artifact_index once from existing events", async () => {
   const dir = mkdtempSync(join(tmpdir(), "retrace-sqlite-index-"));
   const file = join(dir, "ledger.db");
