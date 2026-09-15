@@ -136,7 +136,7 @@ export class D1Store implements EventStore {
 
   async eventsReferencingArtifacts(q: ArtifactIndexQuery, now: () => number = Date.now): Promise<ArtifactIndexResult> {
     if (now() >= q.deadline) return { ok: false, reason: "deadline" };
-    if (!q.artifact_keys.length) return { ok: true, events: [] };
+    if (!q.artifact_keys.length && !q.artifact_prefixes?.length) return { ok: true, events: [] };
     try {
       const { sql, params } = eventsReferencingArtifactsSql(q);
       const { results } = await this.db.prepare(sql).bind(...params).all<{ body: string }>();

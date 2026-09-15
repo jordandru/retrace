@@ -307,6 +307,43 @@ function classifierCanonicalArtifact(policy: PolicyBody, id: string): string | u
   return id;
 }
 
+function classifierResolvedCommitKey(event: Event, policy: PolicyBody): string | undefined {
+  if (event.action !== "committed" && event.action !== "merged") return undefined;
+  const ref = event.artifacts.find((a) => a.id.startsWith("commit:"))?.id;
+  const match = ref ? /^commit:([^@]+)@([0-9a-f]{7,40})$/i.exec(ref) : null;
+  const sha = extractSha(event)?.toLowerCase();
+  if (!match || !sha || !/^[0-9a-f]{40}$/.test(sha) || !sha.startsWith(match[2].toLowerCase())) return undefined;
+  const repository = canonicalRepositoryR(policy, match[1]);
+  return repository ? `${repository}@${sha}` : undefined;
+}
+
+function classifierCaptureSeals(
+  events: Event[],
+  policy: PolicyBody,
+  canonicalRepo: string,
+): { ok: true; seals: CaptureSeal[] } | { ok: false } {
+  const resolutions = new Map<string, string>();
+  for (const event of events) {
+    if (event.action !== "committed" && event.action !== "merged") continue;
+    const ref = event.artifacts.find((a) => a.id.startsWith("commit:"))?.id;
+    if (!ref) continue;
+    const match = /^commit:([^@]+)@/.exec(ref);
+    if (!match || canonicalRepositoryR(policy, match[1]) !== canonicalRepo) continue;
+    const key = classifierResolvedCommitKey(event, policy);
+    if (!key || resolutions.has(ref) && resolutions.get(ref) !== key) return { ok: false };
+    resolutions.set(ref, key);
+  }
+  return {
+    ok: true,
+    seals: captureSeals(events, {
+      repoName: canonicalRepo,
+      aliases: policy.repositories.find((r) => r.name === canonicalRepo)?.aliases,
+      hookSealedBy: policy.trusted_hook_stamps,
+      ownerSeals: true,
+    }, (id) => resolutions.get(id)),
+  };
+}
+
 async function classifierLedgerAttributionContext(
   events: Event[],
   candidates: Event[],
@@ -335,7 +372,10 @@ async function classifierLedgerAttributionContext(
     const target = byId.get(String(e.method?.params?.target_event_id));
     if (!target || domains.has(target.id)) continue;
     const ownCommit = target.artifacts.find((a) => a.id.startsWith("commit:"))?.id;
-    const ownKey = ownCommit ? /^commit:[^@]+@([0-9a-f]{7,40})$/i.exec(ownCommit)?.[1]?.slice(0, 12) : undefined;
+    const ownKey = ownCommit ? classifierResolvedCommitKey(target, policy) : undefined;
+    if (ownCommit && (target.action === "committed" || target.action === "merged") && !ownKey) {
+      throw new Error("context_missing: target commit identity");
+    }
     const before = Math.min(target.seq, ownKey ? seals.get(ownKey)?.seq ?? target.seq : target.seq);
     const units: AttributionUnit[] = [];
     target.artifacts.forEach((a, index) => {
@@ -455,22 +495,17 @@ async function amendmentCaptureDependencies(opts: {
   deadline: number;
   now: () => number;
 }): Promise<CaptureDependencyRead> {
-  const sealPolicy = {
-    repoName: opts.canonicalRepo,
-    aliases: opts.policy.repositories.find((r) => r.name === opts.canonicalRepo)?.aliases,
-    hookSealedBy: opts.policy.trusted_hook_stamps,
-    ownerSeals: true,
-  };
   const events = new Map(opts.baseEvents.map((e) => [e.id, e]));
   let rowsRead = opts.baseEvents.length;
-  const read = async (artifactKeys: string[]): Promise<CaptureDependencyRead | null> => {
-    if (!artifactKeys.length) return null;
+  const read = async (artifactKeys: string[], artifactPrefixes: string[] = []): Promise<CaptureDependencyRead | null> => {
+    if (!artifactKeys.length && !artifactPrefixes.length) return null;
     if (!opts.store.eventsReferencingArtifacts) return { ok: false, reason: "store_error" };
     const remaining = CLASSIFY_ROW_CAP - rowsRead;
     if (remaining < 1) return { ok: false, reason: "budget" };
     const result = await opts.store.eventsReferencingArtifacts({
       project: opts.project,
       artifact_keys: [...new Set(artifactKeys)],
+      artifact_prefixes: [...new Set(artifactPrefixes)],
       after_seq: -1,
       through_seq: opts.U,
       row_cap: remaining,
@@ -509,22 +544,23 @@ async function amendmentCaptureDependencies(opts: {
   if (targetRead) return targetRead;
   if (opts.now() >= opts.deadline) return { ok: false, reason: "deadline" };
 
-  const preliminary = captureSeals([...events.values()], sealPolicy);
-  const commitKeys = new Set<string>();
-  for (const seal of preliminary) {
-    const commit = seal.event.artifacts.find((a) => a.id.startsWith("commit:"))?.id;
-    const match = commit ? /^commit:([^@]+)@([0-9a-f]{7,40})$/i.exec(commit) : null;
-    if (!match) continue;
-    const canonical = canonicalRepositoryR(opts.policy, match[1]) ?? match[1];
-    const repository = opts.policy.repositories.find((r) => r.name === canonical);
-    for (const name of new Set([match[1], canonical, repository?.name, ...(repository?.aliases ?? [])].filter((x): x is string => !!x))) {
-      commitKeys.add(`commit:${name}@${match[2]}`);
+  const preliminary = classifierCaptureSeals([...events.values()], opts.policy, opts.canonicalRepo);
+  if (!preliminary.ok) return { ok: false, reason: "store_error" };
+  const commitPrefixes = new Set<string>();
+  for (const seal of preliminary.seals) {
+    const split = /^(.*)@([0-9a-f]{40})$/i.exec(seal.key);
+    if (!split) return { ok: false, reason: "store_error" };
+    const repository = opts.policy.repositories.find((r) => r.name === split[1]);
+    if (!repository) return { ok: false, reason: "store_error" };
+    for (const name of new Set([repository.name, ...repository.aliases])) {
+      commitPrefixes.add(`commit:${name}@${split[2].slice(0, 7)}`);
     }
   }
-  const groupRead = await read([...commitKeys]);
+  const groupRead = await read([], [...commitPrefixes]);
   if (groupRead) return groupRead;
   if (opts.now() >= opts.deadline) return { ok: false, reason: "deadline" };
-  return { ok: true, seals: captureSeals([...events.values()], sealPolicy) };
+  const complete = classifierCaptureSeals([...events.values()], opts.policy, opts.canonicalRepo);
+  return complete.ok ? complete : { ok: false, reason: "store_error" };
 }
 
 /** Bounded candidates plus point-read dependencies; never fetches or verifies the project prefix. */

@@ -1037,6 +1037,67 @@ test("F1: same-SHA producer expansion preserves the earliest capture boundary an
   assert.equal(got.record.decision.witnesses.some((w) => w.id === target.id), false);
 });
 
+test("F1: mixed abbreviated/full commit references group in both producer orders", async () => {
+  for (const [firstLength, secondLength] of [[12, 40], [40, 12]] as const) {
+    const store = new MemoryEventStore();
+    await putPolicy(store, "p", { repositories: [{ name: "acme/app", aliases: ["app", "old-name"] }] });
+    const root = (await appendEvent(store, {
+      project: "p", actor: { type: "human", id: "jordan@example.com" }, action: "instructed",
+      artifacts: [{ id: `task:mixed-producers-${firstLength}`, role: "generated" }],
+    })).event;
+    const captureSha = "123456789abc".padEnd(40, firstLength === 12 ? "d" : "e");
+    const firstRef = `commit:acme/app@${captureSha.slice(0, firstLength)}`;
+    const secondRef = `commit:acme/app@${captureSha.slice(0, secondLength)}`;
+    await appendEvent(store, commitInput({
+      idempotency_key: `git:mixed-first:${firstLength}`,
+      artifacts: [{ id: firstRef, role: "generated" }, { id: "repo:acme/app#other.ts", role: "generated" }],
+      method: { tool: "git", params: {
+        sha: captureSha, parents: [], raw_message: "first\n",
+        author: { name: "Jordan", email: "jordan@example.com" }, sealed_by: "assert:git hook (assert)",
+      } },
+    }));
+    const evidence = (await appendEvent(store, {
+      project: "p", actor: { type: "agent", id: "A" }, action: "edited", caused_by: root.id,
+      artifacts: [{ id: "repo:acme/app#a.ts", role: "generated" }],
+      method: { tool: "editor", params: { sealed_by: "pinned:A" } },
+    })).event;
+    await appendEvent(store, commitInput({
+      idempotency_key: `gh:push:acme/app:${captureSha}`,
+      tags: ["github", "push"],
+      artifacts: [{ id: secondRef, role: "generated" }, { id: "repo:acme/app#a.ts", role: "generated" }],
+      method: { tool: "git", params: {
+        sha: captureSha, parents: [], raw_message: "second\n",
+        author: { name: "Jordan", email: "jordan@example.com" }, sealed_by: "webhook:github",
+      } },
+    }));
+    const target = (await appendEvent(store, {
+      project: "p", actor: { type: "agent", id: "C" }, action: "edited", caused_by: root.id,
+      artifacts: [{ id: "repo:acme/app#a.ts", role: "generated" }],
+      method: { tool: "editor", params: { sealed_by: "pinned:C" } },
+    })).event;
+    await appendEvent(store, {
+      project: "p", actor: { type: "human", id: "jordan@example.com" }, action: "other",
+      action_detail: "amended", caused_by: root.id, intent: "attribute C to A",
+      artifacts: [{ id: `event:${target.id}`, role: "used" }, { id: `event:${evidence.id}`, role: "used" }],
+      method: { tool: "retrace_amend", params: {
+        sealed_by: "owner", target_event_id: target.id,
+        attribution: {
+          from: { type: "agent", id: "C" }, to: { type: "agent", id: "A" }, evidence: [evidence.id],
+        },
+      } },
+    });
+
+    const v7 = await fullV7Attribution(store, { [captureSha]: ["a.ts", "other.ts"] });
+    assert.deepEqual([...v7.effective.keys()], [target.id], `v7 ${firstLength}→${secondLength}`);
+    const got = await classify(store, commitInput({ actorId: "C", files: ["a.ts"], raw: "work\n\nRetrace-Actor: C\n" }));
+    assert.equal(got.kind, "decision", `${firstLength}→${secondLength}: ${JSON.stringify(got)}`);
+    if (got.kind !== "decision") continue;
+    const classifier = JSON.parse([...store.contexts.values()][0]!.amendment_snapshot) as { effective: { target: string }[] };
+    assert.deepEqual(classifier.effective.map((x) => x.target), [...v7.effective.keys()], `${firstLength}→${secondLength}`);
+    assert.equal(got.record.decision.witnesses.some((w) => w.id === target.id), false, `${firstLength}→${secondLength}`);
+  }
+});
+
 test("F2: causal traversal continues through a target that was already loaded as evidence", async () => {
   const store = new MemoryEventStore();
   await putPolicy(store);

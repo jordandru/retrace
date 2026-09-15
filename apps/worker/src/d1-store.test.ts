@@ -134,7 +134,7 @@ test("eventsReferencingArtifacts SQL joins the index, binds keys, and uses row_c
   });
   assert.equal(result.ok, true);
   const stmt = db.last!;
-  assert.match(stmt.sql, /JOIN event_artifact_index i ON i\.project = e\.project AND i\.seq = e\.seq/);
+  assert.match(stmt.sql, /FROM event_artifact_index i INDEXED BY idx_eai_project_key_seq JOIN events e/);
   assert.match(stmt.sql, /i\.seq > \? AND i\.seq <= \?/);
   assert.equal(stmt.params[0], "retrace");
   assert.equal(stmt.params[1], 1);
@@ -142,6 +142,26 @@ test("eventsReferencingArtifacts SQL joins the index, binds keys, and uses row_c
   assert.equal(stmt.params.at(-1), 21);
   assert.ok(stmt.params.includes("repo:jordandru/retrace#a.ts"));
   assert.ok(stmt.params.includes("repo:retrace#a.ts"));
+});
+
+test("eventsReferencingArtifacts binds indexed literal prefixes for mixed commit-reference lengths", async () => {
+  const db = new FakeD1();
+  const store = new D1Store(db as unknown as D1Database);
+  const prefix = "commit:acme/app@abcdef0";
+  const result = await store.eventsReferencingArtifacts({
+    project: "retrace",
+    artifact_keys: [],
+    artifact_prefixes: [prefix],
+    after_seq: -1,
+    through_seq: 20,
+    row_cap: 10,
+    deadline: Date.now() + 5_000,
+  });
+  assert.equal(result.ok, true);
+  const stmt = db.last!;
+  assert.match(stmt.sql, /i\.artifact_key GLOB \?/);
+  assert.ok(stmt.params.includes(`${prefix}*`));
+  assert.equal(stmt.params.at(-1), 11);
 });
 
 test("eventsReferencingArtifacts returns typed over-budget on a past deadline without querying", async () => {

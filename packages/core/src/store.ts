@@ -5,7 +5,7 @@
 import { Event, EventInput } from "./schema.js";
 import { sealEvent, verifyChain, VerifyResult } from "./chain.js";
 import { markUntrustedText } from "./explain.js";
-import { artifactKey, artifactLookup, sameArtifact } from "./capture.js";
+import { artifactKey, artifactLookup, escapeGlobLiteral, sameArtifact } from "./capture.js";
 
 export interface HistoryQuery {
   project: string;
@@ -190,6 +190,8 @@ export interface ArtifactIndexRow {
 export interface ArtifactIndexQuery {
   project: string;
   artifact_keys: string[];
+  /** Exact literal prefixes over stored artifact ids (implemented as indexed prefix ranges/GLOBs). */
+  artifact_prefixes?: string[];
   /** Exclusive lower bound. */
   after_seq: number;
   /** Inclusive upper bound U. */
@@ -250,7 +252,7 @@ export function artifactIndexRows(e: Event): ArtifactIndexRow[] {
 /** In-memory spec the SQL stores must match: sameArtifact matching, row cap on matching index rows. */
 export function eventsReferencingArtifactKeys(events: Event[], q: ArtifactIndexQuery, nowMs: number): ArtifactIndexResult {
   if (nowMs >= q.deadline) return { ok: false, reason: "deadline" };
-  if (!q.artifact_keys.length) return { ok: true, events: [] };
+  if (!q.artifact_keys.length && !q.artifact_prefixes?.length) return { ok: true, events: [] };
   const matched: Event[] = [];
   let rows = 0;
   const windowed = events
@@ -258,7 +260,10 @@ export function eventsReferencingArtifactKeys(events: Event[], q: ArtifactIndexQ
     .sort((a, b) => a.seq - b.seq);
   for (const e of windowed) {
     const hitKeys = new Set(
-      e.artifacts.filter((a) => q.artifact_keys.some((k) => sameArtifact(artifactKey(a.id), k))).map((a) => artifactKey(a.id)),
+      e.artifacts
+        .filter((a) => q.artifact_keys.some((k) => sameArtifact(artifactKey(a.id), k))
+          || q.artifact_prefixes?.some((prefix) => artifactKey(a.id).startsWith(prefix)))
+        .map((a) => artifactKey(a.id)),
     );
     if (!hitKeys.size) continue;
     rows += hitKeys.size;
@@ -293,9 +298,14 @@ export function artifactKeyMatchSql(keys: string[]): { sql: string; params: stri
 
 export function eventsReferencingArtifactsSql(q: ArtifactIndexQuery): { sql: string; params: (string | number)[] } {
   const match = artifactKeyMatchSql(q.artifact_keys);
+  const prefixParams = [...new Set(q.artifact_prefixes ?? [])].map((prefix) => `${escapeGlobLiteral(prefix)}*`);
+  const prefixSql = prefixParams.map(() => "i.artifact_key GLOB ?").join(" OR ");
+  const predicate = prefixSql
+    ? q.artifact_keys.length ? `(${match.sql} OR ${prefixSql})` : `(${prefixSql})`
+    : match.sql;
   return {
-    sql: `SELECT e.body FROM events e JOIN event_artifact_index i ON i.project = e.project AND i.seq = e.seq WHERE e.project = ? AND i.seq > ? AND i.seq <= ? AND ${match.sql} ORDER BY e.seq ASC LIMIT ?`,
-    params: [q.project, q.after_seq, q.through_seq, ...match.params, q.row_cap + 1],
+    sql: `SELECT e.body FROM event_artifact_index i INDEXED BY idx_eai_project_key_seq JOIN events e ON e.project = i.project AND e.seq = i.seq WHERE i.project = ? AND i.seq > ? AND i.seq <= ? AND ${predicate} ORDER BY i.seq ASC LIMIT ?`,
+    params: [q.project, q.after_seq, q.through_seq, ...match.params, ...prefixParams, q.row_cap + 1],
   };
 }
 

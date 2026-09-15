@@ -165,7 +165,7 @@ export class SqliteStore implements EventStore {
 
   async eventsReferencingArtifacts(q: ArtifactIndexQuery, now: () => number = Date.now): Promise<ArtifactIndexResult> {
     if (now() >= q.deadline) return { ok: false, reason: "deadline" };
-    if (!q.artifact_keys.length) return { ok: true, events: [] };
+    if (!q.artifact_keys.length && !q.artifact_prefixes?.length) return { ok: true, events: [] };
     try {
       const { sql, params } = eventsReferencingArtifactsSql(q);
       const rows = this.db.prepare(sql).all(...params) as { body: string }[];

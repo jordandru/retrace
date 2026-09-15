@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   appendEvent, sealEvent, verifyProject, EventInput, HeadMovedError, createHandler, POLICY_PROFILE,
-  recordWebhookClassifyOutcome,
+  eventsReferencingArtifactsSql, recordWebhookClassifyOutcome,
 } from "@retrace-dev/core";
 import { SqliteStore } from "./sqlite-store.js";
 
@@ -146,6 +146,33 @@ test("SqliteStore writes event_artifact_index on insert and matches sameArtifact
     project: "junk", artifact_keys: ["a"], after_seq: -1, through_seq: 10, row_cap: 100, deadline: 0,
   }, () => 1);
   assert.deepEqual(deadline, { ok: false, reason: "deadline" });
+});
+
+test("SqliteStore artifact prefixes find abbreviated and full commit references", async () => {
+  const store = new SqliteStore(":memory:");
+  const sha = "a1234567890b".padEnd(40, "c");
+  for (const suffix of [sha.slice(0, 12), sha]) {
+    await appendEvent(store, ev({
+      action: "committed",
+      artifacts: [{ id: `commit:acme/app@${suffix}`, role: "generated" }],
+      method: { tool: "git", params: { sha } },
+    }));
+  }
+  const query = {
+    project: "junk",
+    artifact_keys: [],
+    artifact_prefixes: [`commit:acme/app@${sha.slice(0, 7)}`],
+    after_seq: -1,
+    through_seq: 10,
+    row_cap: 10,
+    deadline: Date.now() + 5_000,
+  };
+  const hit = await store.eventsReferencingArtifacts(query);
+  assert.equal(hit.ok, true);
+  if (hit.ok) assert.deepEqual(hit.events.map((e) => e.seq), [0, 1]);
+  const { sql, params } = eventsReferencingArtifactsSql(query);
+  const plan = (store as any).db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...params).map((row: any) => row.detail).join("\n");
+  assert.match(plan, /idx_eai_project_key_seq \(project=\? AND artifact_key>[?] AND artifact_key<[?]\)/);
 });
 
 test("SqliteStore backfills event_artifact_index once from existing events", async () => {
