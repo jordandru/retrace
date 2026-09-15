@@ -323,8 +323,11 @@ export function reviewEffortFindings(events: Event[], models: RoutingModelRegist
   const summary = (reviews: Event[], label: string, detail: string): Finding | undefined => {
     if (!reviews.length) return undefined;
     const oldest = reviews.reduce((a, b) => (a.seq < b.seq ? a : b));
+    const boundary = scope?.routingHistoryComplete === false
+      ? `oldest observed routing seq ${adoptionSeq}; adoption boundary unknown`
+      : `adoption seq ${adoptionSeq}`;
     const counted = scope
-      ? `reviews in the inspected window (last ${scope.recentEventLimit} events; adoption seq ${adoptionSeq}; window ${scope.reachesAdoption ? "reaches" : "does not reach"} adoption)`
+      ? `reviews in the inspected window (last ${scope.recentEventLimit} events; ${boundary}; window ${scope.reachesAdoption ? "reaches" : "does not reach"} adoption)`
       : "reviews since adoption";
     return result("warn", label, `${reviews.length} of ${reviewCount} ${counted} ${detail} (oldest ${oldest.id})`);
   };

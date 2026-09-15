@@ -336,6 +336,46 @@ test("doctor: exhausted routing search reports incomplete history without droppi
   assert.match(findings[0]!.detail, /search exhausted its bounded page limit/);
 });
 
+test("doctor: capped real routing rows never claim the oldest observed row is adoption", async () => {
+  const project = "retrace";
+  const ledger: Event[] = [];
+  for (let seq = 1; seq <= 3202; seq++) {
+    ledger.push(commitEvt({
+      project, id: seq === 1 ? "evt_true_adoption" : `evt_route_${seq}`, seq, action: "other",
+      actor: { type: "agent", id: "claude-code" },
+      method: { tool: "routing", params: { target: { agent: "codex", model: "gpt-6-astra", effort: "high" } } },
+    }));
+  }
+  ledger.push(commitEvt({
+    project, id: "evt_recent_review", seq: 3203, action: "rejected",
+    actor: { type: "agent", id: "codex", model: "gpt-6-astra" },
+    tags: ["review"], method: { tool: "review", params: {} },
+  }));
+  let calls = 0;
+  const loaded = await loadReviewEffortEvents({
+    async history(q: HistoryQuery) {
+      calls++;
+      return pageHistoryNewest(ledger, q);
+    },
+  }, project);
+
+  assert.equal(calls, 65);
+  assert.equal(loaded.scope.routingHistoryComplete, false);
+  assert.equal(loaded.events.some((event) => event.id === "evt_true_adoption"), false);
+  const findings = reviewEffortFindings(
+    loaded.events,
+    { "gpt-6": { supports_effort: true, levels: ["high"], aliases: ["gpt-6-astra"] } },
+    loaded.scope,
+  );
+  assert.deepEqual(findings.map((finding) => finding.label), [
+    "review routing",
+    "review reasoning effort",
+    "review routing history",
+  ]);
+  assert.match(findings[0]!.detail, /oldest observed routing seq 3; adoption boundary unknown/);
+  assert.ok(findings.every((finding) => !finding.detail.includes("adoption seq")));
+});
+
 test("doctor: CLI version gap when Worker advertises min_cli_version above the running CLI", () => {
   assert.equal(cliVersionGap({}, "0.1.7"), undefined);
   assert.equal(cliVersionGap({ min_cli_version: "0.1.8" }, "0.1.8")?.level, "pass");
