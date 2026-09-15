@@ -75,3 +75,24 @@ second start marker will be added here with its date.
   `method.params.claim_decision` between the first window's revert and this marker. This note's own commit
   is the first commit attempted under the restarted shadow; its outcome (a seal with `claim_decision`, or a
   parked seal with an `unavailable` reason) is to be cited here by a dated addition, as before.
+
+## Addition 2026-09-15 19:21:48Z — window PAUSED a second time (policy reverted to off)
+
+This note's own commit `4416d2d0` was the first attempted under the restarted shadow. The hook's attempt
+(19:12:55Z) returned `503 classification_unavailable / store_error`, the seal was parked in
+`retrace-pending-seal`, and no classification completed. Not the deadline: every bounded read of PR #51
+runs in production D1 in single-digit milliseconds (amendment candidates 4 ms, artifact-index statement
+7 ms), the index and the policy document are present. Root cause, reproduced locally against the exported
+ledger and the production policy body (finding `evt_2a4dfb78f2744e8fa86bbbd670fafaf0`): the round-4
+strict full-OID resolution in `classifierCaptureSeals` (`packages/core/src/classify.ts` ~319) is applied
+to every `committed`/`merged` event naming a canonical-repo commit in the read set, including events the
+seal filter would never accept as a seal. The live ledger holds one — `evt_728c78b0091940c687f96b07b1f0bc89`
+(seq 2753, an MCP-logged 2026-09-09 correction for the trailer-less merge `9c3156b`, a 7-character
+reference and no `sha`) — inside the artifact window of amendment #2543's target, so every classification
+on `retrace` fails closed. Ten review rounds missed it because every test ledger is synthetic. On Jordan's
+go (`evt_e12e96bef5c4473ca632eb6804ba0e1c`) the policy was set back to `off` (Worker version
+`4fc02b5b-2f8c-4299-aa86-07354f7e64a5`, `evt_ecf9c31031cf41eba9ddd10927b60dfa`) and the parked seal
+replayed (`evt_8ce84cf1f7454e1da3f5bf9ef35f1a9d`). Shadow was live 12 minutes (19:09:30Z–19:21:48Z); one
+commit attempted; zero classifications completed; zero seals lost. **Activation remains NOT proven.** The
+window restarts on a redeploy in which the strict resolution applies only to seal-eligible events; the
+census above stays the "before"; a third start marker will be added here with its date.
