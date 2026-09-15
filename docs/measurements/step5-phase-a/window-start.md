@@ -37,3 +37,18 @@ cost profile (labelled census / bench / proxy per row) → the step 6 decision. 
 `scripts/phase-a-measure.mjs --since 2026-09-15T04:41:00Z` over an export bundle, never the live API in a
 loop. Jordan's live boxing-rpg work during the window is the second-project evidence Grok's assessment
 asked for.
+
+## Addition 2026-09-15 04:53Z — window PAUSED (policy reverted to off)
+
+The first commit sealed under shadow was this note's own commit `5b358464`. Both the hook's attempt
+(04:42:51Z) and a replay (04:43:57Z) returned `503 classification_unavailable / deadline`; the webhook
+copy went to `pending_deliveries` (attempt 0, outcome pending/deadline); `classification_breakers`
+recorded one failure; `classification_contexts` stayed empty. Root cause by code read: the amendment
+evaluation on the classifier's hot path loads every event of the project (`store.all`, 4,386 events on
+retrace) inside the 500 ms budget (`packages/core/src/classify.ts` ~396–406). Finding
+`evt_e39d2f8ebea240f89bb74c3cd3e0042a`. On Jordan's go the policy was set back to `off`
+(`evt_f9d8587309f9435cb817c3a77236feb4`) and the parked hook seal replayed (`evt_0eeedcb808154bef8c5a3c58836574b7`).
+Shadow was live 12 minutes; one commit attempted; zero classifications completed; zero seals lost.
+**Activation is therefore NOT proven**: no seal carrying `claim_decision` exists. The window restarts on
+a redeploy with a bounded amendment query; the census above stays the "before" for that restart, and a
+second start marker will be added here with its date.
