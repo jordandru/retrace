@@ -16,7 +16,10 @@ import { canonicalize, sha256Hex } from "./chain.js";
 import {
   CommitActorResolution, resolveCommitActor, validCausedById,
 } from "./commit-actor.js";
-import { actorKey, captureSeals, generatesArtifact, previousCaptureTouch, sameArtifact, type CaptureSeal } from "./capture.js";
+import {
+  actorKey, captureSealEligible, captureSeals, firstStampedSeq, generatesArtifact, previousCaptureTouch, sameArtifact,
+  type CapturePolicy, type CaptureSeal,
+} from "./capture.js";
 import {
   ARTIFACT_INDEX_DEFAULT_ROW_CAP, ArtifactIndexResult, CausedByProblem, EventStore,
   SEALED_BY_GITHUB_WEBHOOK, SEALED_BY_PARAM, causedByProblem,
@@ -321,9 +324,20 @@ function classifierCaptureSeals(
   policy: PolicyBody,
   canonicalRepo: string,
 ): { ok: true; seals: CaptureSeal[] } | { ok: false } {
+  const capturePolicy: CapturePolicy = {
+    repoName: canonicalRepo,
+    aliases: policy.repositories.find((r) => r.name === canonicalRepo)?.aliases,
+    hookSealedBy: policy.trusted_hook_stamps,
+    ownerSeals: true,
+  };
+  // Strict full-OID resolution (round 4) guards the seals the classifier will trust. It applies to exactly the events
+  // captureSeals would accept: an event without a trusted stamp is not a seal and cannot become one, so its reference
+  // neither resolves nor vetoes. The live ledger holds such events (an MCP-logged correction naming `commit:…@9c3156b`
+  // with no sha, evt_728c78b0); vetoing on them made every classification unavailable (2026-09-15, evt_2a4dfb78).
+  const firstStamped = firstStampedSeq(events, capturePolicy);
   const resolutions = new Map<string, string>();
   for (const event of events) {
-    if (event.action !== "committed" && event.action !== "merged") continue;
+    if (!captureSealEligible(event, capturePolicy, firstStamped)) continue;
     const ref = event.artifacts.find((a) => a.id.startsWith("commit:"))?.id;
     if (!ref) continue;
     const match = /^commit:([^@]+)@/.exec(ref);
@@ -332,15 +346,7 @@ function classifierCaptureSeals(
     if (!key || resolutions.has(ref) && resolutions.get(ref) !== key) return { ok: false };
     resolutions.set(ref, key);
   }
-  return {
-    ok: true,
-    seals: captureSeals(events, {
-      repoName: canonicalRepo,
-      aliases: policy.repositories.find((r) => r.name === canonicalRepo)?.aliases,
-      hookSealedBy: policy.trusted_hook_stamps,
-      ownerSeals: true,
-    }, (id) => resolutions.get(id)),
-  };
+  return { ok: true, seals: captureSeals(events, capturePolicy, (id) => resolutions.get(id)) };
 }
 
 async function classifierLedgerAttributionContext(

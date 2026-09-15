@@ -58,20 +58,32 @@ export interface CapturePolicy {
 }
 export interface CaptureSeal { key: string; seq: number; event: Event; paths: Set<string> }
 /** Shared commit boundary classification. The adapter supplies full OID resolution for authoritative attribution. */
+/** The seq before which an unstamped git seal counts as legacy: the first stamped seal in `events`, unless the policy pins it. */
+export function firstStampedSeq(events: Event[], policy: CapturePolicy): number {
+  return policy.firstStampedSeq ?? [...events].sort((a,b) => a.seq - b.seq).find(e => typeof e.method?.params?.sealed_by === "string")?.seq ?? Infinity;
+}
+
+/** Whether `e` is a capture seal this policy trusts: a legacy unstamped git seal, a git seal stamped by a trusted hook
+ *  (or the owner when `ownerSeals`), or a GitHub push seal. Anything else naming a commit — an MCP-logged correction,
+ *  a read, a note — is not a seal and can never become one, whatever reference it carries. */
+export function captureSealEligible(e: Event, policy: CapturePolicy, firstStamped: number): boolean {
+  if (e.action !== "committed" && e.action !== "merged") return false;
+  const stamp = e.method?.params?.sealed_by;
+  const shape = e.method?.tool === "git" && (e.idempotency_key === undefined || e.idempotency_key.startsWith("git:"));
+  const legacy = stamp === undefined && e.seq < firstStamped && e.method?.tool === "git" && !e.tags?.includes("push");
+  const stamps = policy.hookSealedBy ?? [];
+  const hook = shape && (typeof stamp === "string" && (stamps.includes(stamp) || stamp === "owner" && policy.ownerSeals === true) || stamp === undefined && policy.allowUnstampedSeals === true);
+  const webhook = e.tags?.includes("push") && stamp === "webhook:github";
+  return Boolean(legacy || hook || webhook);
+}
+
 export function captureSeals(events: Event[], policy: CapturePolicy, resolve: (id: string) => string | undefined = id => /^commit:[^@]+@([0-9a-f]{7,40})$/.exec(id)?.[1].slice(0,12)): CaptureSeal[] {
   const sorted = [...events].sort((a,b) => a.seq - b.seq);
-  const firstStamped = policy.firstStampedSeq ?? sorted.find(e => typeof e.method?.params?.sealed_by === "string")?.seq ?? Infinity;
-  const stamps = new Set(policy.hookSealedBy ?? []);
+  const firstStamped = firstStampedSeq(sorted, policy);
   const excluded = new Set((policy.unreachableShas ?? []).map(s=>s.includes("@")?s:s.slice(0,12)));
   const grouped = new Map<string, CaptureSeal>();
   for (const e of sorted) {
-    if (e.action !== "committed" && e.action !== "merged") continue;
-    const stamp = e.method?.params?.sealed_by;
-    const shape = e.method?.tool === "git" && (e.idempotency_key === undefined || e.idempotency_key.startsWith("git:"));
-    const legacy = stamp === undefined && e.seq < firstStamped && e.method?.tool === "git" && !e.tags?.includes("push");
-    const hook = shape && (typeof stamp === "string" && (stamps.has(stamp) || stamp === "owner" && policy.ownerSeals === true) || stamp === undefined && policy.allowUnstampedSeals === true);
-    const webhook = e.tags?.includes("push") && stamp === "webhook:github";
-    if (!legacy && !hook && !webhook) continue;
+    if (!captureSealEligible(e, policy, firstStamped)) continue;
     const id = e.artifacts.find(a => a.id.startsWith("commit:"))?.id;
     const key = id ? resolve(id) : undefined;
     if (!key || excluded.has(key) || excluded.has(key.slice(0,12))) continue;

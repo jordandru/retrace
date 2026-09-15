@@ -614,7 +614,7 @@ async function attributionFixture(store: MemoryEventStore, opts: {
   return { root: root.event, evidence: evidence.event, target: target.event, amend: amend.event };
 }
 
-async function fullV7Attribution(store: MemoryEventStore, commitFiles: Record<string, string[]> = {}) {
+async function fullV7Attribution(store: MemoryEventStore, commitFiles: Record<string, string[]> = {}, gitResolutions: Record<string, { repo: string; oid: string }> = {}) {
   const events = await store.all("p");
   const head = await store.head("p");
   assert.ok(head);
@@ -625,6 +625,7 @@ async function fullV7Attribution(store: MemoryEventStore, commitFiles: Record<st
     const sha = event.method?.params?.sha;
     if (ref && typeof sha === "string") resolutions[ref] = { repo: "acme/app", oid: sha };
   }
+  Object.assign(resolutions, gitResolutions); // what the CLI resolves through git for refs no seal carries
   const context = await prepareAttributionContext(snapshot, {
     profile: "retrace-attribution/1",
     repositories: [{ name: "acme/app", aliases: ["app", "old-name"], from_seq: 0, hook_sealed_by: ["assert:git hook (assert)"] }],
@@ -1189,6 +1190,79 @@ test("F1: mixed abbreviated/full commit references group in both producer orders
     assert.deepEqual(classifier.effective.map((x) => x.target), [...v7.effective.keys()], `${firstLength}→${secondLength}`);
     assert.equal(got.record.decision.witnesses.some((w) => w.id === target.id), false, `${firstLength}→${secondLength}`);
   }
+});
+
+// Live-ledger shape (2026-09-15, evt_2a4dfb78): an event that names a commit but is not a seal — an MCP-logged
+// correction with a 7-char reference and no sha — sat in the amendment target's window and vetoed every classification.
+async function nonSealCommitRefFixture(store: MemoryEventStore, correction: Partial<EventInput> & { method: EventInput["method"] }) {
+  await putPolicy(store, "p", { repositories: [{ name: "acme/app", aliases: ["app"] }] });
+  const root = (await appendEvent(store, {
+    project: "p", actor: { type: "human", id: "jordan@example.com" }, action: "instructed",
+    artifacts: [{ id: "task:non-seal-ref", role: "generated" }],
+  })).event;
+  const captureSha = "123456789abc".padEnd(40, "d");
+  await appendEvent(store, commitInput({
+    idempotency_key: "git:capture",
+    artifacts: [{ id: `commit:acme/app@${captureSha.slice(0, 12)}`, role: "generated" }, { id: "repo:acme/app#a.ts", role: "generated" }],
+    method: { tool: "git", params: {
+      sha: captureSha, parents: [], raw_message: "capture\n",
+      author: { name: "Jordan", email: "jordan@example.com" }, sealed_by: "assert:git hook (assert)",
+    } },
+  }));
+  const evidence = (await appendEvent(store, {
+    project: "p", actor: { type: "agent", id: "A" }, action: "edited", caused_by: root.id,
+    artifacts: [{ id: "repo:acme/app#a.ts", role: "generated" }],
+    method: { tool: "editor", params: { sealed_by: "pinned:A" } },
+  })).event;
+  const target = (await appendEvent(store, {
+    project: "p", actor: { type: "agent", id: "C" }, action: "edited", caused_by: root.id,
+    artifacts: [{ id: "repo:acme/app#a.ts", role: "generated" }],
+    method: { tool: "editor", params: { sealed_by: "pinned:C" } },
+  })).event;
+  // the event under test: names the same file and a commit of the canonical repo by a short reference, no sha
+  await appendEvent(store, {
+    project: "p", actor: { type: "agent", id: "claude-code" }, action: "committed", caused_by: root.id,
+    intent: "correction: merge commit sealed without trailers",
+    artifacts: [{ id: "commit:acme/app@9c3156b", kind: "commit", role: "generated" }, { id: "repo:acme/app#a.ts", role: "generated" }],
+    ...correction,
+  });
+  await appendEvent(store, {
+    project: "p", actor: { type: "human", id: "jordan@example.com" }, action: "other",
+    action_detail: "amended", caused_by: root.id, intent: "attribute C to A",
+    artifacts: [{ id: `event:${target.id}`, role: "used" }, { id: `event:${evidence.id}`, role: "used" }],
+    method: { tool: "retrace_amend", params: {
+      sealed_by: "owner", target_event_id: target.id,
+      attribution: { from: { type: "agent", id: "C" }, to: { type: "agent", id: "A" }, evidence: [evidence.id] },
+    } },
+  });
+  return { target, captureSha };
+}
+
+test("live shape: an MCP-logged committed event with a short commit ref and no sha neither vetoes nor seals", async () => {
+  const store = new MemoryEventStore();
+  const { target, captureSha } = await nonSealCommitRefFixture(store, {
+    method: { tool: "retrace_log", params: { sealed_by: "pinned:claude-code MCP (pinned) (signing)" } },
+  });
+  // v7 on the CLI resolves the short reference through git (9c3156b is a real commit); the bounded classifier has no git
+  // and must not need one: the event is not a seal, so its reference neither resolves nor vetoes.
+  const v7 = await fullV7Attribution(store, { [captureSha]: ["a.ts"] }, { "commit:acme/app@9c3156b": { repo: "acme/app", oid: "9c3156b".padEnd(40, "0") } });
+  assert.deepEqual([...v7.effective.keys()], [target.id]);
+  const got = await classify(store, commitInput({ actorId: "C", files: ["a.ts"], raw: "work\n\nRetrace-Actor: C\n" }));
+  assert.equal(got.kind, "decision", JSON.stringify(got));
+  if (got.kind !== "decision") return;
+  const snapshot = JSON.parse([...store.contexts.values()][0]!.amendment_snapshot) as { effective: { target: string }[] };
+  assert.deepEqual(snapshot.effective.map((x) => x.target), [target.id]);
+  assert.equal(got.record.decision.witnesses.some((w) => w.id === target.id), false);
+});
+
+test("a trusted hook seal whose commit reference cannot be resolved to a full OID still fails closed", async () => {
+  const store = new MemoryEventStore();
+  await nonSealCommitRefFixture(store, {
+    idempotency_key: "git:unresolvable",
+    method: { tool: "git", params: { parents: [], raw_message: "no sha\n", sealed_by: "assert:git hook (assert)" } },
+  });
+  const got = await classify(store, commitInput({ actorId: "C", files: ["a.ts"], raw: "work\n\nRetrace-Actor: C\n" }));
+  assert.deepEqual(got, { kind: "unavailable", reason: "store_error" });
 });
 
 test("F2: causal traversal continues through a target that was already loaded as evidence", async () => {
