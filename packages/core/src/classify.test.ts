@@ -1499,7 +1499,7 @@ test("diagnostics: a throwing bounded read carries the exception text", async ()
   assert.deepEqual(s.seen.map(said), [{
     site: "classify.amendments.candidates",
     reason: "store_error",
-    detail: "D1_ERROR: no such index",
+    detail: "matched(D1_ERROR, no such index)",
   }]);
   assertTimed(s.seen[0], "store.amendmentEventsUpTo");
 });
@@ -1542,7 +1542,7 @@ test("diagnostics: classify.outer names the operation the throw came from", asyn
     assert.deepEqual(s.seen.map(said), [{
       site: "classify.outer",
       reason: "store_error",
-      detail: `${operation}: D1_ERROR`,
+      detail: `${operation}: matched(D1_ERROR)`,
     }]);
     assertTimed(s.seen[0], operation);
   }
@@ -1638,7 +1638,7 @@ test("diagnostics: a caught value contributes its class, never its text", () => 
   // Three bypasses Codex reproduced in round 2: an allow-listed prefix with a body appended, a
   // spoofed `Error.name`, and a rejection that is simply a string.
   const withBody = new Error('D1_ERROR: near "x": body={"token":"PRIVATE"}');
-  assert.equal(diagnosticDetail(thrown(withBody)), "D1_ERROR");
+  assert.equal(diagnosticDetail(thrown(withBody)), "matched(D1_ERROR)");
   assert.ok(!diagnosticDetail(thrown(withBody)).includes("PRIVATE"));
 
   const spoofed = new Error("boom");
@@ -1663,11 +1663,11 @@ test("diagnostics: a caught value contributes its class, never its text", () => 
   // The condition vocabulary composes our own literals: this is the line the incident needed.
   assert.equal(
     diagnosticDetail(thrown(new Error("D1_ERROR: LIKE or GLOB pattern too complex: SQLITE_ERROR"))),
-    "D1_ERROR: LIKE or GLOB pattern too complex",
+    "matched(D1_ERROR, LIKE or GLOB pattern too complex)",
   );
   assert.equal(
     diagnosticDetail(thrown(new Error('D1_ERROR: no such index: idx_x /private/path "secret"'))),
-    "D1_ERROR: no such index",
+    "matched(D1_ERROR, no such index)",
   );
 
   assert.equal(diagnosticDetail(thrown("PRIVATE_THROWN_STRING")), "non-error(string)");
@@ -1675,7 +1675,10 @@ test("diagnostics: a caught value contributes its class, never its text", () => 
   assert.equal(diagnosticDetail(thrown(null)), "non-error(null)");
 
   // A recognised condition is worth telling apart; an ordinary class still names itself.
-  assert.equal(diagnosticDetail(thrown(new Error("Network connection lost while reading rows"))), "Network connection lost");
+  assert.equal(
+    diagnosticDetail(thrown(new Error("Network connection lost while reading rows"))),
+    "matched(Network connection lost)",
+  );
   assert.equal(diagnosticDetail(thrown(new SyntaxError('Unexpected token } in JSON: {"secret":"hunter2"}'))), "SyntaxError");
   assert.equal(diagnosticDetail(thrown(new TypeError("x of undefined"))), "TypeError");
   assert.equal(diagnosticDetail(thrown(new AggregateError([], "private text"))), "AggregateError");

@@ -314,7 +314,7 @@ test("runArtifactIndexStatements: a throwing statement still fails closed, and s
   assert.equal(seen.length, 1);
   assert.equal(seen[0].site, "store.artifact_index");
   assert.equal(seen[0].reason, "store_error");
-  assert.equal(seen[0].detail, "statement 0: D1_ERROR: too many SQL variables");
+  assert.equal(seen[0].detail, "statement 0: matched(D1_ERROR, too many SQL variables)");
   assert.equal(typeof seen[0].ms, "number", "how long the failing statement ran");
 
   // Without a sink the helper behaves exactly as before.

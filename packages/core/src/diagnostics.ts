@@ -82,8 +82,10 @@ export const DIAGNOSTIC_DETAIL_UNAVAILABLE = "detail unavailable";
 /**
  * Conditions worth telling apart, as substrings we look for and literals we print. What is emitted
  * is always the entry below, never the message it was recognised in, because the rest of a D1
- * message can be anything the statement or the row contained. Families come first so a store error
- * renders as `D1_ERROR: LIKE or GLOB pattern too complex` — both halves ours.
+ * message can be anything the statement or the row contained. Matches are reported as
+ * `matched(D1_ERROR, LIKE or GLOB pattern too complex)` — a list of what was found in the message,
+ * not a claim about cause: a message may quote or negate a condition, and this cannot tell the
+ * difference (Codex nit, PR 57 round 4).
  *
  * The specific SQLite conditions are here because of the incident this module was written for: the
  * shadow window failed on `D1_ERROR: LIKE or GLOB pattern too complex`, and three windows were
@@ -170,7 +172,7 @@ export function thrownClass(error: unknown): string {
   const conditions = message
     ? CONDITIONS.filter((c) => message.includes(c.toLowerCase()))
     : [];
-  if (conditions.length) return conditions.join(": ");
+  if (conditions.length) return `matched(${conditions.join(", ")})`;
   const name = readString(() => (error as Error).name);
   return CLASS_NAMES.find((c) => c === name) ?? "Error";
 }

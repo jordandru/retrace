@@ -327,7 +327,7 @@ test("policySnapshotFromIndex: a throwing read still fails closed, and says why 
   assert.equal(seen.length, 1);
   assert.deepEqual(
     { site: seen[0].site, reason: seen[0].reason, detail: seen[0].detail },
-    { site: "policy.snapshot.document", reason: "store_error", detail: "D1_ERROR" },
+    { site: "policy.snapshot.document", reason: "store_error", detail: "matched(D1_ERROR)" },
   );
   assert.equal(typeof seen[0].ms, "number", "how long the failing read ran");
 
