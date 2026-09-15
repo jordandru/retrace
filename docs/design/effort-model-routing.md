@@ -1,6 +1,8 @@
 # Effort and model routing for spawned agents — design note
 
-**Status:** DRAFT v2, 2026-09-10, author claude-code, on Jordan's ask (2026-09-10). Not built. v1 (a6a45c2) was
+**Status:** DRAFT v2, 2026-09-10, author claude-code, on Jordan's ask (2026-09-10). PR 35 implements
+doctor-only advisories; R3's `/status` and reconcile consumers are deferred to a follow-up PR. The complete
+design is not yet built. v1 (a6a45c2) was
 reviewed by Nemotron 3 Ultra via NOOA (evt_316223f7a9a84ed29a7bf5def3a91ebc): *needs changes* — four blocking
 (TOCTOU on launch, unauthenticated pins, escalation ordering, moving-head classification), two non-blocking
 (model capability registry, advisory token counts). v2 folds all six; dispositions in §10. Companion to
@@ -91,12 +93,16 @@ Routing decision (coordinator, before launch):
     escalated_from: null, why: "touches router.ts ingress + policy.ts" } },
   artifacts: [ { id: "https://github.com/jordandru/retrace/pull/32", role: "used" } ] }
 ```
-Review event (reviewer, unchanged shape plus two fields): `method.params.reasoning_effort` — self-reported
-from the agent's own configuration — and `method.params.routing_event_id`. A small data file
+Review event (reviewer, unchanged shape plus review metadata): `method.params.reasoning_effort` —
+self-reported from the agent's own configuration — `method.params.routing_event_id`, and the full
+`method.params.reviewed_head` commit SHA. The first two names are optional for old-client compatibility
+but, when present, are typed non-empty strings: values such as `reasoning_effort: null` and
+`routing_event_id: 17` fail schema validation. Unrelated arbitrary params still round-trip. A small data file
 `routing-rules/models.json` maps `model_id → { supports_effort, levels[] }` (Nemotron F5); its digest is in
 every routing event, and consumers use it to decide whether a missing `reasoning_effort` is a WARN or
 expected. Routing intent vs execution is a standard consumer check shown side by side ("routed high ·
-ran medium"), never one hiding the other: a mismatch is a WARN on `/status` and a finding in reconcile.
+ran medium"), never one hiding the other. PR 35 reports these mismatches through doctor; `/status` and
+reconcile delivery of R3 remain deferred to a follow-up PR.
 
 ## 6. Measurement (Grok, alongside §15 step 5)
 
@@ -126,7 +132,8 @@ R1 Every spawned review has a routing event before its first ledger event, namin
 R2 A review event without `reasoning_effort` on a model `models.json` says supports it is a WARN; on one
    that does not, it is expected and not a finding.
 R3 A review event's self-reported effort ≠ its cited routing event's intent → WARN on `/status`,
-   reconcile finding, displayed side by side; a review citing no routing event → WARN.
+   reconcile finding, displayed side by side; a review citing no routing event → WARN. PR 35's
+   doctor-only advisory is partial delivery; `/status` and reconcile are deferred to a follow-up PR.
 R4 A PR touching any class-S path is never routed below high on first pass; a pin lower than the rubric
    is refused; a pin whose event is not owner/pinned-stamped by an authorised principal is ignored and
    reported.

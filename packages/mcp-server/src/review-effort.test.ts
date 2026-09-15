@@ -123,12 +123,15 @@ test("review effort R2/R3: registry has the specified capability shape and skill
     ), true);
     assert.equal(value.supports_effort || value.levels.length === 0, true);
   }
+  assert.deepEqual(models["gpt-6"]?.aliases, ["gpt-6-astra"]);
   assert.deepEqual(models["claude-opus-4-8"]?.aliases, ["claude-opus-4.8"]);
-  assert.deepEqual(models["grok-4.6"]?.aliases, ["Cursor Grok 4.6"]);
+  assert.deepEqual(models["grok-4.6"]?.aliases, ["Cursor Grok 4.6", "Grok 4.6"]);
   assert.deepEqual(models["gpt-5.6-sol"]?.aliases, ["GPT-5.6 Sol"]);
   const skill = read("SKILL.md").toString("utf8");
   assert.match(skill, /recorded before launch/i);
   assert.match(skill, /reasoning_effort/);
   assert.match(skill, /routing_event_id/);
+  assert.match(skill, /reviewed_head/);
+  assert.match(skill, /unknown model is a refusal before launch/i);
   assert.match(skill, /review event is the truth/i);
 });

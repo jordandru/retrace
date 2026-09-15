@@ -33,7 +33,10 @@ digest of the exact bytes of each file. Do not route from an unstamped copy or o
    - its level is not below the rubric.
    Ignore and report an unauthorised pin. Refuse a pin below the rubric. Pins raise only.
 5. Confirm `models.json` lists the selected model and the chosen effort is in `levels` when
-   `supports_effort` is true.
+   `supports_effort` is true. Model ids match only an exact key or explicit case-sensitive alias. An
+   unknown model is a refusal before launch: do not infer a fallback model or effort. The unmatched-path
+   default to S applies only to classifying changed paths, never to model lookup. Doctor warns on unknown
+   model names in historical review events.
 
 ## Record before launch
 
@@ -66,8 +69,9 @@ launch. Reclassify the new head and record a new routing event.
   invent an effort flag; the routing event still records the rubric target.
 
 The reviewer must self-report `method.params.reasoning_effort` from its own running configuration when its
-model supports effort, and cite `method.params.routing_event_id` in its review event. Never copy the
-coordinator's planned effort into the review event.
+model supports effort, cite `method.params.routing_event_id`, and report the full reviewed commit SHA as
+`method.params.reviewed_head` in its review event. Never copy the coordinator's planned effort into the
+review event.
 
 ## Escalation and later pushes
 

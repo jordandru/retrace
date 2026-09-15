@@ -508,6 +508,27 @@ test("schemaSurface is derived from the zod shapes, so it cannot drift from the 
   assert.deepEqual(Object.keys(MethodParams.shape).sort(), ["reasoning_effort", "routing_event_id"]);
 });
 
+test("review method params stay optional and open while named routing fields are typed", () => {
+  assert.deepEqual(MethodParams.parse({}), {}, "old clients may omit both review fields");
+  assert.deepEqual(
+    MethodParams.parse({ arbitrary: { nested: true }, count: 3 }),
+    { arbitrary: { nested: true }, count: 3 },
+    "unrelated arbitrary params round-trip",
+  );
+  assert.deepEqual(
+    MethodParams.parse({ reasoning_effort: "high", routing_event_id: "evt_route" }),
+    { reasoning_effort: "high", routing_event_id: "evt_route" },
+  );
+  for (const invalid of [
+    { reasoning_effort: null },
+    { reasoning_effort: "" },
+    { routing_event_id: 17 },
+    { routing_event_id: "" },
+  ]) {
+    assert.equal(MethodParams.safeParse(invalid).success, false, JSON.stringify(invalid));
+  }
+});
+
 test("GET /api publishes the schema surface, unauthenticated, and it matches this build", async () => {
   const store = new MemStore();
   const handle = createHandler(store, { token: "secret" });

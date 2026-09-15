@@ -238,7 +238,7 @@ function paramsOf(event: Event): Record<string, unknown> {
 }
 
 function isReviewEvent(event: Event): boolean {
-  return event.actor.type === "agent" && (
+  return event.actor.type === "agent" && event.method?.tool !== "routing" && (
     event.action === "approved"
     || event.action === "rejected"
     || event.action_detail === "reviewed"
@@ -246,7 +246,11 @@ function isReviewEvent(event: Event): boolean {
   );
 }
 
-export type ReviewEffortScope = { recentEventLimit: number; reachesAdoption: boolean };
+export type ReviewEffortScope = {
+  recentEventLimit: number;
+  reachesAdoption: boolean;
+  routingHistoryComplete: boolean;
+};
 
 /** Advisory R2/R3 checks: routing is intent; the review event remains the truth about what ran. */
 export function reviewEffortFindings(events: Event[], models: RoutingModelRegistry, scope?: ReviewEffortScope): Finding[] {
@@ -254,8 +258,11 @@ export function reviewEffortFindings(events: Event[], models: RoutingModelRegist
   const adoptionSeq = events
     .filter((event) => event.method?.tool === "routing")
     .reduce<number | undefined>((first, event) => first === undefined ? event.seq : Math.min(first, event.seq), undefined);
-  if (adoptionSeq === undefined) return [];
-  const findings: Finding[] = [];
+  const incompleteHistory = scope?.routingHistoryComplete === false
+    ? result("warn", "review routing history", `routing-event search exhausted its bounded page limit; adoption boundary and review findings may be incomplete`)
+    : undefined;
+  if (adoptionSeq === undefined) return incompleteHistory ? [incompleteHistory] : [];
+  const findings: Finding[] = incompleteHistory ? [incompleteHistory] : [];
   const unrouted: Event[] = [];
   const missingModels: Event[] = [];
   const missingEfforts: Event[] = [];
@@ -269,13 +276,13 @@ export function reviewEffortFindings(events: Event[], models: RoutingModelRegist
     const registeredModel = model ? resolveRoutingModel(models, model) : undefined;
     const capability = registeredModel?.capability;
 
-    if (!routingId) {
-      unrouted.push(review);
-      continue;
-    }
     if (!model || !capability) missingModels.push(review);
     if (capability?.supports_effort && !effort) {
       missingEfforts.push(review);
+    }
+    if (!routingId) {
+      unrouted.push(review);
+      continue;
     }
     const routing = byId.get(routingId);
     if (!routing) {
@@ -286,13 +293,21 @@ export function reviewEffortFindings(events: Event[], models: RoutingModelRegist
       findings.push(result("warn", "review routing", `${review.id}: ${routingId} is not a routing event recorded before the review`));
       continue;
     }
-    const target = paramsOf(routing).target;
-    const routed = target && typeof target === "object" ? target as Record<string, unknown> : {};
-    const routedAgent = typeof routed.agent === "string" ? routed.agent : undefined;
-    const routedModel = typeof routed.model === "string" ? routed.model : undefined;
-    const routedEffort = typeof routed.effort === "string"
-      ? routed.effort
-      : undefined;
+    const routingParams = paramsOf(routing);
+    const routedHead = typeof routingParams.head_sha === "string" ? routingParams.head_sha : undefined;
+    const reviewedHead = typeof params.reviewed_head === "string" ? params.reviewed_head : undefined;
+    if (routedHead && reviewedHead && routedHead !== reviewedHead) {
+      findings.push(result("warn", "review head mismatch", `${review.id}: routed ${routedHead} · reviewed ${reviewedHead} (${routingId})`));
+    }
+    const target = routingParams.target;
+    const routed = target && typeof target === "object" && !Array.isArray(target) ? target as Record<string, unknown> : {};
+    const routedAgent = typeof routed.agent === "string" && routed.agent.length ? routed.agent : undefined;
+    const routedModel = typeof routed.model === "string" && routed.model.length ? routed.model : undefined;
+    const routedEffort = typeof routed.effort === "string" && routed.effort.length ? routed.effort : undefined;
+    if (!routedAgent || !routedModel || !routedEffort) {
+      findings.push(result("warn", "review routing intent", `${review.id}: cited routing event ${routingId} lacks usable target.agent, target.model, or target.effort`));
+      continue;
+    }
     if (routedAgent && routedAgent !== review.actor.id) {
       findings.push(result("warn", "review agent mismatch", `${review.id}: routed ${routedAgent} · ran ${review.actor.id} (${routingId})`));
     }
@@ -315,7 +330,7 @@ export function reviewEffortFindings(events: Event[], models: RoutingModelRegist
   };
   return [
     summary(unrouted, "review routing", "cite no routing_event_id"),
-    summary(missingModels, "review model", "do not report an actor.model listed in the routing model registry"),
+    summary(missingModels, "review model", "do not report an actor.model listed in the routing model registry (unknown models have no inferred fallback)"),
     summary(missingEfforts, "review reasoning effort", "use an effort-capable model but do not self-report method.params.reasoning_effort"),
     ...findings,
   ].filter((finding): finding is Finding => finding !== undefined);
@@ -323,7 +338,7 @@ export function reviewEffortFindings(events: Event[], models: RoutingModelRegist
 
 /** Model ids are exact, case-sensitive keys or aliases. */
 export function resolveRoutingModel(models: RoutingModelRegistry, model: string): { id: string; capability: RoutingModel } | undefined {
-  if (models[model]) return { id: model, capability: models[model] };
+  if (Object.prototype.hasOwnProperty.call(models, model)) return { id: model, capability: models[model] };
   for (const [id, capability] of Object.entries(models)) {
     if (capability.aliases?.includes(model)) return { id, capability };
   }
@@ -348,9 +363,9 @@ export async function loadReviewEffortEvents(
   const routing = await collectRoutingEvents(store, project);
   const recent = await store.history({ project, limit: REVIEW_EFFORT_RECENT_LIMIT });
   const byId = new Map<string, Event>();
-  for (const event of routing) byId.set(event.id, event);
+  for (const event of routing.events) byId.set(event.id, event);
   for (const event of recent.events) byId.set(event.id, event);
-  const adoptionSeq = routing.reduce<number | undefined>(
+  const adoptionSeq = routing.events.reduce<number | undefined>(
     (first, event) => first === undefined ? event.seq : Math.min(first, event.seq),
     undefined,
   );
@@ -362,13 +377,14 @@ export async function loadReviewEffortEvents(
     events: [...byId.values()].sort((a, b) => a.seq - b.seq),
     scope: {
       recentEventLimit: REVIEW_EFFORT_RECENT_LIMIT,
-      reachesAdoption: adoptionSeq === undefined || !recent.truncated
-        || (oldestRecentSeq !== undefined && oldestRecentSeq <= adoptionSeq),
+      reachesAdoption: routing.complete && (adoptionSeq === undefined || !recent.truncated
+        || (oldestRecentSeq !== undefined && oldestRecentSeq <= adoptionSeq)),
+      routingHistoryComplete: routing.complete,
     },
   };
 }
 
-async function collectRoutingEvents(store: Pick<EventStore, "history">, project: string): Promise<Event[]> {
+async function collectRoutingEvents(store: Pick<EventStore, "history">, project: string): Promise<{ events: Event[]; complete: boolean }> {
   const out: Event[] = [];
   const seen = new Set<string>();
   let before_seq: number | undefined;
@@ -385,10 +401,10 @@ async function collectRoutingEvents(store: Pick<EventStore, "history">, project:
       seen.add(event.id);
       out.push(event);
     }
-    if (!result.truncated || result.next_before_seq === undefined) break;
+    if (!result.truncated || result.next_before_seq === undefined) return { events: out, complete: true };
     before_seq = result.next_before_seq;
   }
-  return out;
+  return { events: out, complete: false };
 }
 
 export function loadRoutingModels(repo: string): RoutingModelRegistry | undefined {
