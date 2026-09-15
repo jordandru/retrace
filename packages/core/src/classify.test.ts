@@ -5,7 +5,8 @@ import {
   applyBreakerFailure, applyBreakerSuccess, breakerIsOpen, breakerShouldOpen, classifyCommitClaim,
   collectAttributionAmendments, createHandler, decideFromTable, emptyBreaker, prepareAttributionContext,
   recordWebhookClassifyOutcome, reconstructWithheldPayload, verifiedAttributionSnapshot,
-  webhookBreakerAdmission, wouldWrite, DIAGNOSTIC_DETAIL_MAX, diagnosticDetail,
+  webhookBreakerAdmission, wouldWrite, DIAGNOSTIC_DETAIL_MAX, DIAGNOSTIC_DETAIL_UNAVAILABLE,
+  diagnosticDetail, emitDiagnostic, phrase, thrown, thrownClass,
   type ClaimRecord, type Diagnostic, type EventInput, type HistoryQuery,
 } from "./index.js";
 
@@ -1455,6 +1456,20 @@ function sink() {
   return { seen, diag: (d: Diagnostic) => { seen.push(d); } };
 }
 
+/** The part of a diagnostic that is deterministic; `ms`/`timing` are asserted by shape. */
+function said({ site, reason, detail }: Diagnostic) {
+  return detail === undefined ? { site, reason } : { site, reason, detail };
+}
+
+/** Every classify-path line carries the elapsed total and the per-step breakdown. */
+function assertTimed(d: Diagnostic, lastStep: string) {
+  assert.equal(typeof d.ms, "number", "elapsed milliseconds");
+  assert.ok((d.ms ?? -1) >= 0);
+  assert.ok((d.timing ?? "").length > 0, "per-step timing");
+  assert.match(d.timing ?? "", /^(?:[\w.:]+=\d+ )*[\w.:]+=\d+$/, "names and milliseconds only");
+  assert.ok((d.timing ?? "").split(" ").at(-1)?.startsWith(`${lastStep}=`), `last step is ${lastStep}: ${d.timing}`);
+}
+
 test("diagnostics: a store without the bounded amendment read names the site and the condition", async () => {
   const store = new MemoryEventStore();
   await putPolicy(store);
@@ -1463,11 +1478,12 @@ test("diagnostics: a store without the bounded amendment read names the site and
 
   const got = await classify(store, commitInput(), { diag: s.diag });
   assert.deepEqual(got, { kind: "unavailable", reason: "store_error" });
-  assert.deepEqual(s.seen, [{
+  assert.deepEqual(s.seen.map(said), [{
     site: "classify.amendments.candidates",
     reason: "store_error",
     detail: "store has no amendmentEventsUpTo",
   }]);
+  assertTimed(s.seen[0], "evaluate_amendments");
 });
 
 test("diagnostics: a throwing bounded read carries the exception text", async () => {
@@ -1480,11 +1496,12 @@ test("diagnostics: a throwing bounded read carries the exception text", async ()
 
   const got = await classify(store, commitInput({ files: ["a.ts"] }), { diag: s.diag });
   assert.deepEqual(got, { kind: "unavailable", reason: "store_error" });
-  assert.deepEqual(s.seen, [{
+  assert.deepEqual(s.seen.map(said), [{
     site: "classify.amendments.candidates",
     reason: "store_error",
-    detail: "Error: D1_ERROR: no such index: idx_events_amendment_candidates",
+    detail: "D1_ERROR",
   }]);
+  assertTimed(s.seen[0], "store.amendmentEventsUpTo");
 });
 
 test("diagnostics: a store without the artifact index names the window read", async () => {
@@ -1495,11 +1512,12 @@ test("diagnostics: a store without the artifact index names the window read", as
 
   const got = await classify(store, commitInput({ files: ["a.ts"] }), { diag: s.diag });
   assert.deepEqual(got, { kind: "unavailable", reason: "store_error" });
-  assert.deepEqual(s.seen, [{
+  assert.deepEqual(s.seen.map(said), [{
     site: "classify.window",
     reason: "store_error",
     detail: "store has no eventsReferencingArtifacts",
   }]);
+  assertTimed(s.seen[0], "store.eventsReferencingArtifacts");
 });
 
 test("diagnostics: classify.outer names the operation the throw came from", async () => {
@@ -1521,11 +1539,12 @@ test("diagnostics: classify.outer names the operation the throw came from", asyn
 
     const got = await classify(store, commitInput(), { diag: s.diag });
     assert.deepEqual(got, { kind: "unavailable", reason: "store_error" });
-    assert.deepEqual(s.seen, [{
+    assert.deepEqual(s.seen.map(said), [{
       site: "classify.outer",
       reason: "store_error",
-      detail: `${operation}: Error: D1_ERROR: network`,
+      detail: `${operation}: D1_ERROR`,
     }]);
+    assertTimed(s.seen[0], operation);
   }
 });
 
@@ -1583,41 +1602,141 @@ test("diagnostics: a sink that throws changes neither a failure nor a decision",
 
   const healthy = new MemoryEventStore();
   await putPolicy(healthy);
+  // The success line goes through the same broken sink.
   assert.equal((await classify(healthy, commitInput(), { diag })).kind, "decision");
 });
 
-test("diagnostics: a decision emits nothing", async () => {
+test("diagnostics: a decision emits one timing line and nothing else", async () => {
+  // How much of the 500 ms budget a healthy production classification spends, and where, is the
+  // measurement the failures cannot give (Jordan's D1 round-trip hypothesis, 2026-09-15).
   const store = new MemoryEventStore();
   await putPolicy(store);
   const s = sink();
 
   const got = await classify(store, commitInput(), { diag: s.diag });
   assert.equal(got.kind, "decision", JSON.stringify(got));
-  assert.deepEqual(s.seen, []);
+  assert.deepEqual(s.seen.map(said), [{ site: "classify.ok", reason: "decision" }]);
+  assertTimed(s.seen[0], "decide");
+  assert.match(s.seen[0].timing ?? "", /store\.head=\d+/);
+  assert.match(s.seen[0].timing ?? "", /store\.readPolicySnapshot=\d+/);
+  assert.match(s.seen[0].timing ?? "", /evaluate_amendments=\d+/);
 });
 
-test("diagnostics: detail forwards a store condition and withholds everything else", () => {
-  // Allow-listed store and platform conditions pass through, collapsed to one line.
-  assert.equal(diagnosticDetail(new Error("D1_ERROR: no such\n  index")), "Error: D1_ERROR: no such index");
-  assert.equal(diagnosticDetail(new Error("Network connection lost")), "Error: Network connection lost");
-  assert.equal(diagnosticDetail("a fixed phrase from a call site"), "a fixed phrase from a call site");
+test("diagnostics: the timing ledger is names and numbers only, never data", async () => {
+  const store = new MemoryEventStore();
+  await putPolicy(store);
+  const s = sink();
 
-  // A decode failure quotes the body it could not parse: the class is logged, the message is not.
-  const decode = new SyntaxError('Unexpected token } in JSON at position 5: {"secret":"hunter2"}');
-  assert.equal(diagnosticDetail(decode), "SyntaxError (message withheld)");
-  assert.ok(!diagnosticDetail(decode).includes("hunter2"));
-  assert.equal(diagnosticDetail(new TypeError("x of undefined")), "TypeError (message withheld)");
+  await classify(store, commitInput({ files: ["a.ts"], actorId: "codex" }), { diag: s.diag });
+  const steps = (s.seen[0].timing ?? "").split(" ").map((step) => step.split("=")[0]);
+  for (const step of steps) {
+    assert.match(step, /^[a-z][\w.:]*$/, `step name carries no data: ${step}`);
+  }
+});
 
-  // A thrown non-Error is named by its type and never serialised.
-  assert.equal(
-    diagnosticDetail({ stack: "/home/someone/secret/path", token: "t0ken" }),
-    "non-error thrown value (object)",
-  );
-  assert.equal(diagnosticDetail(null), "non-error thrown value (null)");
+test("diagnostics: a caught value contributes its class, never its text", () => {
+  // Three bypasses Codex reproduced in round 2: an allow-listed prefix with a body appended, a
+  // spoofed `Error.name`, and a rejection that is simply a string.
+  const withBody = new Error('D1_ERROR: near "x": body={"token":"PRIVATE"}');
+  assert.equal(diagnosticDetail(thrown(withBody)), "D1_ERROR");
+  assert.ok(!diagnosticDetail(thrown(withBody)).includes("PRIVATE"));
 
-  // Bounded, and never a stack.
-  const long = diagnosticDetail("x".repeat(DIAGNOSTIC_DETAIL_MAX + 50));
+  const spoofed = new Error("boom");
+  spoofed.name = "PRIVATE_NAME /private/repo/key";
+  assert.equal(diagnosticDetail(thrown(spoofed)), "Error");
+
+  assert.equal(diagnosticDetail(thrown("PRIVATE_THROWN_STRING")), "non-error(string)");
+  assert.equal(diagnosticDetail(thrown({ stack: "/home/someone/key", token: "t0ken" })), "non-error(object)");
+  assert.equal(diagnosticDetail(thrown(null)), "non-error(null)");
+
+  // A recognised condition is worth telling apart; an ordinary class still names itself.
+  assert.equal(diagnosticDetail(thrown(new Error("Network connection lost while reading rows"))), "Network connection lost");
+  assert.equal(diagnosticDetail(thrown(new SyntaxError('Unexpected token } in JSON: {"secret":"hunter2"}'))), "SyntaxError");
+  assert.equal(diagnosticDetail(thrown(new TypeError("x of undefined"))), "TypeError");
+  assert.equal(diagnosticDetail(thrown(new AggregateError([], "private text"))), "AggregateError");
+
+  // A thrown function is named, never invoked.
+  let called = false;
+  const fn = () => { called = true; return "PRIVATE_RETURNED"; };
+  assert.equal(diagnosticDetail(thrown(fn)), "non-error(function)");
+  assert.equal(called, false);
+
+  // Accessors that throw cost their text, not the line.
+  const hostile = new Error("x");
+  Object.defineProperty(hostile, "message", { get() { throw new Error("nope"); } });
+  Object.defineProperty(hostile, "name", { get() { throw new Error("nope"); } });
+  assert.equal(diagnosticDetail(thrown(hostile)), "Error");
+  assert.equal(thrownClass(hostile), "Error");
+
+  // The phrase channel is call-site text, bounded.
+  assert.equal(diagnosticDetail(phrase("a fixed phrase")), "a fixed phrase");
+  const long = diagnosticDetail(phrase("x".repeat(DIAGNOSTIC_DETAIL_MAX + 50)));
   assert.equal(long.length, DIAGNOSTIC_DETAIL_MAX);
   assert.ok(long.endsWith("\u2026"));
-  assert.ok(!diagnosticDetail(new Error("D1_ERROR: boom")).includes("at "));
+});
+
+test("diagnostics: a hostile exception never costs the line or its stage", async () => {
+  // A throwing `message` getter used to make the whole diagnostic disappear (Codex P2, round 2).
+  const store = new MemoryEventStore();
+  await putPolicy(store);
+  store.head = async () => {
+    const hostile = new Error("x");
+    Object.defineProperty(hostile, "message", { get() { throw new Error("nope"); } });
+    throw hostile;
+  };
+  const s = sink();
+
+  const got = await classify(store, commitInput(), { diag: s.diag });
+  assert.deepEqual(got, { kind: "unavailable", reason: "store_error" });
+  assert.deepEqual(s.seen.map(said), [{ site: "classify.outer", reason: "store_error", detail: "store.head: Error" }]);
+  assertTimed(s.seen[0], "store.head");
+});
+
+test("diagnostics: a thrown function is never executed by the diagnostics layer", async () => {
+  // An async thrown function used to be run as a detail thunk, and its rejection exited the process.
+  const rejected: unknown[] = [];
+  const onUnhandled = (e: unknown) => { rejected.push(e); };
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    let called = false;
+    const store = new MemoryEventStore();
+    await putPolicy(store);
+    store.head = async () => {
+      // eslint-disable-next-line @typescript-eslint/no-throw-literal
+      throw async () => { called = true; throw new Error("PRIVATE"); };
+    };
+    const s = sink();
+
+    const got = await classify(store, commitInput(), { diag: s.diag });
+    assert.deepEqual(got, { kind: "unavailable", reason: "store_error" });
+    assert.deepEqual(s.seen.map(said), [{
+      site: "classify.outer", reason: "store_error", detail: "store.head: non-error(function)",
+    }]);
+    assert.equal(called, false, "the thrown function was not invoked");
+    await new Promise((r) => setTimeout(r, 10));
+    assert.deepEqual(rejected, []);
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+  }
+});
+
+test("diagnostics: a detail thunk that throws still emits the site, the reason and the timing", () => {
+  const seen: Diagnostic[] = [];
+  emitDiagnostic((d) => { seen.push(d); }, "test.site", "store_error",
+    () => { throw new Error("formatting failed"); },
+    () => ({ ms: 7, timing: "store.head=7" }));
+  assert.deepEqual(seen, [{
+    site: "test.site",
+    reason: "store_error",
+    detail: DIAGNOSTIC_DETAIL_UNAVAILABLE,
+    ms: 7,
+    timing: "store.head=7",
+  }]);
+});
+
+test("diagnostics: a measure that throws costs its numbers, not the line", () => {
+  const seen: Diagnostic[] = [];
+  emitDiagnostic((d) => { seen.push(d); }, "test.site", "store_error", phrase("a fixed phrase"),
+    () => { throw new Error("clock broken"); });
+  assert.deepEqual(seen, [{ site: "test.site", reason: "store_error", detail: "a fixed phrase" }]);
 });

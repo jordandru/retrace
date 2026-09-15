@@ -6,7 +6,7 @@
 import { Event, EventInput } from "./schema.js";
 import { newId, sealEvent, sha256Hex } from "./chain.js";
 import { ChainHead, EventStore, SEALED_BY_OWNER } from "./store.js";
-import { emitDiagnostic, type DiagnosticSink } from "./diagnostics.js";
+import { emitDiagnostic, thrown, type DiagnosticSink } from "./diagnostics.js";
 
 export const POLICY_PROFILE = "retrace-project-policy/1";
 export const POLICY_IDEMPOTENCY_PREFIX = "policy:";
@@ -548,22 +548,26 @@ export async function policySnapshotFromIndex(opts: {
   /** Observability only: emitted when a read throws, so the caller's `store_error` has a cause. */
   diag?: DiagnosticSink;
 }): Promise<PolicySnapshot> {
-  const now = opts.budget?.now?.() ?? Date.now();
+  const clock = opts.budget?.now ?? Date.now;
+  const now = clock();
   if (opts.budget?.deadline !== undefined && now >= opts.budget.deadline)
     return { U: opts.U ?? -1, events: [], activations: [], unavailable: "deadline" };
   // Which of the two reads threw: one site for both leaves the caller guessing (Codex, PR 57 r1).
   let read = "document";
+  let readStarted = clock();
   try {
     const u = opts.U ?? (opts.headSeq ?? -1);
     if (u < 0) return { U: -1, events: [], activations: [] };
     const doc = await opts.getByActivationSeq(opts.project, u);
     if (!doc) return { U: u, events: [], activations: [], document: null };
     read = "activation";
+    readStarted = clock();
     const act = await opts.getEvent(doc.envelope.activation.event_id);
     const activations = act && act.project === opts.project && act.seq <= u ? [act] : [];
     return { U: u, events: activations, activations, document: doc };
   } catch (error) {
-    emitDiagnostic(opts.diag, `policy.snapshot.${read}`, "store_error", error);
+    emitDiagnostic(opts.diag, `policy.snapshot.${read}`, "store_error", thrown(error),
+      () => ({ ms: clock() - readStarted }));
     return { U: opts.U ?? -1, events: [], activations: [], unavailable: "store_error" };
   }
 }

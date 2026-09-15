@@ -13,7 +13,10 @@ import {
   type AttributionCaptureContext, type AttributionDomain, type AttributionUnit,
 } from "./attribution-context.js";
 import { canonicalize, sha256Hex } from "./chain.js";
-import { diagnosticDetail, emitDiagnostic, type DiagnosticSink } from "./diagnostics.js";
+import {
+  diagnosticDetail, emitDiagnostic, phrase, thrown,
+  type DiagnosticDetail, type DiagnosticMeasure, type DiagnosticSink,
+} from "./diagnostics.js";
 import {
   CommitActorResolution, resolveCommitActor, validCausedById,
 } from "./commit-actor.js";
@@ -428,9 +431,12 @@ async function amendmentDependencies(opts: {
   deadline: number;
   now: () => number;
   diag?: DiagnosticSink;
+  mark?: (at: string) => void;
+  measure?: DiagnosticMeasure;
 }): Promise<DependencyRead> {
-  const fail = (reason: "deadline" | "budget" | "store_error", detail?: unknown): DependencyRead => {
-    emitDiagnostic(opts.diag, "classify.amendments.deps", reason, detail);
+  const mark = opts.mark ?? (() => {});
+  const fail = (reason: "deadline" | "budget" | "store_error", detail?: DiagnosticDetail): DependencyRead => {
+    emitDiagnostic(opts.diag, "classify.amendments.deps", reason, detail, opts.measure);
     return { ok: false, reason };
   };
   const candidateById = new Map(opts.candidates.map((e) => [e.id, e]));
@@ -453,6 +459,8 @@ async function amendmentDependencies(opts: {
     const missing = [...new Set(ids)].filter((id) => !candidateById.has(id) && !dependencies.has(id));
     if (opts.candidates.length + dependencies.size + missing.length > CLASSIFY_ROW_CAP) return false;
     if (!missing.length) return true;
+    // One step per hop: a dozen sequential point reads is itself the finding.
+    mark("store.getMany");
     const rows = opts.store.getMany
       ? await opts.store.getMany(missing)
       : (await Promise.all(missing.map((id) => opts.store.get(id)))).filter((e): e is Event => e !== null);
@@ -464,16 +472,16 @@ async function amendmentDependencies(opts: {
   };
 
   try {
-    if (!(await read([...required]))) return fail("budget", "row cap reached reading amendment dependencies");
+    if (!(await read([...required]))) return fail("budget", phrase("row cap reached reading amendment dependencies"));
     for (const candidate of opts.candidates) {
       let child = candidate;
       let id = candidate.caused_by;
       const traversed = new Set<string>();
       while (id) {
-        if (opts.now() >= opts.deadline) return fail("deadline", "walking caused_by");
+        if (opts.now() >= opts.deadline) return fail("deadline", phrase("walking caused_by"));
         if (traversed.has(id)) break; // complete cycle: the shared checker classifies it as unrooted
         traversed.add(id);
-        if (!(await read([id]))) return fail("budget", "row cap reached walking caused_by");
+        if (!(await read([id]))) return fail("budget", phrase("row cap reached walking caused_by"));
         const event = candidateById.get(id) ?? dependencies.get(id);
         if (!event) throw new Error("unresolvable");
         if (event.project !== child.project || event.seq >= child.seq) break;
@@ -485,7 +493,7 @@ async function amendmentDependencies(opts: {
     }
   } catch (error) {
     const deadlined = error instanceof Error && error.message === "deadline";
-    return fail(deadlined ? "deadline" : "store_error", error);
+    return fail(deadlined ? "deadline" : "store_error", thrown(error));
   }
   return { ok: true, events: [...dependencies.values()] };
 }
@@ -507,18 +515,24 @@ async function amendmentCaptureDependencies(opts: {
   deadline: number;
   now: () => number;
   diag?: DiagnosticSink;
+  mark?: (at: string) => void;
+  measure?: DiagnosticMeasure;
 }): Promise<CaptureDependencyRead> {
-  const fail = (reason: "deadline" | "budget" | "store_error", detail?: unknown): CaptureDependencyRead => {
-    emitDiagnostic(opts.diag, "classify.amendments.captures", reason, detail);
+  const mark = opts.mark ?? (() => {});
+  const fail = (reason: "deadline" | "budget" | "store_error", detail?: DiagnosticDetail): CaptureDependencyRead => {
+    emitDiagnostic(opts.diag, "classify.amendments.captures", reason, detail, opts.measure);
     return { ok: false, reason };
   };
   const events = new Map(opts.baseEvents.map((e) => [e.id, e]));
   let rowsRead = opts.baseEvents.length;
   const read = async (artifactKeys: string[], artifactPrefixes: string[] = []): Promise<CaptureDependencyRead | null> => {
     if (!artifactKeys.length && !artifactPrefixes.length) return null;
-    if (!opts.store.eventsReferencingArtifacts) return fail("store_error", "store has no eventsReferencingArtifacts");
+    if (!opts.store.eventsReferencingArtifacts) return fail("store_error", phrase("store has no eventsReferencingArtifacts"));
     const remaining = CLASSIFY_ROW_CAP - rowsRead;
-    if (remaining < 1) return fail("budget", "row cap reached before the capture read");
+    if (remaining < 1) return fail("budget", phrase("row cap reached before the capture read"));
+    mark(artifactPrefixes.length
+      ? "store.eventsReferencingArtifacts:capture_group"
+      : "store.eventsReferencingArtifacts:capture_target");
     const result = await opts.store.eventsReferencingArtifacts({
       project: opts.project,
       artifact_keys: [...new Set(artifactKeys)],
@@ -528,9 +542,9 @@ async function amendmentCaptureDependencies(opts: {
       row_cap: remaining,
       deadline: opts.deadline,
     }, opts.now);
-    if (!result.ok) return fail(result.reason, "eventsReferencingArtifacts");
+    if (!result.ok) return fail(result.reason, phrase("eventsReferencingArtifacts"));
     rowsRead += result.events.length;
-    if (rowsRead > CLASSIFY_ROW_CAP) return fail("budget", "row cap exceeded by the capture read");
+    if (rowsRead > CLASSIFY_ROW_CAP) return fail("budget", phrase("row cap exceeded by the capture read"));
     for (const event of result.events) events.set(event.id, event);
     return null;
   };
@@ -559,25 +573,25 @@ async function amendmentCaptureDependencies(opts: {
   const uncovered = [...targetKeys].filter((key) => !opts.coveredArtifactKeys.some((covered) => sameArtifact(key, covered)));
   const targetRead = await read(uncovered);
   if (targetRead) return targetRead;
-  if (opts.now() >= opts.deadline) return fail("deadline", "after the target read");
+  if (opts.now() >= opts.deadline) return fail("deadline", phrase("after the target read"));
 
   const preliminary = classifierCaptureSeals([...events.values()], opts.policy, opts.canonicalRepo);
-  if (!preliminary.ok) return fail("store_error", "a seal-eligible commit reference does not resolve (preliminary pass)");
+  if (!preliminary.ok) return fail("store_error", phrase("a seal-eligible commit reference does not resolve (preliminary pass)"));
   const commitPrefixes = new Set<string>();
   for (const seal of preliminary.seals) {
     const split = /^(.*)@([0-9a-f]{40})$/i.exec(seal.key);
-    if (!split) return fail("store_error", "seal key without a full object id");
+    if (!split) return fail("store_error", phrase("seal key without a full object id"));
     const repository = opts.policy.repositories.find((r) => r.name === split[1]);
-    if (!repository) return fail("store_error", `no policy repository named ${split[1]}`);
+    if (!repository) return fail("store_error", phrase("a seal's repository is not in the policy"));
     for (const name of new Set([repository.name, ...repository.aliases])) {
       commitPrefixes.add(`commit:${name}@${split[2].slice(0, 7)}`);
     }
   }
   const groupRead = await read([], [...commitPrefixes]);
   if (groupRead) return groupRead;
-  if (opts.now() >= opts.deadline) return fail("deadline", "after the group read");
+  if (opts.now() >= opts.deadline) return fail("deadline", phrase("after the group read"));
   const complete = classifierCaptureSeals([...events.values()], opts.policy, opts.canonicalRepo);
-  return complete.ok ? complete : fail("store_error", "a seal-eligible commit reference does not resolve (complete pass)");
+  return complete.ok ? complete : fail("store_error", phrase("a seal-eligible commit reference does not resolve (complete pass)"));
 }
 
 /** Bounded candidates plus point-read dependencies; never fetches or verifies the project prefix; fails closed on a store without the bounded read. */
@@ -594,15 +608,19 @@ export async function evaluateAmendmentsAtU(opts: {
   deadline: number;
   now: () => number;
   diag?: DiagnosticSink;
+  /** Opens a step in the caller's timing ledger before each store call. */
+  mark?: (at: string) => void;
+  measure?: DiagnosticMeasure;
 }): Promise<AmendmentEval> {
+  const mark = opts.mark ?? (() => {});
   const unavailable = (reason: "deadline" | "budget" | "store_error"): AmendmentEval => ({
     ok: false,
     reason,
     snapshotJson: amendmentSnapshotJson({ unavailable: reason }),
   });
   // The two helpers emit their own diagnostics, so a propagated reason uses `unavailable`, not `fail`.
-  const fail = (reason: "deadline" | "budget" | "store_error", site: string, detail?: unknown): AmendmentEval => {
-    emitDiagnostic(opts.diag, `classify.amendments.${site}`, reason, detail);
+  const fail = (reason: "deadline" | "budget" | "store_error", site: string, detail?: DiagnosticDetail): AmendmentEval => {
+    emitDiagnostic(opts.diag, `classify.amendments.${site}`, reason, detail, opts.measure);
     return unavailable(reason);
   };
   const baseSeals = captureSeals(opts.captureEvents, {
@@ -617,28 +635,32 @@ export async function evaluateAmendmentsAtU(opts: {
     return { ok: true, collection, snapshotJson: amendmentSnapshotJson({ effective: [] }), captureSeals: baseSeals };
   }
   // Fail closed: a store without the bounded candidate read never falls back to all() (NOOA F1).
-  if (!opts.store.amendmentEventsUpTo) return fail("store_error", "candidates", "store has no amendmentEventsUpTo");
+  if (!opts.store.amendmentEventsUpTo) return fail("store_error", "candidates", phrase("store has no amendmentEventsUpTo"));
   let candidates: Event[];
+  mark("store.amendmentEventsUpTo");
   try {
     candidates = await opts.store.amendmentEventsUpTo(opts.project, opts.U, CLASSIFY_ROW_CAP + 1);
   } catch (error) {
-    return fail("store_error", "candidates", error);
+    return fail("store_error", "candidates", thrown(error));
   }
   if (opts.now() >= opts.deadline) return fail("deadline", "candidates");
-  if (candidates.length > CLASSIFY_ROW_CAP) return fail("budget", "candidates", `${candidates.length} candidates over the row cap`);
+  if (candidates.length > CLASSIFY_ROW_CAP) return fail("budget", "candidates", phrase("candidate count over the row cap"));
   if (candidates.length === 0) {
     return { ok: true, collection: emptyAmendmentCollection(), snapshotJson: amendmentSnapshotJson({ effective: [] }), captureSeals: baseSeals };
   }
   const dependencies = await amendmentDependencies({
     store: opts.store, candidates, deadline: opts.deadline, now: opts.now, diag: opts.diag,
+    mark: opts.mark, measure: opts.measure,
   });
   if (!dependencies.ok) return unavailable(dependencies.reason);
   const captures = await amendmentCaptureDependencies({
     store: opts.store, project: opts.project, U: opts.U, policy: opts.policy, canonicalRepo: opts.canonicalRepo,
     candidates, dependencies: dependencies.events, baseEvents: opts.captureEvents,
     coveredArtifactKeys: opts.coveredArtifactKeys, deadline: opts.deadline, now: opts.now, diag: opts.diag,
+    mark: opts.mark, measure: opts.measure,
   });
   if (!captures.ok) return unavailable(captures.reason);
+  mark("amendment.collect");
   try {
     const captureEvents = captures.seals.map((seal) => seal.event);
     const contextEvents = [...new Map([...dependencies.events, ...candidates, ...captureEvents].map((e) => [e.id, e])).values()];
@@ -648,7 +670,8 @@ export async function evaluateAmendmentsAtU(opts: {
     const collection = collectAttributionAmendmentsFromDependencies(candidates, [...dependencies.events, ...captureEvents], context);
     if (opts.now() >= opts.deadline) return fail("deadline", "collection");
     if (collection.unavailable) {
-      emitDiagnostic(opts.diag, "classify.amendments.collection", "store_error", collection.unavailable);
+      emitDiagnostic(opts.diag, "classify.amendments.collection", "store_error",
+        phrase(collection.unavailable), opts.measure);
       return { ok: false, reason: "store_error", snapshotJson: amendmentSnapshotJson({ unavailable: collection.unavailable }) };
     }
     return {
@@ -658,7 +681,7 @@ export async function evaluateAmendmentsAtU(opts: {
       captureSeals: captures.seals,
     };
   } catch (error) {
-    return fail("store_error", "context", error);
+    return fail("store_error", "context", thrown(error));
   }
 }
 
@@ -885,8 +908,42 @@ export interface ClassifyOpts {
   diag?: DiagnosticSink;
 }
 
-/** What the classifier is doing, so the outer catch can name the operation a throw came from. */
-type ClassifyStage = { at: string };
+/**
+ * What the classifier is doing and how long each step took. The outer catch needs the first to name
+ * the operation a throw came from; a latency hypothesis needs the second — production D1 round trips
+ * cost tens of milliseconds where a memory store costs microseconds, and the path makes a dozen of
+ * them inside a 500 ms budget (Jordan, 2026-09-15).
+ */
+class ClassifyStage {
+  at = "start";
+  private steps: string[] = [];
+  private last: number;
+  constructor(private readonly started: number, private readonly clock: () => number) {
+    this.last = started;
+  }
+  /** Close the step in progress and open `at`. Called before each awaited store call. */
+  mark(at: string): void {
+    const t = this.clock();
+    this.steps.push(`${this.at}=${t - this.last}`);
+    this.at = at;
+    this.last = t;
+  }
+  /**
+   * Per-step milliseconds, oldest first, ending with the step in progress: `store.head=12 …`.
+   * Step names are fixed literals with no whitespace, so the line stays one space-separated list.
+   */
+  timing(): string {
+    const t = this.clock();
+    return [...this.steps, `${this.at}=${t - this.last}`].join(" ");
+  }
+  elapsed(): number {
+    return this.clock() - this.started;
+  }
+  /** The measure passed to every diagnostic on this classification. */
+  measure(): DiagnosticMeasure {
+    return () => ({ ms: this.elapsed(), timing: this.timing() });
+  }
+}
 
 async function classifyCommitClaimInner(opts: ClassifyOpts, stage: ClassifyStage): Promise<ClassifyResult> {
   const policyMode = parseTrailerPolicy(opts.trailerPolicy);
@@ -901,42 +958,42 @@ async function classifyCommitClaimInner(opts: ClassifyOpts, stage: ClassifyStage
   const unavailable = (
     reason: "deadline" | "budget" | "store_error" | "policy_missing",
     site: string,
-    detail?: unknown | (() => unknown),
+    detail?: DiagnosticDetail | (() => DiagnosticDetail | undefined),
   ): ClassifyResult => {
-    emitDiagnostic(opts.diag, `classify.${site}`, reason, detail);
+    emitDiagnostic(opts.diag, `classify.${site}`, reason, detail, stage.measure());
     return { kind: "unavailable", reason };
   };
   // Thunks: a diagnostic must not read a store capability on a path that will not log (Codex nit).
   const windowUnsupported = () =>
-    (opts.store.eventsReferencingArtifacts ? undefined : "store has no eventsReferencingArtifacts");
+    (opts.store.eventsReferencingArtifacts ? undefined : phrase("store has no eventsReferencingArtifacts"));
   const snapshotUnsupported = () =>
-    (opts.store.readPolicySnapshot ? undefined : "store has no readPolicySnapshot");
+    (opts.store.readPolicySnapshot ? undefined : phrase("store has no readPolicySnapshot"));
 
-  stage.at = "require_context_store";
+  stage.mark("require_context_store");
   try {
     requireContextStore(opts.store);
   } catch (error) {
-    return unavailable("store_error", "context_store", error);
+    return unavailable("store_error", "context_store", thrown(error));
   }
 
-  stage.at = "derive_claim";
+  stage.mark("derive_claim");
   const derived = deriveCommitClaim(opts.input);
   const sha = extractSha(opts.input);
-  if (!sha) return unavailable("store_error", "commit", "the seal carries no sha");
+  if (!sha) return unavailable("store_error", "commit", phrase("the seal carries no sha"));
   const files = fileArtifacts(opts.input);
   const parents = extractParents(opts.input);
-  stage.at = "resolve_caused_by";
+  stage.mark("resolve_caused_by");
   const caused = await resolveCausedBy(opts.store, opts.input, derived.resolved.trailers);
   if (now() >= deadline) return unavailable("deadline", "caused_by");
 
-  stage.at = "store.head";
+  stage.mark("store.head");
   const head = await opts.store.head(opts.input.project);
   const Utry = head?.seq ?? -1;
   const headHash = head?.hash ?? GENESIS_HASH;
 
   if (now() >= deadline) return unavailable("deadline", "head");
 
-  stage.at = "store.readPolicySnapshot";
+  stage.mark("store.readPolicySnapshot");
   const snapshot: PolicySnapshot = opts.store.readPolicySnapshot
     ? await opts.store.readPolicySnapshot(opts.input.project, Utry, { deadline, now })
     : { U: Utry, events: [], activations: [], unavailable: "store_error" };
@@ -945,31 +1002,31 @@ async function classifyCommitClaimInner(opts: ClassifyOpts, stage: ClassifyStage
   let policyDoc: PolicyDocument | null = null;
   // New context: policy at Utry. Q4: context key is (project, canonical R, sha) — a later
   // delivery under a different R is a different key and a second context; no new recorded field.
-  stage.at = "select_policy";
+  stage.mark("select_policy");
   const selected = selectPolicyForContext(snapshot, snapshot.document
     ? new Map([[snapshot.document.digest, snapshot.document], [documentMapKey(opts.input.project, snapshot.document.digest), snapshot.document]])
     : new Map());
   if (selected.status === "selected") policyDoc = selected.document;
-  else if (selected.status === "incomplete") return unavailable("store_error", "policy_selection", selected.reason);
+  else if (selected.status === "incomplete") return unavailable("store_error", "policy_selection", phrase(selected.reason));
 
   if (!policyDoc) return unavailable("policy_missing", "policy");
 
-  stage.at = "submitted_paths";
+  stage.mark("submitted_paths");
   const pin = opts.canonicalR ?? (policyDoc.body.github_repos.length === 1 ? policyDoc.body.github_repos[0] : undefined);
   const canonicalR = canonicalRForFacts(policyDoc.body, files, pin);
   let paths = submittedPathsForRepo(canonicalR, files, policyDoc.body, pin !== undefined);
   let Fdigest = await digestOf([...paths].sort());
   const claimDigest = await digestOf({ type: derived.claim.type, id: derived.claim.id, source: derived.claim.source });
 
-  stage.at = "store.getClassificationContext";
+  stage.mark("store.getClassificationContext");
   const found = await opts.store.getClassificationContext(opts.input.project, canonicalR, sha);
   if (now() >= deadline) return unavailable("deadline", "context_read");
   let ctx = found;
   // Existing context: retrieve the *exact* policy named by the context, never latest (P4).
   if (ctx) {
-    stage.at = "store.getPolicy";
+    stage.mark("store.getPolicy");
     const named = opts.store.getPolicy ? await opts.store.getPolicy(opts.input.project, { digest: ctx.policy_digest }) : null;
-    if (!named) return unavailable("store_error", "policy_by_digest", "the context's policy digest is not in the store");
+    if (!named) return unavailable("store_error", "policy_by_digest", phrase("the context's policy digest is not in the store"));
     policyDoc = named;
     paths = submittedPathsForRepo(ctx.canonical_repo, files, policyDoc.body, opts.canonicalR !== undefined);
     Fdigest = await digestOf([...paths].sort());
@@ -996,14 +1053,15 @@ async function classifyCommitClaimInner(opts: ClassifyOpts, stage: ClassifyStage
       deadline,
     }, now);
   };
-  stage.at = "store.eventsReferencingArtifacts";
+  stage.mark("store.eventsReferencingArtifacts");
   let index = await readWindow();
   if (!index.ok) return unavailable(index.reason, "window", windowUnsupported);
-  stage.at = "evaluate_amendments";
+  stage.mark("evaluate_amendments");
   let evaluated = await evaluateAmendmentsAtU({
     store: opts.store, project: opts.input.project, U, headHash: pinnedHeadHash,
     policy: policyDoc.body, policyDigest: policyDoc.digest, canonicalRepo: canonicalR,
     captureEvents: index.events, coveredArtifactKeys: windowArtifactKeys, deadline, now, diag: opts.diag,
+    mark: (at) => stage.mark(at), measure: stage.measure(),
   });
   // evaluateAmendmentsAtU emitted its own diagnostic for this reason.
   if (!evaluated.ok) return { kind: "unavailable", reason: evaluated.reason };
@@ -1026,27 +1084,28 @@ async function classifyCommitClaimInner(opts: ClassifyOpts, stage: ClassifyStage
       per_path_lower: {},
       created_at: new Date(now()).toISOString(),
     };
-    stage.at = "store.insertClassificationContextIfAbsent";
+    stage.mark("store.insertClassificationContextIfAbsent");
     const inserted = await opts.store.insertClassificationContextIfAbsent(candidate);
     if (now() >= deadline) return unavailable("deadline", "context_insert");
     ctx = inserted.context;
     if (!inserted.inserted) {
-      stage.at = "store.getPolicy (insert race)";
+      stage.mark("store.getPolicy:insert_race");
       const named = opts.store.getPolicy ? await opts.store.getPolicy(opts.input.project, { digest: ctx.policy_digest }) : null;
-      if (!named) return unavailable("store_error", "policy_by_digest", "the context's policy digest is not in the store (insert race)");
+      if (!named) return unavailable("store_error", "policy_by_digest", phrase("the context's policy digest is not in the store (insert race)"));
       policyDoc = named;
       paths = submittedPathsForRepo(ctx.canonical_repo, files, policyDoc.body, opts.canonicalR !== undefined);
       Fdigest = await digestOf([...paths].sort());
       U = ctx.read_head_seq;
       pinnedHeadHash = ctx.read_head_hash;
-      stage.at = "store.eventsReferencingArtifacts (insert race)";
+      stage.mark("store.eventsReferencingArtifacts:insert_race");
       index = await readWindow();
       if (!index.ok) return unavailable(index.reason, "window", windowUnsupported);
-      stage.at = "evaluate_amendments (insert race)";
+      stage.mark("evaluate_amendments:insert_race");
       evaluated = await evaluateAmendmentsAtU({
         store: opts.store, project: opts.input.project, U, headHash: pinnedHeadHash,
         policy: policyDoc.body, policyDigest: policyDoc.digest, canonicalRepo: canonicalR,
         captureEvents: index.events, coveredArtifactKeys: windowArtifactKeys, deadline, now, diag: opts.diag,
+        mark: (at) => stage.mark(at), measure: stage.measure(),
       });
       // evaluateAmendmentsAtU emitted its own diagnostic for this reason.
       if (!evaluated.ok) return { kind: "unavailable", reason: evaluated.reason };
@@ -1078,11 +1137,11 @@ async function classifyCommitClaimInner(opts: ClassifyOpts, stage: ClassifyStage
       derivedLowers[p] = prev < 0 ? 0 : prev;
     }
   }
-  stage.at = "store.ensureClassificationPathLowers";
+  stage.mark("store.ensureClassificationPathLowers");
   const per_path_lower = await opts.store.ensureClassificationPathLowers(opts.input.project, canonicalR, sha, derivedLowers);
   if (now() >= deadline) return unavailable("deadline", "path_lowers");
 
-  stage.at = "decide";
+  stage.mark("decide");
   const windowEvents = index.events.filter((e) => e.seq <= U);
   const loose_hints = countLooseHints(windowEvents, paths.map((p) => ({ path: p })));
 
@@ -1175,25 +1234,32 @@ async function classifyCommitClaimInner(opts: ClassifyOpts, stage: ClassifyStage
   };
 
   if (legacy) {
-    stage.at = "store.setClassificationLegacyDecision";
+    stage.mark("store.setClassificationLegacyDecision");
     if (opts.store.setClassificationLegacyDecision) {
       await opts.store.setClassificationLegacyDecision(opts.input.project, canonicalR, sha, record);
     }
     if (now() >= deadline) return unavailable("deadline", "legacy_record");
+    emitDiagnostic(opts.diag, "classify.ok", "legacy", undefined, stage.measure());
     return { kind: "legacy", record };
   }
   if (now() >= deadline) return unavailable("deadline", "record");
+  // A healthy classification is the measurement the failures cannot give: how much of the 500 ms
+  // budget production actually spends, and where.
+  emitDiagnostic(opts.diag, "classify.ok", "decision", undefined, stage.measure());
   return { kind: "decision", record };
 }
 
 export async function classifyCommitClaim(opts: ClassifyOpts): Promise<ClassifyResult> {
   // The stage names the operation a throw came from: without it every rejected read looks alike
   // at this catch, which is where the production failure lands (Codex P2, PR 57 round 1).
-  const stage: ClassifyStage = { at: "start" };
+  const clock = opts.now ?? Date.now;
+  const stage = new ClassifyStage(clock(), clock);
   try {
     return await classifyCommitClaimInner(opts, stage);
   } catch (error) {
-    emitDiagnostic(opts.diag, "classify.outer", "store_error", () => `${stage.at}: ${diagnosticDetail(error)}`);
+    // The stage is our own literal; the caught value contributes only its class.
+    emitDiagnostic(opts.diag, "classify.outer", "store_error",
+      () => phrase(`${stage.at}: ${diagnosticDetail(thrown(error))}`), stage.measure());
     return { kind: "unavailable", reason: "store_error" };
   }
 }

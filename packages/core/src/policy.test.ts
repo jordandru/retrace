@@ -324,7 +324,12 @@ test("policySnapshotFromIndex: a throwing read still fails closed, and says why 
     await policySnapshotFromIndex({ ...opts, diag: (d: Diagnostic) => { seen.push(d); } }),
     { U: 12, events: [], activations: [], unavailable: "store_error" },
   );
-  assert.deepEqual(seen, [{ site: "policy.snapshot.document", reason: "store_error", detail: "Error: D1_ERROR: network" }]);
+  assert.equal(seen.length, 1);
+  assert.deepEqual(
+    { site: seen[0].site, reason: seen[0].reason, detail: seen[0].detail },
+    { site: "policy.snapshot.document", reason: "store_error", detail: "D1_ERROR" },
+  );
+  assert.equal(typeof seen[0].ms, "number", "how long the failing read ran");
 
   // Without a sink the helper behaves exactly as before.
   assert.deepEqual(
