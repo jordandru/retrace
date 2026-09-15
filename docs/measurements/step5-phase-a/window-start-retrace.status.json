@@ -1,0 +1,539 @@
+{
+  "actors": [
+    {
+      "events": 798,
+      "id": "claude-code",
+      "last_seen": "2026-09-15T04:41:21.990Z",
+      "models": [
+        "claude-fable-5",
+        "claude-fable-5-1",
+        "claude-opus-4-8",
+        "claude-opus-5",
+        "claude-opus-5[1m]"
+      ],
+      "type": "agent"
+    },
+    {
+      "events": 11,
+      "id": "claude-cowork",
+      "last_seen": "2026-08-21T04:32:52.209Z",
+      "models": [
+        "claude-fable-5"
+      ],
+      "type": "agent"
+    },
+    {
+      "events": 1,
+      "id": "claude-fable-5",
+      "last_seen": "2026-08-20T18:41:04.000Z",
+      "models": [],
+      "type": "agent"
+    },
+    {
+      "events": 1044,
+      "id": "codex",
+      "last_seen": "2026-09-15T04:35:02.459Z",
+      "models": [
+        "GPT-5",
+        "gpt-5",
+        "gpt-5.6-luna",
+        "gpt-5.6-sol",
+        "gpt-6",
+        "gpt-6-astra"
+      ],
+      "type": "agent"
+    },
+    {
+      "events": 293,
+      "id": "cursor-agent",
+      "last_seen": "2026-09-15T04:03:47.201Z",
+      "models": [
+        "Cursor Grok 4.6",
+        "GPT-5.6 Sol",
+        "claude-fable-5-1",
+        "grok-4.6"
+      ],
+      "type": "agent"
+    },
+    {
+      "events": 7,
+      "id": "gemini",
+      "last_seen": "2026-09-04T14:50:00.007Z",
+      "models": [
+        "gemini-1.5-pro",
+        "gemini-2.0-flash-exp-001",
+        "gemini-2.5-pro",
+        "gemini-3.5-flash"
+      ],
+      "type": "agent"
+    },
+    {
+      "events": 210,
+      "id": "github-copilot",
+      "last_seen": "2026-09-10T21:39:10.967Z",
+      "models": [
+        "claude-opus-4.8",
+        "gpt-5.6-sol"
+      ],
+      "type": "agent"
+    },
+    {
+      "events": 364,
+      "id": "grok",
+      "last_seen": "2026-09-14T04:20:35.865Z",
+      "models": [
+        "Grok 4.6",
+        "grok-4.6"
+      ],
+      "type": "agent"
+    },
+    {
+      "events": 138,
+      "id": "nooa",
+      "last_seen": "2026-09-15T04:01:24.070Z",
+      "models": [
+        "claude-haiku-4-5",
+        "claude-sonnet-5",
+        "nvidia_nim/nvidia/nemotron-3-super-120b-a12b",
+        "nvidia_nim/nvidia/nemotron-3-ultra-550b-a55b"
+      ],
+      "type": "agent"
+    },
+    {
+      "events": 219,
+      "id": "github:jordandru",
+      "last_seen": "2026-09-15T04:36:06Z",
+      "models": [],
+      "type": "human"
+    },
+    {
+      "events": 878,
+      "id": "jordansboxing@gmail.com",
+      "last_seen": "2026-09-15T04:38:07.021Z",
+      "models": [],
+      "type": "human"
+    },
+    {
+      "events": 14,
+      "id": "323890924+retrace-checkpoint[bot]@users.noreply.github.com",
+      "last_seen": "2026-09-14T12:49:43Z",
+      "models": [],
+      "type": "system"
+    },
+    {
+      "events": 1,
+      "id": "41898282+github-actions[bot]@users.noreply.github.com",
+      "last_seen": "2026-09-01T06:23:53Z",
+      "models": [],
+      "type": "system"
+    },
+    {
+      "events": 388,
+      "id": "github-actions",
+      "last_seen": "2026-09-15T04:35:01Z",
+      "models": [],
+      "type": "system"
+    },
+    {
+      "events": 4,
+      "id": "github-actions[bot]",
+      "last_seen": "2026-09-01T06:23:55Z",
+      "models": [],
+      "type": "system"
+    },
+    {
+      "events": 1,
+      "id": "retrace-api",
+      "last_seen": "2026-09-10T13:27:50.538Z",
+      "models": [],
+      "type": "system"
+    },
+    {
+      "events": 14,
+      "id": "retrace-checkpoint[bot]",
+      "last_seen": "2026-09-14T12:49:46Z",
+      "models": [],
+      "type": "system"
+    },
+    {
+      "events": 1,
+      "id": "worker",
+      "last_seen": "2026-08-20T18:52:59.430Z",
+      "models": [],
+      "type": "system"
+    }
+  ],
+  "capture": {
+    "agent_events": 2866,
+    "agent_events_not_pinned": 1185,
+    "agent_events_without_model": 249,
+    "amended_artifact_refs": 487,
+    "amended_unlinked_commits": 32,
+    "artifact_refs": 12696,
+    "artifact_refs_without_role": 48,
+    "attribution": "unavailable: no_git_context",
+    "attribution_attempts": 1,
+    "attribution_unavailable": "no_git_context",
+    "commits": 652,
+    "ineffective_amendment_reasons": [
+      {
+        "id": "evt_b74d06622dfa46a3a108826cdee5c9b8",
+        "reason": "missing_target"
+      }
+    ],
+    "ineffective_amendments": 1,
+    "instructions": 839,
+    "instructions_without_followup": 74,
+    "legacy_client": 4,
+    "sealed_by": {
+      "assert": 255,
+      "owner": 57,
+      "pinned": 2299,
+      "unauthenticated": 0,
+      "unstamped": 947,
+      "webhook": 828
+    },
+    "unlinked_commits": 53,
+    "unverified_links": 174
+  },
+  "causality": {
+    "attested_events": 41,
+    "broken_links": 1,
+    "coverage_pct": 98.2,
+    "eligible_events": 2938,
+    "rooted_in_human_instruction": 2843,
+    "unlinked": 53
+  },
+  "events": {
+    "last_event_at": "2026-09-15T04:41:21.990Z",
+    "total": 4386
+  },
+  "generated_at": "2026-09-15T04:41:48.461Z",
+  "integrations": [
+    {
+      "events": 2,
+      "last_seen": "2026-08-29T03:06:20.845Z",
+      "system": "claude-artifacts"
+    },
+    {
+      "events": 539,
+      "last_seen": "2026-09-15T04:41:21.990Z",
+      "system": "claude-code"
+    },
+    {
+      "events": 1,
+      "last_seen": "2026-08-31T19:01:17.930Z",
+      "system": "cloudflare"
+    },
+    {
+      "events": 11,
+      "last_seen": "2026-08-30T06:45:20.200Z",
+      "system": "cloudflare-workers"
+    },
+    {
+      "events": 1,
+      "last_seen": "2026-08-31T20:47:04.383Z",
+      "system": "Codex conversation"
+    },
+    {
+      "events": 2,
+      "last_seen": "2026-08-29T17:22:24.208Z",
+      "system": "codex-collaboration"
+    },
+    {
+      "events": 1104,
+      "last_seen": "2026-09-15T04:35:02.459Z",
+      "system": "codex-mcp-client"
+    },
+    {
+      "events": 10,
+      "last_seen": "2026-09-01T04:42:33.716Z",
+      "system": "copilot-cli"
+    },
+    {
+      "events": 229,
+      "last_seen": "2026-09-15T04:03:47.201Z",
+      "system": "cursor"
+    },
+    {
+      "events": 38,
+      "last_seen": "2026-09-15T03:19:38.688Z",
+      "system": "cursor-agent"
+    },
+    {
+      "events": 2,
+      "last_seen": "2026-09-01T06:25:32.977Z",
+      "system": "cursor-oneshot"
+    },
+    {
+      "events": 2,
+      "last_seen": "2026-09-01T06:18:59.890Z",
+      "system": "cursor-oneshot-cursor"
+    },
+    {
+      "events": 16,
+      "last_seen": "2026-09-07T22:36:32.038Z",
+      "system": "gemini-cli"
+    },
+    {
+      "events": 384,
+      "last_seen": "2026-09-15T04:33:26.000Z",
+      "system": "git"
+    },
+    {
+      "events": 867,
+      "last_seen": "2026-09-15T04:36:06Z",
+      "system": "github"
+    },
+    {
+      "events": 166,
+      "last_seen": "2026-09-10T21:39:10.967Z",
+      "system": "github-copilot"
+    },
+    {
+      "events": 12,
+      "last_seen": "2026-08-29T21:52:03.863Z",
+      "system": "google-drive"
+    },
+    {
+      "events": 554,
+      "last_seen": "2026-09-14T18:50:27.716Z",
+      "system": "grok"
+    },
+    {
+      "events": 14,
+      "last_seen": "2026-08-29T01:56:35.759Z",
+      "system": "grok-shell-retrace"
+    },
+    {
+      "events": 2,
+      "last_seen": "2026-09-02T05:45:01.797Z",
+      "system": "internet"
+    },
+    {
+      "events": 1,
+      "last_seen": "2026-09-02T05:47:48.156Z",
+      "system": "internet-and-local-workspace"
+    },
+    {
+      "events": 10,
+      "last_seen": "2026-09-01T04:54:45.488Z",
+      "system": "local workspace"
+    },
+    {
+      "events": 1,
+      "last_seen": "2026-08-31T20:43:02.977Z",
+      "system": "local workspace and GitHub"
+    },
+    {
+      "events": 4,
+      "last_seen": "2026-09-01T04:48:34.213Z",
+      "system": "local workspace and live Retrace Worker"
+    },
+    {
+      "events": 1,
+      "last_seen": "2026-09-01T04:04:19.941Z",
+      "system": "local workspace, Cursor CLI, GitHub Actions"
+    },
+    {
+      "events": 1,
+      "last_seen": "2026-09-01T04:26:44.051Z",
+      "system": "local workspace, Retrace ledger, live Worker API, GitHub Actions"
+    },
+    {
+      "events": 12,
+      "last_seen": "2026-09-02T06:04:38.393Z",
+      "system": "local-workspace"
+    },
+    {
+      "events": 304,
+      "last_seen": "2026-09-15T04:01:24.070Z",
+      "system": "nooa-object-oriented-agents"
+    },
+    {
+      "events": 1,
+      "last_seen": "2026-09-02T05:46:31.118Z",
+      "system": "npm-registry"
+    },
+    {
+      "events": 22,
+      "last_seen": "2026-09-10T03:19:11.579Z",
+      "system": "orca"
+    },
+    {
+      "events": 1,
+      "last_seen": "2026-08-30T03:36:16.780Z",
+      "system": "Orca IDE"
+    },
+    {
+      "events": 17,
+      "last_seen": "2026-08-29T17:19:50.389Z",
+      "system": "retrace-api"
+    },
+    {
+      "events": 1,
+      "last_seen": "2026-09-04T14:17:03.644Z",
+      "system": "signing-rollout-verify"
+    },
+    {
+      "events": 2,
+      "last_seen": "2026-09-01T05:59:18.164Z",
+      "system": "vscode"
+    }
+  ],
+  "integrity": {
+    "checked": 4386,
+    "legacy_events": 996,
+    "ok": true
+  },
+  "issuance": {
+    "principal_conflicts": [],
+    "principals": [
+      {
+        "actor": {
+          "id": "retrace-git",
+          "type": "system"
+        },
+        "live": false,
+        "name": "git hook (assert)",
+        "principal": {
+          "id": "retrace",
+          "type": "team"
+        }
+      },
+      {
+        "actor": {
+          "id": "gdrive-forwarder",
+          "type": "system"
+        },
+        "live": false,
+        "name": "Drive forwarder (assert)",
+        "principal": {
+          "id": "retrace",
+          "type": "team"
+        }
+      },
+      {
+        "actor": {
+          "id": "retrace-ci",
+          "type": "system"
+        },
+        "live": false,
+        "name": "GitHub Actions gate (read)",
+        "principal": {
+          "id": "retrace",
+          "type": "team"
+        }
+      },
+      {
+        "actor": {
+          "id": "openclaw",
+          "type": "agent"
+        },
+        "live": true,
+        "name": "retrace · openclaw for jordansboxing@gmail.com",
+        "principal": {
+          "id": "jordansboxing@gmail.com",
+          "type": "human"
+        }
+      },
+      {
+        "actor": {
+          "id": "nooa",
+          "type": "agent"
+        },
+        "live": true,
+        "name": "nooa pilot (Jordan) — first producer",
+        "principal": {
+          "id": "jordansboxing@gmail.com",
+          "type": "human"
+        }
+      },
+      {
+        "actor": {
+          "id": "claude-code",
+          "type": "agent"
+        },
+        "live": true,
+        "name": "claude-code MCP (pinned) (signing)",
+        "principal": {
+          "id": "jordansboxing@gmail.com",
+          "type": "human"
+        }
+      },
+      {
+        "actor": {
+          "id": "codex",
+          "type": "agent"
+        },
+        "live": true,
+        "name": "codex (signing)",
+        "principal": {
+          "id": "jordansboxing@gmail.com",
+          "type": "human"
+        }
+      },
+      {
+        "actor": {
+          "id": "gemini",
+          "type": "agent"
+        },
+        "live": false,
+        "name": "Gemini CLI MCP (pinned) (signing)",
+        "principal": {
+          "id": "jordansboxing@gmail.com",
+          "type": "human"
+        }
+      },
+      {
+        "actor": {
+          "id": "grok",
+          "type": "agent"
+        },
+        "live": true,
+        "name": "Grok MCP (pinned) (signing)",
+        "principal": {
+          "id": "jordansboxing@gmail.com",
+          "type": "human"
+        }
+      },
+      {
+        "actor": {
+          "id": "github-copilot",
+          "type": "agent"
+        },
+        "live": true,
+        "name": "github-copilot (signing)",
+        "principal": {
+          "id": "jordansboxing@gmail.com",
+          "type": "human"
+        }
+      },
+      {
+        "actor": {
+          "id": "cursor-agent",
+          "type": "agent"
+        },
+        "live": true,
+        "name": "Cursor Agent MCP (pinned) (signing)",
+        "principal": {
+          "id": "jordansboxing@gmail.com",
+          "type": "human"
+        }
+      }
+    ],
+    "shared_actor_id": []
+  },
+  "policy": {
+    "digest": "97dc14693483c1d78ee885a8c45219757668e6a0987ba0c28583132b9abc910e",
+    "mode": "document",
+    "version": 1
+  },
+  "project": "retrace",
+  "routing": [
+    {
+      "repo": "jordandru/retrace",
+      "source": "policy"
+    }
+  ]
+}
