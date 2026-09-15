@@ -112,10 +112,48 @@ function checkCandidate(attempt: Attempt, events: Event[], options: AttributionO
   return { ok: true, tier: "human", flags, whole_event, amendment };
 }
 
-export function collectAttributionAmendments(events: Event[], options: AttributionOptions = {}): AttributionCollection {
+function replayAttributionCandidates(
+  events: Event[],
+  candidates: Event[],
+  options: AttributionOptions & { context: AttributionCaptureContext },
+): AttributionCollection {
+  const { context } = options;
   const effective = new Map<string, AttributionAmendment[]>(); const superseded: AttributionAmendment[] = []; const rejected: AttributionCollection["rejected"] = [];
   const unavailable = (reason: string): AttributionCollection => ({ effective, superseded, rejected, unavailable: reason });
-  if (!events.some(isAttributionAmendment)) return { effective, superseded, rejected };
+  const byId = new Map(events.map(e => [e.id, e]));
+  for (const e of candidates) {
+    const target = byId.get(String(e.method?.params?.target_event_id));
+    if (target && !context.domains.has(target.id)) return unavailable("context_missing");
+  }
+  const targetSeq = (e: Event) => byId.get(String(e.method?.params?.target_event_id))?.seq ?? Infinity;
+  for (const event of [...candidates].sort((a,b) => targetSeq(a) - targetSeq(b) || a.seq - b.seq || a.id.localeCompare(b.id))) {
+    const result = checkCandidate(sealedAttempt(event), events, options, { effective });
+    if (!result.ok) { rejected.push({ event, reason: result.reason }); continue; }
+    const a = result.amendment;
+    superseded.push(...(effective.get(a.target_id) ?? []).filter(p => p.amendment_id === a.supersedes));
+    effective.set(a.target_id, [...(effective.get(a.target_id) ?? []).filter(p => p.amendment_id !== a.supersedes), a]);
+  }
+  return { effective, superseded, rejected, context };
+}
+
+/**
+ * Replay authoritative point-read dependencies through the same v7 candidate checker.
+ * The caller resolves every cited target, evidence, and causal-root dependency and builds
+ * the capture context at the pinned head.
+ */
+export function collectAttributionAmendmentsFromDependencies(
+  candidates: Event[],
+  dependencies: Event[],
+  context: AttributionCaptureContext,
+): AttributionCollection {
+  const events = [...new Map([...dependencies, ...candidates].map(e => [e.id, e])).values()];
+  return replayAttributionCandidates(events, candidates, { context });
+}
+
+export function collectAttributionAmendments(events: Event[], options: AttributionOptions = {}): AttributionCollection {
+  const empty = (): AttributionCollection => ({ effective: new Map(), superseded: [], rejected: [] });
+  const unavailable = (reason: string): AttributionCollection => ({ ...empty(), unavailable: reason });
+  if (!events.some(isAttributionAmendment)) return empty();
   if (!isVerifiedAttributionSnapshot(options.snapshot)) return unavailable("untrusted_snapshot");
   const snapshot = options.snapshot;
   const suppliedIds=new Set(events.map(e=>e.id));
@@ -126,21 +164,7 @@ export function collectAttributionAmendments(events: Event[], options: Attributi
   const context = options.context;
   if (!context) return unavailable("context_missing");
   if (context.project !== snapshot.project || context.head_seq !== snapshot.head.seq || context.head_hash !== snapshot.head.hash) return unavailable("context_conflict");
-  const byId = new Map(events.map(e => [e.id, e]));
-  for (const e of events.filter(isAttributionAmendment)) {
-    const target = byId.get(String(e.method?.params?.target_event_id));
-    if (target && !context.domains.has(target.id)) return unavailable("context_missing");
-  }
-  const targetSeq = (e: Event) => byId.get(String(e.method?.params?.target_event_id))?.seq ?? Infinity;
-  const candidates = events.filter(isAttributionAmendment).sort((a,b) => targetSeq(a) - targetSeq(b) || a.seq - b.seq || a.id.localeCompare(b.id));
-  for (const event of candidates) {
-    const result = checkCandidate(sealedAttempt(event), events, options, { effective });
-    if (!result.ok) { rejected.push({ event, reason: result.reason }); continue; }
-    const a = result.amendment;
-    superseded.push(...(effective.get(a.target_id) ?? []).filter(p => p.amendment_id === a.supersedes));
-    effective.set(a.target_id, [...(effective.get(a.target_id) ?? []).filter(p => p.amendment_id !== a.supersedes), a]);
-  }
-  return { effective, superseded, rejected, context };
+  return replayAttributionCandidates(events, events.filter(isAttributionAmendment), { ...options, context });
 }
 
 /** Check a sealed record through the identical final-snapshot replay. */

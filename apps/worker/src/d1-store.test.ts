@@ -245,6 +245,8 @@ test("D1 shim amendmentEventsUpTo returns only attribution amendments at or belo
 
   const got = await store.amendmentEventsUpTo("retrace", 3, 10);
   assert.deepEqual(got.map((e) => e.id), ["method-amendment", "tag-amendment"]);
+  const many = await store.getMany(["above-u", "method-amendment", "missing", "method-amendment"]);
+  assert.deepEqual(many.map((e) => e.id).sort(), ["above-u", "method-amendment"]);
   const indexes = sqlite.prepare("PRAGMA index_list(events)").all().map((r: any) => r.name);
   assert.ok(indexes.includes("idx_events_amendment_candidates"));
 });

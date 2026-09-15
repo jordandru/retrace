@@ -127,6 +127,8 @@ export interface EventStore {
   insert(e: Event): Promise<void>;
   byIdempotencyKey(project: string, key: string): Promise<Event | null>;
   get(id: string): Promise<Event | null>;
+  /** Bounded point-read batch. Missing ids are omitted; callers decide whether absence is fatal. */
+  getMany?(ids: string[]): Promise<Event[]>;
   history(q: HistoryQuery): Promise<HistoryPage>;
   all(project: string): Promise<Event[]>;
   /** Attribution-amendment candidates through inclusive sequence U, ascending, capped by the caller's LIMIT. */

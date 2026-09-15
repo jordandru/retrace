@@ -6,17 +6,18 @@
  * (`actor_written: "claim"`, `shadow: true`). Nothing is withheld; 426 is not introduced here.
  */
 import {
-  collectAttributionAmendments, type AttributionAmendment, type AttributionCollection,
+  collectAttributionAmendments, collectAttributionAmendmentsFromDependencies,
+  type AttributionAmendment, type AttributionCollection,
 } from "./attribution.js";
 import {
-  isAttributionAmendment, verifiedAttributionSnapshot,
-  type AttributionCaptureContext, type AttributionDomain, type AttributionSnapshot, type AttributionUnit,
+  isAttributionAmendment,
+  type AttributionCaptureContext, type AttributionDomain, type AttributionUnit,
 } from "./attribution-context.js";
 import { canonicalize, sha256Hex } from "./chain.js";
 import {
   CommitActorResolution, resolveCommitActor, validCausedById,
 } from "./commit-actor.js";
-import { actorKey, captureSeals, generatesArtifact, previousCaptureTouch, sameArtifact } from "./capture.js";
+import { actorKey, captureSeals, generatesArtifact, previousCaptureTouch, sameArtifact, type CaptureSeal } from "./capture.js";
 import {
   ARTIFACT_INDEX_DEFAULT_ROW_CAP, ArtifactIndexResult, CausedByProblem, EventStore,
   SEALED_BY_GITHUB_WEBHOOK, SEALED_BY_PARAM, causedByProblem, eventsReferencingArtifactKeys,
@@ -307,32 +308,30 @@ function classifierCanonicalArtifact(policy: PolicyBody, id: string): string | u
 }
 
 async function classifierLedgerAttributionContext(
-  snapshot: AttributionSnapshot,
+  events: Event[],
+  candidates: Event[],
+  captureFacts: CaptureSeal[],
+  project: string,
+  U: number,
+  headHash: string,
   policy: PolicyBody,
   policyDigest: string,
 ): Promise<AttributionCaptureContext> {
   const canonicalArtifact = (id: string, _seq: number) => classifierCanonicalArtifact(policy, id);
   const domains = new Map<string, AttributionDomain>();
-  const byId = new Map(snapshot.events.map((e) => [e.id, e]));
+  const byId = new Map(events.map((e) => [e.id, e]));
   const seals = new Map<string, { key: string; seq: number; paths: Set<string> }>();
-  for (const repository of policy.repositories) {
-    for (const seal of captureSeals(snapshot.events, {
-      repoName: repository.name,
-      aliases: repository.aliases,
-      hookSealedBy: policy.trusted_hook_stamps,
-      ownerSeals: true,
-    })) {
-      const existing = seals.get(seal.key);
-      const value = existing ?? { key: seal.key, seq: seal.seq, paths: new Set<string>() };
-      value.seq = Math.min(value.seq, seal.seq);
-      for (const artifactId of seal.paths) {
-        const id = canonicalArtifact(artifactId, seal.seq);
-        if (id) value.paths.add(id);
-      }
-      seals.set(seal.key, value);
+  for (const seal of captureFacts) {
+    const existing = seals.get(seal.key);
+    const value = existing ?? { key: seal.key, seq: seal.seq, paths: new Set<string>() };
+    value.seq = Math.min(value.seq, seal.seq);
+    for (const artifactId of seal.paths) {
+      const id = canonicalArtifact(artifactId, seal.seq);
+      if (id) value.paths.add(id);
     }
+    seals.set(seal.key, value);
   }
-  for (const e of snapshot.events.filter(isAttributionAmendment)) {
+  for (const e of candidates) {
     const target = byId.get(String(e.method?.params?.target_event_id));
     if (!target || domains.has(target.id)) continue;
     const ownCommit = target.artifacts.find((a) => a.id.startsWith("commit:"))?.id;
@@ -358,9 +357,9 @@ async function classifierLedgerAttributionContext(
   }
   return {
     profile: "retrace-attribution/1",
-    project: snapshot.project,
-    head_seq: snapshot.head.seq,
-    head_hash: snapshot.head.hash,
+    project,
+    head_seq: U,
+    head_hash: headHash,
     policy_digest: policyDigest,
     git_facts_digest: await sha256Hex("classifier-ledger-only"),
     domains,
@@ -373,13 +372,74 @@ export type AmendmentEval =
   | { ok: true; collection: AttributionCollection; snapshotJson: string }
   | { ok: false; reason: "deadline" | "budget" | "store_error"; snapshotJson: string };
 
-/** Complete prefix at U — never a single history page. Effectiveness via collectAttributionAmendments. */
+type DependencyRead =
+  | { ok: true; events: Event[] }
+  | { ok: false; reason: "deadline" | "budget" | "store_error" };
+
+async function amendmentDependencies(opts: {
+  store: EventStore;
+  candidates: Event[];
+  deadline: number;
+  now: () => number;
+}): Promise<DependencyRead> {
+  const candidateById = new Map(opts.candidates.map((e) => [e.id, e]));
+  const dependencies = new Map<string, Event>();
+  const required = new Set<string>();
+  let causalFrontier = new Set<string>();
+  for (const candidate of opts.candidates) {
+    const target = candidate.method?.params?.target_event_id;
+    if (typeof target === "string") required.add(target);
+    const evidence = candidate.method?.params?.attribution;
+    if (evidence && typeof evidence === "object" && !Array.isArray(evidence)) {
+      const ids = (evidence as Record<string, unknown>).evidence;
+      if (Array.isArray(ids)) for (const id of ids) if (typeof id === "string") required.add(id);
+    }
+    if (typeof candidate.caused_by === "string") {
+      required.add(candidate.caused_by);
+      causalFrontier.add(candidate.caused_by);
+    }
+  }
+
+  const read = async (ids: string[]): Promise<boolean> => {
+    const missing = [...new Set(ids)].filter((id) => !candidateById.has(id) && !dependencies.has(id));
+    if (opts.candidates.length + dependencies.size + missing.length > CLASSIFY_ROW_CAP) return false;
+    if (!missing.length) return true;
+    const rows = opts.store.getMany
+      ? await opts.store.getMany(missing)
+      : (await Promise.all(missing.map((id) => opts.store.get(id)))).filter((e): e is Event => e !== null);
+    if (opts.now() >= opts.deadline) throw new Error("deadline");
+    const byId = new Map(rows.map((e) => [e.id, e]));
+    if (missing.some((id) => !byId.has(id))) throw new Error("unresolvable");
+    for (const id of missing) dependencies.set(id, byId.get(id)!);
+    return true;
+  };
+
+  try {
+    if (!(await read([...required]))) return { ok: false, reason: "budget" };
+    while (causalFrontier.size) {
+      const next = new Set<string>();
+      for (const id of causalFrontier) {
+        const event = candidateById.get(id) ?? dependencies.get(id);
+        if (event?.caused_by && !candidateById.has(event.caused_by) && !dependencies.has(event.caused_by)) next.add(event.caused_by);
+      }
+      if (!(await read([...next]))) return { ok: false, reason: "budget" };
+      causalFrontier = next;
+    }
+  } catch (error) {
+    return { ok: false, reason: error instanceof Error && error.message === "deadline" ? "deadline" : "store_error" };
+  }
+  return { ok: true, events: [...dependencies.values()] };
+}
+
+/** Bounded candidates plus point-read dependencies; never fetches or verifies the project prefix. */
 export async function evaluateAmendmentsAtU(opts: {
   store: EventStore;
   project: string;
   U: number;
+  headHash: string;
   policy: PolicyBody;
   policyDigest: string;
+  captureSeals: CaptureSeal[];
   deadline: number;
   now: () => number;
 }): Promise<AmendmentEval> {
@@ -393,40 +453,36 @@ export async function evaluateAmendmentsAtU(opts: {
     const collection = emptyAmendmentCollection();
     return { ok: true, collection, snapshotJson: amendmentSnapshotJson({ effective: [] }) };
   }
-  let prefix: Event[];
+  let candidates: Event[];
   try {
     if (opts.store.amendmentEventsUpTo) {
-      const amendments = await opts.store.amendmentEventsUpTo(opts.project, opts.U, CLASSIFY_ROW_CAP + 1);
-      if (opts.now() >= opts.deadline) return fail("deadline");
-      if (amendments.length > CLASSIFY_ROW_CAP) return fail("budget");
-      if (amendments.length === 0) {
-        return { ok: true, collection: emptyAmendmentCollection(), snapshotJson: amendmentSnapshotJson({ effective: [] }) };
-      }
-      const page = await opts.store.history({
-        project: opts.project,
-        before_seq: opts.U + 1,
-        limit: CLASSIFY_ROW_CAP,
-      });
-      if (page.truncated) return fail("budget");
-      prefix = page.events;
+      candidates = await opts.store.amendmentEventsUpTo(opts.project, opts.U, CLASSIFY_ROW_CAP + 1);
     } else {
       const events = await opts.store.all(opts.project);
-      prefix = events.filter((e) => e.seq <= opts.U).sort((a, b) => a.seq - b.seq || a.id.localeCompare(b.id));
-      if (prefix.length > CLASSIFY_ROW_CAP) return fail("budget");
-      if (!prefix.some(isAttributionAmendment)) {
-        return { ok: true, collection: emptyAmendmentCollection(), snapshotJson: amendmentSnapshotJson({ effective: [] }) };
-      }
+      candidates = events.filter((e) => e.seq <= opts.U && isAttributionAmendment(e))
+        .sort((a, b) => a.seq - b.seq || a.id.localeCompare(b.id))
+        .slice(0, CLASSIFY_ROW_CAP + 1);
     }
   } catch {
     return fail("store_error");
   }
   if (opts.now() >= opts.deadline) return fail("deadline");
+  if (candidates.length > CLASSIFY_ROW_CAP) return fail("budget");
+  if (candidates.length === 0) {
+    return { ok: true, collection: emptyAmendmentCollection(), snapshotJson: amendmentSnapshotJson({ effective: [] }) };
+  }
+  const dependencies = await amendmentDependencies({
+    store: opts.store, candidates, deadline: opts.deadline, now: opts.now,
+  });
+  if (!dependencies.ok) return fail(dependencies.reason);
   try {
-    const head = prefix.at(-1)!;
-    const snapshot = await verifiedAttributionSnapshot(prefix, opts.project, { seq: head.seq, hash: head.hash });
+    const captureEvents = opts.captureSeals.map((seal) => seal.event);
+    const contextEvents = [...new Map([...dependencies.events, ...candidates, ...captureEvents].map((e) => [e.id, e])).values()];
+    const context = await classifierLedgerAttributionContext(
+      contextEvents, candidates, opts.captureSeals, opts.project, opts.U, opts.headHash, opts.policy, opts.policyDigest,
+    );
+    const collection = collectAttributionAmendmentsFromDependencies(candidates, [...dependencies.events, ...captureEvents], context);
     if (opts.now() >= opts.deadline) return fail("deadline");
-    const context = await classifierLedgerAttributionContext(snapshot, opts.policy, opts.policyDigest);
-    const collection = collectAttributionAmendments(prefix, { snapshot, context });
     if (collection.unavailable) {
       return { ok: false, reason: "store_error", snapshotJson: amendmentSnapshotJson({ unavailable: collection.unavailable }) };
     }
@@ -712,39 +768,9 @@ async function classifyCommitClaimInner(opts: ClassifyOpts): Promise<ClassifyRes
 
   const found = await opts.store.getClassificationContext(opts.input.project, canonicalR, sha);
   if (now() >= deadline) return { kind: "unavailable", reason: "deadline" };
-  let amendEval: AmendmentEval | null = null;
-  if (!found) {
-    amendEval = await evaluateAmendmentsAtU({
-      store: opts.store, project: opts.input.project, U: Utry, policy: policyDoc.body,
-      policyDigest: policyDoc.digest, deadline, now,
-    });
-    if (!amendEval.ok) return { kind: "unavailable", reason: amendEval.reason };
-  }
-  const candidate: ClassificationContextRow = {
-    project: opts.input.project,
-    canonical_repo: canonicalR,
-    sha,
-    read_head_seq: Utry,
-    read_head_hash: headHash,
-    policy_digest: policyDoc.digest,
-    first_producer: opts.producer,
-    first_F_digest: Fdigest,
-    first_claim_digest: claimDigest,
-    classifier_profile: CLASSIFIER_PROFILE,
-    rollout_mode: policyMode,
-    amendment_snapshot: amendEval?.snapshotJson ?? amendmentSnapshotJson({ unavailable: "pending" }),
-    per_path_lower: {},
-    created_at: new Date(now()).toISOString(),
-  };
-
-  const inserted = found
-    ? { inserted: false, context: found }
-    : await opts.store.insertClassificationContextIfAbsent(candidate);
-  if (now() >= deadline) return { kind: "unavailable", reason: "deadline" };
-  const ctx = inserted.context;
-
+  let ctx = found;
   // Existing context: retrieve the *exact* policy named by the context, never latest (P4).
-  if (!inserted.inserted) {
+  if (ctx) {
     const named = opts.store.getPolicy ? await opts.store.getPolicy(opts.input.project, { digest: ctx.policy_digest }) : null;
     if (!named) return { kind: "unavailable", reason: "store_error" };
     policyDoc = named;
@@ -752,36 +778,25 @@ async function classifyCommitClaimInner(opts: ClassifyOpts): Promise<ClassifyRes
     Fdigest = await digestOf([...paths].sort());
   }
 
-  const U = ctx.read_head_seq;
-  const evaluated: AmendmentEval = (!amendEval || U !== Utry)
-    ? await evaluateAmendmentsAtU({
-      store: opts.store, project: opts.input.project, U, policy: policyDoc.body,
-      policyDigest: policyDoc.digest, deadline, now,
-    })
-    : amendEval;
-  if (!evaluated.ok) return { kind: "unavailable", reason: evaluated.reason };
-  const amendmentCollection = evaluated.collection;
+  let U = ctx?.read_head_seq ?? Utry;
+  let pinnedHeadHash = ctx?.read_head_hash ?? headHash;
   const thisShaShort = sha.slice(0, 12);
-  const canonicalKeys = artifactKeysForPaths(canonicalR, paths, policyDoc.body);
-  const looseKeys = paths.flatMap((p) => [`file:${p}`, p]);
-  const keys = [...new Set([...canonicalKeys, ...looseKeys])];
-
-  if (now() >= deadline) return { kind: "unavailable", reason: "deadline" };
-
-  // One bounded §3.5 read: events referencing F in (genesis, U]. Lowers and witnesses come from it.
-  let index: ArtifactIndexResult;
-  if (!keys.length) index = { ok: true, events: [] };
-  else if (opts.store.eventsReferencingArtifacts) {
-    index = await opts.store.eventsReferencingArtifacts({
-      project: opts.input.project,
-      artifact_keys: keys,
-      after_seq: -1,
-      through_seq: U,
-      row_cap: CLASSIFY_ROW_CAP,
-      deadline,
-    }, now);
-  } else {
-    index = eventsReferencingArtifactKeys(await opts.store.all(opts.input.project), {
+  const readWindow = async (): Promise<ArtifactIndexResult> => {
+    const canonicalKeys = artifactKeysForPaths(canonicalR, paths, policyDoc!.body);
+    const looseKeys = paths.flatMap((p) => [`file:${p}`, p]);
+    const keys = [...new Set([...canonicalKeys, ...looseKeys])];
+    if (!keys.length) return { ok: true, events: [] };
+    if (opts.store.eventsReferencingArtifacts) {
+      return opts.store.eventsReferencingArtifacts({
+        project: opts.input.project,
+        artifact_keys: keys,
+        after_seq: -1,
+        through_seq: U,
+        row_cap: CLASSIFY_ROW_CAP,
+        deadline,
+      }, now);
+    }
+    return eventsReferencingArtifactKeys(await opts.store.all(opts.input.project), {
       project: opts.input.project,
       artifact_keys: keys,
       after_seq: -1,
@@ -789,15 +804,61 @@ async function classifyCommitClaimInner(opts: ClassifyOpts): Promise<ClassifyRes
       row_cap: CLASSIFY_ROW_CAP,
       deadline,
     }, now());
-  }
-  if (!index.ok) return { kind: "unavailable", reason: index.reason };
-
-  const seals = captureSeals(index.events, {
+  };
+  const deriveSeals = (events: Event[]) => captureSeals(events, {
     repoName: canonicalR,
-    aliases: policyDoc.body.repositories.find((r) => r.name === canonicalR)?.aliases,
-    hookSealedBy: policyDoc.body.trusted_hook_stamps,
+    aliases: policyDoc!.body.repositories.find((r) => r.name === canonicalR)?.aliases,
+    hookSealedBy: policyDoc!.body.trusted_hook_stamps,
     ownerSeals: true,
   });
+  let index = await readWindow();
+  if (!index.ok) return { kind: "unavailable", reason: index.reason };
+  let seals = deriveSeals(index.events);
+  let evaluated = await evaluateAmendmentsAtU({
+    store: opts.store, project: opts.input.project, U, headHash: pinnedHeadHash,
+    policy: policyDoc.body, policyDigest: policyDoc.digest, captureSeals: seals, deadline, now,
+  });
+  if (!evaluated.ok) return { kind: "unavailable", reason: evaluated.reason };
+
+  if (!ctx) {
+    const candidate: ClassificationContextRow = {
+      project: opts.input.project,
+      canonical_repo: canonicalR,
+      sha,
+      read_head_seq: Utry,
+      read_head_hash: headHash,
+      policy_digest: policyDoc.digest,
+      first_producer: opts.producer,
+      first_F_digest: Fdigest,
+      first_claim_digest: claimDigest,
+      classifier_profile: CLASSIFIER_PROFILE,
+      rollout_mode: policyMode,
+      amendment_snapshot: evaluated.snapshotJson,
+      per_path_lower: {},
+      created_at: new Date(now()).toISOString(),
+    };
+    const inserted = await opts.store.insertClassificationContextIfAbsent(candidate);
+    if (now() >= deadline) return { kind: "unavailable", reason: "deadline" };
+    ctx = inserted.context;
+    if (!inserted.inserted) {
+      const named = opts.store.getPolicy ? await opts.store.getPolicy(opts.input.project, { digest: ctx.policy_digest }) : null;
+      if (!named) return { kind: "unavailable", reason: "store_error" };
+      policyDoc = named;
+      paths = submittedPathsForRepo(ctx.canonical_repo, files, policyDoc.body, opts.canonicalR !== undefined);
+      Fdigest = await digestOf([...paths].sort());
+      U = ctx.read_head_seq;
+      pinnedHeadHash = ctx.read_head_hash;
+      index = await readWindow();
+      if (!index.ok) return { kind: "unavailable", reason: index.reason };
+      seals = deriveSeals(index.events);
+      evaluated = await evaluateAmendmentsAtU({
+        store: opts.store, project: opts.input.project, U, headHash: pinnedHeadHash,
+        policy: policyDoc.body, policyDigest: policyDoc.digest, captureSeals: seals, deadline, now,
+      });
+      if (!evaluated.ok) return { kind: "unavailable", reason: evaluated.reason };
+    }
+  }
+  const amendmentCollection = evaluated.collection;
   const touches = seals
     .filter((s) => {
       const sealSha = extractSha(s.event);

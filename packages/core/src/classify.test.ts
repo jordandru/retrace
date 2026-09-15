@@ -660,6 +660,87 @@ test("bounded amendment lookup skips all() with 5,000 non-amendment events", asy
   assert.equal(allCalls, 0);
 });
 
+test("5,000 events plus one amendment read only the candidate and its dependencies inside 500 ms", async () => {
+  const store = new MemoryEventStore();
+  await putPolicy(store);
+  const noise = "x".repeat(1_024);
+  for (let i = 0; i < 5_000; i++) {
+    await appendEvent(store, {
+      project: "p",
+      actor: { type: "system", id: "noise" },
+      action: "executed",
+      artifacts: [{ id: `task:large-noise-${i}`, role: "used" }],
+      intent: noise,
+      timestamp: "2026-09-10T10:00:00.000Z",
+    });
+  }
+  const { target } = await attributionFixture(store, { targetPaths: ["a.ts"] });
+  const reads = {
+    rows: 0,
+    bytes: 0,
+    calls: { all: 0, history: 0, get: 0, getMany: 0, amendmentEventsUpTo: 0 },
+  };
+  const record = (name: keyof typeof reads.calls, events: unknown[]) => {
+    reads.calls[name]++;
+    reads.rows += events.length;
+    reads.bytes += Buffer.byteLength(JSON.stringify(events));
+  };
+  const all = store.all.bind(store);
+  store.all = async (...args) => { const rows = await all(...args); record("all", rows); return rows; };
+  const history = store.history.bind(store);
+  store.history = async (...args) => { const page = await history(...args); record("history", page.events); return page; };
+  const get = store.get.bind(store);
+  store.get = async (...args) => { const row = await get(...args); record("get", row ? [row] : []); return row; };
+  const getMany = store.getMany.bind(store);
+  store.getMany = async (...args) => { const rows = await getMany(...args); record("getMany", rows); return rows; };
+  const amendments = store.amendmentEventsUpTo.bind(store);
+  store.amendmentEventsUpTo = async (...args) => {
+    const rows = await amendments(...args);
+    record("amendmentEventsUpTo", rows);
+    return rows;
+  };
+
+  const started = performance.now();
+  const got = await classify(store, commitInput({ files: ["a.ts"] }));
+  const elapsed = performance.now() - started;
+  assert.equal(got.kind, "decision", JSON.stringify(got));
+  if (got.kind !== "decision") return;
+  assert.equal(got.record.decision.witnesses.some((w) => w.id === target.id), false);
+  assert.ok(elapsed < 500, `classification took ${elapsed.toFixed(1)} ms`);
+  assert.deepEqual(reads.calls, { all: 0, history: 0, get: 1, getMany: 1, amendmentEventsUpTo: 1 });
+  assert.equal(reads.rows, 5, "one policy activation plus one candidate, root, target, and evidence");
+  assert.ok(reads.bytes < 32_000, `point reads returned ${reads.bytes} bytes`);
+});
+
+test("an attribution candidate with an unresolvable evidence id fails closed", async () => {
+  const store = new MemoryEventStore();
+  await putPolicy(store);
+  const root = (await appendEvent(store, {
+    project: "p", actor: { type: "human", id: "jordan@example.com" }, action: "instructed",
+    artifacts: [{ id: "task:missing-evidence", role: "generated" }],
+  })).event;
+  const target = (await appendEvent(store, {
+    project: "p", actor: { type: "agent", id: "codex" }, action: "edited", caused_by: root.id,
+    artifacts: [{ id: "repo:acme/app#a.ts", role: "generated" }],
+    method: { tool: "editor", params: { sealed_by: "pinned:codex" } },
+  })).event;
+  const missing = "evt_" + "f".repeat(32);
+  await appendEvent(store, {
+    project: "p", actor: { type: "human", id: "jordan@example.com" }, action: "other",
+    action_detail: "amended", caused_by: root.id, intent: "cannot resolve evidence",
+    artifacts: [{ id: `event:${target.id}`, role: "used" }, { id: `event:${missing}`, role: "used" }],
+    method: { tool: "retrace_amend", params: {
+      sealed_by: "owner", target_event_id: target.id,
+      attribution: {
+        from: { type: "agent", id: "codex" }, to: { type: "agent", id: "other" }, evidence: [missing],
+      },
+    } },
+  });
+
+  const got = await classify(store, commitInput({ files: ["a.ts"] }));
+  assert.deepEqual(got, { kind: "unavailable", reason: "store_error" });
+});
+
 test("rejected amendment does not exclude a witness v7 would still accept", async () => {
   const store = new MemoryEventStore();
   await putPolicy(store);
@@ -731,9 +812,9 @@ test("F1: classifier amendment cascade matches v7 capture-boundary effectiveness
     project: "p", actor: { type: "human", id: "jordan@example.com" }, action: "instructed",
     artifacts: [{ id: "task:cascade", role: "generated" }], timestamp: "2026-09-10T10:00:00.000Z",
   })).event;
-  const edit = async (actor: string, stamp: string) => (await appendEvent(store, {
+  const edit = async (actor: string, stamp: string, repo = "acme/app") => (await appendEvent(store, {
     project: "p", actor: { type: "agent", id: actor }, action: "edited", caused_by: root.id,
-    artifacts: [{ id: "repo:acme/app#a.ts", role: "generated" }],
+    artifacts: [{ id: `repo:${repo}#a.ts`, role: "generated" }],
     timestamp: "2026-09-10T10:01:00.000Z", method: { tool: "editor", params: { sealed_by: stamp } },
   })).event;
   const stale = await edit("B", "assert:B");
@@ -761,7 +842,7 @@ test("F1: classifier amendment cascade matches v7 capture-boundary effectiveness
     } },
   }));
   const a = await edit("A", "pinned:A");
-  const c = await edit("C", "pinned:C");
+  const c = await edit("C", "pinned:C", "old-name");
   const amend = async (target: typeof a, to: string, evidence: typeof a) => (await appendEvent(store, {
     project: "p", actor: { type: "human", id: "jordan@example.com" }, action: "other",
     action_detail: "amended", caused_by: root.id, intent: "correction",

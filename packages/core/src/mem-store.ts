@@ -38,6 +38,10 @@ export class MemoryEventStore implements EventStore {
   }
   async byIdempotencyKey(p: string, k: string) { return this.events.find((e) => e.project === p && e.idempotency_key === k) ?? null; }
   async get(id: string) { return this.events.find((e) => e.id === id) ?? null; }
+  async getMany(ids: string[]) {
+    const wanted = new Set(ids);
+    return this.events.filter((e) => wanted.has(e.id));
+  }
   async all(p: string) { return this.events.filter((e) => e.project === p).sort((a, b) => a.seq - b.seq); }
   async amendmentEventsUpTo(p: string, throughSeq: number, limit: number) {
     return this.events

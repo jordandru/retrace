@@ -35,12 +35,14 @@ test("SqliteStore.amendmentEventsUpTo returns only attribution amendments at or 
     action: "other", action_detail: "amended", tags: ["attribution"],
   }))).event;
   await appendEvent(store, ev({ action: "edited", tags: ["attribution"] }));
-  await appendEvent(store, ev({
+  const above = (await appendEvent(store, ev({
     action: "other", action_detail: "amended", method: { params: { attribution: { from: "late" } } },
-  }));
+  }))).event;
 
   const got = await store.amendmentEventsUpTo("junk", tag.seq, 10);
   assert.deepEqual(got.map((e) => e.id), [method.id, tag.id]);
+  const many = await store.getMany([above.id, method.id, "missing", method.id]);
+  assert.deepEqual(many.map((e) => e.id).sort(), [above.id, method.id].sort());
   const indexes = (store as any).db.prepare("PRAGMA index_list(events)").all().map((r: any) => r.name);
   assert.ok(indexes.includes("idx_events_amendment_candidates"));
 });

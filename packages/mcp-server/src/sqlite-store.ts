@@ -109,6 +109,14 @@ export class SqliteStore implements EventStore {
     return row ? (JSON.parse(row.body) as Event) : null;
   }
 
+  async getMany(ids: string[]) {
+    if (!ids.length) return [];
+    const rows = this.db.prepare(
+      "SELECT body FROM events WHERE id IN (SELECT value FROM json_each(?))",
+    ).all(JSON.stringify([...new Set(ids)])) as { body: string }[];
+    return rows.map((r) => JSON.parse(r.body) as Event);
+  }
+
   async all(project: string) {
     const rows = this.db.prepare("SELECT body FROM events WHERE project = ? ORDER BY seq ASC").all(project) as { body: string }[];
     return rows.map((r) => JSON.parse(r.body) as Event);

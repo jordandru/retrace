@@ -84,6 +84,14 @@ export class D1Store implements EventStore {
     return row ? (JSON.parse(row.body) as Event) : null;
   }
 
+  async getMany(ids: string[]) {
+    if (!ids.length) return [];
+    const { results } = await this.db.prepare(
+      "SELECT body FROM events WHERE id IN (SELECT value FROM json_each(?))",
+    ).bind(JSON.stringify([...new Set(ids)])).all<{ body: string }>();
+    return results.map((r) => JSON.parse(r.body) as Event);
+  }
+
   async all(project: string) {
     const { results } = await this.db.prepare("SELECT body FROM events WHERE project = ? ORDER BY seq ASC").bind(project).all<{ body: string }>();
     return results.map((r) => JSON.parse(r.body) as Event);
