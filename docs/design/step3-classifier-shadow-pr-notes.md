@@ -77,3 +77,5 @@ Round-3 finding disposition and pinning tests:
 - F14/F15/F16 fixed — `F14/F15/F16: breaker CAS retries, sparse window restarts, and a live probe has one owner`; `F16 HTTP: duplicate delivery ids cannot execute the same half-open probe`
 - F17 fixed — `F17: push mapping records explicit parents and never invents ancestry from array order`; `F17: fileless push with incomplete parent facts is sealed as merge_unclassified`
 - F18 fixed — `F18: bare-only and file-only evidence remains diagnostic, never a witness`
+
+Known flake: the CLI packaging test rebuilds shared `dist` under a concurrent suite; it passes serialized.

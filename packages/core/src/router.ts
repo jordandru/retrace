@@ -34,7 +34,7 @@
  */
 import { z } from "zod";
 import { Actor, ActorType, EventInput, GENESIS_HASH, schemaSurface } from "./schema.js";
-import { EventStore, appendEvent, AdapterIdempotencyError, CausedByError, verifyProject, explainEvent, newShareId, shareIsLive, Share, isHeadMovedError, SEALED_BY_PARAM, SEALED_BY_OWNER, SEALED_BY_UNAUTHENTICATED, SEALED_BY_GITHUB_WEBHOOK } from "./store.js";
+import { EventStore, appendEvent, AdapterIdempotencyError, AppendDeadlineExceededError, CausedByError, verifyProject, explainEvent, newShareId, shareIsLive, Share, isHeadMovedError, SEALED_BY_PARAM, SEALED_BY_OWNER, SEALED_BY_UNAUTHENTICATED, SEALED_BY_GITHUB_WEBHOOK } from "./store.js";
 import {
   OwnerPrincipal, PolicyError, RouteConflictError, canonicalGithubRepo, missingPolicyDisposition, parseOwnerPrincipal, planPolicyPut,
   routeGithubDelivery,
@@ -551,9 +551,15 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
           const input = inputs[inputIndex]!;
           const parsed = EventInput.safeParse(input);
           if (!parsed.success) { results.push({ error: parsed.error.issues }); continue; }
+          const remainingShas = () => inputs.slice(inputIndex).map((candidate) => String(candidate.method?.params?.sha ?? "")).filter(Boolean);
           if (mode === "shadow" && isGitCommitSeal(parsed.data)) {
-            const remainingShas = () => inputs.slice(inputIndex).map((candidate) => String(candidate.method?.params?.sha ?? "")).filter(Boolean);
             if (Date.now() >= deliveryDeadline) {
+              if (isShadowPush) {
+                await withinDeliveryDeadline(
+                  recordWebhookClassifyOutcome(store, project, "deadline", Date.now(), probe),
+                  deliveryDeadline,
+                );
+              }
               return json({ ok: true, pending: remainingShas(), reason: "deadline" }, 202);
             }
             if (parsed.data.idempotency_key) {
@@ -574,8 +580,15 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
               }),
               operationDeadline,
             );
-            if (classified === DELIVERY_DEADLINE_EXPIRED)
+            if (classified === DELIVERY_DEADLINE_EXPIRED) {
+              if (isShadowPush) {
+                await withinDeliveryDeadline(
+                  recordWebhookClassifyOutcome(store, project, "deadline", Date.now(), probe),
+                  deliveryDeadline,
+                );
+              }
               return json({ ok: true, pending: remainingShas(), reason: "deadline" }, 202);
+            }
             if (classified.kind === "unavailable") {
               if (isShadowPush) {
                 const reason = classified.reason === "deadline" || classified.reason === "store_error" || classified.reason === "budget" ? classified.reason : "store_error";
@@ -604,8 +617,14 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
             if (classified.kind === "decision") toSeal = attachClaimDecision(parsed.data, classified.record);
             const stamped = stampSealedBy(toSeal, SEALED_BY_GITHUB_WEBHOOK);
             for (let attempt = 0; ; attempt++) {
-              try { const r = await appendEvent(store, stamped); results.push({ id: r.event.id, seq: r.event.seq, deduped: r.deduped }); break; }
+              try {
+                const r = await appendEvent(store, stamped, isShadowPush ? { deadline: deliveryDeadline } : {});
+                results.push({ id: r.event.id, seq: r.event.seq, deduped: r.deduped });
+                break;
+              }
               catch (e: any) {
+                if (e instanceof AppendDeadlineExceededError || e?.name === "AppendDeadlineExceededError")
+                  return json({ ok: true, pending: remainingShas(), reason: "deadline" }, 202);
                 const client = writeClientError(e);
                 if (client) return json({ error: client }, 400);
                 if (!/UNIQUE/i.test(String(e?.message)) || attempt >= 4) throw e;
@@ -615,8 +634,14 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
           }
           const stamped = stampSealedBy(parsed.data, SEALED_BY_GITHUB_WEBHOOK);
           for (let attempt = 0; ; attempt++) {
-            try { const r = await appendEvent(store, stamped); results.push({ id: r.event.id, seq: r.event.seq, deduped: r.deduped }); break; }
+            try {
+              const r = await appendEvent(store, stamped, isShadowPush ? { deadline: deliveryDeadline } : {});
+              results.push({ id: r.event.id, seq: r.event.seq, deduped: r.deduped });
+              break;
+            }
             catch (e: any) {
+              if (e instanceof AppendDeadlineExceededError || e?.name === "AppendDeadlineExceededError")
+                return json({ ok: true, pending: remainingShas(), reason: "deadline" }, 202);
               const client = writeClientError(e);
               if (client) return json({ error: client }, 400);
               if (!/UNIQUE/i.test(String(e?.message)) || attempt >= 4) throw e;

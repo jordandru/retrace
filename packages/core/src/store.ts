@@ -562,24 +562,71 @@ export function adapterIdempotencyError(input: EventInput): string | undefined {
   return undefined;
 }
 
+export class AppendDeadlineExceededError extends Error {
+  constructor() {
+    super("append deadline exceeded");
+    this.name = "AppendDeadlineExceededError";
+  }
+}
+
+export interface AppendEventOptions {
+  /** Absolute wall-clock deadline. Store reads are raced individually so a timed-out append cannot later seal. */
+  deadline?: number;
+  now?: () => number;
+}
+
+function assertAppendDeadline(opts: AppendEventOptions): void {
+  if (opts.deadline !== undefined && (opts.now ?? Date.now)() >= opts.deadline)
+    throw new AppendDeadlineExceededError();
+}
+
+async function appendReadWithinDeadline<T>(read: () => Promise<T>, opts: AppendEventOptions): Promise<T> {
+  if (opts.deadline === undefined) return read();
+  assertAppendDeadline(opts);
+  const remaining = opts.deadline - (opts.now ?? Date.now)();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const result = await Promise.race([
+      read(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new AppendDeadlineExceededError()), remaining);
+      }),
+    ]);
+    assertAppendDeadline(opts);
+    return result;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 /** Append an event: idempotent, sealed onto the current chain head. */
-export async function appendEvent(store: EventStore, input: EventInput): Promise<{ event: Event; deduped: boolean }> {
+export async function appendEvent(
+  store: EventStore,
+  input: EventInput,
+  opts: AppendEventOptions = {},
+): Promise<{ event: Event; deduped: boolean }> {
   const reserved = adapterIdempotencyError(input);
   if (reserved) throw new AdapterIdempotencyError(reserved);
+  assertAppendDeadline(opts);
   let toSeal = input;
   if (input.caused_by) {
-    const parent = await store.get(input.caused_by);
+    const parent = await appendReadWithinDeadline(() => store.get(input.caused_by!), opts);
     const problem = causedByProblem(parent, input);
     // Keep the claimed link. Adapters (git hook, Drive) must not drop an event because a trailer is stale
     // or the instruct lives in another project/clone. retrace_log rejects instead (agent can retry).
     if (problem) toSeal = markCausedByUnverified(input, problem);
   }
   if (toSeal.idempotency_key) {
-    const existing = await store.byIdempotencyKey(toSeal.project, toSeal.idempotency_key);
+    const existing = await appendReadWithinDeadline(
+      () => store.byIdempotencyKey(toSeal.project, toSeal.idempotency_key!),
+      opts,
+    );
     if (existing) return { event: existing, deduped: true };
   }
-  const head = await store.head(toSeal.project);
+  const head = await appendReadWithinDeadline(() => store.head(toSeal.project), opts);
+  assertAppendDeadline(opts);
   const event = await sealEvent(toSeal, head);
+  assertAppendDeadline(opts);
   await store.insert(event);
   return { event, deduped: false };
 }

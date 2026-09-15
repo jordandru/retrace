@@ -526,6 +526,49 @@ test("F8: admission, dedup, and outcome persistence share the delivery deadline"
   }
 });
 
+test("F8: a delayed append dedup read times out without a late seal", async () => {
+  const { store, h } = handler();
+  await putPolicy(h);
+  const original = store.byIdempotencyKey.bind(store);
+  let commitLookups = 0;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  store.byIdempotencyKey = async (...args) => {
+    if (String(args[1]).startsWith("gh:push:") && ++commitLookups === 2) await gate;
+    return original(...args);
+  };
+
+  const started = Date.now();
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const result = await Promise.race([
+    postPush(h, pushPayload(), "d-append-gap").then(async (response) => ({
+      status: response.status,
+      body: await response.json() as { pending?: string[]; reason?: string },
+    })),
+    new Promise<{ timedOut: true }>((resolve) => {
+      timeout = setTimeout(() => resolve({ timedOut: true }), 2_400);
+    }),
+  ]).finally(() => {
+    if (timeout !== undefined) clearTimeout(timeout);
+  });
+  assert.equal("timedOut" in result, false, "append exceeded the delivery deadline");
+  if ("timedOut" in result) {
+    release();
+    return;
+  }
+  assert.equal(result.status, 202);
+  assert.equal(result.body.reason, "deadline");
+  assert.deepEqual(result.body.pending, [SHA]);
+  assert.equal(commitLookups, 2);
+  assert.ok(Date.now() - started < 2_300);
+  assert.ok(await store.getPendingDelivery("d-append-gap"));
+  assert.equal(store.events.filter((event) => event.action === "committed").length, 0);
+
+  release();
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.equal(store.events.filter((event) => event.action === "committed").length, 0, "released read must not seal late");
+});
+
 test("F9/F10: drain budgets are per-sha and terminal/policy-off work stays durable", async () => {
   const { store, h } = handler();
   await putPolicy(h);
@@ -652,6 +695,29 @@ test("F13: success resets per commit; classifier store errors are 202; pending i
   await putPolicy(insertFailureHandler);
   insertFailure.insertPendingDelivery = async () => { throw new Error("durable insert failed"); };
   assert.equal((await postPush(insertFailureHandler, pushPayload(), "d-insert-error")).status, 500);
+});
+
+test("F13: three real classifier timer expirations open the breaker", async () => {
+  const { store, h } = handler();
+  await putPolicy(h);
+  let classifiers = 0;
+  store.eventsReferencingArtifacts = async () => {
+    classifiers++;
+    return new Promise(() => {});
+  };
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const response = await postPush(h, pushPayload(), `d-timer-deadline-${attempt}`);
+    assert.equal(response.status, 202, await response.clone().text());
+    assert.equal((await response.json() as { reason?: string }).reason, "deadline");
+  }
+  assert.equal(store.breakers.get("p")?.state, "open");
+  assert.equal(store.breakers.get("p")?.failures, 3);
+
+  const fourth = await postPush(h, pushPayload(), "d-timer-deadline-fourth");
+  assert.equal(fourth.status, 202, await fourth.clone().text());
+  assert.equal((await fourth.json() as { reason?: string }).reason, "breaker_open");
+  assert.equal(classifiers, 3, "open breaker must skip the fourth classification");
 });
 
 test("F16 HTTP: duplicate delivery ids cannot execute the same half-open probe", async () => {
