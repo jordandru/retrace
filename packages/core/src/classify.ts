@@ -917,13 +917,27 @@ export interface ClassifyOpts {
 class ClassifyStage {
   at = "start";
   private steps: string[] = [];
-  private last: number;
-  constructor(private readonly started: number, private readonly clock: () => number) {
-    this.last = started;
+  private last = 0;
+  private started = 0;
+  private live = false;
+  /**
+   * `live` only when a sink is present. Diagnostics read `Date.now` and never `opts.now`: the clock
+   * the classifier makes decisions with is stateful in this repository's tests, and an observer that
+   * consumes it turns a decision into a deadline (Codex P2, PR 57 round 3). Diagnostic timing
+   * therefore adds no call to the behavioural clock, and none at all without a sink.
+   */
+  constructor(private readonly enabled: boolean) {}
+  /** Begin measuring. Called inside the protected flow, after the skip guards, never before. */
+  start(): void {
+    if (!this.enabled || this.live) return;
+    this.live = true;
+    this.started = Date.now();
+    this.last = this.started;
   }
   /** Close the step in progress and open `at`. Called before each awaited store call. */
   mark(at: string): void {
-    const t = this.clock();
+    if (!this.live) { this.at = at; return; }
+    const t = Date.now();
     this.steps.push(`${this.at}=${t - this.last}`);
     this.at = at;
     this.last = t;
@@ -932,12 +946,13 @@ class ClassifyStage {
    * Per-step milliseconds, oldest first, ending with the step in progress: `store.head=12 …`.
    * Step names are fixed literals with no whitespace, so the line stays one space-separated list.
    */
-  timing(): string {
-    const t = this.clock();
+  timing(): string | undefined {
+    if (!this.live) return undefined;
+    const t = Date.now();
     return [...this.steps, `${this.at}=${t - this.last}`].join(" ");
   }
-  elapsed(): number {
-    return this.clock() - this.started;
+  elapsed(): number | undefined {
+    return this.live ? Date.now() - this.started : undefined;
   }
   /** The measure passed to every diagnostic on this classification. */
   measure(): DiagnosticMeasure {
@@ -955,6 +970,9 @@ async function classifyCommitClaimInner(opts: ClassifyOpts, stage: ClassifyStage
   const started = now();
   const deadline = opts.deadline ?? started + CLASSIFY_DEADLINE_MS;
   const legacy = isLegacyClientCommitSeal(opts.input);
+  // After the skip guards above: a classification that never happens measures nothing and, more to
+  // the point, reads no clock it did not read before (Codex P2, PR 57 round 3).
+  stage.start();
   const unavailable = (
     reason: "deadline" | "budget" | "store_error" | "policy_missing",
     site: string,
@@ -1252,8 +1270,9 @@ async function classifyCommitClaimInner(opts: ClassifyOpts, stage: ClassifyStage
 export async function classifyCommitClaim(opts: ClassifyOpts): Promise<ClassifyResult> {
   // The stage names the operation a throw came from: without it every rejected read looks alike
   // at this catch, which is where the production failure lands (Codex P2, PR 57 round 1).
-  const clock = opts.now ?? Date.now;
-  const stage = new ClassifyStage(clock(), clock);
+  // No clock read here: the outer frame runs before the policy-off and not-commit guards, and
+  // before the fail-closed catch, so a throwing `opts.now` must not be able to escape (Codex P2).
+  const stage = new ClassifyStage(opts.diag !== undefined);
   try {
     return await classifyCommitClaimInner(opts, stage);
   } catch (error) {

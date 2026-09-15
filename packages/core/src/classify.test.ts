@@ -1499,7 +1499,7 @@ test("diagnostics: a throwing bounded read carries the exception text", async ()
   assert.deepEqual(s.seen.map(said), [{
     site: "classify.amendments.candidates",
     reason: "store_error",
-    detail: "D1_ERROR",
+    detail: "D1_ERROR: no such index",
   }]);
   assertTimed(s.seen[0], "store.amendmentEventsUpTo");
 });
@@ -1645,6 +1645,31 @@ test("diagnostics: a caught value contributes its class, never its text", () => 
   spoofed.name = "PRIVATE_NAME /private/repo/key";
   assert.equal(diagnosticDetail(thrown(spoofed)), "Error");
 
+  // An identifier-shaped name is still the thrower's text: only a known class survives (round 3).
+  const credentialShaped = new Error("boom");
+  credentialShaped.name = "sk_live_SYNTHETIC_PRIVATE_TOKEN";
+  assert.equal(diagnosticDetail(thrown(credentialShaped)), "Error");
+  const proxied = new Proxy(new Error("boom"), {
+    get(target, key, receiver) {
+      if (key === "name") return "SYNTHETIC_PROXY_SECRET";
+      return Reflect.get(target, key, receiver);
+    },
+  });
+  assert.equal(diagnosticDetail(thrown(proxied)), "Error");
+  const aggregate = new AggregateError([], "private text");
+  aggregate.name = "SYNTHETIC_AGGREGATE_SECRET";
+  assert.equal(diagnosticDetail(thrown(aggregate)), "Error");
+
+  // The condition vocabulary composes our own literals: this is the line the incident needed.
+  assert.equal(
+    diagnosticDetail(thrown(new Error("D1_ERROR: LIKE or GLOB pattern too complex: SQLITE_ERROR"))),
+    "D1_ERROR: LIKE or GLOB pattern too complex",
+  );
+  assert.equal(
+    diagnosticDetail(thrown(new Error('D1_ERROR: no such index: idx_x /private/path "secret"'))),
+    "D1_ERROR: no such index",
+  );
+
   assert.equal(diagnosticDetail(thrown("PRIVATE_THROWN_STRING")), "non-error(string)");
   assert.equal(diagnosticDetail(thrown({ stack: "/home/someone/key", token: "t0ken" })), "non-error(object)");
   assert.equal(diagnosticDetail(thrown(null)), "non-error(null)");
@@ -1739,4 +1764,44 @@ test("diagnostics: a measure that throws costs its numbers, not the line", () =>
   emitDiagnostic((d) => { seen.push(d); }, "test.site", "store_error", phrase("a fixed phrase"),
     () => { throw new Error("clock broken"); });
   assert.deepEqual(seen, [{ site: "test.site", reason: "store_error", detail: "a fixed phrase" }]);
+});
+
+test("diagnostics: timing never touches the clock the classifier decides with", async () => {
+  // A stateful fake clock is behaviour: an observer that consumes it turns a decision into a
+  // deadline. Reads and result must be identical with and without a sink (Codex P2, round 3).
+  const run = async (diag?: (d: Diagnostic) => void) => {
+    const store = new MemoryEventStore();
+    await putPolicy(store);
+    let reads = 0;
+    const now = () => { reads++; return 1_000 + reads; };
+    const got = await classify(store, commitInput(), diag ? { now, diag } : { now });
+    return { reads, kind: got.kind, ms: got.kind === "decision" ? got.record.decision.classification_ms : -1 };
+  };
+
+  const quiet = await run();
+  const loud = await run(() => {});
+  assert.equal(quiet.kind, "decision", "the fake clock still reaches a decision");
+  assert.deepEqual(loud, quiet, "a sink changes neither the clock reads nor the record");
+});
+
+test("diagnostics: a throwing clock still fails closed, and a skipped classification reads no clock", async () => {
+  const store = new MemoryEventStore();
+  await putPolicy(store);
+
+  // The classifier's own first clock read is inside the fail-closed catch; it must stay there.
+  const got = await classify(store, commitInput(), {
+    now: () => { throw new Error("D1_ERROR: clock"); },
+    diag: () => {},
+  });
+  assert.deepEqual(got, { kind: "unavailable", reason: "store_error" });
+
+  // A skipped classification does no timing work at all.
+  let reads = 0;
+  const skipped = await classify(store, commitInput(), {
+    trailerPolicy: "off",
+    now: () => { reads++; return Date.now(); },
+    diag: () => { throw new Error("no diagnostic belongs on a skipped path"); },
+  });
+  assert.deepEqual(skipped, { kind: "skip", reason: "policy_off" });
+  assert.equal(reads, 0);
 });

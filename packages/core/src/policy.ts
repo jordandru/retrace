@@ -548,26 +548,26 @@ export async function policySnapshotFromIndex(opts: {
   /** Observability only: emitted when a read throws, so the caller's `store_error` has a cause. */
   diag?: DiagnosticSink;
 }): Promise<PolicySnapshot> {
-  const clock = opts.budget?.now ?? Date.now;
-  const now = clock();
+  const now = opts.budget?.now?.() ?? Date.now();
   if (opts.budget?.deadline !== undefined && now >= opts.budget.deadline)
     return { U: opts.U ?? -1, events: [], activations: [], unavailable: "deadline" };
   // Which of the two reads threw: one site for both leaves the caller guessing (Codex, PR 57 r1).
   let read = "document";
-  let readStarted = clock();
+  // `Date.now`, not the budget clock: a measurement must not consume the caller's clock.
+  let readStarted = opts.diag ? Date.now() : 0;
   try {
     const u = opts.U ?? (opts.headSeq ?? -1);
     if (u < 0) return { U: -1, events: [], activations: [] };
     const doc = await opts.getByActivationSeq(opts.project, u);
     if (!doc) return { U: u, events: [], activations: [], document: null };
     read = "activation";
-    readStarted = clock();
+    if (opts.diag) readStarted = Date.now();
     const act = await opts.getEvent(doc.envelope.activation.event_id);
     const activations = act && act.project === opts.project && act.seq <= u ? [act] : [];
     return { U: u, events: activations, activations, document: doc };
   } catch (error) {
     emitDiagnostic(opts.diag, `policy.snapshot.${read}`, "store_error", thrown(error),
-      () => ({ ms: clock() - readStarted }));
+      () => ({ ms: Date.now() - readStarted }));
     return { U: opts.U ?? -1, events: [], activations: [], unavailable: "store_error" };
   }
 }

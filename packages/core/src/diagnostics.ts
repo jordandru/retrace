@@ -80,9 +80,15 @@ export const DIAGNOSTIC_TIMING_MAX = 600;
 export const DIAGNOSTIC_DETAIL_UNAVAILABLE = "detail unavailable";
 
 /**
- * Conditions worth telling apart. A caught value whose message begins with one of these renders as
- * the token itself — the literal below, never the message it was recognised in, because the rest of
- * a D1 message can be anything the statement or the row contained.
+ * Conditions worth telling apart, as substrings we look for and literals we print. What is emitted
+ * is always the entry below, never the message it was recognised in, because the rest of a D1
+ * message can be anything the statement or the row contained. Families come first so a store error
+ * renders as `D1_ERROR: LIKE or GLOB pattern too complex` — both halves ours.
+ *
+ * The specific SQLite conditions are here because of the incident this module was written for: the
+ * shadow window failed on `D1_ERROR: LIKE or GLOB pattern too complex`, and three windows were
+ * reverted without ever seeing that sentence, because the catch that swallowed it kept nothing
+ * (finding evt_ea9631238e5040068c5eae82a115e810; workerd caps a LIKE/GLOB pattern at 50 bytes).
  */
 const CONDITIONS = [
   "D1_ERROR",
@@ -95,13 +101,44 @@ const CONDITIONS = [
   "Worker exceeded",
   "Script exceeded",
   "storage limit",
+  "LIKE or GLOB pattern too complex",
+  "too many SQL variables",
+  "statement too long",
+  "string or blob too big",
+  "response size limit",
+  "no such table",
+  "no such column",
+  "no such index",
+  "database is locked",
+  "database or disk is full",
+  "UNIQUE constraint failed",
   "deadline",
   "unresolvable",
   "classification context store is not available",
 ] as const;
 
-/** A class label we are willing to print: an identifier, nothing else. `Error.name` is mutable. */
-const SAFE_CLASS = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
+/**
+ * The only class labels we print. `Error.name` is writable and a Proxy can answer anything, so a
+ * name that merely *looks* like an identifier is still the thrower's text — `sk_live_…` passes any
+ * shape test there is (Codex P2, PR 57 round 3). A name outside this set renders as `Error`.
+ */
+const CLASS_NAMES = [
+  "Error",
+  "TypeError",
+  "RangeError",
+  "SyntaxError",
+  "ReferenceError",
+  "EvalError",
+  "URIError",
+  "AggregateError",
+  "DOMException",
+  "ClassificationStoreError",
+  "ClassificationUnavailableError",
+  "PolicyError",
+  "HeadMovedError",
+  "RouteConflictError",
+  "AdapterIdempotencyError",
+] as const;
 
 const collapse = (text: string) => text.replace(/\s+/g, " ").trim();
 
@@ -119,20 +156,23 @@ function readString(read: () => unknown): string {
 }
 
 /**
- * The class of a caught value, from a fixed vocabulary. A recognised condition renders as its token;
- * anything else renders as its class name when that name is a plain identifier, and as `Error`
- * otherwise. A value that is not an `Error` renders as its type and is never called, serialised or
- * coerced — a thrown function in particular is named, not invoked.
+ * The class of a caught value, from a fixed vocabulary — every character of the result is a literal
+ * of this module. Recognised conditions render as their own tokens, joined in list order; otherwise
+ * the value renders as its class when that class is one we know, and as `Error` when it is not. A
+ * value that is not an `Error` renders as its type and is never called, serialised or coerced — a
+ * thrown function in particular is named, not invoked.
  */
 export function thrownClass(error: unknown): string {
   if (!(error instanceof Error)) {
     return `non-error(${error === null ? "null" : typeof error})`;
   }
-  const message = readString(() => (error as Error).message);
-  const condition = CONDITIONS.find((c) => message.toLowerCase().startsWith(c.toLowerCase()));
-  if (condition) return condition;
+  const message = readString(() => (error as Error).message).toLowerCase();
+  const conditions = message
+    ? CONDITIONS.filter((c) => message.includes(c.toLowerCase()))
+    : [];
+  if (conditions.length) return conditions.join(": ");
   const name = readString(() => (error as Error).name);
-  return SAFE_CLASS.test(name) ? name : "Error";
+  return CLASS_NAMES.find((c) => c === name) ?? "Error";
 }
 
 /** One bounded line from one of the two channels. Never throws. */
