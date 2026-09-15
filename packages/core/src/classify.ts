@@ -369,7 +369,7 @@ async function classifierLedgerAttributionContext(
 }
 
 export type AmendmentEval =
-  | { ok: true; collection: AttributionCollection; snapshotJson: string }
+  | { ok: true; collection: AttributionCollection; snapshotJson: string; captureSeals: CaptureSeal[] }
   | { ok: false; reason: "deadline" | "budget" | "store_error"; snapshotJson: string };
 
 type DependencyRead =
@@ -385,7 +385,6 @@ async function amendmentDependencies(opts: {
   const candidateById = new Map(opts.candidates.map((e) => [e.id, e]));
   const dependencies = new Map<string, Event>();
   const required = new Set<string>();
-  let causalFrontier = new Set<string>();
   for (const candidate of opts.candidates) {
     const target = candidate.method?.params?.target_event_id;
     if (typeof target === "string") required.add(target);
@@ -396,7 +395,6 @@ async function amendmentDependencies(opts: {
     }
     if (typeof candidate.caused_by === "string") {
       required.add(candidate.caused_by);
-      causalFrontier.add(candidate.caused_by);
     }
   }
 
@@ -416,19 +414,117 @@ async function amendmentDependencies(opts: {
 
   try {
     if (!(await read([...required]))) return { ok: false, reason: "budget" };
-    while (causalFrontier.size) {
-      const next = new Set<string>();
-      for (const id of causalFrontier) {
+    for (const candidate of opts.candidates) {
+      let child = candidate;
+      let id = candidate.caused_by;
+      const traversed = new Set<string>();
+      while (id) {
+        if (opts.now() >= opts.deadline) return { ok: false, reason: "deadline" };
+        if (traversed.has(id)) break; // complete cycle: the shared checker classifies it as unrooted
+        traversed.add(id);
+        if (!(await read([id]))) return { ok: false, reason: "budget" };
         const event = candidateById.get(id) ?? dependencies.get(id);
-        if (event?.caused_by && !candidateById.has(event.caused_by) && !dependencies.has(event.caused_by)) next.add(event.caused_by);
+        if (!event) throw new Error("unresolvable");
+        if (event.project !== child.project || event.seq >= child.seq) break;
+        if (event.actor.type === "human" && event.action === "instructed") break;
+        if (!event.caused_by) break;
+        child = event;
+        id = event.caused_by;
       }
-      if (!(await read([...next]))) return { ok: false, reason: "budget" };
-      causalFrontier = next;
     }
   } catch (error) {
     return { ok: false, reason: error instanceof Error && error.message === "deadline" ? "deadline" : "store_error" };
   }
   return { ok: true, events: [...dependencies.values()] };
+}
+
+type CaptureDependencyRead =
+  | { ok: true; seals: CaptureSeal[] }
+  | { ok: false; reason: "deadline" | "budget" | "store_error" };
+
+async function amendmentCaptureDependencies(opts: {
+  store: EventStore;
+  project: string;
+  U: number;
+  policy: PolicyBody;
+  canonicalRepo: string;
+  candidates: Event[];
+  dependencies: Event[];
+  baseEvents: Event[];
+  coveredArtifactKeys: string[];
+  deadline: number;
+  now: () => number;
+}): Promise<CaptureDependencyRead> {
+  const sealPolicy = {
+    repoName: opts.canonicalRepo,
+    aliases: opts.policy.repositories.find((r) => r.name === opts.canonicalRepo)?.aliases,
+    hookSealedBy: opts.policy.trusted_hook_stamps,
+    ownerSeals: true,
+  };
+  const events = new Map(opts.baseEvents.map((e) => [e.id, e]));
+  let rowsRead = opts.baseEvents.length;
+  const read = async (artifactKeys: string[]): Promise<CaptureDependencyRead | null> => {
+    if (!artifactKeys.length) return null;
+    if (!opts.store.eventsReferencingArtifacts) return { ok: false, reason: "store_error" };
+    const remaining = CLASSIFY_ROW_CAP - rowsRead;
+    if (remaining < 1) return { ok: false, reason: "budget" };
+    const result = await opts.store.eventsReferencingArtifacts({
+      project: opts.project,
+      artifact_keys: [...new Set(artifactKeys)],
+      after_seq: -1,
+      through_seq: opts.U,
+      row_cap: remaining,
+      deadline: opts.deadline,
+    }, opts.now);
+    if (!result.ok) return result;
+    rowsRead += result.events.length;
+    if (rowsRead > CLASSIFY_ROW_CAP) return { ok: false, reason: "budget" };
+    for (const event of result.events) events.set(event.id, event);
+    return null;
+  };
+
+  const byId = new Map([...opts.dependencies, ...opts.candidates].map((e) => [e.id, e]));
+  const targetKeys = new Set<string>();
+  for (const candidate of opts.candidates) {
+    const target = byId.get(String(candidate.method?.params?.target_event_id));
+    if (!target) continue;
+    for (const artifact of target.artifacts) {
+      if (/^(commit|event|actor):/.test(artifact.id) || ["commit", "event", "actor"].includes(artifact.kind ?? "")) continue;
+      const output = artifact.role !== undefined
+        ? artifact.role === "generated" || artifact.role === "both"
+        : ["created", "edited", "deleted", "renamed", "moved", "committed", "merged"].includes(target.action);
+      if (!output) continue;
+      const canonical = classifierCanonicalArtifact(opts.policy, artifact.id);
+      if (!canonical) continue;
+      const match = REPO_ARTIFACT.exec(canonical);
+      if (match) {
+        for (const key of artifactKeysForPaths(match[1], [match[2]], opts.policy)) targetKeys.add(key);
+      } else {
+        targetKeys.add(canonical);
+      }
+    }
+  }
+  const uncovered = [...targetKeys].filter((key) => !opts.coveredArtifactKeys.some((covered) => sameArtifact(key, covered)));
+  const targetRead = await read(uncovered);
+  if (targetRead) return targetRead;
+  if (opts.now() >= opts.deadline) return { ok: false, reason: "deadline" };
+
+  const preliminary = captureSeals([...events.values()], sealPolicy);
+  const commitKeys = new Set<string>();
+  for (const seal of preliminary) {
+    const commit = seal.event.artifacts.find((a) => a.id.startsWith("commit:"))?.id;
+    const match = commit ? /^commit:([^@]+)@([0-9a-f]{7,40})$/i.exec(commit) : null;
+    if (!match) continue;
+    const canonical = canonicalRepositoryR(opts.policy, match[1]) ?? match[1];
+    const repository = opts.policy.repositories.find((r) => r.name === canonical);
+    for (const name of new Set([match[1], canonical, repository?.name, ...(repository?.aliases ?? [])].filter((x): x is string => !!x))) {
+      commitKeys.add(`commit:${name}@${match[2]}`);
+    }
+  }
+  const groupRead = await read([...commitKeys]);
+  if (groupRead) return groupRead;
+  if (opts.now() >= opts.deadline) return { ok: false, reason: "deadline" };
+  return { ok: true, seals: captureSeals([...events.values()], sealPolicy) };
 }
 
 /** Bounded candidates plus point-read dependencies; never fetches or verifies the project prefix. */
@@ -439,7 +535,9 @@ export async function evaluateAmendmentsAtU(opts: {
   headHash: string;
   policy: PolicyBody;
   policyDigest: string;
-  captureSeals: CaptureSeal[];
+  canonicalRepo: string;
+  captureEvents: Event[];
+  coveredArtifactKeys: string[];
   deadline: number;
   now: () => number;
 }): Promise<AmendmentEval> {
@@ -448,10 +546,16 @@ export async function evaluateAmendmentsAtU(opts: {
     reason,
     snapshotJson: amendmentSnapshotJson({ unavailable: reason }),
   });
+  const baseSeals = captureSeals(opts.captureEvents, {
+    repoName: opts.canonicalRepo,
+    aliases: opts.policy.repositories.find((r) => r.name === opts.canonicalRepo)?.aliases,
+    hookSealedBy: opts.policy.trusted_hook_stamps,
+    ownerSeals: true,
+  });
   if (opts.now() >= opts.deadline) return fail("deadline");
   if (opts.U < 0) {
     const collection = emptyAmendmentCollection();
-    return { ok: true, collection, snapshotJson: amendmentSnapshotJson({ effective: [] }) };
+    return { ok: true, collection, snapshotJson: amendmentSnapshotJson({ effective: [] }), captureSeals: baseSeals };
   }
   let candidates: Event[];
   try {
@@ -469,24 +573,35 @@ export async function evaluateAmendmentsAtU(opts: {
   if (opts.now() >= opts.deadline) return fail("deadline");
   if (candidates.length > CLASSIFY_ROW_CAP) return fail("budget");
   if (candidates.length === 0) {
-    return { ok: true, collection: emptyAmendmentCollection(), snapshotJson: amendmentSnapshotJson({ effective: [] }) };
+    return { ok: true, collection: emptyAmendmentCollection(), snapshotJson: amendmentSnapshotJson({ effective: [] }), captureSeals: baseSeals };
   }
   const dependencies = await amendmentDependencies({
     store: opts.store, candidates, deadline: opts.deadline, now: opts.now,
   });
   if (!dependencies.ok) return fail(dependencies.reason);
+  const captures = await amendmentCaptureDependencies({
+    store: opts.store, project: opts.project, U: opts.U, policy: opts.policy, canonicalRepo: opts.canonicalRepo,
+    candidates, dependencies: dependencies.events, baseEvents: opts.captureEvents,
+    coveredArtifactKeys: opts.coveredArtifactKeys, deadline: opts.deadline, now: opts.now,
+  });
+  if (!captures.ok) return fail(captures.reason);
   try {
-    const captureEvents = opts.captureSeals.map((seal) => seal.event);
+    const captureEvents = captures.seals.map((seal) => seal.event);
     const contextEvents = [...new Map([...dependencies.events, ...candidates, ...captureEvents].map((e) => [e.id, e])).values()];
     const context = await classifierLedgerAttributionContext(
-      contextEvents, candidates, opts.captureSeals, opts.project, opts.U, opts.headHash, opts.policy, opts.policyDigest,
+      contextEvents, candidates, captures.seals, opts.project, opts.U, opts.headHash, opts.policy, opts.policyDigest,
     );
     const collection = collectAttributionAmendmentsFromDependencies(candidates, [...dependencies.events, ...captureEvents], context);
     if (opts.now() >= opts.deadline) return fail("deadline");
     if (collection.unavailable) {
       return { ok: false, reason: "store_error", snapshotJson: amendmentSnapshotJson({ unavailable: collection.unavailable }) };
     }
-    return { ok: true, collection, snapshotJson: amendmentSnapshotJson(effectiveAmendmentRecord(collection)) };
+    return {
+      ok: true,
+      collection,
+      snapshotJson: amendmentSnapshotJson(effectiveAmendmentRecord(collection)),
+      captureSeals: captures.seals,
+    };
   } catch {
     return fail("store_error");
   }
@@ -781,10 +896,12 @@ async function classifyCommitClaimInner(opts: ClassifyOpts): Promise<ClassifyRes
   let U = ctx?.read_head_seq ?? Utry;
   let pinnedHeadHash = ctx?.read_head_hash ?? headHash;
   const thisShaShort = sha.slice(0, 12);
+  let windowArtifactKeys: string[] = [];
   const readWindow = async (): Promise<ArtifactIndexResult> => {
     const canonicalKeys = artifactKeysForPaths(canonicalR, paths, policyDoc!.body);
     const looseKeys = paths.flatMap((p) => [`file:${p}`, p]);
     const keys = [...new Set([...canonicalKeys, ...looseKeys])];
+    windowArtifactKeys = keys;
     if (!keys.length) return { ok: true, events: [] };
     if (opts.store.eventsReferencingArtifacts) {
       return opts.store.eventsReferencingArtifacts({
@@ -805,20 +922,15 @@ async function classifyCommitClaimInner(opts: ClassifyOpts): Promise<ClassifyRes
       deadline,
     }, now());
   };
-  const deriveSeals = (events: Event[]) => captureSeals(events, {
-    repoName: canonicalR,
-    aliases: policyDoc!.body.repositories.find((r) => r.name === canonicalR)?.aliases,
-    hookSealedBy: policyDoc!.body.trusted_hook_stamps,
-    ownerSeals: true,
-  });
   let index = await readWindow();
   if (!index.ok) return { kind: "unavailable", reason: index.reason };
-  let seals = deriveSeals(index.events);
   let evaluated = await evaluateAmendmentsAtU({
     store: opts.store, project: opts.input.project, U, headHash: pinnedHeadHash,
-    policy: policyDoc.body, policyDigest: policyDoc.digest, captureSeals: seals, deadline, now,
+    policy: policyDoc.body, policyDigest: policyDoc.digest, canonicalRepo: canonicalR,
+    captureEvents: index.events, coveredArtifactKeys: windowArtifactKeys, deadline, now,
   });
   if (!evaluated.ok) return { kind: "unavailable", reason: evaluated.reason };
+  let seals = evaluated.captureSeals;
 
   if (!ctx) {
     const candidate: ClassificationContextRow = {
@@ -850,12 +962,13 @@ async function classifyCommitClaimInner(opts: ClassifyOpts): Promise<ClassifyRes
       pinnedHeadHash = ctx.read_head_hash;
       index = await readWindow();
       if (!index.ok) return { kind: "unavailable", reason: index.reason };
-      seals = deriveSeals(index.events);
       evaluated = await evaluateAmendmentsAtU({
         store: opts.store, project: opts.input.project, U, headHash: pinnedHeadHash,
-        policy: policyDoc.body, policyDigest: policyDoc.digest, captureSeals: seals, deadline, now,
+        policy: policyDoc.body, policyDigest: policyDoc.digest, canonicalRepo: canonicalR,
+        captureEvents: index.events, coveredArtifactKeys: windowArtifactKeys, deadline, now,
       });
       if (!evaluated.ok) return { kind: "unavailable", reason: evaluated.reason };
+      seals = evaluated.captureSeals;
     }
   }
   const amendmentCollection = evaluated.collection;
