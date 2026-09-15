@@ -80,9 +80,10 @@ second start marker will be added here with its date.
 
 This note's own commit `4416d2d0` was the first attempted under the restarted shadow. The hook's attempt
 (19:12:55Z) returned `503 classification_unavailable / store_error`, the seal was parked in
-`retrace-pending-seal`, and no classification completed. Not the deadline: every bounded read of PR #51
-runs in production D1 in single-digit milliseconds (amendment candidates 4 ms, artifact-index statement
-7 ms), the index and the policy document are present. Root cause, reproduced locally against the exported
+`retrace-pending-seal`, and no classification completed. Not the deadline: the recorded probes of PR #51's
+bounded reads against production D1 took 4 ms (amendment candidates) and 7 ms (the artifact-index
+statement for this commit's keys) — observations supporting this diagnosis, not a latency guarantee — and
+the index and the policy document are present. Root cause, reproduced locally against the exported
 ledger and the production policy body (finding `evt_2a4dfb78f2744e8fa86bbbd670fafaf0`): the round-4
 strict full-OID resolution in `classifierCaptureSeals` (`packages/core/src/classify.ts` ~319) is applied
 to every `committed`/`merged` event naming a canonical-repo commit in the read set, including events the
