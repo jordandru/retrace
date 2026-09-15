@@ -1,11 +1,12 @@
-# Retrace AI — a read-only ledger digest (document revision v1.3)
+# Retrace AI — a read-only ledger digest (document revision v1.4)
 
-**Status:** document revision **v1.3**, 2026-09-15, author claude-code (coordinator), on Jordan's
+**Status:** document revision **v1.4**, 2026-09-15, author claude-code (coordinator), on Jordan's
 instruction `evt_6518ef63686942cfbd3570bdfbc0b59f` (idea: `evt_48c9bbb11210437cb965c338f04a2db6`).
 Revisions: v1 `07ae033`; v1.1 `c04f9c0` (Codex round 1, review 5205506130); v1.2 `e89602b` (Codex
 round 2, review 5205804395); **v1.3 folds Codex round 3's nits (approval, review 5205892320,
 `evt_5a3e0d08dfda47d691be3605cae850d9`) and the Nemotron pass (NOOA run
-`review_pr49_v12_20260915T053722Z`, routing `evt_91e23ae85d2640d281c7e4d12b822e55`)** — see §13.
+`review_pr49_v12_20260915T053722Z`, routing `evt_91e23ae85d2640d281c7e4d12b822e55`); v1.4 folds the
+reassigned last review's one blocking finding (cursor-agent, GitHub review 5206011343)** — see §13.
 Product stages are named **stage 1, 1.1, 1.2, 1.3, 2** (§10) to keep them apart from document
 revisions. Class (a): governs behaviour of a new seat. Design gate: Codex (approved), Nemotron (done),
 last review reassigned by Jordan to a non-author seat. Not built. Corrections are appended in place with
@@ -170,9 +171,12 @@ A run never has two terminal events.
 trusted writer: a small program whose only network call is that one POST with a schema-validated
 envelope. **Threat model, stated:** the seat's credential is a write-capable credential until server-side
 restrictions exist; whoever holds it can append arbitrary events. Stage 1 detects rather than prevents:
-after publication the runner queries the ledger for every event by the seat's actor within the run window
-and asserts exactly one, its own; any other is a tier-1 "seat wrote outside its envelope" finding in the
-next run and a `failed` outcome for this one (Nemotron 1; T9). The hourly NOOA audit is asked to add the
+after publication the runner lists every event by the seat's actor within the run window (from the run's
+start export head to the head observed after publication) and asserts exactly one, its own. **This run's
+outcome is never changed by that audit** — the envelope is frozen and sealed by then (T7). Any other
+event by the seat is recorded in the run's local audit record and becomes a mandatory tier-1 "seat wrote
+outside its envelope" finding in the **next** run, citing both events (Nemotron 1; last review 5206011343;
+T9b). The hourly NOOA audit is asked to add the
 same check (§11). **Server-enforced per-credential action/tag restrictions are a prerequisite for stage
 2 and a queued design item** (§11); until they exist the seat's authority is "trusted writer + audit",
 not "cannot". `retrace-admin` must learn a `retrace-ai` harness entry (§11).
@@ -211,7 +215,8 @@ Authority
   terminal envelope (other actions, amendment or correction tags, arbitrary artifacts, other projects) —
   a runner-side test, labelled as such until server-side restriction exists. (b) After publication the
   runner lists the seat's events in the run window and asserts exactly one; an injected extra event by
-  the same credential → `failed` outcome and a tier-1 finding next run.
+  the same credential leaves this run's sealed outcome untouched and produces a mandatory tier-1 finding
+  in the next run citing both events; the local audit record survives a crash between the two runs.
 Determinism, identity and truth-tracking
 - **T10 selection determinism.** Same retained inputs, clock and rules → identical selection-manifest
   bytes; the tie-breaker is the finding id.
@@ -281,6 +286,11 @@ will be folded as dated additions.
 
 ## 13. Revision history (document revisions)
 
+- **v1.4 (2026-09-15)** — reassigned last review (cursor-agent, GPT-5.6 Sol, GitHub review 5206011343):
+  the post-publication seat audit could not make an already-sealed `digest` outcome `failed` without
+  breaking T7's frozen envelope. Resolved by the reviewer's second option: the audit stays after
+  publication, never changes this run's outcome, and an extra seat event becomes a mandatory tier-1
+  finding in the next run, citing both events (§8, T9b). Everything else in that review passed.
 - **v1.3 (2026-09-15)** — Codex round 3 nits: T11→T10 reference in §7; "document revision" vs "product
   stage" labelling throughout. Nemotron pass (NOOA, Nemotron Ultra): **1** trusted-writer threat model
   stated and a post-publication seat audit added (§8, T9b) — accepted; **2** resolution state — field
