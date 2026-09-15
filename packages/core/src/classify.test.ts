@@ -691,7 +691,7 @@ test("bounded amendment lookup skips all() with 5,000 non-amendment events", asy
   assert.equal(allCalls, 0);
 });
 
-test("a store without amendmentEventsUpTo fails closed as unavailable/store_error and never calls all()", async () => {
+test("only amendmentEventsUpTo missing (eventsReferencingArtifacts present): fails closed as unavailable/store_error, never calls all()", async () => {
   const store = new MemoryEventStore();
   await putPolicy(store);
   // all() answers (empty) rather than throwing: a fallback to it would produce a decision, not store_error.
@@ -707,7 +707,7 @@ test("a store without amendmentEventsUpTo fails closed as unavailable/store_erro
   assert.equal(allCalls, 0);
 });
 
-test("a store without eventsReferencingArtifacts fails closed as unavailable/store_error and never calls all()", async () => {
+test("only eventsReferencingArtifacts missing (amendmentEventsUpTo present): fails closed as unavailable/store_error, never calls all()", async () => {
   const store = new MemoryEventStore();
   await putPolicy(store);
   let allCalls = 0;
@@ -716,6 +716,68 @@ test("a store without eventsReferencingArtifacts fails closed as unavailable/sto
     return [];
   };
   (store as unknown as { eventsReferencingArtifacts?: unknown }).eventsReferencingArtifacts = undefined;
+
+  const got = await classify(store, commitInput({ files: ["a.ts"] }));
+  assert.deepEqual(got, { kind: "unavailable", reason: "store_error" });
+  assert.equal(allCalls, 0);
+});
+
+// A bounded method that is present but broken (throws, or returns a non-array) must fail closed too:
+// evaluateAmendmentsAtU catches its own read; everything else lands in classifyCommitClaim's outer catch.
+test("amendmentEventsUpTo throws: fails closed as unavailable/store_error, never calls all()", async () => {
+  const store = new MemoryEventStore();
+  await putPolicy(store);
+  let allCalls = 0;
+  store.all = async () => {
+    allCalls++;
+    return [];
+  };
+  (store as unknown as { amendmentEventsUpTo?: unknown }).amendmentEventsUpTo = async () => { throw new Error("boom"); };
+
+  const got = await classify(store, commitInput({ files: ["a.ts"] }));
+  assert.deepEqual(got, { kind: "unavailable", reason: "store_error" });
+  assert.equal(allCalls, 0);
+});
+
+test("eventsReferencingArtifacts throws: fails closed as unavailable/store_error, never calls all()", async () => {
+  const store = new MemoryEventStore();
+  await putPolicy(store);
+  let allCalls = 0;
+  store.all = async () => {
+    allCalls++;
+    return [];
+  };
+  (store as unknown as { eventsReferencingArtifacts?: unknown }).eventsReferencingArtifacts = async () => { throw new Error("boom"); };
+
+  const got = await classify(store, commitInput({ files: ["a.ts"] }));
+  assert.deepEqual(got, { kind: "unavailable", reason: "store_error" });
+  assert.equal(allCalls, 0);
+});
+
+test("amendmentEventsUpTo returns a non-array: fails closed as unavailable/store_error, never calls all()", async () => {
+  const store = new MemoryEventStore();
+  await putPolicy(store);
+  let allCalls = 0;
+  store.all = async () => {
+    allCalls++;
+    return [];
+  };
+  (store as unknown as { amendmentEventsUpTo?: unknown }).amendmentEventsUpTo = async () => null;
+
+  const got = await classify(store, commitInput({ files: ["a.ts"] }));
+  assert.deepEqual(got, { kind: "unavailable", reason: "store_error" });
+  assert.equal(allCalls, 0);
+});
+
+test("eventsReferencingArtifacts returns a non-array: fails closed as unavailable/store_error, never calls all()", async () => {
+  const store = new MemoryEventStore();
+  await putPolicy(store);
+  let allCalls = 0;
+  store.all = async () => {
+    allCalls++;
+    return [];
+  };
+  (store as unknown as { eventsReferencingArtifacts?: unknown }).eventsReferencingArtifacts = async () => null;
 
   const got = await classify(store, commitInput({ files: ["a.ts"] }));
   assert.deepEqual(got, { kind: "unavailable", reason: "store_error" });
