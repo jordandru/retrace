@@ -4,7 +4,7 @@ import {
   adapterIdempotencyError, AdapterIdempotencyError, CAUSED_BY_UNVERIFIED_TAG, appendEvent,
   EventInput, Event, EventStore, Share, likeContains, clampHistoryLimit, HISTORY_LIMIT_MAX,
   pageHistoryNewest, collectHistory, asHistoryPage, explainEvent,
-  artifactIndexRows, eventsReferencingArtifactKeys, artifactKeyMatchSql, BACKFILL_ARTIFACT_INDEX_SQL, eventsReferencingArtifactsSql, eventsReferencingArtifactsStatements, prefixRangeUpperBound, ARTIFACT_INDEX_MAX_PARAMS, ARTIFACT_INDEX_MAX_TERMS,
+  artifactIndexRows, eventsReferencingArtifactKeys, artifactKeyMatchSql, BACKFILL_ARTIFACT_INDEX_SQL, eventsReferencingArtifactsSql, eventsReferencingArtifactsStatements, prefixRangeUpperBound, ARTIFACT_INDEX_MAX_TERMS, D1_MAX_BOUND_PARAMS, D1_MAX_COMPOUND_SELECT_TERMS,
   ARTIFACT_INDEX_DEFAULT_ROW_CAP,
 } from "./index.js";
 
@@ -211,10 +211,11 @@ test("eventsReferencingArtifactKeys: sameArtifact aliases, seq window, budget an
   assert.deepEqual(empty, { ok: true, events: [] });
 });
 
-test("eventsReferencingArtifactsStatements binds the window once, one indexed UNION term per key/prefix/glob, batched under platform limits", () => {
+test("eventsReferencingArtifactsStatements binds the window once and one json_each-driven UNION member per kind of term", () => {
   const sha = "a1234567890b".padEnd(40, "c");
+  const prefix = `commit:jordandru/retrace@${sha.slice(0, 7)}`;
   const q = {
-    project: "p", artifact_keys: ["repo:jordandru/retrace#a.ts", "repo:retrace#b.ts"], artifact_prefixes: [`commit:jordandru/retrace@${sha.slice(0, 7)}`],
+    project: "p", artifact_keys: ["repo:jordandru/retrace#a.ts", "repo:retrace#b.ts"], artifact_prefixes: [prefix],
     after_seq: 3, through_seq: 9, row_cap: 10, deadline: 0,
   };
   const [only, ...rest] = eventsReferencingArtifactsStatements(q);
@@ -223,36 +224,53 @@ test("eventsReferencingArtifactsStatements binds the window once, one indexed UN
   assert.doesNotMatch(sql, /INDEXED BY/);
   assert.match(sql, /^WITH w\(project, after_seq, through_seq\) AS \(SELECT \?, \?, \?\) SELECT e\.body, m\.seq, m\.artifact_key FROM \(/);
   assert.match(sql, /\) m CROSS JOIN events e ON e\.project = \? AND e\.seq = m\.seq ORDER BY m\.seq ASC, m\.artifact_key ASC LIMIT \?$/);
-  assert.equal((sql.match(/ UNION /g) ?? []).length, 4, "3 equality terms + 1 prefix term + 1 glob term");
-  assert.equal((sql.match(/i\.artifact_key = \?/g) ?? []).length, 3);
-  assert.equal((sql.match(/i\.artifact_key >= \? AND i\.artifact_key < \?/g) ?? []).length, 1);
-  assert.equal((sql.match(/i\.artifact_key GLOB \?/g) ?? []).length, 1);
+  assert.equal((sql.match(/ UNION /g) ?? []).length, 2, "equality member + prefix member + glob member, whatever the key count");
+  assert.equal((sql.match(/CROSS JOIN json_each\(\?\) t CROSS JOIN event_artifact_index i/g) ?? []).length, 3, "json_each is the outer loop of every member");
+  assert.match(sql, /i\.artifact_key = t\.value AND i\.seq > w\.after_seq AND i\.seq <= w\.through_seq/);
+  assert.match(sql, /i\.artifact_key >= json_extract\(t\.value, '\$\[0\]'\) AND i\.artifact_key < json_extract\(t\.value, '\$\[1\]'\)/);
+  assert.match(sql, /i\.artifact_key >= json_extract\(t\.value, '\$\[0\]'\) AND i\.artifact_key < json_extract\(t\.value, '\$\[1\]'\) AND i\.seq > w\.after_seq AND i\.seq <= w\.through_seq AND i\.artifact_key GLOB json_extract\(t\.value, '\$\[2\]'\)/, "an alias glob seeks the key range of its literal prefix, then filters");
+  assert.doesNotMatch(sql, /artifact_key (=|>=|<|GLOB) \?/, "no per-term SQL parameters");
   assert.deepEqual(params.slice(0, 3), ["p", 3, 9]);
-  assert.equal(params.length, 3 + 3 + 2 + 1 + 2, "window once, one param per equality/glob term, two per bounded prefix, join project, limit");
+  assert.equal(params.length, 3 + 3 + 2, "window once, one JSON array per member, join project, limit");
+  assert.deepEqual(JSON.parse(params[3] as string), ["repo:jordandru/retrace#a.ts", "repo:retrace#a.ts", "repo:retrace#b.ts"]);
+  assert.deepEqual(JSON.parse(params[4] as string), [[prefix, "commit:jordandru/retrace@a123457"]], "prefix and its exclusive upper bound");
+  assert.deepEqual(JSON.parse(params[5] as string), [["repo:", "repo;", "repo:*/retrace#b.ts"]], "glob with the key range of its literal prefix");
   assert.equal(params.at(-1), 11, "LIMIT is row_cap + 1");
   assert.deepEqual(eventsReferencingArtifactsStatements({ project: "p", artifact_keys: [], after_seq: -1, through_seq: 1, row_cap: 1, deadline: 0 }), []);
   assert.deepEqual(eventsReferencingArtifactsSql(q), only);
 });
 
-test("eventsReferencingArtifactsStatements keeps every statement under the D1 parameter and SQLite compound limits", () => {
+test("eventsReferencingArtifactsStatements keeps every statement under D1's parameter and compound-SELECT limits", () => {
   const base = { project: "p", after_seq: -1, through_seq: 9, row_cap: 10, deadline: 0 };
-  // the real four-file classifier shape under a policy with two owner-less aliases: 4 files × (owner/repo + basename alias) exact keys
-  // + 4 files × 2 alias globs → 20 equality terms + 8 glob terms (Codex F4: 114 parameters in round 5)
+  const compoundTerms = (sql: string) => (sql.match(/ UNION /g) ?? []).length + 1;
+  // the real four-file classifier shape under a policy with two owner-less aliases: 4 files × 3 exact spellings
+  // + 4 files × 2 alias globs — 114 parameters in round 5 (Codex F4), 28 compound terms in round 6 (D1 allows 5)
   const fourFiles = ["a.ts", "b.ts", "c.ts", "d.ts"].flatMap((f) => [`repo:acme/app#${f}`, `repo:app#${f}`, `repo:old-name#${f}`]);
   const statements = eventsReferencingArtifactsStatements({ ...base, artifact_keys: fourFiles });
-  assert.equal(statements.length, 1);
-  assert.ok(statements[0]!.params.length <= ARTIFACT_INDEX_MAX_PARAMS, `${statements[0]!.params.length} params`);
-  assert.equal(statements[0]!.params.length, 5 + 12 + 8, "window/join/limit + 12 equality terms (3 spellings × 4 files) + 8 alias globs (2 × 4 files)");
-  const many = eventsReferencingArtifactsStatements({ ...base, artifact_keys: Array.from({ length: 501 }, (_, i) => `task:${i}`) });
-  assert.ok(many.length >= 2);
+  assert.equal(statements.length, 1, "the four-file query is one statement");
+  assert.equal(statements[0]!.params.length, 3 + 2 + 2, "window, equality JSON, glob JSON, join project, limit");
+  assert.equal(compoundTerms(statements[0]!.sql), 2);
+  assert.deepEqual(JSON.parse(statements[0]!.params[3] as string), fourFiles);
+  assert.equal((JSON.parse(statements[0]!.params[4] as string) as string[][]).length, 8, "two alias globs per file");
+  const many = eventsReferencingArtifactsStatements({ ...base, artifact_keys: Array.from({ length: 501 }, (_, i) => `task:${i}`), artifact_prefixes: ["task:1", ""] });
+  assert.equal(many.length, 2, "501 keys + 2 prefixes batch under ARTIFACT_INDEX_MAX_TERMS");
+  let carried = 0;
   for (const st of many) {
-    assert.ok(st.params.length <= ARTIFACT_INDEX_MAX_PARAMS);
-    assert.ok((st.sql.match(/ UNION /g) ?? []).length + 1 <= ARTIFACT_INDEX_MAX_TERMS);
+    assert.ok(st.params.length <= D1_MAX_BOUND_PARAMS);
+    assert.ok(compoundTerms(st.sql) <= D1_MAX_COMPOUND_SELECT_TERMS, `${compoundTerms(st.sql)} compound terms`);
+    let inStatement = 0;
+    for (const p of st.params.slice(3, -2)) inStatement += (JSON.parse(p as string) as unknown[]).length;
+    assert.ok(inStatement <= ARTIFACT_INDEX_MAX_TERMS);
+    carried += inStatement;
   }
+  assert.equal(carried, 503, "every term reaches exactly one statement");
   assert.throws(() => eventsReferencingArtifactsSql({ ...base, artifact_keys: Array.from({ length: 501 }, (_, i) => `task:${i}`) }), /needs \d+ statements/);
+  const small = eventsReferencingArtifactsStatements({ ...base, artifact_keys: ["task:1", "task:2", "task:3"] }, { maxTerms: 2 });
+  assert.equal(small.length, 2, "maxTerms splits terms across statements");
   const unbounded = eventsReferencingArtifactsStatements({ ...base, artifact_keys: [], artifact_prefixes: [""] });
-  assert.match(unbounded[0]!.sql, /i\.artifact_key >= \? AND i\.seq/);
-  assert.doesNotMatch(unbounded[0]!.sql, /artifact_key < \?/, "an empty prefix is an unbounded range");
+  assert.match(unbounded[0]!.sql, /i\.artifact_key >= t\.value AND i\.seq/);
+  assert.doesNotMatch(unbounded[0]!.sql, /json_extract/, "an empty prefix is an unbounded range with no upper bound");
+  assert.deepEqual(JSON.parse(unbounded[0]!.params[3] as string), [""]);
 });
 
 test("prefixRangeUpperBound is the exclusive end of a code-point (BINARY) prefix range", () => {

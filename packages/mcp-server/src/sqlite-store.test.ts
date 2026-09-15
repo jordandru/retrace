@@ -270,13 +270,39 @@ test("SqliteStore batches a 501-term lookup and keeps window, budget and dedupli
   const statements = eventsReferencingArtifactsStatements(q);
   assert.ok(statements.length > 1, "501 exact terms cannot fit one statement");
   for (const st of statements) {
-    assert.ok(st.params.length <= 90, `params ${st.params.length}`);
-    assert.ok((st.sql.match(/ UNION /g) ?? []).length + 1 <= 400);
+    assert.ok(st.params.length <= 100, `params ${st.params.length}`);
+    assert.ok((st.sql.match(/ UNION /g) ?? []).length + 1 <= 5, "D1 allows five compound terms");
+    for (const p of st.params.slice(3, -2)) assert.ok((JSON.parse(p as string) as unknown[]).length <= 400);
   }
   const hit = await store.eventsReferencingArtifacts(q);
   assert.equal(hit.ok, true);
   if (hit.ok) assert.deepEqual(hit.events.map((e: { seq: number }) => e.seq), [1, 2, 3, 4], "window (0, 4] honoured across batches");
   assert.deepEqual(await store.eventsReferencingArtifacts({ ...q, row_cap: 3 }), { ok: false, reason: "budget" }, "budget counted across batches");
+});
+
+test("SqliteStore matches the memory spec for keys that look like JSON numbers or contain JSON syntax", async () => {
+  const store = new SqliteStore(":memory:");
+  const memory = new MemoryEventStore();
+  const keys = ["123", "1e3", "0x1f", "true", "null", "[1]", "{\"a\":1}", "repo:acme/app#a \"quoted\" \\ path.ts", "line\nbreak"];
+  for (const id of keys) {
+    const e = ev({ artifacts: [{ id, role: "generated" }] });
+    await appendEvent(store, e);
+    await appendEvent(memory, e);
+  }
+  for (const [i, key] of keys.entries()) {
+    const q = { project: "junk", artifact_keys: [key], after_seq: -1, through_seq: 100, row_cap: 10, deadline: Date.now() + 5_000 };
+    const sql = await store.eventsReferencingArtifacts(q);
+    const mem = await memory.eventsReferencingArtifacts(q);
+    assert.equal(sql.ok, true); assert.equal(mem.ok, true);
+    if (sql.ok && mem.ok) {
+      assert.deepEqual(mem.events.map((e) => e.seq), [i], `memory spec finds ${JSON.stringify(key)}`);
+      assert.deepEqual(sql.events.map((e) => e.seq), mem.events.map((e) => e.seq), `json_each must hand ${JSON.stringify(key)} back as the same text`);
+    }
+    const prefixed = await store.eventsReferencingArtifacts({ ...q, artifact_keys: [], artifact_prefixes: [key.slice(0, 2)] });
+    const memPrefixed = await memory.eventsReferencingArtifacts({ ...q, artifact_keys: [], artifact_prefixes: [key.slice(0, 2)] });
+    assert.equal(prefixed.ok, true); assert.equal(memPrefixed.ok, true);
+    if (prefixed.ok && memPrefixed.ok) assert.deepEqual(prefixed.events.map((e) => e.seq), memPrefixed.events.map((e) => e.seq), `prefix ${JSON.stringify(key.slice(0, 2))}`);
+  }
 });
 
 test("SqliteStore backfills event_artifact_index once from existing events", async () => {

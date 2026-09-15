@@ -49,9 +49,12 @@ class FakeD1 {
   }
 }
 
-/** D1 documents 100 bound parameters per query; this double refuses more, as production would (PR 51 round 6, Codex F4). */
+/** D1 documents 100 bound parameters per query and workerd sets SQLITE_LIMIT_COMPOUND_SELECT to 5; this double refuses
+ *  both, as production does (PR 51 round 6, Codex F4). `d1-store.workerd.test.ts` runs the same queries in workerd itself. */
 class LimitedD1 extends FakeD1 {
   prepare(sql: string) {
+    const compoundTerms = (sql.match(/ UNION /g) ?? []).length + 1;
+    if (compoundTerms > 5) throw new Error("D1_ERROR: too many terms in compound SELECT: SQLITE_ERROR");
     const stmt = super.prepare(sql);
     const bind = stmt.bind.bind(stmt);
     stmt.bind = (...params: unknown[]) => {
@@ -148,26 +151,26 @@ test("eventsReferencingArtifacts SQL joins the index, binds keys, and uses row_c
   assert.equal(result.ok, true);
   const stmt = db.last!;
   assert.doesNotMatch(stmt.sql, /INDEXED BY/, "no forced index hint (PR 51 round 5, Codex F3)");
-  assert.match(stmt.sql, /^WITH w\(project, after_seq, through_seq\) AS \(SELECT \?, \?, \?\) SELECT e\.body, m\.seq, m\.artifact_key FROM \(SELECT i\.seq, i\.artifact_key FROM w, event_artifact_index i WHERE i\.project = w\.project AND i\.artifact_key = \? AND i\.seq > w\.after_seq AND i\.seq <= w\.through_seq UNION /);
-  assert.match(stmt.sql, /\) m CROSS JOIN events e ON e\.project = \? AND e\.seq = m\.seq ORDER BY m\.seq ASC, m\.artifact_key ASC LIMIT \?$/);
-  assert.equal((stmt.sql.match(/i\.artifact_key = \?/g) ?? []).length, 2, "owner/repo key and its basename alias, one indexed term each");
-  assert.deepEqual(stmt.params.slice(0, 4), ["retrace", 1, 9, "repo:jordandru/retrace#a.ts"], "window bound once, then one param per term");
-  assert.equal(stmt.params.at(-1), 21);
-  assert.ok(stmt.params.includes("repo:jordandru/retrace#a.ts"));
-  assert.ok(stmt.params.includes("repo:retrace#a.ts"));
+  assert.match(stmt.sql, /^WITH w\(project, after_seq, through_seq\) AS \(SELECT \?, \?, \?\) SELECT e\.body, m\.seq, m\.artifact_key FROM \(SELECT i\.seq, i\.artifact_key FROM w CROSS JOIN json_each\(\?\) t CROSS JOIN event_artifact_index i WHERE i\.project = w\.project AND i\.artifact_key = t\.value AND i\.seq > w\.after_seq AND i\.seq <= w\.through_seq\) m CROSS JOIN events e ON e\.project = \? AND e\.seq = m\.seq ORDER BY m\.seq ASC, m\.artifact_key ASC LIMIT \?$/);
+  assert.doesNotMatch(stmt.sql, / UNION /, "one kind of term, one member");
+  assert.deepEqual(stmt.params, ["retrace", 1, 9, JSON.stringify(["repo:jordandru/retrace#a.ts", "repo:retrace#a.ts"]), "retrace", 21], "window bound once, owner/repo key and its basename alias in one JSON array, join project, row_cap + 1");
 });
 
-test("eventsReferencingArtifacts stays under D1's 100-parameter limit on a four-file classifier query and batches 501 terms", async () => {
+test("eventsReferencingArtifacts stays under D1's 100-parameter and 5-term compound limits on a four-file classifier query and batches 501 terms", async () => {
   const db = new LimitedD1();
   const store = new D1Store(db as unknown as D1Database);
   const fourFiles = ["a.ts", "b.ts", "c.ts", "d.ts"].flatMap((f) => [`repo:acme/app#${f}`, `repo:app#${f}`, `repo:old-name#${f}`]);
   const ok = await store.eventsReferencingArtifacts({ project: "retrace", artifact_keys: fourFiles, after_seq: -1, through_seq: 99, row_cap: 20_000, deadline: Date.now() + 5_000 });
-  assert.equal(ok.ok, true, "four files with two aliases must not exceed the limit (114 parameters in round 5)");
+  assert.equal(ok.ok, true, "four files with two aliases must fit one statement (114 parameters in round 5, 28 compound terms in round 6)");
   assert.equal(db.prepared.length, 1);
+  assert.equal(db.prepared[0]!.params.length, 7);
   const many = await store.eventsReferencingArtifacts({ project: "retrace", artifact_keys: Array.from({ length: 501 }, (_, i) => `task:${i}`), after_seq: -1, through_seq: 99, row_cap: 20_000, deadline: Date.now() + 5_000 });
   assert.equal(many.ok, true);
-  assert.ok(db.prepared.length > 2, "501 terms run as several statements");
-  for (const stmt of db.prepared) assert.ok(stmt.params.length <= 100);
+  assert.equal(db.prepared.length, 3, "501 terms run as two statements of at most 400 terms");
+  for (const stmt of db.prepared) {
+    assert.ok(stmt.params.length <= 100);
+    assert.ok((stmt.sql.match(/ UNION /g) ?? []).length + 1 <= 5);
+  }
 });
 
 test("eventsReferencingArtifacts binds indexed literal prefixes for mixed commit-reference lengths", async () => {
@@ -186,9 +189,8 @@ test("eventsReferencingArtifacts binds indexed literal prefixes for mixed commit
   assert.equal(result.ok, true);
   const stmt = db.last!;
   assert.doesNotMatch(stmt.sql, /GLOB/, "a literal prefix is a bound key range, not a glob");
-  assert.match(stmt.sql, /i\.artifact_key >= \? AND i\.artifact_key < \?/);
-  assert.ok(stmt.params.includes(prefix));
-  assert.ok(stmt.params.includes("commit:acme/app@abcdef1"), "exclusive upper bound = prefix with its last code unit incremented");
+  assert.match(stmt.sql, /i\.artifact_key >= json_extract\(t\.value, '\$\[0\]'\) AND i\.artifact_key < json_extract\(t\.value, '\$\[1\]'\)/);
+  assert.ok(stmt.params.includes(JSON.stringify([[prefix, "commit:acme/app@abcdef1"]])), "exclusive upper bound = prefix with its last code point incremented");
   assert.equal(stmt.params.at(-1), 11);
 });
 
