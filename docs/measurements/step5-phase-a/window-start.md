@@ -23,7 +23,7 @@
 | retrace — unlinked commits | 41 | 53 | +12 |
 | boxing-rpg — events | 137 | 185 | +48 |
 | boxing-rpg — causal coverage | 19.0 % | 32.9 % | +13.9 pts |
-| boxing-rpg — unlinked commits | 82 | 91 | +9 |
+| boxing-rpg — unlinked commits | 83 | 94 | +11 |
 
 Reading: boxing-rpg's coverage rose between baseline and window start because the fixed MCP credential
 let its agents log edits over the weekend; the shadow window measures **new** seals from here, not that
@@ -40,7 +40,7 @@ asked for.
 
 ## Addition 2026-09-15 04:53Z — window PAUSED (policy reverted to off)
 
-The first commit sealed under shadow was this note's own commit `5b358464`. Both the hook's attempt
+The first commit attempted under shadow was this note's own commit `5b358464`; it was not sealed until after the revert. Both the hook's attempt
 (04:42:51Z) and a replay (04:43:57Z) returned `503 classification_unavailable / deadline`; the webhook
 copy went to `pending_deliveries` (attempt 0, outcome pending/deadline); `classification_breakers`
 recorded one failure; `classification_contexts` stayed empty. Root cause by code read: the amendment
