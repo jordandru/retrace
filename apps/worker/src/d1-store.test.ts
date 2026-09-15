@@ -134,11 +134,11 @@ test("eventsReferencingArtifacts SQL joins the index, binds keys, and uses row_c
   });
   assert.equal(result.ok, true);
   const stmt = db.last!;
-  assert.match(stmt.sql, /FROM event_artifact_index i INDEXED BY idx_eai_project_key_seq JOIN events e/);
-  assert.match(stmt.sql, /i\.seq > \? AND i\.seq <= \?/);
+  assert.doesNotMatch(stmt.sql, /INDEXED BY/, "no forced index hint (PR 51 round 5, Codex F3)");
+  assert.match(stmt.sql, /^SELECT e\.body FROM events e WHERE e\.project = \? AND e\.seq IN \(SELECT i\.seq FROM event_artifact_index i WHERE i\.project = \? AND i\.artifact_key = \? AND i\.seq > \? AND i\.seq <= \? UNION /);
+  assert.equal((stmt.sql.match(/i\.artifact_key = \?/g) ?? []).length, 2, "owner/repo key and its basename alias, one indexed term each");
   assert.equal(stmt.params[0], "retrace");
-  assert.equal(stmt.params[1], 1);
-  assert.equal(stmt.params[2], 9);
+  assert.deepEqual(stmt.params.slice(1, 5), ["retrace", "repo:jordandru/retrace#a.ts", 1, 9]);
   assert.equal(stmt.params.at(-1), 21);
   assert.ok(stmt.params.includes("repo:jordandru/retrace#a.ts"));
   assert.ok(stmt.params.includes("repo:retrace#a.ts"));
@@ -159,8 +159,10 @@ test("eventsReferencingArtifacts binds indexed literal prefixes for mixed commit
   });
   assert.equal(result.ok, true);
   const stmt = db.last!;
-  assert.match(stmt.sql, /i\.artifact_key GLOB \?/);
-  assert.ok(stmt.params.includes(`${prefix}*`));
+  assert.doesNotMatch(stmt.sql, /GLOB/, "a literal prefix is a bound key range, not a glob");
+  assert.match(stmt.sql, /i\.artifact_key >= \? AND i\.artifact_key < \?/);
+  assert.ok(stmt.params.includes(prefix));
+  assert.ok(stmt.params.includes("commit:acme/app@abcdef1"), "exclusive upper bound = prefix with its last code unit incremented");
   assert.equal(stmt.params.at(-1), 11);
 });
 

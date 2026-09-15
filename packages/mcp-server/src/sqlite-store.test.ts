@@ -175,6 +175,45 @@ test("SqliteStore artifact prefixes find abbreviated and full commit references"
   assert.match(plan, /idx_eai_project_key_seq \(project=\? AND artifact_key>[?] AND artifact_key<[?]\)/);
 });
 
+test("SqliteStore artifact-index lookups are index range seeks on a populated store (PR 51 round 5, Codex F3)", async () => {
+  const store = new SqliteStore(":memory:");
+  const db = (store as any).db;
+  for (let i = 0; i < 5_000; i++) {
+    await appendEvent(store, ev({ action: "edited", artifacts: [{ id: `repo:acme/app#noise/${i}.ts`, role: "generated" }], intent: "n".repeat(1024) }));
+  }
+  const sha = "a1234567890b".padEnd(40, "c");
+  await appendEvent(store, ev({ action: "committed", artifacts: [{ id: `commit:acme/app@${sha.slice(0, 12)}`, role: "generated" }, { id: "repo:acme/app#other.ts", role: "generated" }], method: { tool: "git", params: { sha } } }));
+  await appendEvent(store, ev({ action: "edited", artifacts: [{ id: "repo:acme/app#a.ts", role: "generated" }] }));
+  await appendEvent(store, ev({ action: "committed", artifacts: [{ id: `commit:acme/app@${sha}`, role: "generated" }, { id: "repo:acme/app#a.ts", role: "generated" }], method: { tool: "git", params: { sha } } }));
+  const base = { project: "junk", after_seq: -1, through_seq: 10_000, row_cap: 20_000, deadline: Date.now() + 60_000 };
+  const shapes: Record<string, { query: any; expect: number[] }> = {
+    // the classifier's alias-expanded path predicate: owner/repo key, its basename alias, and an owner-less alias glob
+    aliasPath: { query: { ...base, artifact_keys: ["repo:acme/app#a.ts", "repo:app#a.ts", "repo:old-name#a.ts"] }, expect: [5001, 5002] },
+    // the producer-group query: three literal commit-reference prefixes
+    threePrefix: { query: { ...base, artifact_keys: [], artifact_prefixes: [`commit:acme/app@${sha.slice(0, 7)}`, `commit:app@${sha.slice(0, 7)}`, `commit:old-name@${sha.slice(0, 7)}`] }, expect: [5000, 5002] },
+    // the ordinary pre-PR single-key lookup
+    singleKey: { query: { ...base, artifact_keys: ["repo:acme/app#a.ts"] }, expect: [5001, 5002] },
+  };
+  for (const [name, { query, expect }] of Object.entries(shapes)) {
+    const { sql, params } = eventsReferencingArtifactsSql(query);
+    assert.doesNotMatch(sql, /INDEXED BY/, `${name}: no forced index hint`);
+    const plan: string[] = db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...params).map((row: any) => row.detail);
+    const indexSearches = plan.filter((line) => /SEARCH i /.test(line));
+    assert.ok(indexSearches.length >= 1, `${name}: at least one index term\n${plan.join("\n")}`);
+    for (const line of indexSearches) {
+      assert.match(line, /idx_eai_project_key_seq \(project=\? AND artifact_key[=>]/, `${name}: every artifact-index term seeks the key index\n${plan.join("\n")}`);
+    }
+    assert.ok(!plan.some((line) => /idx_eai_project_key_seq \(project=\?\)$/.test(line)), `${name}: no project-only index search\n${plan.join("\n")}`);
+    assert.ok(!plan.some((line) => /SEARCH e .*seq>\? AND seq<\?/.test(line)), `${name}: the events side is a unique (project, seq) probe, not a window walk\n${plan.join("\n")}`);
+    const started = Date.now();
+    const result = await store.eventsReferencingArtifacts(query);
+    const elapsed = Date.now() - started;
+    assert.equal(result.ok, true, name);
+    if (result.ok) assert.deepEqual(result.events.map((e) => e.seq), expect, name);
+    assert.ok(elapsed < 500, `${name}: ${elapsed} ms on 5,000 events must stay far inside the classifier budget`);
+  }
+});
+
 test("SqliteStore backfills event_artifact_index once from existing events", async () => {
   const dir = mkdtempSync(join(tmpdir(), "retrace-sqlite-index-"));
   const file = join(dir, "ledger.db");

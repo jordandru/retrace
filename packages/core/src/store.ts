@@ -296,16 +296,47 @@ export function artifactKeyMatchSql(keys: string[]): { sql: string; params: stri
   return { sql: `(${parts.join(" OR ")})`, params };
 }
 
+/** Exclusive upper bound of the BINARY-collated key range that starts with `prefix`: the prefix with its last
+ *  code unit incremented, so `artifact_key >= prefix AND artifact_key < bound` is an index range seek. */
+export function prefixRangeUpperBound(prefix: string): string {
+  if (!prefix) return "\uffff";
+  const last = prefix.charCodeAt(prefix.length - 1);
+  return last < 0xffff ? prefix.slice(0, -1) + String.fromCharCode(last + 1) : `${prefix}\uffff`;
+}
+
+/** One `UNION` member per lookup term, so each term takes its own index range instead of one predicate that the
+ *  planner can only satisfy by walking the project's whole artifact index (PR 51 round 4, Codex F3):
+ *  exact keys and literal prefixes seek `idx_eai_project_key_seq (project, artifact_key, seq)`; the owner-less alias
+ *  globs from `artifactLookup` (`repo:*\/name#path`) cannot be seeked on the key and use the `(project, seq)` window,
+ *  exactly as before this PR. The outer query joins `events` by its unique `(project, seq)`. Rows are deduplicated
+ *  by the `UNION`; `row_cap + 1` bounds returned rows and the callers turn the overflow into `budget`. */
 export function eventsReferencingArtifactsSql(q: ArtifactIndexQuery): { sql: string; params: (string | number)[] } {
-  const match = artifactKeyMatchSql(q.artifact_keys);
-  const prefixParams = [...new Set(q.artifact_prefixes ?? [])].map((prefix) => `${escapeGlobLiteral(prefix)}*`);
-  const prefixSql = prefixParams.map(() => "i.artifact_key GLOB ?").join(" OR ");
-  const predicate = prefixSql
-    ? q.artifact_keys.length ? `(${match.sql} OR ${prefixSql})` : `(${prefixSql})`
-    : match.sql;
+  const equals = new Set<string>();
+  const globs = new Set<string>();
+  for (const k of q.artifact_keys) {
+    const look = artifactLookup(k);
+    for (const eq of look.equals) equals.add(eq);
+    if (look.glob) globs.add(look.glob);
+  }
+  const prefixes = [...new Set(q.artifact_prefixes ?? [])];
+  const terms: string[] = [];
+  const params: (string | number)[] = [];
+  for (const eq of equals) {
+    terms.push("SELECT i.seq FROM event_artifact_index i WHERE i.project = ? AND i.artifact_key = ? AND i.seq > ? AND i.seq <= ?");
+    params.push(q.project, eq, q.after_seq, q.through_seq);
+  }
+  for (const prefix of prefixes) {
+    terms.push("SELECT i.seq FROM event_artifact_index i WHERE i.project = ? AND i.artifact_key >= ? AND i.artifact_key < ? AND i.seq > ? AND i.seq <= ?");
+    params.push(q.project, prefix, prefixRangeUpperBound(prefix), q.after_seq, q.through_seq);
+  }
+  for (const g of globs) {
+    terms.push("SELECT i.seq FROM event_artifact_index i WHERE i.project = ? AND i.seq > ? AND i.seq <= ? AND i.artifact_key GLOB ?");
+    params.push(q.project, q.after_seq, q.through_seq, g);
+  }
+  if (!terms.length) return { sql: "SELECT body FROM events WHERE 0", params: [] };
   return {
-    sql: `SELECT e.body FROM event_artifact_index i INDEXED BY idx_eai_project_key_seq JOIN events e ON e.project = i.project AND e.seq = i.seq WHERE i.project = ? AND i.seq > ? AND i.seq <= ? AND ${predicate} ORDER BY i.seq ASC LIMIT ?`,
-    params: [q.project, q.after_seq, q.through_seq, ...match.params, ...prefixParams, q.row_cap + 1],
+    sql: `SELECT e.body FROM events e WHERE e.project = ? AND e.seq IN (${terms.join(" UNION ")}) ORDER BY e.seq ASC LIMIT ?`,
+    params: [q.project, ...params, q.row_cap + 1],
   };
 }
 

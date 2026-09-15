@@ -4,7 +4,7 @@ import {
   adapterIdempotencyError, AdapterIdempotencyError, CAUSED_BY_UNVERIFIED_TAG, appendEvent,
   EventInput, Event, EventStore, Share, likeContains, clampHistoryLimit, HISTORY_LIMIT_MAX,
   pageHistoryNewest, collectHistory, asHistoryPage, explainEvent,
-  artifactIndexRows, eventsReferencingArtifactKeys, artifactKeyMatchSql, BACKFILL_ARTIFACT_INDEX_SQL,
+  artifactIndexRows, eventsReferencingArtifactKeys, artifactKeyMatchSql, BACKFILL_ARTIFACT_INDEX_SQL, eventsReferencingArtifactsSql, prefixRangeUpperBound,
   ARTIFACT_INDEX_DEFAULT_ROW_CAP,
 } from "./index.js";
 
@@ -209,6 +209,33 @@ test("eventsReferencingArtifactKeys: sameArtifact aliases, seq window, budget an
   assert.equal(ARTIFACT_INDEX_DEFAULT_ROW_CAP, 20_000);
   const empty = eventsReferencingArtifactKeys(events, { ...q, artifact_keys: [] }, 0);
   assert.deepEqual(empty, { ok: true, events: [] });
+});
+
+test("eventsReferencingArtifactsSql emits one indexed UNION term per key, prefix and glob, without a forced index", () => {
+  const sha = "a1234567890b".padEnd(40, "c");
+  const { sql, params } = eventsReferencingArtifactsSql({
+    project: "p", artifact_keys: ["repo:jordandru/retrace#a.ts", "repo:retrace#b.ts"], artifact_prefixes: [`commit:jordandru/retrace@${sha.slice(0, 7)}`],
+    after_seq: 3, through_seq: 9, row_cap: 10, deadline: 0,
+  });
+  assert.doesNotMatch(sql, /INDEXED BY/);
+  assert.match(sql, /^SELECT e\.body FROM events e WHERE e\.project = \? AND e\.seq IN \(/);
+  assert.equal((sql.match(/ UNION /g) ?? []).length, 4, "3 equality terms + 1 prefix term + 1 glob term join with UNION");
+  assert.equal((sql.match(/i\.artifact_key = \?/g) ?? []).length, 3);
+  assert.equal((sql.match(/i\.artifact_key >= \? AND i\.artifact_key < \?/g) ?? []).length, 1);
+  assert.equal((sql.match(/i\.artifact_key GLOB \?/g) ?? []).length, 1);
+  assert.equal(params[0], "p");
+  assert.ok(params.includes(`commit:jordandru/retrace@${sha.slice(0, 7)}`));
+  assert.ok(params.includes(prefixRangeUpperBound(`commit:jordandru/retrace@${sha.slice(0, 7)}`)));
+  assert.equal(params[params.length - 1], 11, "LIMIT is row_cap + 1");
+  assert.deepEqual(eventsReferencingArtifactsSql({ project: "p", artifact_keys: [], after_seq: -1, through_seq: 1, row_cap: 1, deadline: 0 }), { sql: "SELECT body FROM events WHERE 0", params: [] });
+});
+
+test("prefixRangeUpperBound is the exclusive end of a BINARY prefix range", () => {
+  assert.equal(prefixRangeUpperBound("commit:acme/app@a12"), "commit:acme/app@a13");
+  assert.equal(prefixRangeUpperBound("repo:x#z"), "repo:x#{");
+  assert.equal(prefixRangeUpperBound(""), "\uffff");
+  assert.equal(prefixRangeUpperBound("a\uffff"), "a\uffff\uffff");
+  assert.ok("commit:acme/app@a12abc" >= "commit:acme/app@a12" && "commit:acme/app@a12abc" < prefixRangeUpperBound("commit:acme/app@a12"));
 });
 
 test("artifactKeyMatchSql and backfill SQL are bound, not interpolated; backfill reads json artifact ids", () => {
