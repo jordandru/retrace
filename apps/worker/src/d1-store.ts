@@ -89,6 +89,20 @@ export class D1Store implements EventStore {
     return results.map((r) => JSON.parse(r.body) as Event);
   }
 
+  async amendmentEventsUpTo(project: string, throughSeq: number, limit: number) {
+    const { results } = await this.db.prepare(
+      `SELECT body FROM events
+       WHERE project = ? AND seq <= ? AND action = 'other'
+         AND json_extract(body, '$.action_detail') = 'amended'
+         AND (
+           json_type(body, '$.method.params.attribution') IS NOT NULL
+           OR EXISTS (SELECT 1 FROM json_each(body, '$.tags') WHERE value = 'attribution')
+         )
+       ORDER BY seq ASC LIMIT ?`,
+    ).bind(project, throughSeq, limit).all<{ body: string }>();
+    return results.map((r) => JSON.parse(r.body) as Event);
+  }
+
   async projects() {
     const { results } = await this.db.prepare("SELECT DISTINCT project FROM events ORDER BY project").all<{ project: string }>();
     return results.map((r) => r.project);

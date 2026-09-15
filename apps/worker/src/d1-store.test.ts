@@ -220,6 +220,35 @@ class SqliteD1 {
   }
 }
 
+test("D1 shim amendmentEventsUpTo returns only attribution amendments at or below U", async () => {
+  const sqlite = new DatabaseSync(":memory:");
+  sqlite.exec(SCHEMA_SQL);
+  const store = new D1Store(new SqliteD1(sqlite) as unknown as D1Database);
+  const insert = (id: string, seq: number, over: Partial<Event>) => store.insert({
+    ...event,
+    id,
+    seq,
+    hash: String(seq).padStart(64, "0"),
+    ...over,
+  });
+  await insert("plain-amendment", 1, { action: "other", action_detail: "amended" });
+  await insert("method-amendment", 2, {
+    action: "other", action_detail: "amended", method: { params: { attribution: null } },
+  });
+  await insert("tag-amendment", 3, {
+    action: "other", action_detail: "amended", tags: ["attribution"],
+  });
+  await insert("wrong-action", 4, { action: "edited", tags: ["attribution"] });
+  await insert("above-u", 5, {
+    action: "other", action_detail: "amended", method: { params: { attribution: { from: "late" } } },
+  });
+
+  const got = await store.amendmentEventsUpTo("retrace", 3, 10);
+  assert.deepEqual(got.map((e) => e.id), ["method-amendment", "tag-amendment"]);
+  const indexes = sqlite.prepare("PRAGMA index_list(events)").all().map((r: any) => r.name);
+  assert.ok(indexes.includes("idx_events_amendment_candidates"));
+});
+
 test("Codex-D1: a lost route CAS aborts the batch — loser has no policy row and no activation", async () => {
   const sqlite = new DatabaseSync(":memory:");
   sqlite.exec(SCHEMA_SQL);

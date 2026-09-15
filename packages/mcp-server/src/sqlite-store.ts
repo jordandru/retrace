@@ -114,6 +114,20 @@ export class SqliteStore implements EventStore {
     return rows.map((r) => JSON.parse(r.body) as Event);
   }
 
+  async amendmentEventsUpTo(project: string, throughSeq: number, limit: number) {
+    const rows = this.db.prepare(
+      `SELECT body FROM events
+       WHERE project = ? AND seq <= ? AND action = 'other'
+         AND json_extract(body, '$.action_detail') = 'amended'
+         AND (
+           json_type(body, '$.method.params.attribution') IS NOT NULL
+           OR EXISTS (SELECT 1 FROM json_each(body, '$.tags') WHERE value = 'attribution')
+         )
+       ORDER BY seq ASC LIMIT ?`,
+    ).all(project, throughSeq, limit) as { body: string }[];
+    return rows.map((r) => JSON.parse(r.body) as Event);
+  }
+
   async projects() {
     const rows = this.db.prepare("SELECT DISTINCT project FROM events ORDER BY project").all() as { project: string }[];
     return rows.map((r) => r.project);

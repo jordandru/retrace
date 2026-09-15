@@ -630,6 +630,36 @@ test("T13: effective whole-event amendment excludes the target; snapshot is the 
   assert.ok(snap.effective?.some((a) => a.id === amend.id && a.target === target.id));
 });
 
+test("bounded amendment lookup skips all() with 5,000 non-amendment events", async () => {
+  const store = new MemoryEventStore();
+  await putPolicy(store);
+  for (let i = 0; i < 5_000; i++) {
+    await appendEvent(store, {
+      project: "p",
+      actor: { type: "system", id: "noise" },
+      action: "executed",
+      artifacts: [{ id: `task:noise-${i}`, role: "used" }],
+      timestamp: "2026-09-10T10:00:00.000Z",
+    });
+  }
+  let allCalls = 0;
+  store.all = async () => {
+    allCalls++;
+    throw new Error("all() must not be called");
+  };
+  let boundedCalls = 0;
+  const bounded = store.amendmentEventsUpTo.bind(store);
+  store.amendmentEventsUpTo = async (...args) => {
+    boundedCalls++;
+    return bounded(...args);
+  };
+
+  const got = await classify(store, commitInput());
+  assert.equal(got.kind, "decision", JSON.stringify(got));
+  assert.equal(boundedCalls, 1);
+  assert.equal(allCalls, 0);
+});
+
 test("rejected amendment does not exclude a witness v7 would still accept", async () => {
   const store = new MemoryEventStore();
   await putPolicy(store);
@@ -760,9 +790,16 @@ test("F1: classifier amendment cascade matches v7 capture-boundary effectiveness
   assert.deepEqual([...v7.effective.keys()], [c.id]);
   assert.ok(v7.rejected.some((x) => x.event.id !== valid.id && x.reason === "uncorroborated"));
 
+  let boundedCalls = 0;
+  const bounded = store.amendmentEventsUpTo.bind(store);
+  store.amendmentEventsUpTo = async (...args) => {
+    boundedCalls++;
+    return bounded(...args);
+  };
   const got = await classify(store, commitInput({ actorId: "C", raw: "work\n\nRetrace-Actor: C\n" }));
   assert.equal(got.kind, "decision");
   if (got.kind !== "decision") return;
+  assert.equal(boundedCalls, 1, "F1 cascade must use the bounded amendment path");
   assert.equal(got.record.decision.witnesses.some((w) => w.id === c.id), false);
   const classifier = JSON.parse([...store.contexts.values()][0]!.amendment_snapshot) as { effective: { target: string }[] };
   assert.deepEqual(classifier.effective.map((x) => x.target), [...v7.effective.keys()]);

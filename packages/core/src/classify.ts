@@ -393,18 +393,34 @@ export async function evaluateAmendmentsAtU(opts: {
     const collection = emptyAmendmentCollection();
     return { ok: true, collection, snapshotJson: amendmentSnapshotJson({ effective: [] }) };
   }
-  let events: Event[];
+  let prefix: Event[];
   try {
-    events = await opts.store.all(opts.project);
+    if (opts.store.amendmentEventsUpTo) {
+      const amendments = await opts.store.amendmentEventsUpTo(opts.project, opts.U, CLASSIFY_ROW_CAP + 1);
+      if (opts.now() >= opts.deadline) return fail("deadline");
+      if (amendments.length > CLASSIFY_ROW_CAP) return fail("budget");
+      if (amendments.length === 0) {
+        return { ok: true, collection: emptyAmendmentCollection(), snapshotJson: amendmentSnapshotJson({ effective: [] }) };
+      }
+      const page = await opts.store.history({
+        project: opts.project,
+        before_seq: opts.U + 1,
+        limit: CLASSIFY_ROW_CAP,
+      });
+      if (page.truncated) return fail("budget");
+      prefix = page.events;
+    } else {
+      const events = await opts.store.all(opts.project);
+      prefix = events.filter((e) => e.seq <= opts.U).sort((a, b) => a.seq - b.seq || a.id.localeCompare(b.id));
+      if (prefix.length > CLASSIFY_ROW_CAP) return fail("budget");
+      if (!prefix.some(isAttributionAmendment)) {
+        return { ok: true, collection: emptyAmendmentCollection(), snapshotJson: amendmentSnapshotJson({ effective: [] }) };
+      }
+    }
   } catch {
     return fail("store_error");
   }
   if (opts.now() >= opts.deadline) return fail("deadline");
-  const prefix = events.filter((e) => e.seq <= opts.U).sort((a, b) => a.seq - b.seq || a.id.localeCompare(b.id));
-  if (prefix.length > CLASSIFY_ROW_CAP) return fail("budget");
-  if (!prefix.some(isAttributionAmendment)) {
-    return { ok: true, collection: emptyAmendmentCollection(), snapshotJson: amendmentSnapshotJson({ effective: [] }) };
-  }
   try {
     const head = prefix.at(-1)!;
     const snapshot = await verifiedAttributionSnapshot(prefix, opts.project, { seq: head.seq, hash: head.hash });

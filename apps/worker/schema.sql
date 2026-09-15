@@ -21,6 +21,8 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS idx_events_project_ts ON events(project, timestamp);
 CREATE INDEX IF NOT EXISTS idx_events_actor ON events(project, actor_id);
 CREATE INDEX IF NOT EXISTS idx_events_idem ON events(project, idempotency_key);
+CREATE INDEX IF NOT EXISTS idx_events_amendment_candidates ON events(project, seq)
+  WHERE action = 'other' AND json_extract(body, '$.action_detail') = 'amended';
 CREATE TABLE IF NOT EXISTS event_artifacts (
   event_id TEXT NOT NULL,
   project TEXT NOT NULL,

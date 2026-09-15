@@ -129,6 +129,8 @@ export interface EventStore {
   get(id: string): Promise<Event | null>;
   history(q: HistoryQuery): Promise<HistoryPage>;
   all(project: string): Promise<Event[]>;
+  /** Attribution-amendment candidates through inclusive sequence U, ascending, capped by the caller's LIMIT. */
+  amendmentEventsUpTo?(project: string, throughSeq: number, limit: number): Promise<Event[]>;
   projects(): Promise<string[]>;
   /** Delete every row belonging to a project AND insert `audit` (already sealed onto its own project's chain) in the
    *  same transaction, so a deletion can never exist without its audit record and vice versa (security review
@@ -345,6 +347,8 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS idx_events_project_ts ON events(project, timestamp);
 CREATE INDEX IF NOT EXISTS idx_events_actor ON events(project, actor_id);
 CREATE INDEX IF NOT EXISTS idx_events_idem ON events(project, idempotency_key);
+CREATE INDEX IF NOT EXISTS idx_events_amendment_candidates ON events(project, seq)
+  WHERE action = 'other' AND json_extract(body, '$.action_detail') = 'amended';
 CREATE TABLE IF NOT EXISTS event_artifacts (
   event_id TEXT NOT NULL,
   project TEXT NOT NULL,

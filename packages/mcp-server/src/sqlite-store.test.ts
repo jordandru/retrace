@@ -25,6 +25,26 @@ test("SqliteStore: artifact role is body-only — survives insert → get/all/hi
   assert.deepEqual(cols, ["event_id", "project", "artifact_id"]);
 });
 
+test("SqliteStore.amendmentEventsUpTo returns only attribution amendments at or below U", async () => {
+  const store = new SqliteStore(":memory:");
+  await appendEvent(store, ev({ action: "other", action_detail: "amended" }));
+  const method = (await appendEvent(store, ev({
+    action: "other", action_detail: "amended", method: { params: { attribution: null } },
+  }))).event;
+  const tag = (await appendEvent(store, ev({
+    action: "other", action_detail: "amended", tags: ["attribution"],
+  }))).event;
+  await appendEvent(store, ev({ action: "edited", tags: ["attribution"] }));
+  await appendEvent(store, ev({
+    action: "other", action_detail: "amended", method: { params: { attribution: { from: "late" } } },
+  }));
+
+  const got = await store.amendmentEventsUpTo("junk", tag.seq, 10);
+  assert.deepEqual(got.map((e) => e.id), [method.id, tag.id]);
+  const indexes = (store as any).db.prepare("PRAGMA index_list(events)").all().map((r: any) => r.name);
+  assert.ok(indexes.includes("idx_events_amendment_candidates"));
+});
+
 test("SqliteStore.history: % and _ in text are literals; LIMIT is bound and clamped", async () => {
   const store = new SqliteStore(":memory:");
   await appendEvent(store, ev({ intent: "100% coverage", artifacts: [{ id: "pct" }] }));
