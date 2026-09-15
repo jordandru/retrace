@@ -38,8 +38,12 @@ export function escapeGlobLiteral(s: string): string {
 }
 
 /** SQL lookup for a query key so the artifact index hits every row `sameArtifact` would accept.
- *  Rows store the exact `artifactKey`; owner/repo ↔ basename expansion lives here, next to `sameArtifact`. */
-export function artifactLookup(queryKey: string): { equals: string[]; glob?: string } {
+ *  Rows store the exact `artifactKey`; owner/repo ↔ basename expansion lives here, next to `sameArtifact`.
+ *  An owner-less alias used to bind `GLOB repo:*\/<alias>#<path>`. That pattern's only wildcard is the owner
+ *  segment, so it is equivalent to "key starts with `repo:` and ends with `/<alias>#<path>`" (`*` already
+ *  matches `/` and `#`). D1 rejects LIKE/GLOB patterns over 50 bytes; suffix equality has no such limit,
+ *  and because it is a literal compare it does not need `escapeGlobLiteral` (`*`, `?`, `[`). */
+export function artifactLookup(queryKey: string): { equals: string[]; suffix?: string } {
   const id = artifactKey(queryKey);
   const m = REPO_ARTIFACT.exec(id);
   if (!m) return { equals: [id] };
@@ -48,7 +52,7 @@ export function artifactLookup(queryKey: string): { equals: string[]; glob?: str
     const base = repo.slice(repo.lastIndexOf("/") + 1);
     return { equals: [id, `repo:${base}#${path}`] };
   }
-  return { equals: [id], glob: `repo:*/${escapeGlobLiteral(repo)}#${escapeGlobLiteral(path)}` };
+  return { equals: [id], suffix: `/${repo}#${path}` };
 }
 
 export interface CapturePolicy {

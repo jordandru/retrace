@@ -96,3 +96,38 @@ test("D1 in workerd: this harness enforces the five-term compound limit the roun
     await assert.rejects(db.prepare(union(6)).all(), /too many terms in compound SELECT/);
   });
 });
+
+test("D1 in workerd: alias lookup whose old GLOB exceeded 50 bytes returns the matching row", { timeout: 60_000 }, async () => {
+  await withD1(async (db) => {
+    const glob50 = "a".repeat(50);
+    const glob51 = "a".repeat(51);
+    await db.prepare("SELECT 'x' GLOB ?").bind(glob50).all();
+    await assert.rejects(db.prepare("SELECT 'x' GLOB ?").bind(glob51).all(), /LIKE or GLOB pattern too complex/);
+
+    const path = "packages/mcp-server/src/sqlite-store.test.ts";
+    const oldGlob = `repo:*/retrace#${path}`;
+    assert.equal(new TextEncoder().encode(oldGlob).length, 59);
+    assert.ok(new TextEncoder().encode(oldGlob).length > 50);
+
+    const store = new D1Store(db);
+    const memory = new MemoryEventStore();
+    const hit = `repo:jordandru/retrace#${path}`;
+    const miss = `repo:jordandru/retrace-extra#${path}`;
+    for (const id of [hit, miss]) {
+      const input = { project: "p", actor: { type: "agent" as const, id: "A" }, action: "edited" as const, artifacts: [{ id, role: "generated" as const }] };
+      await appendEvent(memory, input);
+      await appendEvent(store, input);
+    }
+    const q: ArtifactIndexQuery = {
+      project: "p", artifact_keys: [`repo:retrace#${path}`], after_seq: -1, through_seq: 10, row_cap: 100, deadline: Date.now() + 30_000,
+    };
+    for (const st of eventsReferencingArtifactsStatements(q)) {
+      assert.doesNotMatch(st.sql, /\bGLOB\b|\bLIKE\b/);
+    }
+    const got = await store.eventsReferencingArtifacts(q);
+    const want = await memory.eventsReferencingArtifacts(q);
+    assert.equal(got.ok, true, `D1 must not throw store_error; got ${JSON.stringify(got)}`);
+    assert.deepEqual(seqs(got), seqs(want), "workerd D1 must match the memory spec");
+    assert.deepEqual(seqs(got), [0], "hit owner/retrace#path; near-miss retrace-extra must not match");
+  });
+});

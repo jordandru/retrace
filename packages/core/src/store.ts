@@ -5,7 +5,7 @@
 import { Event, EventInput } from "./schema.js";
 import { sealEvent, verifyChain, VerifyResult } from "./chain.js";
 import { markUntrustedText } from "./explain.js";
-import { artifactKey, artifactLookup, escapeGlobLiteral, sameArtifact } from "./capture.js";
+import { artifactKey, artifactLookup, sameArtifact } from "./capture.js";
 
 export interface HistoryQuery {
   project: string;
@@ -102,7 +102,9 @@ export function asHistoryPage(body: unknown): HistoryPage {
   throw new Error("history response was neither an event list nor a history page");
 }
 
-/** LIKE pattern for a substring search that treats % and _ as literals (audit 2026-08-30). */
+/** LIKE pattern for a substring search that treats % and _ as literals (audit 2026-08-30).
+ *  The wrapped pattern is unbounded: a needle longer than 48 bytes exceeds D1's 50-byte LIKE/GLOB
+ *  limit (issue #53). Classify no longer uses LIKE/GLOB; this helper still does. */
 export function likeContains(text: string): { sql: string; pattern: string } {
   const pattern = "%" + text.replace(/!/g, "!!").replace(/%/g, "!%").replace(/_/g, "!_") + "%";
   return { sql: "e.body LIKE ? ESCAPE '!'", pattern };
@@ -273,14 +275,17 @@ export function eventsReferencingArtifactKeys(events: Event[], q: ArtifactIndexQ
   return { ok: true, events: matched };
 }
 
+/** Inclusive lower bound of stored `repo:` keys. Exclusive upper bound is `prefixRangeUpperBound` of this. */
+export const ALIAS_KEY_RANGE_LO = "repo:";
+
 /** SQL predicate over `event_artifact_index` alias `i` that implements `artifactLookup` / `sameArtifact`. */
 export function artifactKeyMatchSql(keys: string[]): { sql: string; params: string[] } {
   const equals = new Set<string>();
-  const globs = new Set<string>();
+  const suffixes = new Set<string>();
   for (const k of keys) {
     const look = artifactLookup(k);
     for (const eq of look.equals) equals.add(eq);
-    if (look.glob) globs.add(look.glob);
+    if (look.suffix) suffixes.add(look.suffix);
   }
   const parts: string[] = [];
   const params: string[] = [];
@@ -288,9 +293,11 @@ export function artifactKeyMatchSql(keys: string[]): { sql: string; params: stri
     parts.push(`i.artifact_key IN (${[...equals].map(() => "?").join(",")})`);
     params.push(...equals);
   }
-  for (const g of globs) {
-    parts.push("i.artifact_key GLOB ?");
-    params.push(g);
+  const aliasUpper = prefixRangeUpperBound(ALIAS_KEY_RANGE_LO);
+  if (suffixes.size && aliasUpper === undefined) throw new Error("artifactKeyMatchSql: alias suffix range must stay bounded");
+  for (const suffix of suffixes) {
+    parts.push("(i.artifact_key >= ? AND i.artifact_key < ? AND substr(i.artifact_key, -length(?)) = ?)");
+    params.push(ALIAS_KEY_RANGE_LO, aliasUpper!, suffix, suffix);
   }
   if (!parts.length) return { sql: "0", params: [] };
   return { sql: `(${parts.join(" OR ")})`, params };
@@ -321,6 +328,9 @@ export const D1_MAX_BOUND_PARAMS = 100;
 export const D1_MAX_COMPOUND_SELECT_TERMS = 5;
 /** Lookup terms per statement: bounds the bound JSON payload and lets the deadline be checked between batches. */
 export const ARTIFACT_INDEX_MAX_TERMS = 400;
+/** workerd/D1 rejects a LIKE or GLOB pattern longer than this (ordinary SQLite does not). The classify
+ *  path must not bind one; `likeContains` still can (issue #53). */
+export const D1_LIKE_GLOB_PATTERN_MAX_BYTES = 50;
 export interface ArtifactIndexStatement { sql: string; params: (string | number)[] }
 export interface ArtifactIndexHit { seq: number; artifact_key: string; body: string }
 
@@ -328,8 +338,7 @@ type ArtifactIndexTerm =
   | { kind: "eq"; value: string }
   | { kind: "prefix"; value: [string, string] }
   | { kind: "unbounded"; value: string }
-  | { kind: "glob"; value: [string, string, string] }
-  | { kind: "glob_unbounded"; value: string };
+  | { kind: "suffix"; value: [string, string, string] };
 
 /** The literal text a GLOB pattern must start with (everything before its first `*`, `?` or `[`). */
 export function globLiteralPrefix(pattern: string): string {
@@ -343,8 +352,9 @@ export function globLiteralPrefix(pattern: string): string {
  *  (`CROSS JOIN` keeps `json_each` as the outer loop) instead of one predicate the planner can only satisfy by walking
  *  the project's whole artifact index (PR 51 round 4, Codex F3): exact keys seek
  *  `idx_eai_project_key_seq (project, artifact_key, seq)` with the window inside the seek; literal prefixes are bound
- *  key ranges (`[prefix, prefixRangeUpperBound)`, or `>= prefix` alone when unbounded); the owner-less alias globs from
- *  `artifactLookup` (`repo:*\/name#path`) cannot be seeked on the key and stay window-scoped as before this PR. Every
+ *  key ranges (`[prefix, prefixRangeUpperBound)`, or `>= prefix` alone when unbounded); owner-less alias lookups from
+ *  `artifactLookup` (`/<alias>#<path>`) seek the same `repo:` … `repo;` key range the old `GLOB repo:*\/alias#path`
+ *  used, then filter with suffix equality (`substr` / `length`) so D1's 50-byte LIKE/GLOB limit cannot fire. Every
  *  member yields DISTINCT `(seq, artifact_key)` so the row budget counts distinct matching artifact rows, as the in-memory
  *  spec does (round 6, Codex F5; round 7: overlapping same-kind terms in a single member); the outer query joins `events` by its unique `(project, seq)` — `CROSS JOIN` so SQLite
  *  keeps the matched seqs as the outer loop instead of walking the project's events. `LIMIT` is `row_cap + 1`;
@@ -356,11 +366,11 @@ export function eventsReferencingArtifactsStatements(
 ): ArtifactIndexStatement[] {
   const maxTerms = Math.max(1, limits.maxTerms ?? ARTIFACT_INDEX_MAX_TERMS);
   const equals = new Set<string>();
-  const globs = new Set<string>();
+  const suffixes = new Set<string>();
   for (const k of q.artifact_keys) {
     const look = artifactLookup(k);
     for (const eq of look.equals) equals.add(eq);
-    if (look.glob) globs.add(look.glob);
+    if (look.suffix) suffixes.add(look.suffix);
   }
   const terms: ArtifactIndexTerm[] = [];
   for (const eq of equals) terms.push({ kind: "eq", value: eq });
@@ -368,12 +378,10 @@ export function eventsReferencingArtifactsStatements(
     const upper = prefixRangeUpperBound(prefix);
     terms.push(upper === undefined ? { kind: "unbounded", value: prefix } : { kind: "prefix", value: [prefix, upper] });
   }
-  for (const g of globs) {
-    // SQLite only turns GLOB into a key range for a literal or bound pattern, not for a json_each column, so bind the
-    // range of the pattern's literal prefix explicitly (`repo:` … `repo;` for the alias globs) and keep GLOB as the filter.
-    const literal = globLiteralPrefix(g);
-    const upper = prefixRangeUpperBound(literal);
-    terms.push(upper === undefined ? { kind: "glob_unbounded", value: g } : { kind: "glob", value: [literal, upper, g] });
+  const aliasUpper = prefixRangeUpperBound(ALIAS_KEY_RANGE_LO);
+  if (suffixes.size && aliasUpper === undefined) throw new Error("eventsReferencingArtifactsStatements: alias suffix range must stay bounded so the key index applies");
+  for (const suffix of suffixes) {
+    terms.push({ kind: "suffix", value: [ALIAS_KEY_RANGE_LO, aliasUpper!, suffix] });
   }
 
   // DISTINCT inside every member: overlapping terms of one kind (prefixes `x`, `x:`, `x:o`) reach the same (seq, artifact_key)
@@ -384,15 +392,14 @@ export function eventsReferencingArtifactsStatements(
     eq: `${member}i.artifact_key = t.value AND i.seq > w.after_seq AND i.seq <= w.through_seq`,
     prefix: `${member}i.artifact_key >= json_extract(t.value, '$[0]') AND i.artifact_key < json_extract(t.value, '$[1]') AND i.seq > w.after_seq AND i.seq <= w.through_seq`,
     unbounded: `${member}i.artifact_key >= t.value AND i.seq > w.after_seq AND i.seq <= w.through_seq`,
-    glob: `${member}i.artifact_key >= json_extract(t.value, '$[0]') AND i.artifact_key < json_extract(t.value, '$[1]') AND i.seq > w.after_seq AND i.seq <= w.through_seq AND i.artifact_key GLOB json_extract(t.value, '$[2]')`,
-    glob_unbounded: `${member}i.seq > w.after_seq AND i.seq <= w.through_seq AND i.artifact_key GLOB t.value`,
+    suffix: `${member}i.artifact_key >= json_extract(t.value, '$[0]') AND i.artifact_key < json_extract(t.value, '$[1]') AND i.seq > w.after_seq AND i.seq <= w.through_seq AND substr(i.artifact_key, -length(json_extract(t.value, '$[2]'))) = json_extract(t.value, '$[2]')`,
   };
   const statements: ArtifactIndexStatement[] = [];
   for (let at = 0; at < terms.length; at += maxTerms) {
     const batch = terms.slice(at, at + maxTerms);
     const members: string[] = [];
     const params: (string | number)[] = [q.project, q.after_seq, q.through_seq];
-    for (const kind of ["eq", "prefix", "unbounded", "glob", "glob_unbounded"] as const) {
+    for (const kind of ["eq", "prefix", "unbounded", "suffix"] as const) {
       const values = batch.filter((t) => t.kind === kind).map((t) => t.value);
       if (!values.length) continue;
       members.push(memberSql[kind]);
