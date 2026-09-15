@@ -1,4 +1,4 @@
-import { ArtifactIndexQuery, ArtifactIndexResult, ChainHead, Event, EventStore, HeadMovedError, HistoryQuery, HistoryPage, PendingDelivery, Share, artifactIndexRows, clampHistoryLimit, eventsReferencingArtifactsSql, historyPageFromNewestFirst, likeContains, policyDocumentFromRow, policySnapshotFromIndex, assertRouteWriteConsistent, RouteConflictError } from "@retrace-dev/core";
+import { ArtifactIndexQuery, ArtifactIndexResult, ChainHead, Event, EventStore, HeadMovedError, HistoryQuery, HistoryPage, PendingDelivery, Share, artifactIndexRows, clampHistoryLimit, runArtifactIndexStatements, ArtifactIndexHit, historyPageFromNewestFirst, likeContains, policyDocumentFromRow, policySnapshotFromIndex, assertRouteWriteConsistent, RouteConflictError } from "@retrace-dev/core";
 import type { BreakerRow, ClassificationContextRow, PolicyRouteRow, PolicySnapshot, PolicySnapshotBudget, PolicyWrite } from "@retrace-dev/core";
 
 export class D1Store implements EventStore {
@@ -135,25 +135,10 @@ export class D1Store implements EventStore {
   }
 
   async eventsReferencingArtifacts(q: ArtifactIndexQuery, now: () => number = Date.now): Promise<ArtifactIndexResult> {
-    if (now() >= q.deadline) return { ok: false, reason: "deadline" };
-    if (!q.artifact_keys.length && !q.artifact_prefixes?.length) return { ok: true, events: [] };
-    try {
-      const { sql, params } = eventsReferencingArtifactsSql(q);
-      const { results } = await this.db.prepare(sql).bind(...params).all<{ body: string }>();
-      if (now() >= q.deadline) return { ok: false, reason: "deadline" };
-      if (results.length > q.row_cap) return { ok: false, reason: "budget" };
-      const seen = new Set<string>();
-      const events: Event[] = [];
-      for (const r of results) {
-        const e = JSON.parse(r.body) as Event;
-        if (seen.has(e.id)) continue;
-        seen.add(e.id);
-        events.push(e);
-      }
-      return { ok: true, events };
-    } catch {
-      return { ok: false, reason: "store_error" };
-    }
+    return runArtifactIndexStatements(q, now, async ({ sql, params }) => {
+      const { results } = await this.db.prepare(sql).bind(...params).all<ArtifactIndexHit>();
+      return results;
+    });
   }
 
   async insertPendingDelivery(row: PendingDelivery) {

@@ -296,21 +296,45 @@ export function artifactKeyMatchSql(keys: string[]): { sql: string; params: stri
   return { sql: `(${parts.join(" OR ")})`, params };
 }
 
-/** Exclusive upper bound of the BINARY-collated key range that starts with `prefix`: the prefix with its last
- *  code unit incremented, so `artifact_key >= prefix AND artifact_key < bound` is an index range seek. */
-export function prefixRangeUpperBound(prefix: string): string {
-  if (!prefix) return "\uffff";
-  const last = prefix.charCodeAt(prefix.length - 1);
-  return last < 0xffff ? prefix.slice(0, -1) + String.fromCharCode(last + 1) : `${prefix}\uffff`;
+/** Exclusive upper bound of the BINARY-collated (UTF-8 byte order == code-point order) key range that starts with
+ *  `prefix`: the prefix with its last code point replaced by its successor, skipping the surrogate range and carrying
+ *  past U+10FFFF. `undefined` means the range is unbounded above (empty prefix, or every code point already U+10FFFF).
+ *  PR 51 round 6 (Codex F6): a UTF-16 code-unit increment produced lone surrogates and a false U+FFFF ceiling. */
+export function prefixRangeUpperBound(prefix: string): string | undefined {
+  const cps = Array.from(prefix);
+  for (let i = cps.length - 1; i >= 0; i--) {
+    let cp = cps[i]!.codePointAt(0)!;
+    if (cp >= 0x10ffff) continue;
+    cp += 1;
+    if (cp >= 0xd800 && cp <= 0xdfff) cp = 0xe000;
+    return cps.slice(0, i).join("") + String.fromCodePoint(cp);
+  }
+  return undefined;
 }
 
-/** One `UNION` member per lookup term, so each term takes its own index range instead of one predicate that the
- *  planner can only satisfy by walking the project's whole artifact index (PR 51 round 4, Codex F3):
- *  exact keys and literal prefixes seek `idx_eai_project_key_seq (project, artifact_key, seq)`; the owner-less alias
- *  globs from `artifactLookup` (`repo:*\/name#path`) cannot be seeked on the key and use the `(project, seq)` window,
- *  exactly as before this PR. The outer query joins `events` by its unique `(project, seq)`. Rows are deduplicated
- *  by the `UNION`; `row_cap + 1` bounds returned rows and the callers turn the overflow into `budget`. */
-export function eventsReferencingArtifactsSql(q: ArtifactIndexQuery): { sql: string; params: (string | number)[] } {
+/** Conservative per-statement limits: Cloudflare D1 documents 100 bound parameters per query; SQLite's default
+ *  SQLITE_MAX_COMPOUND_SELECT is 500 terms (PR 51 round 6, Codex F4). */
+export const ARTIFACT_INDEX_MAX_PARAMS = 90;
+export const ARTIFACT_INDEX_MAX_TERMS = 400;
+export interface ArtifactIndexStatement { sql: string; params: (string | number)[] }
+export interface ArtifactIndexHit { seq: number; artifact_key: string; body: string }
+
+/** Statements for `eventsReferencingArtifacts`, batched under the platform limits. Each statement binds the project
+ *  and the sequence window once through a one-row CTE and then one `UNION` member per lookup term, so every term
+ *  takes its own index range instead of one predicate the planner can only satisfy by walking the project's whole
+ *  artifact index (PR 51 round 4, Codex F3): exact keys seek `idx_eai_project_key_seq (project, artifact_key, seq)`;
+ *  literal prefixes are bound key ranges; the owner-less alias globs from `artifactLookup` (`repo:*\/name#path`) cannot
+ *  be seeked on the key and stay window-scoped as before this PR. Every member yields `(seq, artifact_key)` so the
+ *  row budget counts distinct matching artifact rows, as the in-memory spec does (round 6, Codex F5); the outer query
+ *  joins `events` by its unique `(project, seq)` — `CROSS JOIN` so SQLite keeps the matched seqs as the outer loop
+ *  instead of walking the project's events and probing the subquery. `LIMIT` is `row_cap + 1`; `runArtifactIndexStatements` enforces the
+ *  budget, deduplicates rows and events across batches and checks the deadline between them. */
+export function eventsReferencingArtifactsStatements(
+  q: ArtifactIndexQuery,
+  limits: { maxParams?: number; maxTerms?: number } = {},
+): ArtifactIndexStatement[] {
+  const maxParams = limits.maxParams ?? ARTIFACT_INDEX_MAX_PARAMS;
+  const maxTerms = limits.maxTerms ?? ARTIFACT_INDEX_MAX_TERMS;
   const equals = new Set<string>();
   const globs = new Set<string>();
   for (const k of q.artifact_keys) {
@@ -318,26 +342,78 @@ export function eventsReferencingArtifactsSql(q: ArtifactIndexQuery): { sql: str
     for (const eq of look.equals) equals.add(eq);
     if (look.glob) globs.add(look.glob);
   }
-  const prefixes = [...new Set(q.artifact_prefixes ?? [])];
-  const terms: string[] = [];
-  const params: (string | number)[] = [];
+  const terms: { sql: string; params: string[] }[] = [];
+  const member = "SELECT i.seq, i.artifact_key FROM w, event_artifact_index i WHERE i.project = w.project AND ";
   for (const eq of equals) {
-    terms.push("SELECT i.seq FROM event_artifact_index i WHERE i.project = ? AND i.artifact_key = ? AND i.seq > ? AND i.seq <= ?");
-    params.push(q.project, eq, q.after_seq, q.through_seq);
+    terms.push({ sql: `${member}i.artifact_key = ? AND i.seq > w.after_seq AND i.seq <= w.through_seq`, params: [eq] });
   }
-  for (const prefix of prefixes) {
-    terms.push("SELECT i.seq FROM event_artifact_index i WHERE i.project = ? AND i.artifact_key >= ? AND i.artifact_key < ? AND i.seq > ? AND i.seq <= ?");
-    params.push(q.project, prefix, prefixRangeUpperBound(prefix), q.after_seq, q.through_seq);
+  for (const prefix of [...new Set(q.artifact_prefixes ?? [])]) {
+    const upper = prefixRangeUpperBound(prefix);
+    terms.push(upper === undefined
+      ? { sql: `${member}i.artifact_key >= ? AND i.seq > w.after_seq AND i.seq <= w.through_seq`, params: [prefix] }
+      : { sql: `${member}i.artifact_key >= ? AND i.artifact_key < ? AND i.seq > w.after_seq AND i.seq <= w.through_seq`, params: [prefix, upper] });
   }
   for (const g of globs) {
-    terms.push("SELECT i.seq FROM event_artifact_index i WHERE i.project = ? AND i.seq > ? AND i.seq <= ? AND i.artifact_key GLOB ?");
-    params.push(q.project, q.after_seq, q.through_seq, g);
+    terms.push({ sql: `${member}i.seq > w.after_seq AND i.seq <= w.through_seq AND i.artifact_key GLOB ?`, params: [g] });
   }
-  if (!terms.length) return { sql: "SELECT body FROM events WHERE 0", params: [] };
-  return {
-    sql: `SELECT e.body FROM events e WHERE e.project = ? AND e.seq IN (${terms.join(" UNION ")}) ORDER BY e.seq ASC LIMIT ?`,
-    params: [q.project, ...params, q.row_cap + 1],
+  const fixedParams = 5; // CTE project, after_seq, through_seq; join project; LIMIT
+  const statements: ArtifactIndexStatement[] = [];
+  let batch: { sql: string; params: string[] }[] = [];
+  let batchParams = 0;
+  const flush = () => {
+    if (!batch.length) return;
+    statements.push({
+      sql: `WITH w(project, after_seq, through_seq) AS (SELECT ?, ?, ?) SELECT e.body, m.seq, m.artifact_key FROM (${batch.map((t) => t.sql).join(" UNION ")}) m CROSS JOIN events e ON e.project = ? AND e.seq = m.seq ORDER BY m.seq ASC, m.artifact_key ASC LIMIT ?`,
+      params: [q.project, q.after_seq, q.through_seq, ...batch.flatMap((t) => t.params), q.project, q.row_cap + 1],
+    });
+    batch = [];
+    batchParams = 0;
   };
+  for (const t of terms) {
+    if (batch.length && (batch.length >= maxTerms || fixedParams + batchParams + t.params.length > maxParams)) flush();
+    batch.push(t);
+    batchParams += t.params.length;
+  }
+  flush();
+  return statements;
+}
+
+/** Single-statement form for callers that know their query is small; throws when batching would be required. */
+export function eventsReferencingArtifactsSql(q: ArtifactIndexQuery): ArtifactIndexStatement {
+  const statements = eventsReferencingArtifactsStatements(q);
+  if (statements.length !== 1) throw new Error(`eventsReferencingArtifactsSql: query needs ${statements.length} statements; use eventsReferencingArtifactsStatements`);
+  return statements[0]!;
+}
+
+/** Shared driver for the SQL stores: runs the batched statements in order, checks the deadline between them, counts
+ *  distinct matching `(seq, artifact_key)` rows against `row_cap` exactly as `eventsReferencingArtifactKeys` does,
+ *  and returns deduplicated events in sequence order. `exec` is the store's own way of running one statement. */
+export async function runArtifactIndexStatements(
+  q: ArtifactIndexQuery,
+  now: () => number,
+  exec: (statement: ArtifactIndexStatement) => Promise<ArtifactIndexHit[]>,
+): Promise<ArtifactIndexResult> {
+  if (now() >= q.deadline) return { ok: false, reason: "deadline" };
+  if (!q.artifact_keys.length && !q.artifact_prefixes?.length) return { ok: true, events: [] };
+  const seenRows = new Set<string>();
+  const bySeq = new Map<number, Event>();
+  try {
+    for (const statement of eventsReferencingArtifactsStatements(q)) {
+      if (now() >= q.deadline) return { ok: false, reason: "deadline" };
+      const rows = await exec(statement);
+      if (now() >= q.deadline) return { ok: false, reason: "deadline" };
+      for (const r of rows) {
+        const rowKey = `${r.seq}\u0000${r.artifact_key}`;
+        if (seenRows.has(rowKey)) continue;
+        seenRows.add(rowKey);
+        if (seenRows.size > q.row_cap) return { ok: false, reason: "budget" };
+        if (!bySeq.has(r.seq)) bySeq.set(r.seq, JSON.parse(r.body) as Event);
+      }
+    }
+  } catch {
+    return { ok: false, reason: "store_error" };
+  }
+  return { ok: true, events: [...bySeq.entries()].sort((a, b) => a[0] - b[0]).map(([, e]) => e) };
 }
 
 /** One-time D1 backfill. `artifact_key` is the stored artifact id (`artifactKey` is that identity). Idempotent. */
