@@ -711,13 +711,25 @@ test("F1: classifier amendment cascade matches v7 capture-boundary effectiveness
     idempotency_key: "git:capture",
     artifacts: [
       { id: `commit:acme/app@${SHA2.slice(0, 12)}`, role: "generated" },
-      { id: "repo:acme/app#a.ts", role: "generated" },
+      { id: "repo:acme/app#other.ts", role: "generated" },
     ],
     method: { tool: "git", params: {
       sha: SHA2, parents: [], raw_message: "capture\n\nRetrace-Actor: codex\n",
       author: { name: "Jordan", email: "jordan@example.com" }, sealed_by: "assert:git hook (assert)",
     } },
   }))).event;
+  await appendEvent(store, commitInput({
+    idempotency_key: `gh:push:acme/app:${SHA2}`,
+    tags: ["github", "push"],
+    artifacts: [
+      { id: `commit:acme/app@${SHA2.slice(0, 12)}`, role: "generated" },
+      { id: "repo:acme/app#a.ts", role: "generated" },
+    ],
+    method: { tool: "git", params: {
+      sha: SHA2, parents: [], raw_message: "capture\n\nRetrace-Actor: codex\n",
+      author: { name: "Jordan", email: "jordan@example.com" }, sealed_by: "webhook:github",
+    } },
+  }));
   const a = await edit("A", "pinned:A");
   const c = await edit("C", "pinned:C");
   const amend = async (target: typeof a, to: string, evidence: typeof a) => (await appendEvent(store, {

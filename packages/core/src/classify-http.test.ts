@@ -490,6 +490,42 @@ test("F8: an unsettled classification store operation is response-bounded", asyn
   assert.ok(elapsed >= 450 && elapsed < 1_500, `response took ${elapsed} ms`);
 });
 
+test("F8: admission, dedup, and outcome persistence share the delivery deadline", async () => {
+  for (const method of ["getBreaker", "byIdempotencyKey", "casBreaker"] as const) {
+    const { store, h } = handler();
+    await putPolicy(h);
+    const original = store[method].bind(store) as (...args: unknown[]) => Promise<unknown>;
+    let entered = false;
+    (store as any)[method] = async (...args: unknown[]) => {
+      if (method === "byIdempotencyKey" && !String(args[1]).startsWith("gh:push:")) return original(...args);
+      entered = true;
+      return new Promise(() => {});
+    };
+    const started = Date.now();
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const result = await Promise.race([
+      postPush(h, pushPayload(), `d-gap-${method}`).then(async (response) => ({
+        status: response.status,
+        body: await response.json() as { pending?: string[]; reason?: string },
+      })),
+      new Promise<{ timedOut: true }>((resolve) => {
+        timeout = setTimeout(() => resolve({ timedOut: true }), 2_400);
+      }),
+    ]).finally(() => {
+      if (timeout !== undefined) clearTimeout(timeout);
+    });
+    assert.equal("timedOut" in result, false, `${method} exceeded the delivery deadline`);
+    if ("timedOut" in result) continue;
+    assert.equal(result.status, 202);
+    assert.equal(result.body.reason, "deadline");
+    assert.deepEqual(result.body.pending, [SHA]);
+    assert.equal(entered, true);
+    assert.ok(Date.now() - started < 2_300);
+    assert.ok(await store.getPendingDelivery(`d-gap-${method}`));
+    assert.equal(store.events.filter((event) => event.action === "committed").length, 0);
+  }
+});
+
 test("F9/F10: drain budgets are per-sha and terminal/policy-off work stays durable", async () => {
   const { store, h } = handler();
   await putPolicy(h);

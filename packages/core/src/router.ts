@@ -68,6 +68,21 @@ function writeClientError(e: unknown): string | undefined {
 
 const enc = new TextEncoder();
 export const WEBHOOK_DELIVERY_DEADLINE_MS = 2_000;
+const DELIVERY_DEADLINE_EXPIRED = Symbol("delivery deadline expired");
+
+async function withinDeliveryDeadline<T>(work: Promise<T>, deadline: number): Promise<T | typeof DELIVERY_DEADLINE_EXPIRED> {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) return DELIVERY_DEADLINE_EXPIRED;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    work,
+    new Promise<typeof DELIVERY_DEADLINE_EXPIRED>((resolve) => {
+      timer = setTimeout(() => resolve(DELIVERY_DEADLINE_EXPIRED), remaining);
+    }),
+  ]).finally(() => {
+    if (timer !== undefined) clearTimeout(timer);
+  });
+}
 
 /** Constant-time compare: SHA-256 both sides then XOR, same loop as verifyGithubSignature (audit 2026-08-30). */
 export async function tokenEquals(a: string, b: string): Promise<boolean> {
@@ -520,7 +535,12 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
             return json({ error: "pending insert failed" }, 500);
           }
           const probeOwner = `${delivery ?? `probe:${repo}`}:${crypto.randomUUID()}`;
-          const admit = await webhookBreakerAdmission(store, project, Date.now(), probeOwner);
+          const admit = await withinDeliveryDeadline(
+            webhookBreakerAdmission(store, project, Date.now(), probeOwner),
+            deliveryDeadline,
+          );
+          if (admit === DELIVERY_DEADLINE_EXPIRED)
+            return json({ ok: true, pending: (payload.commits ?? []).map((c: any) => c.id), reason: "deadline" }, 202);
           if (admit === "pending") return json({ ok: true, pending: (payload.commits ?? []).map((c: any) => c.id), reason: "breaker_open" }, 202);
           probe = admit === "probe";
         }
@@ -534,38 +554,50 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
           if (mode === "shadow" && isGitCommitSeal(parsed.data)) {
             const remainingShas = () => inputs.slice(inputIndex).map((candidate) => String(candidate.method?.params?.sha ?? "")).filter(Boolean);
             if (Date.now() >= deliveryDeadline) {
-              await recordWebhookClassifyOutcome(store, project, "deadline", Date.now(), probe);
               return json({ ok: true, pending: remainingShas(), reason: "deadline" }, 202);
             }
             if (parsed.data.idempotency_key) {
-              const prior = await store.byIdempotencyKey(project, parsed.data.idempotency_key);
+              const prior = await withinDeliveryDeadline(
+                store.byIdempotencyKey(project, parsed.data.idempotency_key),
+                deliveryDeadline,
+              );
+              if (prior === DELIVERY_DEADLINE_EXPIRED)
+                return json({ ok: true, pending: remainingShas(), reason: "deadline" }, 202);
               if (prior) { results.push({ id: prior.id, seq: prior.seq, deduped: true }); continue; }
             }
-            let classifyTimer: ReturnType<typeof setTimeout> | undefined;
             const operationDeadline = Math.min(Date.now() + CLASSIFY_DEADLINE_MS, deliveryDeadline);
-            const remainingMs = Math.max(0, operationDeadline - Date.now());
-            const classified = await Promise.race([
+            const classified = await withinDeliveryDeadline(
               classifyCommitClaim({
                 store, input: parsed.data, producer: "github-push",
                 sealedBy: SEALED_BY_GITHUB_WEBHOOK, trailerPolicy: mode, canonicalR: repo,
                 deadline: operationDeadline,
               }),
-              new Promise<Awaited<ReturnType<typeof classifyCommitClaim>>>((resolve) => {
-                classifyTimer = setTimeout(() => resolve({ kind: "unavailable", reason: "deadline" }), remainingMs);
-              }),
-            ]).finally(() => {
-              if (classifyTimer !== undefined) clearTimeout(classifyTimer);
-            });
+              operationDeadline,
+            );
+            if (classified === DELIVERY_DEADLINE_EXPIRED)
+              return json({ ok: true, pending: remainingShas(), reason: "deadline" }, 202);
             if (classified.kind === "unavailable") {
               if (isShadowPush) {
                 const reason = classified.reason === "deadline" || classified.reason === "store_error" || classified.reason === "budget" ? classified.reason : "store_error";
-                await recordWebhookClassifyOutcome(store, project, reason, Date.now(), probe);
+                const recorded = await withinDeliveryDeadline(
+                  recordWebhookClassifyOutcome(store, project, reason, Date.now(), probe),
+                  deliveryDeadline,
+                );
                 pendingShas.push(...remainingShas());
-                return json({ ok: true, pending: [...new Set(pendingShas)].filter(Boolean), reason: classified.reason }, 202);
+                return json({
+                  ok: true,
+                  pending: [...new Set(pendingShas)].filter(Boolean),
+                  reason: recorded === DELIVERY_DEADLINE_EXPIRED ? "deadline" : classified.reason,
+                }, 202);
               }
             }
             if (isShadowPush && (classified.kind === "decision" || classified.kind === "legacy")) {
-              await recordWebhookClassifyOutcome(store, project, "ok", Date.now(), probe);
+              const recorded = await withinDeliveryDeadline(
+                recordWebhookClassifyOutcome(store, project, "ok", Date.now(), probe),
+                deliveryDeadline,
+              );
+              if (recorded === DELIVERY_DEADLINE_EXPIRED)
+                return json({ ok: true, pending: remainingShas(), reason: "deadline" }, 202);
               probe = false;
             }
             let toSeal = parsed.data;
@@ -592,7 +624,11 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
           }
         }
         if (isShadowPush) {
-          if (delivery && store.deletePendingDelivery) await store.deletePendingDelivery(delivery);
+          if (delivery && store.deletePendingDelivery) {
+            const deleted = await withinDeliveryDeadline(store.deletePendingDelivery(delivery), deliveryDeadline);
+            if (deleted === DELIVERY_DEADLINE_EXPIRED)
+              return json({ ok: true, pending: [], reason: "deadline" }, 202);
+          }
         }
         return json({ ok: true, event: ghEvent, project, logged: results }, 201);
       }

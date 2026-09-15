@@ -325,8 +325,8 @@ async function classifierLedgerAttributionContext(
       const existing = seals.get(seal.key);
       const value = existing ?? { key: seal.key, seq: seal.seq, paths: new Set<string>() };
       value.seq = Math.min(value.seq, seal.seq);
-      for (const artifact of seal.event.artifacts) {
-        const id = canonicalArtifact(artifact.id, seal.event.seq);
+      for (const artifactId of seal.paths) {
+        const id = canonicalArtifact(artifactId, seal.seq);
         if (id) value.paths.add(id);
       }
       seals.set(seal.key, value);
