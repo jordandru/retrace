@@ -52,3 +52,48 @@ Shadow was live 12 minutes; one commit attempted; zero classifications completed
 **Activation is therefore NOT proven**: no seal carrying `claim_decision` exists. The window restarts on
 a redeploy with a bounded amendment query; the census above stays the "before" for that restart, and a
 second start marker will be added here with its date.
+
+## Second start marker 2026-09-15 19:09:30Z — window RESTARTED (shadow live on the bounded classifier)
+
+- The P1 (`evt_e39d2f8ebea240f89bb74c3cd3e0042a`) is fixed by PR #51 "Bound classifier amendment scan",
+  merged as `bba3757db1aa7e81c9665b09e932eaf00606b54e` (merge go `evt_945d08b2c0c548268a4cb9f03e092304`;
+  gate of record `evt_0c55d1fdd25145238a841a9fc27ce676`): amendment candidates come from
+  `amendmentEventsUpTo` on the new D1 index `idx_events_amendment_candidates`, witness and capture windows
+  from `eventsReferencingArtifacts` (`json_each`-driven UNION members, `DISTINCT`, batched under workerd's
+  limits), dependencies by point reads; a store without the bounded methods fails closed. No `store.all()`
+  remains on the classify hot path.
+- Deploy order as three separate go's: D1 migrated (`evt_95a7fd6b9c0547fe8d39bf6f1758ed81`; index present
+  in `sqlite_master` before and after), Worker `retrace-api` version `66dcc89a-a453-4b97-a0b2-3084d255f83e`
+  deployed from `bba3757` (`evt_6070bf10349249e19c3fdad3a41245c6`; root 200, fresh export chain ok over
+  4,804 events), then `RETRACE_TRAILER_POLICY=shadow` set as a Worker secret, producing version
+  `4c290ab1-0e4d-44bd-a0b0-1d72867a34f5` at 19:09:30.766Z (`evt_e31755ee9821423fb9412d90bbe53a2a`).
+  **The window reopens at that secret-change event.** Project policy document present (digest
+  `97dc14693483c1d78ee885a8c45219757668e6a0987ba0c28583132b9abc910e`). One Worker still serves `retrace`
+  and `boxing-rpg` together.
+- The census in this note's first section remains the "before" for this restart; no new census is taken.
+- **Activation is not yet proven at the time of writing** (rule 0): the ledger holds zero seals carrying
+  `method.params.claim_decision` between the first window's revert and this marker. This note's own commit
+  is the first commit attempted under the restarted shadow; its outcome (a seal with `claim_decision`, or a
+  parked seal with an `unavailable` reason) is to be cited here by a dated addition, as before.
+
+## Addition 2026-09-15 19:21:48Z — window PAUSED a second time (policy reverted to off)
+
+This note's own commit `4416d2d0` was the first attempted under the restarted shadow. The hook's attempt
+(19:12:55Z) returned `503 classification_unavailable / store_error`, the seal was parked in
+`retrace-pending-seal`, and no classification completed. Not the deadline: the recorded probes of PR #51's
+bounded reads against production D1 took 4 ms (amendment candidates) and 7 ms (the artifact-index
+statement for this commit's keys) — observations supporting this diagnosis, not a latency guarantee — and
+the index and the policy document are present. Root cause, reproduced locally against the exported
+ledger and the production policy body (finding `evt_2a4dfb78f2744e8fa86bbbd670fafaf0`): the round-4
+strict full-OID resolution in `classifierCaptureSeals` (`packages/core/src/classify.ts` ~319) is applied
+to every `committed`/`merged` event naming a canonical-repo commit in the read set, including events the
+seal filter would never accept as a seal. The live ledger holds one — `evt_728c78b0091940c687f96b07b1f0bc89`
+(seq 2753, an MCP-logged 2026-09-09 correction for the trailer-less merge `9c3156b`, a 7-character
+reference and no `sha`) — inside the artifact window of amendment #2543's target, so every classification
+on `retrace` fails closed. Ten review rounds missed it because every test ledger is synthetic. On Jordan's
+go (`evt_e12e96bef5c4473ca632eb6804ba0e1c`) the policy was set back to `off` (Worker version
+`4fc02b5b-2f8c-4299-aa86-07354f7e64a5`, `evt_ecf9c31031cf41eba9ddd10927b60dfa`) and the parked seal
+replayed (`evt_8ce84cf1f7454e1da3f5bf9ef35f1a9d`). Shadow was live 12 minutes (19:09:30Z–19:21:48Z); one
+commit attempted; zero classifications completed; zero seals lost. **Activation remains NOT proven.** The
+window restarts on a redeploy in which the strict resolution applies only to seal-eligible events; the
+census above stays the "before"; a third start marker will be added here with its date.
