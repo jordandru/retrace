@@ -569,6 +569,75 @@ test("F8: a delayed append dedup read times out without a late seal", async () =
   assert.equal(store.events.filter((event) => event.action === "committed").length, 0, "released read must not seal late");
 });
 
+test("F8: an in-flight insert times out with pending retained and drain-accounted late success", async () => {
+  const { store, h } = handler();
+  await putPolicy(h);
+  const originalInsert = store.insert.bind(store);
+  let entered = false;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  store.insert = async (event) => {
+    if (event.action === "committed") {
+      entered = true;
+      await gate;
+    }
+    return originalInsert(event);
+  };
+  const originalDelete = store.deletePendingDelivery.bind(store);
+  let cleanupCalls = 0;
+  store.deletePendingDelivery = async (deliveryId) => {
+    cleanupCalls++;
+    return originalDelete(deliveryId);
+  };
+
+  const started = Date.now();
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const result = await Promise.race([
+    postPush(h, pushPayload(), "d-insert-gap").then(async (response) => ({
+      status: response.status,
+      body: await response.json() as { pending?: string[]; reason?: string },
+    })),
+    new Promise<{ timedOut: true }>((resolve) => {
+      timeout = setTimeout(() => resolve({ timedOut: true }), 2_400);
+    }),
+  ]).finally(() => {
+    if (timeout !== undefined) clearTimeout(timeout);
+  });
+  assert.equal("timedOut" in result, false, "insert exceeded the delivery deadline");
+  if ("timedOut" in result) {
+    release();
+    return;
+  }
+  assert.equal(result.status, 202);
+  assert.equal(result.body.reason, "deadline");
+  assert.deepEqual(result.body.pending, [SHA]);
+  assert.equal(entered, true);
+  assert.ok(Date.now() - started < 2_300);
+  assert.ok(await store.getPendingDelivery("d-insert-gap"));
+  assert.equal(cleanupCalls, 0);
+  assert.equal(store.events.filter((event) => event.action === "committed").length, 0);
+
+  release();
+  for (let attempt = 0; attempt < 50 && !store.events.some((event) => event.action === "committed"); attempt++)
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(store.events.filter((event) => event.action === "committed").length, 1);
+  assert.ok(await store.getPendingDelivery("d-insert-gap"), "normal request cleanup must stay stopped after timeout");
+  assert.equal(cleanupCalls, 0);
+  assert.ok(await store.byIdempotencyKey("p", `gh:push:acme/app:${SHA}`), "late seal must remain idempotently discoverable");
+
+  const originalUpdate = store.updatePendingDeliveryIfLeaseOwner.bind(store);
+  let savedOutcomes: string | undefined;
+  store.updatePendingDeliveryIfLeaseOwner = async (row, owner) => {
+    savedOutcomes = row.outcomes;
+    return originalUpdate(row, owner);
+  };
+  assert.deepEqual(await drainPendingGithubDeliveries(store, { trailerPolicy: "shadow" }), { drained: 1, failed: 0 });
+  assert.equal(store.events.filter((event) => event.action === "committed").length, 1, "drain must dedup the late insert");
+  assert.equal((JSON.parse(savedOutcomes!) as Record<string, { status: string }>)[SHA]?.status, "sealed");
+  assert.equal(cleanupCalls, 1, "only the drain may clean up after recording the outcome");
+  assert.equal(await store.getPendingDelivery("d-insert-gap"), null);
+});
+
 test("F9/F10: drain budgets are per-sha and terminal/policy-off work stays durable", async () => {
   const { store, h } = handler();
   await putPolicy(h);
@@ -718,6 +787,37 @@ test("F13: three real classifier timer expirations open the breaker", async () =
   assert.equal(fourth.status, 202, await fourth.clone().text());
   assert.equal((await fourth.json() as { reason?: string }).reason, "breaker_open");
   assert.equal(classifiers, 3, "open breaker must skip the fourth classification");
+});
+
+test("F19: expired outcome rejection is observed under default Node rejection handling", async () => {
+  const { store, h } = handler();
+  await putPolicy(h);
+  const originalLookup = store.byIdempotencyKey.bind(store);
+  const originalGetBreaker = store.getBreaker.bind(store);
+  let breakerCalls = 0;
+  store.byIdempotencyKey = async (...args) => {
+    if (String(args[1]).startsWith("gh:push:"))
+      await new Promise((resolve) => setTimeout(resolve, 1_650));
+    return originalLookup(...args);
+  };
+  store.eventsReferencingArtifacts = async () => new Promise(() => {});
+  store.getBreaker = async (...args) => {
+    if (++breakerCalls > 1) throw new Error("outcome read failed");
+    return originalGetBreaker(...args);
+  };
+  const logged: string[] = [];
+  const originalError = console.error;
+  console.error = (...args: unknown[]) => { logged.push(args.map(String).join(" ")); };
+  try {
+    const response = await postPush(h, pushPayload(), "d-expired-outcome");
+    assert.equal(response.status, 202, await response.clone().text());
+    assert.equal((await response.json() as { reason?: string }).reason, "deadline");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(breakerCalls, 2);
+    assert.ok(logged.some((line) => line.includes("outcome read failed")), "late rejection must be logged and swallowed");
+  } finally {
+    console.error = originalError;
+  }
 });
 
 test("F16 HTTP: duplicate delivery ids cannot execute the same half-open probe", async () => {

@@ -569,6 +569,20 @@ export class AppendDeadlineExceededError extends Error {
   }
 }
 
+export type AppendInsertOutcome =
+  | { inserted: true }
+  | { inserted: false; error: unknown };
+
+export class AppendInsertInFlightError extends AppendDeadlineExceededError {
+  readonly completion: Promise<AppendInsertOutcome>;
+
+  constructor(completion: Promise<AppendInsertOutcome>) {
+    super();
+    this.name = "AppendInsertInFlightError";
+    this.completion = completion;
+  }
+}
+
 export interface AppendEventOptions {
   /** Absolute wall-clock deadline. Store reads are raced individually so a timed-out append cannot later seal. */
   deadline?: number;
@@ -594,6 +608,42 @@ async function appendReadWithinDeadline<T>(read: () => Promise<T>, opts: AppendE
     ]);
     assertAppendDeadline(opts);
     return result;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+const APPEND_INSERT_DEADLINE_EXPIRED = Symbol("append insert deadline expired");
+
+async function appendInsertWithinDeadline(store: EventStore, event: Event, opts: AppendEventOptions): Promise<void> {
+  if (opts.deadline === undefined) {
+    await store.insert(event);
+    return;
+  }
+  assertAppendDeadline(opts);
+  const remaining = opts.deadline - (opts.now ?? Date.now)();
+  // This promise always fulfills, so a late insert rejection is observed even after the response deadline wins.
+  const completion: Promise<AppendInsertOutcome> = Promise.resolve()
+    .then(() => store.insert(event))
+    .then<AppendInsertOutcome, AppendInsertOutcome>(
+      () => ({ inserted: true }),
+      (error: unknown) => ({ inserted: false, error }),
+    );
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const outcome = await Promise.race([
+      completion,
+      new Promise<typeof APPEND_INSERT_DEADLINE_EXPIRED>((resolve) => {
+        timer = setTimeout(() => resolve(APPEND_INSERT_DEADLINE_EXPIRED), remaining);
+      }),
+    ]);
+    if (outcome === APPEND_INSERT_DEADLINE_EXPIRED) {
+      // The caller returns with durable pending state intact. If this insert later succeeds, its idempotency key
+      // lets the drain record it as sealed without appending a duplicate.
+      throw new AppendInsertInFlightError(completion);
+    }
+    if (!outcome.inserted) throw outcome.error;
+    assertAppendDeadline(opts);
   } finally {
     if (timer !== undefined) clearTimeout(timer);
   }
@@ -627,7 +677,7 @@ export async function appendEvent(
   assertAppendDeadline(opts);
   const event = await sealEvent(toSeal, head);
   assertAppendDeadline(opts);
-  await store.insert(event);
+  await appendInsertWithinDeadline(store, event, opts);
   return { event, deduped: false };
 }
 

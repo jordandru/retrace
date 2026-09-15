@@ -70,18 +70,41 @@ const enc = new TextEncoder();
 export const WEBHOOK_DELIVERY_DEADLINE_MS = 2_000;
 const DELIVERY_DEADLINE_EXPIRED = Symbol("delivery deadline expired");
 
+type DeliveryWorkOutcome<T> =
+  | { status: "fulfilled"; value: T }
+  | { status: "rejected"; reason: unknown };
+
+function logExpiredDeliveryRejection<T>(outcome: DeliveryWorkOutcome<T>): void {
+  if (outcome.status === "rejected")
+    console.error(`retrace-api: delivery work rejected after deadline: ${(outcome.reason as any)?.stack ?? outcome.reason}`);
+}
+
 async function withinDeliveryDeadline<T>(work: Promise<T>, deadline: number): Promise<T | typeof DELIVERY_DEADLINE_EXPIRED> {
+  // Observe both branches before checking the clock: callers pass already-started promises, including with no budget.
+  const settled: Promise<DeliveryWorkOutcome<T>> = work.then(
+    (value) => ({ status: "fulfilled", value }),
+    (reason: unknown) => ({ status: "rejected", reason }),
+  );
   const remaining = deadline - Date.now();
-  if (remaining <= 0) return DELIVERY_DEADLINE_EXPIRED;
+  if (remaining <= 0) {
+    void settled.then(logExpiredDeliveryRejection);
+    return DELIVERY_DEADLINE_EXPIRED;
+  }
   let timer: ReturnType<typeof setTimeout> | undefined;
-  return Promise.race([
-    work,
+  const outcome = await Promise.race([
+    settled,
     new Promise<typeof DELIVERY_DEADLINE_EXPIRED>((resolve) => {
       timer = setTimeout(() => resolve(DELIVERY_DEADLINE_EXPIRED), remaining);
     }),
   ]).finally(() => {
     if (timer !== undefined) clearTimeout(timer);
   });
+  if (outcome === DELIVERY_DEADLINE_EXPIRED) {
+    void settled.then(logExpiredDeliveryRejection);
+    return outcome;
+  }
+  if (outcome.status === "rejected") throw outcome.reason;
+  return outcome.value;
 }
 
 /** Constant-time compare: SHA-256 both sides then XOR, same loop as verifyGithubSignature (audit 2026-08-30). */
