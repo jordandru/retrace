@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createHandler, parseCredentials, Credential, EventStore, Event, Share, appendEvent, EventInput, verifyProject, ChainHead, HeadMovedError, schemaSurface, Location, Action, tokenEquals, parseGithubRepoProjects, resolveGithubProject, pageHistoryNewest, generateSigningKey, MemoryEventStore } from "./index.js";
+import { createHandler, parseCredentials, Credential, EventStore, Event, Share, appendEvent, EventInput, verifyProject, ChainHead, HeadMovedError, schemaSurface, Location, MethodParams, Action, tokenEquals, parseGithubRepoProjects, resolveGithubProject, pageHistoryNewest, generateSigningKey, MemoryEventStore } from "./index.js";
 
 const MemStore = MemoryEventStore;
 
@@ -505,6 +505,28 @@ test("schemaSurface is derived from the zod shapes, so it cannot drift from the 
   for (const f of ["session", "client", "ide", "workspace", "surface", "device", "system"]) assert.ok(surface.location.includes(f), f);
   for (const f of ["actor", "action", "artifacts", "location", "caused_by", "idempotency_key"]) assert.ok(surface.event.includes(f), f);
   assert.ok(surface.artifact.includes("role"));
+  assert.deepEqual(Object.keys(MethodParams.shape).sort(), ["reasoning_effort", "routing_event_id"]);
+});
+
+test("review method params stay optional and open while named routing fields are typed", () => {
+  assert.deepEqual(MethodParams.parse({}), {}, "old clients may omit both review fields");
+  assert.deepEqual(
+    MethodParams.parse({ arbitrary: { nested: true }, count: 3 }),
+    { arbitrary: { nested: true }, count: 3 },
+    "unrelated arbitrary params round-trip",
+  );
+  assert.deepEqual(
+    MethodParams.parse({ reasoning_effort: "high", routing_event_id: "evt_route" }),
+    { reasoning_effort: "high", routing_event_id: "evt_route" },
+  );
+  for (const invalid of [
+    { reasoning_effort: null },
+    { reasoning_effort: "" },
+    { routing_event_id: 17 },
+    { routing_event_id: "" },
+  ]) {
+    assert.equal(MethodParams.safeParse(invalid).success, false, JSON.stringify(invalid));
+  }
 });
 
 test("GET /api publishes the schema surface, unauthenticated, and it matches this build", async () => {
