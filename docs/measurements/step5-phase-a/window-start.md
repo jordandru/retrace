@@ -97,3 +97,17 @@ replayed (`evt_8ce84cf1f7454e1da3f5bf9ef35f1a9d`). Shadow was live 12 minutes (1
 commit attempted; zero classifications completed; zero seals lost. **Activation remains NOT proven.** The
 window restarts on a redeploy in which the strict resolution applies only to seal-eligible events; the
 census above stays the "before"; a third start marker will be added here with its date.
+
+## Third start marker 2026-09-15 21:08:49Z — window RESTARTED (PR #56 fix deployed)
+
+- The second pause's cause (`evt_2a4dfb78`: strict full-OID resolution vetoing on non-seal commit references)
+  is fixed by PR #56, merged as `97a6a27badc9` (`evt_2cb82595`; Codex `evt_6190db98`, cursor-agent last seat
+  `evt_a824fcbf`), with PR #55 recording the second start and pause (`2cf7988fdde0`, `evt_a334d2cf`).
+- No schema change this time. Worker `retrace-api` version `8fc6b82a-3534-4726-a141-82ee33c1002b` deployed from
+  main `2cf7988` (`evt_45b0bf77`; root 200, fresh export chain ok over 4,873 events), then
+  `RETRACE_TRAILER_POLICY=shadow` set as a Worker secret, producing version
+  `d995c8f5-4609-453a-9ec5-b8ccc0a47114` at 21:08:49.492Z (`evt_ad3c735b`). **The window reopens at that
+  secret-change event.** The census in the first section remains the "before".
+- **Activation is not yet proven at the time of writing** (rule 0). This note's own commit is the first attempted
+  under the third start; its outcome (a seal carrying `method.params.claim_decision`, or a parked seal with an
+  `unavailable` reason) is to be cited here by a dated addition, as before.
