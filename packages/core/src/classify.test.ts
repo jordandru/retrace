@@ -5,8 +5,8 @@ import {
   applyBreakerFailure, applyBreakerSuccess, breakerIsOpen, breakerShouldOpen, classifyCommitClaim,
   collectAttributionAmendments, createHandler, decideFromTable, emptyBreaker, prepareAttributionContext,
   recordWebhookClassifyOutcome, reconstructWithheldPayload, verifiedAttributionSnapshot,
-  webhookBreakerAdmission, wouldWrite,
-  type ClaimRecord, type EventInput, type HistoryQuery,
+  webhookBreakerAdmission, wouldWrite, DIAGNOSTIC_DETAIL_MAX, diagnosticDetail,
+  type ClaimRecord, type Diagnostic, type EventInput, type HistoryQuery,
 } from "./index.js";
 
 const OWNER = { authorization: "Bearer owner-token-long-enough" };
@@ -1446,4 +1446,106 @@ test("F18: bare-only and file-only evidence remains diagnostic, never a witness"
     assert.equal(got.record.decision.loose_hints, 1);
     assert.deepEqual(got.record.decision.witnesses, []);
   }
+});
+
+// --- Fail-closed diagnostics (observability only: a diagnostic never changes a result) ---
+
+function sink() {
+  const seen: Diagnostic[] = [];
+  return { seen, diag: (d: Diagnostic) => { seen.push(d); } };
+}
+
+test("diagnostics: a store without the bounded amendment read names the site and the condition", async () => {
+  const store = new MemoryEventStore();
+  await putPolicy(store);
+  (store as unknown as { amendmentEventsUpTo?: unknown }).amendmentEventsUpTo = undefined;
+  const s = sink();
+
+  const got = await classify(store, commitInput(), { diag: s.diag });
+  assert.deepEqual(got, { kind: "unavailable", reason: "store_error" });
+  assert.deepEqual(s.seen, [{
+    site: "classify.amendments.candidates",
+    reason: "store_error",
+    detail: "store has no amendmentEventsUpTo",
+  }]);
+});
+
+test("diagnostics: a throwing bounded read carries the exception text", async () => {
+  const store = new MemoryEventStore();
+  await putPolicy(store);
+  (store as unknown as { amendmentEventsUpTo?: unknown }).amendmentEventsUpTo = async () => {
+    throw new Error("D1_ERROR: no such index: idx_events_amendment_candidates");
+  };
+  const s = sink();
+
+  const got = await classify(store, commitInput({ files: ["a.ts"] }), { diag: s.diag });
+  assert.deepEqual(got, { kind: "unavailable", reason: "store_error" });
+  assert.deepEqual(s.seen, [{
+    site: "classify.amendments.candidates",
+    reason: "store_error",
+    detail: "Error: D1_ERROR: no such index: idx_events_amendment_candidates",
+  }]);
+});
+
+test("diagnostics: a store without the artifact index names the window read", async () => {
+  const store = new MemoryEventStore();
+  await putPolicy(store);
+  (store as unknown as { eventsReferencingArtifacts?: unknown }).eventsReferencingArtifacts = undefined;
+  const s = sink();
+
+  const got = await classify(store, commitInput({ files: ["a.ts"] }), { diag: s.diag });
+  assert.deepEqual(got, { kind: "unavailable", reason: "store_error" });
+  assert.deepEqual(s.seen, [{
+    site: "classify.window",
+    reason: "store_error",
+    detail: "store has no eventsReferencingArtifacts",
+  }]);
+});
+
+test("diagnostics: an exception the classifier does not catch itself reaches classify.outer", async () => {
+  const store = new MemoryEventStore();
+  await putPolicy(store);
+  store.head = async () => { throw new Error("boom"); };
+  const s = sink();
+
+  const got = await classify(store, commitInput(), { diag: s.diag });
+  assert.deepEqual(got, { kind: "unavailable", reason: "store_error" });
+  assert.deepEqual(s.seen, [{ site: "classify.outer", reason: "store_error", detail: "Error: boom" }]);
+});
+
+test("diagnostics: a sink that throws changes neither a failure nor a decision", async () => {
+  const diag = () => { throw new Error("the sink is broken"); };
+
+  const broken = new MemoryEventStore();
+  await putPolicy(broken);
+  (broken as unknown as { amendmentEventsUpTo?: unknown }).amendmentEventsUpTo = undefined;
+  assert.deepEqual(
+    await classify(broken, commitInput(), { diag }),
+    { kind: "unavailable", reason: "store_error" },
+  );
+
+  const healthy = new MemoryEventStore();
+  await putPolicy(healthy);
+  assert.equal((await classify(healthy, commitInput(), { diag })).kind, "decision");
+});
+
+test("diagnostics: a decision emits nothing", async () => {
+  const store = new MemoryEventStore();
+  await putPolicy(store);
+  const s = sink();
+
+  const got = await classify(store, commitInput(), { diag: s.diag });
+  assert.equal(got.kind, "decision", JSON.stringify(got));
+  assert.deepEqual(s.seen, []);
+});
+
+test("diagnostics: detail is one bounded line, never a stack", () => {
+  assert.equal(diagnosticDetail(new Error("a\n   b")), "Error: a b");
+  assert.equal(diagnosticDetail("plain"), "plain");
+  assert.equal(diagnosticDetail({ code: 7 }), '{"code":7}');
+  const long = diagnosticDetail("x".repeat(DIAGNOSTIC_DETAIL_MAX + 50));
+  assert.equal(long.length, DIAGNOSTIC_DETAIL_MAX + 1);
+  assert.ok(long.endsWith("\u2026"));
+  const stack = new Error("with a stack");
+  assert.ok(!diagnosticDetail(stack).includes("at "), "the stack never reaches the log line");
 });

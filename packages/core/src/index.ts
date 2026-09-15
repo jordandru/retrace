@@ -23,5 +23,6 @@ export * from "./commit-actor.js";
 export * from "./producer-sig.js";
 export * from "./attribution.js";
 export * from "./attribution-context.js";
+export * from "./diagnostics.js";
 
 export { generatesArtifact, artifactKey, artifactLookup, escapeGlobLiteral } from "./capture.js";

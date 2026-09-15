@@ -6,6 +6,7 @@
 import { Event, EventInput } from "./schema.js";
 import { newId, sealEvent, sha256Hex } from "./chain.js";
 import { ChainHead, EventStore, SEALED_BY_OWNER } from "./store.js";
+import { emitDiagnostic, type DiagnosticSink } from "./diagnostics.js";
 
 export const POLICY_PROFILE = "retrace-project-policy/1";
 export const POLICY_IDEMPOTENCY_PREFIX = "policy:";
@@ -544,6 +545,8 @@ export async function policySnapshotFromIndex(opts: {
   headSeq: number | undefined;
   getByActivationSeq: (project: string, throughSeq: number) => Promise<PolicyDocument | null>;
   getEvent: (id: string) => Promise<Event | null>;
+  /** Observability only: emitted when a read throws, so the caller's `store_error` has a cause. */
+  diag?: DiagnosticSink;
 }): Promise<PolicySnapshot> {
   const now = opts.budget?.now?.() ?? Date.now();
   if (opts.budget?.deadline !== undefined && now >= opts.budget.deadline)
@@ -556,7 +559,8 @@ export async function policySnapshotFromIndex(opts: {
     const act = await opts.getEvent(doc.envelope.activation.event_id);
     const activations = act && act.project === opts.project && act.seq <= u ? [act] : [];
     return { U: u, events: activations, activations, document: doc };
-  } catch {
+  } catch (error) {
+    emitDiagnostic(opts.diag, "policy.snapshot", "store_error", error);
     return { U: opts.U ?? -1, events: [], activations: [], unavailable: "store_error" };
   }
 }

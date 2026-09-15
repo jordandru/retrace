@@ -5,7 +5,8 @@ import {
   EventInput, Event, EventStore, Share, likeContains, clampHistoryLimit, HISTORY_LIMIT_MAX,
   pageHistoryNewest, collectHistory, asHistoryPage, explainEvent,
   artifactIndexRows, eventsReferencingArtifactKeys, artifactKeyMatchSql, BACKFILL_ARTIFACT_INDEX_SQL, eventsReferencingArtifactsSql, eventsReferencingArtifactsStatements, prefixRangeUpperBound, ARTIFACT_INDEX_MAX_TERMS, D1_MAX_BOUND_PARAMS, D1_MAX_COMPOUND_SELECT_TERMS,
-  ARTIFACT_INDEX_DEFAULT_ROW_CAP,
+  ARTIFACT_INDEX_DEFAULT_ROW_CAP, runArtifactIndexStatements,
+  type Diagnostic,
 } from "./index.js";
 
 class MemStore implements EventStore {
@@ -292,4 +293,33 @@ test("artifactKeyMatchSql and backfill SQL are bound, not interpolated; backfill
   assert.ok(match.params.includes("repo:*/retrace#b.ts"));
   assert.match(BACKFILL_ARTIFACT_INDEX_SQL, /INSERT OR IGNORE INTO event_artifact_index/);
   assert.match(BACKFILL_ARTIFACT_INDEX_SQL, /json_extract\(a\.value, '\$\.id'\)/);
+});
+
+test("runArtifactIndexStatements: a throwing statement still fails closed, and says why when a sink is passed", async () => {
+  const q = {
+    project: "p",
+    artifact_keys: ["repo:acme/app#a.ts"],
+    after_seq: -1,
+    through_seq: 10,
+    row_cap: ARTIFACT_INDEX_DEFAULT_ROW_CAP,
+    deadline: Date.now() + 60_000,
+  };
+  const boom = async () => { throw new Error("D1_ERROR: too many SQL variables"); };
+
+  const seen: Diagnostic[] = [];
+  assert.deepEqual(
+    await runArtifactIndexStatements(q, Date.now, boom, (d) => { seen.push(d); }),
+    { ok: false, reason: "store_error" },
+  );
+  assert.deepEqual(seen, [{
+    site: "store.artifact_index",
+    reason: "store_error",
+    detail: "Error: D1_ERROR: too many SQL variables",
+  }]);
+
+  // Without a sink the helper behaves exactly as before.
+  assert.deepEqual(
+    await runArtifactIndexStatements(q, Date.now, boom),
+    { ok: false, reason: "store_error" },
+  );
 });

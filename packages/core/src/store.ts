@@ -6,6 +6,7 @@ import { Event, EventInput } from "./schema.js";
 import { sealEvent, verifyChain, VerifyResult } from "./chain.js";
 import { markUntrustedText } from "./explain.js";
 import { artifactKey, artifactLookup, escapeGlobLiteral, sameArtifact } from "./capture.js";
+import { emitDiagnostic, type DiagnosticSink } from "./diagnostics.js";
 
 export interface HistoryQuery {
   project: string;
@@ -422,6 +423,8 @@ export async function runArtifactIndexStatements(
   q: ArtifactIndexQuery,
   now: () => number,
   exec: (statement: ArtifactIndexStatement) => Promise<ArtifactIndexHit[]>,
+  /** Observability only: emitted when a statement throws, so the caller's `store_error` has a cause. */
+  diag?: DiagnosticSink,
 ): Promise<ArtifactIndexResult> {
   if (now() >= q.deadline) return { ok: false, reason: "deadline" };
   if (!q.artifact_keys.length && !q.artifact_prefixes?.length) return { ok: true, events: [] };
@@ -440,7 +443,8 @@ export async function runArtifactIndexStatements(
         if (!bySeq.has(r.seq)) bySeq.set(r.seq, JSON.parse(r.body) as Event);
       }
     }
-  } catch {
+  } catch (error) {
+    emitDiagnostic(diag, "store.artifact_index", "store_error", error);
     return { ok: false, reason: "store_error" };
   }
   return { ok: true, events: [...bySeq.entries()].sort((a, b) => a[0] - b[0]).map(([, e]) => e) };

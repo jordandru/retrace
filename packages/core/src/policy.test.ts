@@ -7,8 +7,9 @@ import {
   canonicalPolicyV1, canonicalRepositoryR, compareUtf8, contextKey, eventPolicyRef, jcsSerialize,
   parseJsonRejectDuplicateKeys, policyDigestOf, policyHashObject, selectPolicyForContext,
   validatePolicyBody, validatePolicyEnvelope, verifyPolicySelectionOffline, POLICY_PROFILE,
-  PolicyDocument, evaluateActivation, localConfigDrift,
+  PolicyDocument, evaluateActivation, localConfigDrift, policySnapshotFromIndex,
 } from "./policy.js";
+import type { Diagnostic } from "./diagnostics.js";
 import { SEALED_BY_OWNER } from "./store.js";
 import { Event } from "./schema.js";
 
@@ -307,4 +308,27 @@ test("F14: localConfigDrift compares aliases, not only repository names", () => 
     repositories: [{ name: "acme/app", aliases: ["new"] }],
   }, body);
   assert.equal(match.drifted, false);
+});
+
+test("policySnapshotFromIndex: a throwing read still fails closed, and says why when a sink is passed", async () => {
+  const seen: Diagnostic[] = [];
+  const opts = {
+    project: "p",
+    U: 12,
+    headSeq: 12,
+    getByActivationSeq: async () => { throw new Error("D1_ERROR: network"); },
+    getEvent: async () => null,
+  };
+
+  assert.deepEqual(
+    await policySnapshotFromIndex({ ...opts, diag: (d: Diagnostic) => { seen.push(d); } }),
+    { U: 12, events: [], activations: [], unavailable: "store_error" },
+  );
+  assert.deepEqual(seen, [{ site: "policy.snapshot", reason: "store_error", detail: "Error: D1_ERROR: network" }]);
+
+  // Without a sink the helper behaves exactly as before.
+  assert.deepEqual(
+    await policySnapshotFromIndex(opts),
+    { U: 12, events: [], activations: [], unavailable: "store_error" },
+  );
 });
