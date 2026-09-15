@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Event } from "@retrace-dev/core";
-import { POLICY_PROFILE, SCHEMA_SQL, RouteConflictError, planPolicyPut } from "@retrace-dev/core";
+import { POLICY_PROFILE, SCHEMA_PENDING_LEASE_COLUMNS_SQL, SCHEMA_SQL, RouteConflictError, planPolicyPut } from "@retrace-dev/core";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { D1Store } from "./d1-store.js";
 
@@ -82,14 +85,14 @@ test("deleteProject deletes checkpoint, export-cache, artifact index and pending
 
   assert.deepEqual(
     deletes.map((statement) => statement.sql.match(/^DELETE FROM (\w+)/)?.[1]),
-    ["events", "event_artifacts", "event_artifact_index", "pending_deliveries", "shares", "checkpoints", "export_cache", "project_policies"],
+    ["events", "event_artifacts", "event_artifact_index", "pending_deliveries", "shares", "checkpoints", "export_cache", "project_policies", "classification_contexts", "classification_path_lowers", "classification_breakers"],
   );
   for (const statement of deletes) {
     assert.match(statement.sql, /EXISTS \(SELECT 1 FROM events WHERE id = \?\)$/);
     assert.deepEqual(statement.params, [project, audit.id]);
   }
   assert.deepEqual(deleted, {
-    events: 1, event_artifacts: 1, event_artifact_index: 1, pending_deliveries: 1, shares: 1, checkpoints: 1, export_cache: 1, project_policies: 1,
+    events: 1, event_artifacts: 1, event_artifact_index: 1, pending_deliveries: 1, shares: 1, checkpoints: 1, export_cache: 1, project_policies: 1, classification_contexts: 1, classification_path_lowers: 1, classification_breakers: 1,
   });
 });
 
@@ -260,4 +263,88 @@ test("Codex-D1: a lost route CAS aborts the batch — loser has no policy row an
   assert.equal((await store.getPolicyRoute("acme/shared"))?.project, "a");
   assert.ok(await store.getPolicy("a", { current: true }));
   assert.equal((await store.all("a")).length, 1);
+});
+
+test("A2 D1: two connections racing insert-if-absent keep one classification context", async () => {
+  const path = join(mkdtempSync(join(tmpdir(), "retrace-d1-ctx-")), "ledger.db");
+  const db1 = new DatabaseSync(path);
+  db1.exec(SCHEMA_SQL);
+  const db2 = new DatabaseSync(path);
+  const a = new D1Store(new SqliteD1(db1) as unknown as D1Database);
+  const b = new D1Store(new SqliteD1(db2) as unknown as D1Database);
+  const row = {
+    project: "p",
+    canonical_repo: "acme/app",
+    sha: "a".repeat(40),
+    read_head_seq: 3,
+    read_head_hash: "h".repeat(64),
+    policy_digest: "d".repeat(64),
+    first_producer: "git-hook" as const,
+    first_F_digest: "f".repeat(64),
+    first_claim_digest: "c".repeat(64),
+    classifier_profile: "trailer-consistency/1",
+    rollout_mode: "shadow",
+    amendment_snapshot: "[]",
+    per_path_lower: { "a.ts": 0 },
+    created_at: "2026-09-10T12:00:00.000Z",
+  };
+  const [r1, r2] = await Promise.all([
+    a.insertClassificationContextIfAbsent(row),
+    b.insertClassificationContextIfAbsent({ ...row, read_head_seq: 99 }),
+  ]);
+  assert.equal([r1, r2].filter((r) => r.inserted).length, 1);
+  assert.equal(r1.context.read_head_seq, r2.context.read_head_seq);
+});
+
+test("F11 D1: lease acquisition is atomic across connections and stale owners cannot complete", async () => {
+  const path = join(mkdtempSync(join(tmpdir(), "retrace-d1-lease-")), "ledger.db");
+  const db1 = new DatabaseSync(path);
+  db1.exec(SCHEMA_SQL);
+  for (const sql of SCHEMA_PENDING_LEASE_COLUMNS_SQL) db1.exec(sql);
+  const db2 = new DatabaseSync(path);
+  const a = new D1Store(new SqliteD1(db1) as unknown as D1Database);
+  const b = new D1Store(new SqliteD1(db2) as unknown as D1Database);
+  await a.insertPendingDelivery({
+    delivery_id: "delivery", project: "p", raw_body: "{}", received_at: "2026-09-10T12:00:00.000Z",
+    repo: "acme/app", routing_state: "received",
+  });
+  const [one, two] = await Promise.all([
+    a.claimPendingDeliveryLease("delivery", "owner-a", "2026-09-10T12:00:00.000Z", "2026-09-10T12:01:00.000Z"),
+    b.claimPendingDeliveryLease("delivery", "owner-b", "2026-09-10T12:00:00.000Z", "2026-09-10T12:01:00.000Z"),
+  ]);
+  assert.equal([one, two].filter(Boolean).length, 1);
+  const winner = one ? "owner-a" : "owner-b";
+  const loser = one ? "owner-b" : "owner-a";
+  const reclaimed = await b.claimPendingDeliveryLease("delivery", loser, "2026-09-10T12:01:01.000Z", "2026-09-10T12:02:01.000Z");
+  assert.equal(reclaimed?.lease_owner, loser);
+  assert.equal(await a.updatePendingDeliveryIfLeaseOwner({ ...(one ?? two)!, state: "done" }, winner), false);
+  assert.equal(await b.updatePendingDeliveryIfLeaseOwner({
+    ...reclaimed!, state: "terminal_failure", outcomes: '{"sha":{"status":"budget_failed","attempt_count":3}}',
+  }, loser), true);
+  assert.equal((await a.getPendingDelivery("delivery"))?.state, "terminal_failure");
+  assert.match((await a.getPendingDelivery("delivery"))?.outcomes ?? "", /budget_failed/);
+});
+
+test("F14 D1: breaker CAS rejects stale failure timestamps", async () => {
+  const path = join(mkdtempSync(join(tmpdir(), "retrace-d1-breaker-")), "ledger.db");
+  const db1 = new DatabaseSync(path);
+  db1.exec(SCHEMA_SQL);
+  const db2 = new DatabaseSync(path);
+  const a = new D1Store(new SqliteD1(db1) as unknown as D1Database);
+  const b = new D1Store(new SqliteD1(db2) as unknown as D1Database);
+  const initial = {
+    project: "p", state: "closed" as const, failures: 1,
+    failure_window_start: "2026-09-10T12:00:00.000Z", last_failure_at: "2026-09-10T12:00:00.000Z",
+    opened_at: null, probe_lease_until: null, probe_lease_owner: null,
+  };
+  assert.equal(await a.casBreaker(null, initial), true);
+  const stale = await a.getBreaker("p");
+  assert.ok(stale);
+  const moved = {
+    ...initial, failures: 2,
+    last_failure_at: "2026-09-10T12:01:00.000Z",
+  };
+  assert.equal(await b.casBreaker(stale, moved), true);
+  assert.equal(await a.casBreaker(stale, { ...moved, failures: 3 }), false);
+  assert.equal((await a.getBreaker("p"))?.failures, 2);
 });

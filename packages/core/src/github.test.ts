@@ -68,3 +68,25 @@ test("REST backfill mapping orders events and signature verifies", async () => {
   // every mapped event validates against the schema
   for (const e of evs) EventInput.parse(e);
 });
+
+test("F17: push mapping records explicit parents and never invents ancestry from array order", () => {
+  const x = "0".repeat(40), a = "1".repeat(40), b = "2".repeat(40), merge = "3".repeat(40);
+  const commit = (id: string, parents?: string[]) => ({
+    id, message: "work", timestamp: "2026-09-10T12:00:00.000Z",
+    author: { name: "Jordan", email: "jordan@example.com" },
+    added: [], modified: [], removed: [], ...(parents ? { parents } : {}),
+  });
+  const mapped = mapGithubWebhook("push", {
+    before: "f".repeat(40), ref: "refs/heads/main", repository: { full_name: "acme/app" },
+    commits: [commit(a, [x]), commit(b, [x]), commit(merge, [a, b])],
+  }, { includePush: true });
+  assert.deepEqual(mapped.map((event) => event.method?.params?.parents), [[x], [x], [a, b]]);
+  assert.deepEqual(mapped.map((event) => event.method?.params?.parents_complete), [true, true, true]);
+
+  const forcePush = mapGithubWebhook("push", {
+    before: "e".repeat(40), forced: true, ref: "refs/heads/main", repository: { full_name: "acme/app" },
+    commits: [commit(a), commit(b), commit(merge)],
+  }, { includePush: true });
+  assert.deepEqual(forcePush.map((event) => event.method?.params?.parents), [[], [], []]);
+  assert.deepEqual(forcePush.map((event) => event.method?.params?.parents_complete), [false, false, false]);
+});

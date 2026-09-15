@@ -5,9 +5,11 @@
 import { Event } from "./schema.js";
 import {
   ArtifactIndexQuery, ArtifactIndexResult, ChainHead, EventStore, HeadMovedError, HistoryQuery, HistoryPage,
-  PendingDelivery, Share, pageHistoryNewest,
+  PendingDelivery, Share, eventsReferencingArtifactKeys, pageHistoryNewest,
 } from "./store.js";
 import { PolicyDocument, PolicyRouteRow, PolicySnapshot, PolicySnapshotBudget, PolicyWrite, assertRouteWriteConsistent, policySnapshotFromIndex } from "./policy.js";
+import type { BreakerRow, ClassificationContextRow } from "./classify.js";
+import { sameBreaker } from "./classify.js";
 
 export class MemoryEventStore implements EventStore {
   events: Event[] = [];
@@ -15,6 +17,8 @@ export class MemoryEventStore implements EventStore {
   policies: PolicyDocument[] = [];
   routes = new Map<string, PolicyRouteRow>();
   pending: PendingDelivery[] = [];
+  contexts = new Map<string, ClassificationContextRow>();
+  breakers = new Map<string, BreakerRow>();
   private writeChain: Promise<void> = Promise.resolve();
 
   private enqueue<T>(fn: () => Promise<T> | T): Promise<T> {
@@ -51,9 +55,8 @@ export class MemoryEventStore implements EventStore {
     this.events.push(audit);
     return counts;
   }
-  async eventsReferencingArtifacts(q: ArtifactIndexQuery): Promise<ArtifactIndexResult> {
-    const events = this.events.filter((e) => e.project === q.project && e.seq > q.after_seq && e.seq <= q.through_seq);
-    return { ok: true, events };
+  async eventsReferencingArtifacts(q: ArtifactIndexQuery, now: () => number = Date.now): Promise<ArtifactIndexResult> {
+    return eventsReferencingArtifactKeys(this.events, q, now());
   }
   async insertPendingDelivery(row: PendingDelivery) {
     if (this.pending.some((p) => p.delivery_id === row.delivery_id)) return;
@@ -137,6 +140,77 @@ export class MemoryEventStore implements EventStore {
         throw err;
       }
     });
+  }
+
+  private ctxKey(project: string, repo: string, sha: string) { return `${project}\0${repo}\0${sha}`; }
+
+  async getClassificationContext(project: string, canonicalRepo: string, sha: string) {
+    return this.contexts.get(this.ctxKey(project, canonicalRepo, sha)) ?? null;
+  }
+  async insertClassificationContextIfAbsent(row: ClassificationContextRow) {
+    return this.enqueue(() => {
+      const k = this.ctxKey(row.project, row.canonical_repo, row.sha);
+      const existing = this.contexts.get(k);
+      if (existing) return { inserted: false, context: existing };
+      const stored = { ...row, per_path_lower: { ...row.per_path_lower } };
+      this.contexts.set(k, stored);
+      return { inserted: true, context: stored };
+    });
+  }
+  async ensureClassificationPathLowers(project: string, canonicalRepo: string, sha: string, derived: Record<string, number>) {
+    return this.enqueue(() => {
+      const k = this.ctxKey(project, canonicalRepo, sha);
+      const ctx = this.contexts.get(k);
+      if (!ctx) throw new Error("classification context missing");
+      for (const [path, lower] of Object.entries(derived)) {
+        if (ctx.per_path_lower[path] === undefined) ctx.per_path_lower[path] = lower;
+      }
+      return { ...ctx.per_path_lower };
+    });
+  }
+  async setClassificationLegacyDecision(project: string, canonicalRepo: string, sha: string, decision: unknown) {
+    const ctx = this.contexts.get(this.ctxKey(project, canonicalRepo, sha));
+    if (ctx) ctx.legacy_client_decision = JSON.stringify(decision);
+  }
+  async getBreaker(project: string) { return this.breakers.get(project) ?? null; }
+  async casBreaker(expected: BreakerRow | null, next: BreakerRow) {
+    return this.enqueue(() => {
+      const cur = this.breakers.get(next.project) ?? null;
+      if (!sameBreaker(cur, expected)) return false;
+      this.breakers.set(next.project, { ...next });
+      return true;
+    });
+  }
+  async listDrainablePendingDeliveries(nowIso: string, limit = 20) {
+    return this.pending
+      .filter((p) => p.routing_state !== "unresolved" && p.routing_state !== "pending_policy")
+      .filter((p) => p.state !== "done" && p.state !== "terminal_failure" && (!p.lease_until || p.lease_until <= nowIso))
+      .slice(0, limit);
+  }
+  async claimPendingDeliveryLease(delivery_id: string, owner: string, nowIso: string, untilIso: string) {
+    return this.enqueue(() => {
+      const i = this.pending.findIndex((p) => p.delivery_id === delivery_id);
+      if (i < 0) return null;
+      const row = this.pending[i]!;
+      if (row.routing_state === "unresolved" || row.routing_state === "pending_policy"
+        || row.state === "done" || row.state === "terminal_failure"
+        || (row.lease_until !== undefined && row.lease_until > nowIso)) return null;
+      const claimed = { ...row, lease_owner: owner, lease_until: untilIso };
+      this.pending[i] = claimed;
+      return { ...claimed };
+    });
+  }
+  async updatePendingDeliveryIfLeaseOwner(row: PendingDelivery, owner: string) {
+    return this.enqueue(() => {
+      const i = this.pending.findIndex((p) => p.delivery_id === row.delivery_id);
+      if (i < 0 || this.pending[i]!.lease_owner !== owner) return false;
+      this.pending[i] = { ...row };
+      return true;
+    });
+  }
+  async updatePendingDelivery(row: PendingDelivery) {
+    const i = this.pending.findIndex((p) => p.delivery_id === row.delivery_id);
+    if (i >= 0) this.pending[i] = row;
   }
 }
 

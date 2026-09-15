@@ -33,7 +33,7 @@ RETRACE_PUBLIC_URL = "https://retrace-api.slcwitit.workers.dev"
 
 # Hourly head checkpoints witnessed in Rekor (roadmap rung 2); handler = `scheduled` in src/index.ts
 [triggers]
-crons = ["7 * * * *"]
+crons = ["7 * * * *", "*/5 * * * *"]
 
 # Workers Logs (Workers Paid since 2026-09-06). Invocation logs + console output are retained by Cloudflare so a 5xx can
 # be read by its ref instead of inferred from timing. head_sampling_rate 1 = every request at this traffic level.

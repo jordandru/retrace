@@ -3,7 +3,10 @@ import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { appendEvent, sealEvent, verifyProject, EventInput, HeadMovedError, createHandler, POLICY_PROFILE } from "@retrace-dev/core";
+import {
+  appendEvent, sealEvent, verifyProject, EventInput, HeadMovedError, createHandler, POLICY_PROFILE,
+  recordWebhookClassifyOutcome,
+} from "@retrace-dev/core";
 import { SqliteStore } from "./sqlite-store.js";
 
 const ev = (over: Partial<EventInput>): EventInput => ({ project: "junk", actor: { type: "agent", id: "claude" }, action: "edited", artifacts: [{ id: "a" }], ...over });
@@ -52,7 +55,7 @@ test("SqliteStore.deleteProject: deletes + audit insert commit together", async 
   await appendEvent(store, ev({ project: "keep" }));
   await store.createShare({ id: "sh_1", project: "junk", created_at: "2026-08-20T00:00:00Z" });
   const counts = await store.deleteProject("junk", await audit(store), (await store.head("junk"))!);
-  assert.deepEqual(counts, { events: 2, event_artifacts: 3, event_artifact_index: 3, pending_deliveries: 0, shares: 1, project_policies: 0 });
+  assert.deepEqual(counts, { events: 2, event_artifacts: 3, event_artifact_index: 3, pending_deliveries: 0, shares: 1, project_policies: 0, classification_contexts: 0, classification_path_lowers: 0, classification_breakers: 0 });
   assert.deepEqual(await store.projects(), ["keep", "ops"]);
   assert.equal((await store.all("ops")).length, 1);
   assert.equal((await verifyProject(store, "ops")).ok, true);
@@ -83,7 +86,7 @@ test("SqliteStore.deleteProject: a head that moved since the audit was sealed th
   assert.equal((await store.all("ops")).length, 0);
   // retry with the fresh head succeeds
   const counts = await store.deleteProject("junk", await audit(store), (await store.head("junk"))!);
-  assert.deepEqual(counts, { events: 2, event_artifacts: 2, event_artifact_index: 2, pending_deliveries: 0, shares: 1, project_policies: 0 });
+  assert.deepEqual(counts, { events: 2, event_artifacts: 2, event_artifact_index: 2, pending_deliveries: 0, shares: 1, project_policies: 0, classification_contexts: 0, classification_path_lowers: 0, classification_breakers: 0 });
   assert.equal((await store.all("ops")).length, 1);
 });
 
@@ -227,4 +230,75 @@ test("F15: readPolicySnapshot uses indexed getPolicyByActivationSeq, not all()",
   store.getPolicyByActivationSeq = async () => { throw new Error("disk on fire"); };
   const snap = await store.readPolicySnapshot("p", 0);
   assert.equal(snap.unavailable, "store_error");
+});
+
+test("A2: two SqliteStore connections racing insert-if-absent keep one context row", async () => {
+  const path = join(mkdtempSync(join(tmpdir(), "retrace-ctx-")), "ledger.db");
+  const a = new SqliteStore(path);
+  const b = new SqliteStore(path);
+  const row = {
+    project: "p",
+    canonical_repo: "acme/app",
+    sha: "a".repeat(40),
+    read_head_seq: 3,
+    read_head_hash: "h".repeat(64),
+    policy_digest: "d".repeat(64),
+    first_producer: "git-hook" as const,
+    first_F_digest: "f".repeat(64),
+    first_claim_digest: "c".repeat(64),
+    classifier_profile: "trailer-consistency/1",
+    rollout_mode: "shadow",
+    amendment_snapshot: "[]",
+    per_path_lower: { "a.ts": 0 },
+    created_at: "2026-09-10T12:00:00.000Z",
+  };
+  const later = { ...row, read_head_seq: 99, per_path_lower: { "a.ts": 8 } };
+  const [r1, r2] = await Promise.all([
+    a.insertClassificationContextIfAbsent(row),
+    b.insertClassificationContextIfAbsent(later),
+  ]);
+  assert.equal([r1, r2].filter((r) => r.inserted).length, 1);
+  assert.equal(r1.context.read_head_seq, r2.context.read_head_seq);
+  const got = await a.getClassificationContext("p", "acme/app", row.sha);
+  assert.equal(got?.read_head_seq, r1.context.read_head_seq);
+});
+
+test("F11 SQLite: two connections elect one lease owner; expiry reclaims and stale completion loses", async () => {
+  const path = join(mkdtempSync(join(tmpdir(), "retrace-lease-")), "ledger.db");
+  const a = new SqliteStore(path);
+  const b = new SqliteStore(path);
+  await a.insertPendingDelivery({
+    delivery_id: "delivery", project: "p", raw_body: "{}", received_at: "2026-09-10T12:00:00.000Z",
+    repo: "acme/app", routing_state: "received",
+  });
+  const [one, two] = await Promise.all([
+    a.claimPendingDeliveryLease("delivery", "owner-a", "2026-09-10T12:00:00.000Z", "2026-09-10T12:01:00.000Z"),
+    b.claimPendingDeliveryLease("delivery", "owner-b", "2026-09-10T12:00:00.000Z", "2026-09-10T12:01:00.000Z"),
+  ]);
+  assert.equal([one, two].filter(Boolean).length, 1);
+  const winner = one ? "owner-a" : "owner-b";
+  const loser = one ? "owner-b" : "owner-a";
+  assert.equal((one ?? two)!.lease_owner, winner);
+  const reclaim = await b.claimPendingDeliveryLease("delivery", loser, "2026-09-10T12:01:01.000Z", "2026-09-10T12:02:01.000Z");
+  assert.equal(reclaim?.lease_owner, loser);
+  assert.equal(await a.updatePendingDeliveryIfLeaseOwner({ ...(one ?? two)!, state: "done" }, winner), false);
+  assert.equal(await b.updatePendingDeliveryIfLeaseOwner({
+    ...reclaim!, state: "terminal_failure", outcomes: '{"sha":{"status":"budget_failed","attempt_count":3}}',
+  }, loser), true);
+  assert.equal((await a.getPendingDelivery("delivery"))?.state, "terminal_failure");
+  assert.match((await a.getPendingDelivery("delivery"))?.outcomes ?? "", /budget_failed/);
+});
+
+test("F14 SQLite: concurrent breaker outcomes from separate stores retry lost CAS updates", async () => {
+  const path = join(mkdtempSync(join(tmpdir(), "retrace-breaker-")), "ledger.db");
+  const a = new SqliteStore(path);
+  const b = new SqliteStore(path);
+  await Promise.all([
+    recordWebhookClassifyOutcome(a, "p", "deadline", 1_000, false),
+    recordWebhookClassifyOutcome(b, "p", "deadline", 1_001, false),
+    recordWebhookClassifyOutcome(a, "p", "deadline", 1_002, false),
+  ]);
+  const row = await b.getBreaker("p");
+  assert.equal(row?.failures, 3);
+  assert.equal(row?.state, "open");
 });

@@ -1,3 +1,4 @@
+export * from "./classify.js";
 export * from "./policy.js";
 export * from "./mem-store.js";
 export * from "./schema.js";

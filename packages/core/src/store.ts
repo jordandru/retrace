@@ -154,6 +154,22 @@ export interface EventStore {
   readPolicySnapshot?(project: string, U?: number, budget?: import("./policy.js").PolicySnapshotBudget): Promise<import("./policy.js").PolicySnapshot>;
   /** One transaction: activation event(s) + documents + route upserts. Throws HeadMovedError if a head raced. */
   applyPolicyWrite?(write: import("./policy.js").PolicyWrite, expectedHeads: Record<string, ChainHead | null>): Promise<void>;
+  /**
+   * Classification context (step 3). Absent methods fail closed — never "no context".
+   * RemoteStore must not stub these as empty: Worker classifies; local SQLite implements them.
+   */
+  getClassificationContext?(project: string, canonicalRepo: string, sha: string): Promise<import("./classify.js").ClassificationContextRow | null>;
+  insertClassificationContextIfAbsent?(row: import("./classify.js").ClassificationContextRow): Promise<{ inserted: boolean; context: import("./classify.js").ClassificationContextRow }>;
+  ensureClassificationPathLowers?(project: string, canonicalRepo: string, sha: string, derived: Record<string, number>): Promise<Record<string, number>>;
+  setClassificationLegacyDecision?(project: string, canonicalRepo: string, sha: string, decision: unknown): Promise<void>;
+  getBreaker?(project: string): Promise<import("./classify.js").BreakerRow | null>;
+  casBreaker?(expected: import("./classify.js").BreakerRow | null, next: import("./classify.js").BreakerRow): Promise<boolean>;
+  listDrainablePendingDeliveries?(nowIso: string, limit?: number): Promise<PendingDelivery[]>;
+  /** Atomically acquire an expired/unowned ready delivery lease and return the owned row. */
+  claimPendingDeliveryLease?(delivery_id: string, owner: string, nowIso: string, untilIso: string): Promise<PendingDelivery | null>;
+  /** Update outcomes/release only while `owner` still owns the live row. */
+  updatePendingDeliveryIfLeaseOwner?(row: PendingDelivery, owner: string): Promise<boolean>;
+  updatePendingDelivery?(row: PendingDelivery): Promise<void>;
 }
 
 /** One row of the §3.5 artifact index. `event_artifacts` remains the history join table (event_id, artifact_id). */
@@ -197,6 +213,11 @@ export interface PendingDelivery {
   routing_source?: string;
   routing_digest?: string;
   routing_state?: string;
+  lease_owner?: string;
+  lease_until?: string;
+  outcomes?: string;
+  attempt_count?: number;
+  state?: string;
 }
 
 /** Index rows for one event, keyed by `artifactKey` (same comparison identity as `sameArtifact`). */
@@ -383,6 +404,41 @@ CREATE TABLE IF NOT EXISTS policy_routes (
   set_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_policy_routes_project ON policy_routes(project);
+CREATE TABLE IF NOT EXISTS classification_contexts (
+  project TEXT NOT NULL,
+  canonical_repo TEXT NOT NULL,
+  sha TEXT NOT NULL,
+  read_head_seq INTEGER NOT NULL,
+  read_head_hash TEXT NOT NULL,
+  policy_digest TEXT NOT NULL,
+  first_producer TEXT NOT NULL,
+  first_F_digest TEXT NOT NULL,
+  first_claim_digest TEXT NOT NULL,
+  classifier_profile TEXT NOT NULL,
+  rollout_mode TEXT NOT NULL,
+  amendment_snapshot TEXT NOT NULL DEFAULT '[]',
+  legacy_client_decision TEXT,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (project, canonical_repo, sha)
+);
+CREATE TABLE IF NOT EXISTS classification_path_lowers (
+  project TEXT NOT NULL,
+  canonical_repo TEXT NOT NULL,
+  sha TEXT NOT NULL,
+  path TEXT NOT NULL,
+  lower_seq INTEGER NOT NULL,
+  PRIMARY KEY (project, canonical_repo, sha, path)
+);
+CREATE TABLE IF NOT EXISTS classification_breakers (
+  project TEXT PRIMARY KEY,
+  state TEXT NOT NULL CHECK (state IN ('closed','open')),
+  failures INTEGER NOT NULL DEFAULT 0,
+  failure_window_start TEXT,
+  last_failure_at TEXT,
+  opened_at TEXT,
+  probe_lease_until TEXT,
+  probe_lease_owner TEXT
+);
 `;
 
 /** Idempotent ALTERs for DBs whose pending_deliveries table predated routing columns. */
@@ -391,6 +447,15 @@ export const SCHEMA_PENDING_ROUTE_COLUMNS_SQL = [
   "ALTER TABLE pending_deliveries ADD COLUMN routing_source TEXT",
   "ALTER TABLE pending_deliveries ADD COLUMN routing_digest TEXT",
   "ALTER TABLE pending_deliveries ADD COLUMN routing_state TEXT",
+];
+
+/** Idempotent ALTERs for pending lease/outcome columns (step 3 drain). */
+export const SCHEMA_PENDING_LEASE_COLUMNS_SQL = [
+  "ALTER TABLE pending_deliveries ADD COLUMN lease_owner TEXT",
+  "ALTER TABLE pending_deliveries ADD COLUMN lease_until TEXT",
+  "ALTER TABLE pending_deliveries ADD COLUMN outcomes TEXT",
+  "ALTER TABLE pending_deliveries ADD COLUMN attempt_count INTEGER",
+  "ALTER TABLE pending_deliveries ADD COLUMN state TEXT",
 ];
 
 export function newShareId(): string {
@@ -503,25 +568,122 @@ export function adapterIdempotencyError(input: EventInput): string | undefined {
   return undefined;
 }
 
+export class AppendDeadlineExceededError extends Error {
+  constructor() {
+    super("append deadline exceeded");
+    this.name = "AppendDeadlineExceededError";
+  }
+}
+
+export type AppendInsertOutcome =
+  | { inserted: true }
+  | { inserted: false; error: unknown };
+
+export class AppendInsertInFlightError extends AppendDeadlineExceededError {
+  readonly completion: Promise<AppendInsertOutcome>;
+
+  constructor(completion: Promise<AppendInsertOutcome>) {
+    super();
+    this.name = "AppendInsertInFlightError";
+    this.completion = completion;
+  }
+}
+
+export interface AppendEventOptions {
+  /** Absolute wall-clock deadline. Store reads are raced individually so a timed-out append cannot later seal. */
+  deadline?: number;
+  now?: () => number;
+}
+
+function assertAppendDeadline(opts: AppendEventOptions): void {
+  if (opts.deadline !== undefined && (opts.now ?? Date.now)() >= opts.deadline)
+    throw new AppendDeadlineExceededError();
+}
+
+async function appendReadWithinDeadline<T>(read: () => Promise<T>, opts: AppendEventOptions): Promise<T> {
+  if (opts.deadline === undefined) return read();
+  assertAppendDeadline(opts);
+  const remaining = opts.deadline - (opts.now ?? Date.now)();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const result = await Promise.race([
+      read(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new AppendDeadlineExceededError()), remaining);
+      }),
+    ]);
+    assertAppendDeadline(opts);
+    return result;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+const APPEND_INSERT_DEADLINE_EXPIRED = Symbol("append insert deadline expired");
+
+async function appendInsertWithinDeadline(store: EventStore, event: Event, opts: AppendEventOptions): Promise<void> {
+  if (opts.deadline === undefined) {
+    await store.insert(event);
+    return;
+  }
+  assertAppendDeadline(opts);
+  const remaining = opts.deadline - (opts.now ?? Date.now)();
+  // This promise always fulfills, so a late insert rejection is observed even after the response deadline wins.
+  const completion: Promise<AppendInsertOutcome> = Promise.resolve()
+    .then(() => store.insert(event))
+    .then<AppendInsertOutcome, AppendInsertOutcome>(
+      () => ({ inserted: true }),
+      (error: unknown) => ({ inserted: false, error }),
+    );
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const outcome = await Promise.race([
+      completion,
+      new Promise<typeof APPEND_INSERT_DEADLINE_EXPIRED>((resolve) => {
+        timer = setTimeout(() => resolve(APPEND_INSERT_DEADLINE_EXPIRED), remaining);
+      }),
+    ]);
+    if (outcome === APPEND_INSERT_DEADLINE_EXPIRED) {
+      // The caller returns with durable pending state intact. If this insert later succeeds, its idempotency key
+      // lets the drain record it as sealed without appending a duplicate.
+      throw new AppendInsertInFlightError(completion);
+    }
+    if (!outcome.inserted) throw outcome.error;
+    assertAppendDeadline(opts);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 /** Append an event: idempotent, sealed onto the current chain head. */
-export async function appendEvent(store: EventStore, input: EventInput): Promise<{ event: Event; deduped: boolean }> {
+export async function appendEvent(
+  store: EventStore,
+  input: EventInput,
+  opts: AppendEventOptions = {},
+): Promise<{ event: Event; deduped: boolean }> {
   const reserved = adapterIdempotencyError(input);
   if (reserved) throw new AdapterIdempotencyError(reserved);
+  assertAppendDeadline(opts);
   let toSeal = input;
   if (input.caused_by) {
-    const parent = await store.get(input.caused_by);
+    const parent = await appendReadWithinDeadline(() => store.get(input.caused_by!), opts);
     const problem = causedByProblem(parent, input);
     // Keep the claimed link. Adapters (git hook, Drive) must not drop an event because a trailer is stale
     // or the instruct lives in another project/clone. retrace_log rejects instead (agent can retry).
     if (problem) toSeal = markCausedByUnverified(input, problem);
   }
   if (toSeal.idempotency_key) {
-    const existing = await store.byIdempotencyKey(toSeal.project, toSeal.idempotency_key);
+    const existing = await appendReadWithinDeadline(
+      () => store.byIdempotencyKey(toSeal.project, toSeal.idempotency_key!),
+      opts,
+    );
     if (existing) return { event: existing, deduped: true };
   }
-  const head = await store.head(toSeal.project);
+  const head = await appendReadWithinDeadline(() => store.head(toSeal.project), opts);
+  assertAppendDeadline(opts);
   const event = await sealEvent(toSeal, head);
-  await store.insert(event);
+  assertAppendDeadline(opts);
+  await appendInsertWithinDeadline(store, event, opts);
   return { event, deduped: false };
 }
 
