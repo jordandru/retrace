@@ -49,6 +49,22 @@ class FakeD1 {
   }
 }
 
+/** D1 documents 100 bound parameters per query and workerd sets SQLITE_LIMIT_COMPOUND_SELECT to 5; this double refuses
+ *  both, as production does (PR 51 round 6, Codex F4). `d1-store.workerd.test.ts` runs the same queries in workerd itself. */
+class LimitedD1 extends FakeD1 {
+  prepare(sql: string) {
+    const compoundTerms = (sql.match(/ UNION /g) ?? []).length + 1;
+    if (compoundTerms > 5) throw new Error("D1_ERROR: too many terms in compound SELECT: SQLITE_ERROR");
+    const stmt = super.prepare(sql);
+    const bind = stmt.bind.bind(stmt);
+    stmt.bind = (...params: unknown[]) => {
+      if (params.length > 100) throw new Error(`D1 parameter limit: ${params.length} > 100`);
+      return bind(...params);
+    };
+    return stmt;
+  }
+}
+
 const event: Event = {
   id: "evt_1",
   project: "retrace",
@@ -134,14 +150,48 @@ test("eventsReferencingArtifacts SQL joins the index, binds keys, and uses row_c
   });
   assert.equal(result.ok, true);
   const stmt = db.last!;
-  assert.match(stmt.sql, /JOIN event_artifact_index i ON i\.project = e\.project AND i\.seq = e\.seq/);
-  assert.match(stmt.sql, /i\.seq > \? AND i\.seq <= \?/);
-  assert.equal(stmt.params[0], "retrace");
-  assert.equal(stmt.params[1], 1);
-  assert.equal(stmt.params[2], 9);
-  assert.equal(stmt.params.at(-1), 21);
-  assert.ok(stmt.params.includes("repo:jordandru/retrace#a.ts"));
-  assert.ok(stmt.params.includes("repo:retrace#a.ts"));
+  assert.doesNotMatch(stmt.sql, /INDEXED BY/, "no forced index hint (PR 51 round 5, Codex F3)");
+  assert.match(stmt.sql, /^WITH w\(project, after_seq, through_seq\) AS \(SELECT \?, \?, \?\) SELECT e\.body, m\.seq, m\.artifact_key FROM \(SELECT DISTINCT i\.seq, i\.artifact_key FROM w CROSS JOIN json_each\(\?\) t CROSS JOIN event_artifact_index i WHERE i\.project = w\.project AND i\.artifact_key = t\.value AND i\.seq > w\.after_seq AND i\.seq <= w\.through_seq\) m CROSS JOIN events e ON e\.project = \? AND e\.seq = m\.seq ORDER BY m\.seq ASC, m\.artifact_key ASC LIMIT \?$/);
+  assert.doesNotMatch(stmt.sql, / UNION /, "one kind of term, one member");
+  assert.deepEqual(stmt.params, ["retrace", 1, 9, JSON.stringify(["repo:jordandru/retrace#a.ts", "repo:retrace#a.ts"]), "retrace", 21], "window bound once, owner/repo key and its basename alias in one JSON array, join project, row_cap + 1");
+});
+
+test("eventsReferencingArtifacts stays under D1's 100-parameter and 5-term compound limits on a four-file classifier query and batches 501 terms", async () => {
+  const db = new LimitedD1();
+  const store = new D1Store(db as unknown as D1Database);
+  const fourFiles = ["a.ts", "b.ts", "c.ts", "d.ts"].flatMap((f) => [`repo:acme/app#${f}`, `repo:app#${f}`, `repo:old-name#${f}`]);
+  const ok = await store.eventsReferencingArtifacts({ project: "retrace", artifact_keys: fourFiles, after_seq: -1, through_seq: 99, row_cap: 20_000, deadline: Date.now() + 5_000 });
+  assert.equal(ok.ok, true, "four files with two aliases must fit one statement (114 parameters in round 5, 28 compound terms in round 6)");
+  assert.equal(db.prepared.length, 1);
+  assert.equal(db.prepared[0]!.params.length, 7);
+  const many = await store.eventsReferencingArtifacts({ project: "retrace", artifact_keys: Array.from({ length: 501 }, (_, i) => `task:${i}`), after_seq: -1, through_seq: 99, row_cap: 20_000, deadline: Date.now() + 5_000 });
+  assert.equal(many.ok, true);
+  assert.equal(db.prepared.length, 3, "501 terms run as two statements of at most 400 terms");
+  for (const stmt of db.prepared) {
+    assert.ok(stmt.params.length <= 100);
+    assert.ok((stmt.sql.match(/ UNION /g) ?? []).length + 1 <= 5);
+  }
+});
+
+test("eventsReferencingArtifacts binds indexed literal prefixes for mixed commit-reference lengths", async () => {
+  const db = new FakeD1();
+  const store = new D1Store(db as unknown as D1Database);
+  const prefix = "commit:acme/app@abcdef0";
+  const result = await store.eventsReferencingArtifacts({
+    project: "retrace",
+    artifact_keys: [],
+    artifact_prefixes: [prefix],
+    after_seq: -1,
+    through_seq: 20,
+    row_cap: 10,
+    deadline: Date.now() + 5_000,
+  });
+  assert.equal(result.ok, true);
+  const stmt = db.last!;
+  assert.doesNotMatch(stmt.sql, /GLOB/, "a literal prefix is a bound key range, not a glob");
+  assert.match(stmt.sql, /i\.artifact_key >= json_extract\(t\.value, '\$\[0\]'\) AND i\.artifact_key < json_extract\(t\.value, '\$\[1\]'\)/);
+  assert.ok(stmt.params.includes(JSON.stringify([[prefix, "commit:acme/app@abcdef1"]])), "exclusive upper bound = prefix with its last code point incremented");
+  assert.equal(stmt.params.at(-1), 11);
 });
 
 test("eventsReferencingArtifacts returns typed over-budget on a past deadline without querying", async () => {
@@ -219,6 +269,37 @@ class SqliteD1 {
     }
   }
 }
+
+test("D1 shim amendmentEventsUpTo returns only attribution amendments at or below U", async () => {
+  const sqlite = new DatabaseSync(":memory:");
+  sqlite.exec(SCHEMA_SQL);
+  const store = new D1Store(new SqliteD1(sqlite) as unknown as D1Database);
+  const insert = (id: string, seq: number, over: Partial<Event>) => store.insert({
+    ...event,
+    id,
+    seq,
+    hash: String(seq).padStart(64, "0"),
+    ...over,
+  });
+  await insert("plain-amendment", 1, { action: "other", action_detail: "amended" });
+  await insert("method-amendment", 2, {
+    action: "other", action_detail: "amended", method: { params: { attribution: null } },
+  });
+  await insert("tag-amendment", 3, {
+    action: "other", action_detail: "amended", tags: ["attribution"],
+  });
+  await insert("wrong-action", 4, { action: "edited", tags: ["attribution"] });
+  await insert("above-u", 5, {
+    action: "other", action_detail: "amended", method: { params: { attribution: { from: "late" } } },
+  });
+
+  const got = await store.amendmentEventsUpTo("retrace", 3, 10);
+  assert.deepEqual(got.map((e) => e.id), ["method-amendment", "tag-amendment"]);
+  const many = await store.getMany(["above-u", "method-amendment", "missing", "method-amendment"]);
+  assert.deepEqual(many.map((e) => e.id).sort(), ["above-u", "method-amendment"]);
+  const indexes = sqlite.prepare("PRAGMA index_list(events)").all().map((r: any) => r.name);
+  assert.ok(indexes.includes("idx_events_amendment_candidates"));
+});
 
 test("Codex-D1: a lost route CAS aborts the batch — loser has no policy row and no activation", async () => {
   const sqlite = new DatabaseSync(":memory:");

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   appendEvent, sealEvent, verifyProject, EventInput, HeadMovedError, createHandler, POLICY_PROFILE,
-  recordWebhookClassifyOutcome,
+  eventsReferencingArtifactsSql, eventsReferencingArtifactsStatements, MemoryEventStore, recordWebhookClassifyOutcome,
 } from "@retrace-dev/core";
 import { SqliteStore } from "./sqlite-store.js";
 
@@ -23,6 +23,28 @@ test("SqliteStore: artifact role is body-only — survives insert → get/all/hi
   // the lookup index is untouched: one row per (event, artifact), nothing but ids
   const cols = (store as any).db.prepare("PRAGMA table_info(event_artifacts)").all().map((c: any) => c.name);
   assert.deepEqual(cols, ["event_id", "project", "artifact_id"]);
+});
+
+test("SqliteStore.amendmentEventsUpTo returns only attribution amendments at or below U", async () => {
+  const store = new SqliteStore(":memory:");
+  await appendEvent(store, ev({ action: "other", action_detail: "amended" }));
+  const method = (await appendEvent(store, ev({
+    action: "other", action_detail: "amended", method: { params: { attribution: null } },
+  }))).event;
+  const tag = (await appendEvent(store, ev({
+    action: "other", action_detail: "amended", tags: ["attribution"],
+  }))).event;
+  await appendEvent(store, ev({ action: "edited", tags: ["attribution"] }));
+  const above = (await appendEvent(store, ev({
+    action: "other", action_detail: "amended", method: { params: { attribution: { from: "late" } } },
+  }))).event;
+
+  const got = await store.amendmentEventsUpTo("junk", tag.seq, 10);
+  assert.deepEqual(got.map((e) => e.id), [method.id, tag.id]);
+  const many = await store.getMany([above.id, method.id, "missing", method.id]);
+  assert.deepEqual(many.map((e) => e.id).sort(), [above.id, method.id].sort());
+  const indexes = (store as any).db.prepare("PRAGMA index_list(events)").all().map((r: any) => r.name);
+  assert.ok(indexes.includes("idx_events_amendment_candidates"));
 });
 
 test("SqliteStore.history: % and _ in text are literals; LIMIT is bound and clamped", async () => {
@@ -124,6 +146,185 @@ test("SqliteStore writes event_artifact_index on insert and matches sameArtifact
     project: "junk", artifact_keys: ["a"], after_seq: -1, through_seq: 10, row_cap: 100, deadline: 0,
   }, () => 1);
   assert.deepEqual(deadline, { ok: false, reason: "deadline" });
+});
+
+test("SqliteStore artifact prefixes find abbreviated and full commit references", async () => {
+  const store = new SqliteStore(":memory:");
+  const sha = "a1234567890b".padEnd(40, "c");
+  for (const suffix of [sha.slice(0, 12), sha]) {
+    await appendEvent(store, ev({
+      action: "committed",
+      artifacts: [{ id: `commit:acme/app@${suffix}`, role: "generated" }],
+      method: { tool: "git", params: { sha } },
+    }));
+  }
+  const query = {
+    project: "junk",
+    artifact_keys: [],
+    artifact_prefixes: [`commit:acme/app@${sha.slice(0, 7)}`],
+    after_seq: -1,
+    through_seq: 10,
+    row_cap: 10,
+    deadline: Date.now() + 5_000,
+  };
+  const hit = await store.eventsReferencingArtifacts(query);
+  assert.equal(hit.ok, true);
+  if (hit.ok) assert.deepEqual(hit.events.map((e) => e.seq), [0, 1]);
+  const { sql, params } = eventsReferencingArtifactsSql(query);
+  const plan = (store as any).db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...params).map((row: any) => row.detail).join("\n");
+  assert.match(plan, /idx_eai_project_key_seq \(project=\? AND artifact_key>[?] AND artifact_key<[?]\)/);
+});
+
+test("SqliteStore artifact-index lookups are index range seeks on a populated store (PR 51 round 5, Codex F3)", async () => {
+  const store = new SqliteStore(":memory:");
+  const db = (store as any).db;
+  for (let i = 0; i < 5_000; i++) {
+    await appendEvent(store, ev({ action: "edited", artifacts: [{ id: `repo:acme/app#noise/${i}.ts`, role: "generated" }], intent: "n".repeat(1024) }));
+  }
+  const sha = "a1234567890b".padEnd(40, "c");
+  await appendEvent(store, ev({ action: "committed", artifacts: [{ id: `commit:acme/app@${sha.slice(0, 12)}`, role: "generated" }, { id: "repo:acme/app#other.ts", role: "generated" }], method: { tool: "git", params: { sha } } }));
+  await appendEvent(store, ev({ action: "edited", artifacts: [{ id: "repo:acme/app#a.ts", role: "generated" }] }));
+  await appendEvent(store, ev({ action: "committed", artifacts: [{ id: `commit:acme/app@${sha}`, role: "generated" }, { id: "repo:acme/app#a.ts", role: "generated" }], method: { tool: "git", params: { sha } } }));
+  const base = { project: "junk", after_seq: -1, through_seq: 10_000, row_cap: 20_000, deadline: Date.now() + 60_000 };
+  const shapes: Record<string, { query: any; expect: number[] }> = {
+    // the classifier's alias-expanded path predicate: owner/repo key, its basename alias, and an owner-less alias glob
+    aliasPath: { query: { ...base, artifact_keys: ["repo:acme/app#a.ts", "repo:app#a.ts", "repo:old-name#a.ts"] }, expect: [5001, 5002] },
+    // the producer-group query: three literal commit-reference prefixes
+    threePrefix: { query: { ...base, artifact_keys: [], artifact_prefixes: [`commit:acme/app@${sha.slice(0, 7)}`, `commit:app@${sha.slice(0, 7)}`, `commit:old-name@${sha.slice(0, 7)}`] }, expect: [5000, 5002] },
+    // the ordinary pre-PR single-key lookup
+    singleKey: { query: { ...base, artifact_keys: ["repo:acme/app#a.ts"] }, expect: [5001, 5002] },
+  };
+  for (const [name, { query, expect }] of Object.entries(shapes)) {
+    const statements = eventsReferencingArtifactsStatements(query);
+    assert.equal(statements.length, 1, `${name}: fits one statement`);
+    const { sql, params } = statements[0]!;
+    assert.doesNotMatch(sql, /INDEXED BY/, `${name}: no forced index hint`);
+    const plan: string[] = db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...params).map((row: any) => row.detail);
+    const indexSearches = plan.filter((line) => /SEARCH i /.test(line));
+    assert.ok(indexSearches.length >= 1, `${name}: at least one index term\n${plan.join("\n")}`);
+    for (const line of indexSearches) {
+      assert.match(line, /idx_eai_project_key_seq \(project=\? AND artifact_key[=>]/, `${name}: every artifact-index term seeks the key index\n${plan.join("\n")}`);
+    }
+    assert.ok(!plan.some((line) => /idx_eai_project_key_seq \(project=\?\)$/.test(line)), `${name}: no project-only index search\n${plan.join("\n")}`);
+    assert.ok(plan.some((line) => /SEARCH e USING INDEX \S+ \(project=\? AND seq=\?\)/.test(line)), `${name}: the events side is a unique (project, seq) probe\n${plan.join("\n")}`);
+    assert.ok(!plan.some((line) => /SEARCH e USING INDEX \S+ \(project=\?\)$/.test(line)), `${name}: no project-only walk of events\n${plan.join("\n")}`);
+    const started = Date.now();
+    const result = await store.eventsReferencingArtifacts(query);
+    const elapsed = Date.now() - started;
+    assert.equal(result.ok, true, name);
+    if (result.ok) assert.deepEqual(result.events.map((e) => e.seq), expect, name);
+    assert.ok(elapsed < 500, `${name}: ${elapsed} ms on 5,000 events must stay far inside the classifier budget`);
+  }
+});
+
+test("SqliteStore counts matching artifact rows, not events, against row_cap (PR 51 round 6, Codex F5)", async () => {
+  const store = new SqliteStore(":memory:");
+  const memory = new MemoryEventStore();
+  const input = ev({ artifacts: [{ id: "x:one", role: "generated" }, { id: "x:two", role: "generated" }] });
+  await appendEvent(store, input);
+  await appendEvent(memory, input);
+  const q = { project: "junk", artifact_keys: ["x:one", "x:two"], after_seq: -1, through_seq: 100, row_cap: 1, deadline: Date.now() + 5_000 };
+  assert.deepEqual(await store.eventsReferencingArtifacts(q), { ok: false, reason: "budget" }, "two matching artifacts on one event consume two budget units");
+  assert.deepEqual(await memory.eventsReferencingArtifacts(q), { ok: false, reason: "budget" });
+  const two = await store.eventsReferencingArtifacts({ ...q, row_cap: 2 });
+  assert.equal(two.ok, true);
+  if (two.ok) assert.equal(two.events.length, 1, "the event is returned once");
+  // the same artifact row reached through two overlapping terms (exact key + prefix) counts once
+  const overlap = await store.eventsReferencingArtifacts({ ...q, artifact_keys: ["x:one"], artifact_prefixes: ["x:on"], row_cap: 1 });
+  assert.equal(overlap.ok, true);
+});
+
+test("SqliteStore prefix ranges match exactly what the in-memory spec matches at Unicode edges (PR 51 round 6, Codex F6)", async () => {
+  const cases: [string, string, boolean][] = [
+    ["", "\u{1F600}", true],
+    ["x:\uffff", "x:\uffff\u{1F600}", true],
+    ["x:\uffff", "x:\uffff\uffff", true],
+    ["x:\ud7ff", "x:\ue000", false],
+    ["x:\u{1F600}", "x:\u{1F601}", false],
+    ["x:\u{10ffff}", "x:\u{10ffff}\u{10ffff}", true],
+    ["commit:acme/app@a12", "commit:acme/app@a12abc", true],
+    ["commit:acme/app@a12", "commit:acme/app@a13", false],
+  ];
+  for (const [prefix, key, expected] of cases) {
+    const store = new SqliteStore(":memory:");
+    const memory = new MemoryEventStore();
+    const input = ev({ artifacts: [{ id: key, role: "generated" }] });
+    await appendEvent(store, input);
+    await appendEvent(memory, input);
+    const q = { project: "junk", artifact_keys: [], artifact_prefixes: [prefix], after_seq: -1, through_seq: 100, row_cap: 10, deadline: Date.now() + 5_000 };
+    const sql = await store.eventsReferencingArtifacts(q);
+    const mem = await memory.eventsReferencingArtifacts(q);
+    assert.equal(sql.ok, true); assert.equal(mem.ok, true);
+    if (sql.ok && mem.ok) {
+      assert.equal(mem.events.length, expected ? 1 : 0, `memory spec for ${JSON.stringify(prefix)} vs ${JSON.stringify(key)}`);
+      assert.deepEqual(sql.events.map((e) => e.seq), mem.events.map((e) => e.seq), `SQLite must match the spec for ${JSON.stringify(prefix)} vs ${JSON.stringify(key)}`);
+    }
+  }
+});
+
+test("SqliteStore batches a 501-term lookup and keeps window, budget and deduplication across batches", async () => {
+  const store = new SqliteStore(":memory:");
+  for (let i = 0; i < 6; i++) await appendEvent(store, ev({ artifacts: [{ id: `task:${i}`, role: "generated" }] }));
+  const keys = Array.from({ length: 501 }, (_, i) => `task:${i}`);
+  const q = { project: "junk", artifact_keys: keys, after_seq: 0, through_seq: 4, row_cap: 10, deadline: Date.now() + 5_000 };
+  const statements = eventsReferencingArtifactsStatements(q);
+  assert.ok(statements.length > 1, "501 exact terms cannot fit one statement");
+  for (const st of statements) {
+    assert.ok(st.params.length <= 100, `params ${st.params.length}`);
+    assert.ok((st.sql.match(/ UNION /g) ?? []).length + 1 <= 5, "D1 allows five compound terms");
+    for (const p of st.params.slice(3, -2)) assert.ok((JSON.parse(p as string) as unknown[]).length <= 400);
+  }
+  const hit = await store.eventsReferencingArtifacts(q);
+  assert.equal(hit.ok, true);
+  if (hit.ok) assert.deepEqual(hit.events.map((e: { seq: number }) => e.seq), [1, 2, 3, 4], "window (0, 4] honoured across batches");
+  assert.deepEqual(await store.eventsReferencingArtifacts({ ...q, row_cap: 3 }), { ok: false, reason: "budget" }, "budget counted across batches");
+});
+
+test("SqliteStore matches the memory spec for keys that look like JSON numbers or contain JSON syntax", async () => {
+  const store = new SqliteStore(":memory:");
+  const memory = new MemoryEventStore();
+  const keys = ["123", "1e3", "0x1f", "true", "null", "[1]", "{\"a\":1}", "repo:acme/app#a \"quoted\" \\ path.ts", "line\nbreak"];
+  for (const id of keys) {
+    const e = ev({ artifacts: [{ id, role: "generated" }] });
+    await appendEvent(store, e);
+    await appendEvent(memory, e);
+  }
+  for (const [i, key] of keys.entries()) {
+    const q = { project: "junk", artifact_keys: [key], after_seq: -1, through_seq: 100, row_cap: 10, deadline: Date.now() + 5_000 };
+    const sql = await store.eventsReferencingArtifacts(q);
+    const mem = await memory.eventsReferencingArtifacts(q);
+    assert.equal(sql.ok, true); assert.equal(mem.ok, true);
+    if (sql.ok && mem.ok) {
+      assert.deepEqual(mem.events.map((e) => e.seq), [i], `memory spec finds ${JSON.stringify(key)}`);
+      assert.deepEqual(sql.events.map((e) => e.seq), mem.events.map((e) => e.seq), `json_each must hand ${JSON.stringify(key)} back as the same text`);
+    }
+    const prefixed = await store.eventsReferencingArtifacts({ ...q, artifact_keys: [], artifact_prefixes: [key.slice(0, 2)] });
+    const memPrefixed = await memory.eventsReferencingArtifacts({ ...q, artifact_keys: [], artifact_prefixes: [key.slice(0, 2)] });
+    assert.equal(prefixed.ok, true); assert.equal(memPrefixed.ok, true);
+    if (prefixed.ok && memPrefixed.ok) assert.deepEqual(prefixed.events.map((e) => e.seq), memPrefixed.events.map((e) => e.seq), `prefix ${JSON.stringify(key.slice(0, 2))}`);
+  }
+});
+
+test("SqliteStore folds overlapping prefixes of one kind before LIMIT so the budget and the result are complete (PR 51 round 7, Codex F5)", async () => {
+  const store = new SqliteStore(":memory:");
+  const memory = new MemoryEventStore();
+  for (const id of ["x:one", "x:two", "x:three"]) {
+    const input = ev({ artifacts: [{ id, role: "generated" }] });
+    await appendEvent(store, input);
+    await appendEvent(memory, input);
+  }
+  const q = { project: "junk", artifact_keys: [], artifact_prefixes: ["x", "x:", "x:o"], after_seq: -1, through_seq: 2, row_cap: 3, deadline: Date.now() + 5_000 };
+  const [only] = eventsReferencingArtifactsStatements(q);
+  assert.doesNotMatch(only!.sql, / UNION /, "one kind of term: a single member, nothing else deduplicates before LIMIT");
+  assert.deepEqual(await store.eventsReferencingArtifacts({ ...q, row_cap: 2 }), { ok: false, reason: "budget" }, "three distinct rows exceed row_cap 2");
+  assert.deepEqual(await memory.eventsReferencingArtifacts({ ...q, row_cap: 2 }), { ok: false, reason: "budget" });
+  const sql = await store.eventsReferencingArtifacts(q);
+  const mem = await memory.eventsReferencingArtifacts(q);
+  assert.equal(sql.ok, true); assert.equal(mem.ok, true);
+  if (sql.ok && mem.ok) {
+    assert.deepEqual(mem.events.map((e) => e.seq), [0, 1, 2]);
+    assert.deepEqual(sql.events.map((e) => e.seq), [0, 1, 2], "row_cap 3 returns every event, not the first event's duplicates");
+  }
 });
 
 test("SqliteStore backfills event_artifact_index once from existing events", async () => {

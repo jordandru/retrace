@@ -10,6 +10,7 @@ import {
 import { PolicyDocument, PolicyRouteRow, PolicySnapshot, PolicySnapshotBudget, PolicyWrite, assertRouteWriteConsistent, policySnapshotFromIndex } from "./policy.js";
 import type { BreakerRow, ClassificationContextRow } from "./classify.js";
 import { sameBreaker } from "./classify.js";
+import { isAttributionAmendment } from "./attribution-context.js";
 
 export class MemoryEventStore implements EventStore {
   events: Event[] = [];
@@ -37,7 +38,17 @@ export class MemoryEventStore implements EventStore {
   }
   async byIdempotencyKey(p: string, k: string) { return this.events.find((e) => e.project === p && e.idempotency_key === k) ?? null; }
   async get(id: string) { return this.events.find((e) => e.id === id) ?? null; }
+  async getMany(ids: string[]) {
+    const wanted = new Set(ids);
+    return this.events.filter((e) => wanted.has(e.id));
+  }
   async all(p: string) { return this.events.filter((e) => e.project === p).sort((a, b) => a.seq - b.seq); }
+  async amendmentEventsUpTo(p: string, throughSeq: number, limit: number) {
+    return this.events
+      .filter((e) => e.project === p && e.seq <= throughSeq && isAttributionAmendment(e))
+      .sort((a, b) => a.seq - b.seq || a.id.localeCompare(b.id))
+      .slice(0, limit);
+  }
   async projects() { return [...new Set(this.events.map((e) => e.project))]; }
   async history(q: HistoryQuery): Promise<HistoryPage> { return pageHistoryNewest(this.events, q); }
   async createShare(s: Share) { this.shares.set(s.id, s); }

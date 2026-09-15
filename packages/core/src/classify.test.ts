@@ -614,6 +614,37 @@ async function attributionFixture(store: MemoryEventStore, opts: {
   return { root: root.event, evidence: evidence.event, target: target.event, amend: amend.event };
 }
 
+async function fullV7Attribution(store: MemoryEventStore, commitFiles: Record<string, string[]> = {}) {
+  const events = await store.all("p");
+  const head = await store.head("p");
+  assert.ok(head);
+  const snapshot = await verifiedAttributionSnapshot(events, "p", head!);
+  const resolutions: Record<string, { repo: string; oid: string }> = {};
+  for (const event of events.filter((e) => e.action === "committed" || e.action === "merged")) {
+    const ref = event.artifacts.find((a) => a.id.startsWith("commit:"))?.id;
+    const sha = event.method?.params?.sha;
+    if (ref && typeof sha === "string") resolutions[ref] = { repo: "acme/app", oid: sha };
+  }
+  const context = await prepareAttributionContext(snapshot, {
+    profile: "retrace-attribution/1",
+    repositories: [{ name: "acme/app", aliases: ["app", "old-name"], from_seq: 0, hook_sealed_by: ["assert:git hook (assert)"] }],
+    non_git: [],
+  }, {
+    resolutions,
+    commits: Object.entries(commitFiles).map(([oid, files]) => ({
+      repo: "acme/app",
+      oid,
+      parents: [],
+      diff_profile: "first-parent-M-C/1" as const,
+      files: files.map((path) => ({ path, status: "M" })),
+    })),
+    excluded: [],
+    refs: [],
+    object_format: "sha1",
+  });
+  return collectAttributionAmendments(events, { snapshot, context });
+}
+
 test("T13: effective whole-event amendment excludes the target; snapshot is the effective set", async () => {
   const store = new MemoryEventStore();
   await putPolicy(store);
@@ -628,6 +659,214 @@ test("T13: effective whole-event amendment excludes the target; snapshot is the 
   const snap = JSON.parse(ctx.amendment_snapshot) as { effective?: { id: string; target: string }[]; unavailable?: string };
   assert.equal(snap.unavailable, undefined);
   assert.ok(snap.effective?.some((a) => a.id === amend.id && a.target === target.id));
+});
+
+test("bounded amendment lookup skips all() with 5,000 non-amendment events", async () => {
+  const store = new MemoryEventStore();
+  await putPolicy(store);
+  for (let i = 0; i < 5_000; i++) {
+    await appendEvent(store, {
+      project: "p",
+      actor: { type: "system", id: "noise" },
+      action: "executed",
+      artifacts: [{ id: `task:noise-${i}`, role: "used" }],
+      timestamp: "2026-09-10T10:00:00.000Z",
+    });
+  }
+  let allCalls = 0;
+  store.all = async () => {
+    allCalls++;
+    throw new Error("all() must not be called");
+  };
+  let boundedCalls = 0;
+  const bounded = store.amendmentEventsUpTo.bind(store);
+  store.amendmentEventsUpTo = async (...args) => {
+    boundedCalls++;
+    return bounded(...args);
+  };
+
+  const got = await classify(store, commitInput());
+  assert.equal(got.kind, "decision", JSON.stringify(got));
+  assert.equal(boundedCalls, 1);
+  assert.equal(allCalls, 0);
+});
+
+test("only amendmentEventsUpTo missing (eventsReferencingArtifacts present): fails closed as unavailable/store_error, never calls all()", async () => {
+  const store = new MemoryEventStore();
+  await putPolicy(store);
+  // all() answers (empty) rather than throwing: a fallback to it would produce a decision, not store_error.
+  let allCalls = 0;
+  store.all = async () => {
+    allCalls++;
+    return [];
+  };
+  (store as unknown as { amendmentEventsUpTo?: unknown }).amendmentEventsUpTo = undefined;
+
+  const got = await classify(store, commitInput());
+  assert.deepEqual(got, { kind: "unavailable", reason: "store_error" });
+  assert.equal(allCalls, 0);
+});
+
+test("only eventsReferencingArtifacts missing (amendmentEventsUpTo present): fails closed as unavailable/store_error, never calls all()", async () => {
+  const store = new MemoryEventStore();
+  await putPolicy(store);
+  let allCalls = 0;
+  store.all = async () => {
+    allCalls++;
+    return [];
+  };
+  (store as unknown as { eventsReferencingArtifacts?: unknown }).eventsReferencingArtifacts = undefined;
+
+  const got = await classify(store, commitInput({ files: ["a.ts"] }));
+  assert.deepEqual(got, { kind: "unavailable", reason: "store_error" });
+  assert.equal(allCalls, 0);
+});
+
+// A bounded method that is present but broken (throws, or returns a non-array) must fail closed too:
+// evaluateAmendmentsAtU catches its own read; everything else lands in classifyCommitClaim's outer catch.
+test("amendmentEventsUpTo throws: fails closed as unavailable/store_error, never calls all()", async () => {
+  const store = new MemoryEventStore();
+  await putPolicy(store);
+  let allCalls = 0;
+  store.all = async () => {
+    allCalls++;
+    return [];
+  };
+  (store as unknown as { amendmentEventsUpTo?: unknown }).amendmentEventsUpTo = async () => { throw new Error("boom"); };
+
+  const got = await classify(store, commitInput({ files: ["a.ts"] }));
+  assert.deepEqual(got, { kind: "unavailable", reason: "store_error" });
+  assert.equal(allCalls, 0);
+});
+
+test("eventsReferencingArtifacts throws: fails closed as unavailable/store_error, never calls all()", async () => {
+  const store = new MemoryEventStore();
+  await putPolicy(store);
+  let allCalls = 0;
+  store.all = async () => {
+    allCalls++;
+    return [];
+  };
+  (store as unknown as { eventsReferencingArtifacts?: unknown }).eventsReferencingArtifacts = async () => { throw new Error("boom"); };
+
+  const got = await classify(store, commitInput({ files: ["a.ts"] }));
+  assert.deepEqual(got, { kind: "unavailable", reason: "store_error" });
+  assert.equal(allCalls, 0);
+});
+
+test("amendmentEventsUpTo returns a non-array: fails closed as unavailable/store_error, never calls all()", async () => {
+  const store = new MemoryEventStore();
+  await putPolicy(store);
+  let allCalls = 0;
+  store.all = async () => {
+    allCalls++;
+    return [];
+  };
+  (store as unknown as { amendmentEventsUpTo?: unknown }).amendmentEventsUpTo = async () => null;
+
+  const got = await classify(store, commitInput({ files: ["a.ts"] }));
+  assert.deepEqual(got, { kind: "unavailable", reason: "store_error" });
+  assert.equal(allCalls, 0);
+});
+
+test("eventsReferencingArtifacts returns a non-array: fails closed as unavailable/store_error, never calls all()", async () => {
+  const store = new MemoryEventStore();
+  await putPolicy(store);
+  let allCalls = 0;
+  store.all = async () => {
+    allCalls++;
+    return [];
+  };
+  (store as unknown as { eventsReferencingArtifacts?: unknown }).eventsReferencingArtifacts = async () => null;
+
+  const got = await classify(store, commitInput({ files: ["a.ts"] }));
+  assert.deepEqual(got, { kind: "unavailable", reason: "store_error" });
+  assert.equal(allCalls, 0);
+});
+
+test("5,000 events plus one amendment read only the candidate and its dependencies inside 500 ms", async () => {
+  const store = new MemoryEventStore();
+  await putPolicy(store);
+  const noise = "x".repeat(1_024);
+  for (let i = 0; i < 5_000; i++) {
+    await appendEvent(store, {
+      project: "p",
+      actor: { type: "system", id: "noise" },
+      action: "executed",
+      artifacts: [{ id: `task:large-noise-${i}`, role: "used" }],
+      intent: noise,
+      timestamp: "2026-09-10T10:00:00.000Z",
+    });
+  }
+  const { target } = await attributionFixture(store, { targetPaths: ["a.ts"] });
+  const reads = { rows: 0, bytes: 0, calls: {} as Record<string, number> };
+  const returnedEvents = (value: unknown): unknown[] => {
+    if (Array.isArray(value)) return value.flatMap(returnedEvents);
+    if (!value || typeof value !== "object") return [];
+    const row = value as Record<string, unknown>;
+    if (typeof row.project === "string" && typeof row.seq === "number" && typeof row.hash === "string" && Array.isArray(row.artifacts)) return [value];
+    return Object.values(row).flatMap(returnedEvents);
+  };
+  const asyncMethods = Object.getOwnPropertyNames(MemoryEventStore.prototype)
+    .filter((name) => name !== "constructor" && (MemoryEventStore.prototype as any)[name]?.constructor?.name === "AsyncFunction")
+    .sort();
+  for (const name of asyncMethods) {
+    const original = (store as any)[name].bind(store);
+    reads.calls[name] = 0;
+    (store as any)[name] = async (...args: unknown[]) => {
+      reads.calls[name]++;
+      const result = await original(...args);
+      const events = [...new Map(returnedEvents(result).map((event: any) => [event.id, event])).values()];
+      reads.rows += events.length;
+      reads.bytes += events.reduce<number>((sum, event) => sum + Buffer.byteLength(JSON.stringify(event)), 0);
+      return result;
+    };
+  }
+
+  const started = performance.now();
+  const got = await classify(store, commitInput({ files: ["a.ts"] }));
+  const elapsed = performance.now() - started;
+  assert.equal(got.kind, "decision", JSON.stringify(got));
+  if (got.kind !== "decision") return;
+  assert.equal(got.record.decision.witnesses.some((w) => w.id === target.id), false);
+  assert.ok(elapsed < 500, `classification took ${elapsed.toFixed(1)} ms`);
+  assert.deepEqual(Object.keys(reads.calls).sort(), asyncMethods, "every async store method is instrumented");
+  assert.equal(reads.calls.all, 0);
+  assert.equal(reads.calls.history, 0);
+  assert.equal(reads.calls.getMany, 1);
+  assert.equal(reads.calls.amendmentEventsUpTo, 1);
+  assert.equal(reads.calls.eventsReferencingArtifacts, 1);
+  assert.equal(reads.rows, 8, "logical API appearances: policy activation twice, candidate/dependencies, and path witnesses");
+  assert.ok(reads.bytes < 64_000, `all async store methods returned ${reads.bytes} event bytes`);
+});
+
+test("an attribution candidate with an unresolvable evidence id fails closed", async () => {
+  const store = new MemoryEventStore();
+  await putPolicy(store);
+  const root = (await appendEvent(store, {
+    project: "p", actor: { type: "human", id: "jordan@example.com" }, action: "instructed",
+    artifacts: [{ id: "task:missing-evidence", role: "generated" }],
+  })).event;
+  const target = (await appendEvent(store, {
+    project: "p", actor: { type: "agent", id: "codex" }, action: "edited", caused_by: root.id,
+    artifacts: [{ id: "repo:acme/app#a.ts", role: "generated" }],
+    method: { tool: "editor", params: { sealed_by: "pinned:codex" } },
+  })).event;
+  const missing = "evt_" + "f".repeat(32);
+  await appendEvent(store, {
+    project: "p", actor: { type: "human", id: "jordan@example.com" }, action: "other",
+    action_detail: "amended", caused_by: root.id, intent: "cannot resolve evidence",
+    artifacts: [{ id: `event:${target.id}`, role: "used" }, { id: `event:${missing}`, role: "used" }],
+    method: { tool: "retrace_amend", params: {
+      sealed_by: "owner", target_event_id: target.id,
+      attribution: {
+        from: { type: "agent", id: "codex" }, to: { type: "agent", id: "other" }, evidence: [missing],
+      },
+    } },
+  });
+
+  const got = await classify(store, commitInput({ files: ["a.ts"] }));
+  assert.deepEqual(got, { kind: "unavailable", reason: "store_error" });
 });
 
 test("rejected amendment does not exclude a witness v7 would still accept", async () => {
@@ -701,9 +940,9 @@ test("F1: classifier amendment cascade matches v7 capture-boundary effectiveness
     project: "p", actor: { type: "human", id: "jordan@example.com" }, action: "instructed",
     artifacts: [{ id: "task:cascade", role: "generated" }], timestamp: "2026-09-10T10:00:00.000Z",
   })).event;
-  const edit = async (actor: string, stamp: string) => (await appendEvent(store, {
+  const edit = async (actor: string, stamp: string, repo = "acme/app") => (await appendEvent(store, {
     project: "p", actor: { type: "agent", id: actor }, action: "edited", caused_by: root.id,
-    artifacts: [{ id: "repo:acme/app#a.ts", role: "generated" }],
+    artifacts: [{ id: `repo:${repo}#a.ts`, role: "generated" }],
     timestamp: "2026-09-10T10:01:00.000Z", method: { tool: "editor", params: { sealed_by: stamp } },
   })).event;
   const stale = await edit("B", "assert:B");
@@ -731,7 +970,7 @@ test("F1: classifier amendment cascade matches v7 capture-boundary effectiveness
     } },
   }));
   const a = await edit("A", "pinned:A");
-  const c = await edit("C", "pinned:C");
+  const c = await edit("C", "pinned:C", "old-name");
   const amend = async (target: typeof a, to: string, evidence: typeof a) => (await appendEvent(store, {
     project: "p", actor: { type: "human", id: "jordan@example.com" }, action: "other",
     action_detail: "amended", caused_by: root.id, intent: "correction",
@@ -760,13 +999,235 @@ test("F1: classifier amendment cascade matches v7 capture-boundary effectiveness
   assert.deepEqual([...v7.effective.keys()], [c.id]);
   assert.ok(v7.rejected.some((x) => x.event.id !== valid.id && x.reason === "uncorroborated"));
 
+  let boundedCalls = 0;
+  const bounded = store.amendmentEventsUpTo.bind(store);
+  store.amendmentEventsUpTo = async (...args) => {
+    boundedCalls++;
+    return bounded(...args);
+  };
   const got = await classify(store, commitInput({ actorId: "C", raw: "work\n\nRetrace-Actor: C\n" }));
   assert.equal(got.kind, "decision");
   if (got.kind !== "decision") return;
+  assert.equal(boundedCalls, 1, "F1 cascade must use the bounded amendment path");
   assert.equal(got.record.decision.witnesses.some((w) => w.id === c.id), false);
   const classifier = JSON.parse([...store.contexts.values()][0]!.amendment_snapshot) as { effective: { target: string }[] };
   assert.deepEqual(classifier.effective.map((x) => x.target), [...v7.effective.keys()]);
   assert.equal(capture.seq, 3);
+});
+
+test("F1: off-path target capture keeps bounded classifier effectiveness identical to v7", async () => {
+  const store = new MemoryEventStore();
+  await putPolicy(store, "p", { repositories: [{ name: "acme/app", aliases: ["app", "old-name"] }] });
+  const root = (await appendEvent(store, {
+    project: "p", actor: { type: "human", id: "jordan@example.com" }, action: "instructed",
+    artifacts: [{ id: "task:off-path-capture", role: "generated" }],
+  })).event;
+  const evidence = (await appendEvent(store, {
+    project: "p", actor: { type: "agent", id: "A" }, action: "edited", caused_by: root.id,
+    artifacts: [
+      { id: "repo:acme/app#a.ts", role: "generated" },
+      { id: "repo:acme/app#b.ts", role: "generated" },
+    ],
+    method: { tool: "editor", params: { sealed_by: "pinned:A" } },
+  })).event;
+  const captureSha = "e".repeat(40);
+  await appendEvent(store, commitInput({
+    idempotency_key: "git:off-path-capture",
+    artifacts: [
+      { id: `commit:acme/app@${captureSha.slice(0, 12)}`, role: "generated" },
+      { id: "repo:acme/app#b.ts", role: "generated" },
+    ],
+    method: { tool: "git", params: {
+      sha: captureSha, parents: [], raw_message: "capture b\n",
+      author: { name: "Jordan", email: "jordan@example.com" }, sealed_by: "assert:git hook (assert)",
+    } },
+  }));
+  const target = (await appendEvent(store, {
+    project: "p", actor: { type: "agent", id: "C" }, action: "edited", caused_by: root.id,
+    artifacts: [
+      { id: "repo:acme/app#a.ts", role: "generated" },
+      { id: "repo:acme/app#b.ts", role: "generated" },
+    ],
+    method: { tool: "editor", params: { sealed_by: "pinned:C" } },
+  })).event;
+  await appendEvent(store, {
+    project: "p", actor: { type: "human", id: "jordan@example.com" }, action: "other",
+    action_detail: "amended", caused_by: root.id, intent: "attribute C to A",
+    artifacts: [{ id: `event:${target.id}`, role: "used" }, { id: `event:${evidence.id}`, role: "used" }],
+    method: { tool: "retrace_amend", params: {
+      sealed_by: "owner", target_event_id: target.id,
+      attribution: {
+        from: { type: "agent", id: "C" }, to: { type: "agent", id: "A" }, evidence: [evidence.id],
+      },
+    } },
+  });
+
+  const v7 = await fullV7Attribution(store, { [captureSha]: ["b.ts"] });
+  assert.deepEqual([...v7.effective.keys()], []);
+  const got = await classify(store, commitInput({ actorId: "C", files: ["a.ts"], raw: "work\n\nRetrace-Actor: C\n" }));
+  assert.equal(got.kind, "decision", JSON.stringify(got));
+  if (got.kind !== "decision") return;
+  const classifier = JSON.parse([...store.contexts.values()][0]!.amendment_snapshot) as { effective: { target: string }[] };
+  assert.deepEqual(classifier.effective.map((x) => x.target), [...v7.effective.keys()]);
+  assert.equal(got.record.decision.witnesses.some((w) => w.id === target.id), !v7.effective.has(target.id));
+});
+
+test("F1: same-SHA producer expansion preserves the earliest capture boundary and path union", async () => {
+  const store = new MemoryEventStore();
+  await putPolicy(store, "p", { repositories: [{ name: "acme/app", aliases: ["app", "old-name"] }] });
+  const root = (await appendEvent(store, {
+    project: "p", actor: { type: "human", id: "jordan@example.com" }, action: "instructed",
+    artifacts: [{ id: "task:producer-group", role: "generated" }],
+  })).event;
+  const captureSha = "f".repeat(40);
+  const commitRef = `commit:acme/app@${captureSha.slice(0, 12)}`;
+  await appendEvent(store, commitInput({
+    idempotency_key: "git:first-producer",
+    artifacts: [{ id: commitRef, role: "generated" }, { id: "repo:acme/app#other.ts", role: "generated" }],
+    method: { tool: "git", params: {
+      sha: captureSha, parents: [], raw_message: "first\n",
+      author: { name: "Jordan", email: "jordan@example.com" }, sealed_by: "assert:git hook (assert)",
+    } },
+  }));
+  const evidence = (await appendEvent(store, {
+    project: "p", actor: { type: "agent", id: "A" }, action: "edited", caused_by: root.id,
+    artifacts: [{ id: "repo:acme/app#a.ts", role: "generated" }],
+    method: { tool: "editor", params: { sealed_by: "pinned:A" } },
+  })).event;
+  await appendEvent(store, commitInput({
+    idempotency_key: `gh:push:acme/app:${captureSha}`,
+    tags: ["github", "push"],
+    artifacts: [{ id: commitRef, role: "generated" }, { id: "repo:acme/app#a.ts", role: "generated" }],
+    method: { tool: "git", params: {
+      sha: captureSha, parents: [], raw_message: "second\n",
+      author: { name: "Jordan", email: "jordan@example.com" }, sealed_by: "webhook:github",
+    } },
+  }));
+  const target = (await appendEvent(store, {
+    project: "p", actor: { type: "agent", id: "C" }, action: "edited", caused_by: root.id,
+    artifacts: [{ id: "repo:acme/app#a.ts", role: "generated" }],
+    method: { tool: "editor", params: { sealed_by: "pinned:C" } },
+  })).event;
+  await appendEvent(store, {
+    project: "p", actor: { type: "human", id: "jordan@example.com" }, action: "other",
+    action_detail: "amended", caused_by: root.id, intent: "attribute C to A",
+    artifacts: [{ id: `event:${target.id}`, role: "used" }, { id: `event:${evidence.id}`, role: "used" }],
+    method: { tool: "retrace_amend", params: {
+      sealed_by: "owner", target_event_id: target.id,
+      attribution: {
+        from: { type: "agent", id: "C" }, to: { type: "agent", id: "A" }, evidence: [evidence.id],
+      },
+    } },
+  });
+
+  const v7 = await fullV7Attribution(store, { [captureSha]: ["a.ts", "other.ts"] });
+  assert.deepEqual([...v7.effective.keys()], [target.id]);
+  const got = await classify(store, commitInput({ actorId: "C", files: ["a.ts"], raw: "work\n\nRetrace-Actor: C\n" }));
+  assert.equal(got.kind, "decision", JSON.stringify(got));
+  if (got.kind !== "decision") return;
+  const classifier = JSON.parse([...store.contexts.values()][0]!.amendment_snapshot) as { effective: { target: string }[] };
+  assert.deepEqual(classifier.effective.map((x) => x.target), [...v7.effective.keys()]);
+  assert.equal(got.record.decision.witnesses.some((w) => w.id === target.id), false);
+});
+
+test("F1: mixed abbreviated/full commit references group in both producer orders", async () => {
+  for (const [firstLength, secondLength] of [[12, 40], [40, 12]] as const) {
+    const store = new MemoryEventStore();
+    await putPolicy(store, "p", { repositories: [{ name: "acme/app", aliases: ["app", "old-name"] }] });
+    const root = (await appendEvent(store, {
+      project: "p", actor: { type: "human", id: "jordan@example.com" }, action: "instructed",
+      artifacts: [{ id: `task:mixed-producers-${firstLength}`, role: "generated" }],
+    })).event;
+    const captureSha = "123456789abc".padEnd(40, firstLength === 12 ? "d" : "e");
+    const firstRef = `commit:acme/app@${captureSha.slice(0, firstLength)}`;
+    const secondRef = `commit:acme/app@${captureSha.slice(0, secondLength)}`;
+    await appendEvent(store, commitInput({
+      idempotency_key: `git:mixed-first:${firstLength}`,
+      artifacts: [{ id: firstRef, role: "generated" }, { id: "repo:acme/app#other.ts", role: "generated" }],
+      method: { tool: "git", params: {
+        sha: captureSha, parents: [], raw_message: "first\n",
+        author: { name: "Jordan", email: "jordan@example.com" }, sealed_by: "assert:git hook (assert)",
+      } },
+    }));
+    const evidence = (await appendEvent(store, {
+      project: "p", actor: { type: "agent", id: "A" }, action: "edited", caused_by: root.id,
+      artifacts: [{ id: "repo:acme/app#a.ts", role: "generated" }],
+      method: { tool: "editor", params: { sealed_by: "pinned:A" } },
+    })).event;
+    await appendEvent(store, commitInput({
+      idempotency_key: `gh:push:acme/app:${captureSha}`,
+      tags: ["github", "push"],
+      artifacts: [{ id: secondRef, role: "generated" }, { id: "repo:acme/app#a.ts", role: "generated" }],
+      method: { tool: "git", params: {
+        sha: captureSha, parents: [], raw_message: "second\n",
+        author: { name: "Jordan", email: "jordan@example.com" }, sealed_by: "webhook:github",
+      } },
+    }));
+    const target = (await appendEvent(store, {
+      project: "p", actor: { type: "agent", id: "C" }, action: "edited", caused_by: root.id,
+      artifacts: [{ id: "repo:acme/app#a.ts", role: "generated" }],
+      method: { tool: "editor", params: { sealed_by: "pinned:C" } },
+    })).event;
+    await appendEvent(store, {
+      project: "p", actor: { type: "human", id: "jordan@example.com" }, action: "other",
+      action_detail: "amended", caused_by: root.id, intent: "attribute C to A",
+      artifacts: [{ id: `event:${target.id}`, role: "used" }, { id: `event:${evidence.id}`, role: "used" }],
+      method: { tool: "retrace_amend", params: {
+        sealed_by: "owner", target_event_id: target.id,
+        attribution: {
+          from: { type: "agent", id: "C" }, to: { type: "agent", id: "A" }, evidence: [evidence.id],
+        },
+      } },
+    });
+
+    const v7 = await fullV7Attribution(store, { [captureSha]: ["a.ts", "other.ts"] });
+    assert.deepEqual([...v7.effective.keys()], [target.id], `v7 ${firstLength}→${secondLength}`);
+    const got = await classify(store, commitInput({ actorId: "C", files: ["a.ts"], raw: "work\n\nRetrace-Actor: C\n" }));
+    assert.equal(got.kind, "decision", `${firstLength}→${secondLength}: ${JSON.stringify(got)}`);
+    if (got.kind !== "decision") continue;
+    const classifier = JSON.parse([...store.contexts.values()][0]!.amendment_snapshot) as { effective: { target: string }[] };
+    assert.deepEqual(classifier.effective.map((x) => x.target), [...v7.effective.keys()], `${firstLength}→${secondLength}`);
+    assert.equal(got.record.decision.witnesses.some((w) => w.id === target.id), false, `${firstLength}→${secondLength}`);
+  }
+});
+
+test("F2: causal traversal continues through a target that was already loaded as evidence", async () => {
+  const store = new MemoryEventStore();
+  await putPolicy(store);
+  const root = (await appendEvent(store, {
+    project: "p", actor: { type: "human", id: "jordan@example.com" }, action: "instructed",
+    artifacts: [{ id: "task:overlapping-dependency", role: "generated" }],
+  })).event;
+  const evidence = (await appendEvent(store, {
+    project: "p", actor: { type: "agent", id: "A" }, action: "edited", caused_by: root.id,
+    artifacts: [{ id: "repo:acme/app#a.ts", role: "generated" }],
+    method: { tool: "editor", params: { sealed_by: "pinned:A" } },
+  })).event;
+  const target = (await appendEvent(store, {
+    project: "p", actor: { type: "agent", id: "C" }, action: "edited", caused_by: evidence.id,
+    artifacts: [{ id: "repo:acme/app#a.ts", role: "generated" }],
+    method: { tool: "editor", params: { sealed_by: "pinned:C" } },
+  })).event;
+  await appendEvent(store, {
+    project: "p", actor: { type: "human", id: "jordan@example.com" }, action: "other",
+    action_detail: "amended", caused_by: target.id, intent: "attribute C to A",
+    artifacts: [{ id: `event:${target.id}`, role: "used" }, { id: `event:${evidence.id}`, role: "used" }],
+    method: { tool: "retrace_amend", params: {
+      sealed_by: "owner", target_event_id: target.id,
+      attribution: {
+        from: { type: "agent", id: "C" }, to: { type: "agent", id: "A" }, evidence: [evidence.id],
+      },
+    } },
+  });
+
+  const v7 = await fullV7Attribution(store);
+  assert.deepEqual([...v7.effective.keys()], [target.id]);
+  const got = await classify(store, commitInput({ actorId: "C", files: ["a.ts"], raw: "work\n\nRetrace-Actor: C\n" }));
+  assert.equal(got.kind, "decision", JSON.stringify(got));
+  if (got.kind !== "decision") return;
+  const classifier = JSON.parse([...store.contexts.values()][0]!.amendment_snapshot) as { effective: { target: string }[] };
+  assert.deepEqual(classifier.effective.map((x) => x.target), [...v7.effective.keys()]);
+  assert.equal(got.record.decision.witnesses.some((w) => w.id === target.id), false);
 });
 
 test("F2: deadline crossing during lower persistence returns unavailable and no decision", async () => {

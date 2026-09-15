@@ -5,7 +5,7 @@
 import { Event, EventInput } from "./schema.js";
 import { sealEvent, verifyChain, VerifyResult } from "./chain.js";
 import { markUntrustedText } from "./explain.js";
-import { artifactKey, artifactLookup, sameArtifact } from "./capture.js";
+import { artifactKey, artifactLookup, escapeGlobLiteral, sameArtifact } from "./capture.js";
 
 export interface HistoryQuery {
   project: string;
@@ -127,8 +127,12 @@ export interface EventStore {
   insert(e: Event): Promise<void>;
   byIdempotencyKey(project: string, key: string): Promise<Event | null>;
   get(id: string): Promise<Event | null>;
+  /** Bounded point-read batch. Missing ids are omitted; callers decide whether absence is fatal. */
+  getMany?(ids: string[]): Promise<Event[]>;
   history(q: HistoryQuery): Promise<HistoryPage>;
   all(project: string): Promise<Event[]>;
+  /** Attribution-amendment candidates through inclusive sequence U, ascending, capped by the caller's LIMIT. */
+  amendmentEventsUpTo?(project: string, throughSeq: number, limit: number): Promise<Event[]>;
   projects(): Promise<string[]>;
   /** Delete every row belonging to a project AND insert `audit` (already sealed onto its own project's chain) in the
    *  same transaction, so a deletion can never exist without its audit record and vice versa (security review
@@ -186,6 +190,8 @@ export interface ArtifactIndexRow {
 export interface ArtifactIndexQuery {
   project: string;
   artifact_keys: string[];
+  /** Exact literal prefixes over stored artifact ids (implemented as indexed prefix ranges/GLOBs). */
+  artifact_prefixes?: string[];
   /** Exclusive lower bound. */
   after_seq: number;
   /** Inclusive upper bound U. */
@@ -246,7 +252,7 @@ export function artifactIndexRows(e: Event): ArtifactIndexRow[] {
 /** In-memory spec the SQL stores must match: sameArtifact matching, row cap on matching index rows. */
 export function eventsReferencingArtifactKeys(events: Event[], q: ArtifactIndexQuery, nowMs: number): ArtifactIndexResult {
   if (nowMs >= q.deadline) return { ok: false, reason: "deadline" };
-  if (!q.artifact_keys.length) return { ok: true, events: [] };
+  if (!q.artifact_keys.length && !q.artifact_prefixes?.length) return { ok: true, events: [] };
   const matched: Event[] = [];
   let rows = 0;
   const windowed = events
@@ -254,7 +260,10 @@ export function eventsReferencingArtifactKeys(events: Event[], q: ArtifactIndexQ
     .sort((a, b) => a.seq - b.seq);
   for (const e of windowed) {
     const hitKeys = new Set(
-      e.artifacts.filter((a) => q.artifact_keys.some((k) => sameArtifact(artifactKey(a.id), k))).map((a) => artifactKey(a.id)),
+      e.artifacts
+        .filter((a) => q.artifact_keys.some((k) => sameArtifact(artifactKey(a.id), k))
+          || q.artifact_prefixes?.some((prefix) => artifactKey(a.id).startsWith(prefix)))
+        .map((a) => artifactKey(a.id)),
     );
     if (!hitKeys.size) continue;
     rows += hitKeys.size;
@@ -287,12 +296,154 @@ export function artifactKeyMatchSql(keys: string[]): { sql: string; params: stri
   return { sql: `(${parts.join(" OR ")})`, params };
 }
 
-export function eventsReferencingArtifactsSql(q: ArtifactIndexQuery): { sql: string; params: (string | number)[] } {
-  const match = artifactKeyMatchSql(q.artifact_keys);
-  return {
-    sql: `SELECT e.body FROM events e JOIN event_artifact_index i ON i.project = e.project AND i.seq = e.seq WHERE e.project = ? AND i.seq > ? AND i.seq <= ? AND ${match.sql} ORDER BY e.seq ASC LIMIT ?`,
-    params: [q.project, q.after_seq, q.through_seq, ...match.params, q.row_cap + 1],
+/** Exclusive upper bound of the BINARY-collated (UTF-8 byte order == code-point order) key range that starts with
+ *  `prefix`: the prefix with its last code point replaced by its successor, skipping the surrogate range and carrying
+ *  past U+10FFFF. `undefined` means the range is unbounded above (empty prefix, or every code point already U+10FFFF).
+ *  PR 51 round 6 (Codex F6): a UTF-16 code-unit increment produced lone surrogates and a false U+FFFF ceiling. */
+export function prefixRangeUpperBound(prefix: string): string | undefined {
+  const cps = Array.from(prefix);
+  for (let i = cps.length - 1; i >= 0; i--) {
+    let cp = cps[i]!.codePointAt(0)!;
+    if (cp >= 0x10ffff) continue;
+    cp += 1;
+    if (cp >= 0xd800 && cp <= 0xdfff) cp = 0xe000;
+    return cps.slice(0, i).join("") + String.fromCodePoint(cp);
+  }
+  return undefined;
+}
+
+/** Cloudflare D1 runs on workerd, which caps every statement at 100 bound parameters and, through
+ *  `SqliteDatabase::setupSecurity`, at `SQLITE_LIMIT_COMPOUND_SELECT = 5` compound terms (ordinary SQLite defaults to
+ *  500; PR 51 round 6, Codex F4 — verified against local workerd). Lookup terms therefore never become SQL terms: each
+ *  kind of term travels as one JSON array bound to one parameter and is iterated by `json_each`, so a statement has at
+ *  most five compound members and ten parameters however many keys it carries. */
+export const D1_MAX_BOUND_PARAMS = 100;
+export const D1_MAX_COMPOUND_SELECT_TERMS = 5;
+/** Lookup terms per statement: bounds the bound JSON payload and lets the deadline be checked between batches. */
+export const ARTIFACT_INDEX_MAX_TERMS = 400;
+export interface ArtifactIndexStatement { sql: string; params: (string | number)[] }
+export interface ArtifactIndexHit { seq: number; artifact_key: string; body: string }
+
+type ArtifactIndexTerm =
+  | { kind: "eq"; value: string }
+  | { kind: "prefix"; value: [string, string] }
+  | { kind: "unbounded"; value: string }
+  | { kind: "glob"; value: [string, string, string] }
+  | { kind: "glob_unbounded"; value: string };
+
+/** The literal text a GLOB pattern must start with (everything before its first `*`, `?` or `[`). */
+export function globLiteralPrefix(pattern: string): string {
+  const at = pattern.search(/[*?[]/);
+  return at < 0 ? pattern : pattern.slice(0, at);
+}
+
+/** Statements for `eventsReferencingArtifacts`, batched by term count. Each statement binds the project and the
+ *  sequence window once through a one-row CTE and then holds one `UNION` member per KIND of lookup term, each driven by
+ *  `json_each` over a JSON array bound as a single parameter, so every individual term still takes its own index range
+ *  (`CROSS JOIN` keeps `json_each` as the outer loop) instead of one predicate the planner can only satisfy by walking
+ *  the project's whole artifact index (PR 51 round 4, Codex F3): exact keys seek
+ *  `idx_eai_project_key_seq (project, artifact_key, seq)` with the window inside the seek; literal prefixes are bound
+ *  key ranges (`[prefix, prefixRangeUpperBound)`, or `>= prefix` alone when unbounded); the owner-less alias globs from
+ *  `artifactLookup` (`repo:*\/name#path`) cannot be seeked on the key and stay window-scoped as before this PR. Every
+ *  member yields DISTINCT `(seq, artifact_key)` so the row budget counts distinct matching artifact rows, as the in-memory
+ *  spec does (round 6, Codex F5; round 7: overlapping same-kind terms in a single member); the outer query joins `events` by its unique `(project, seq)` — `CROSS JOIN` so SQLite
+ *  keeps the matched seqs as the outer loop instead of walking the project's events. `LIMIT` is `row_cap + 1`;
+ *  `runArtifactIndexStatements` enforces the budget, deduplicates rows and events across batches and checks the
+ *  deadline between them. */
+export function eventsReferencingArtifactsStatements(
+  q: ArtifactIndexQuery,
+  limits: { maxTerms?: number } = {},
+): ArtifactIndexStatement[] {
+  const maxTerms = Math.max(1, limits.maxTerms ?? ARTIFACT_INDEX_MAX_TERMS);
+  const equals = new Set<string>();
+  const globs = new Set<string>();
+  for (const k of q.artifact_keys) {
+    const look = artifactLookup(k);
+    for (const eq of look.equals) equals.add(eq);
+    if (look.glob) globs.add(look.glob);
+  }
+  const terms: ArtifactIndexTerm[] = [];
+  for (const eq of equals) terms.push({ kind: "eq", value: eq });
+  for (const prefix of [...new Set(q.artifact_prefixes ?? [])]) {
+    const upper = prefixRangeUpperBound(prefix);
+    terms.push(upper === undefined ? { kind: "unbounded", value: prefix } : { kind: "prefix", value: [prefix, upper] });
+  }
+  for (const g of globs) {
+    // SQLite only turns GLOB into a key range for a literal or bound pattern, not for a json_each column, so bind the
+    // range of the pattern's literal prefix explicitly (`repo:` … `repo;` for the alias globs) and keep GLOB as the filter.
+    const literal = globLiteralPrefix(g);
+    const upper = prefixRangeUpperBound(literal);
+    terms.push(upper === undefined ? { kind: "glob_unbounded", value: g } : { kind: "glob", value: [literal, upper, g] });
+  }
+
+  // DISTINCT inside every member: overlapping terms of one kind (prefixes `x`, `x:`, `x:o`) reach the same (seq, artifact_key)
+  // once per term, and a statement with a single member has no UNION to fold them, so without it duplicates would consume
+  // `LIMIT row_cap + 1` before the runner counts distinct rows (PR 51 round 7, Codex F5 regression).
+  const member = "SELECT DISTINCT i.seq, i.artifact_key FROM w CROSS JOIN json_each(?) t CROSS JOIN event_artifact_index i WHERE i.project = w.project AND ";
+  const memberSql: Record<ArtifactIndexTerm["kind"], string> = {
+    eq: `${member}i.artifact_key = t.value AND i.seq > w.after_seq AND i.seq <= w.through_seq`,
+    prefix: `${member}i.artifact_key >= json_extract(t.value, '$[0]') AND i.artifact_key < json_extract(t.value, '$[1]') AND i.seq > w.after_seq AND i.seq <= w.through_seq`,
+    unbounded: `${member}i.artifact_key >= t.value AND i.seq > w.after_seq AND i.seq <= w.through_seq`,
+    glob: `${member}i.artifact_key >= json_extract(t.value, '$[0]') AND i.artifact_key < json_extract(t.value, '$[1]') AND i.seq > w.after_seq AND i.seq <= w.through_seq AND i.artifact_key GLOB json_extract(t.value, '$[2]')`,
+    glob_unbounded: `${member}i.seq > w.after_seq AND i.seq <= w.through_seq AND i.artifact_key GLOB t.value`,
   };
+  const statements: ArtifactIndexStatement[] = [];
+  for (let at = 0; at < terms.length; at += maxTerms) {
+    const batch = terms.slice(at, at + maxTerms);
+    const members: string[] = [];
+    const params: (string | number)[] = [q.project, q.after_seq, q.through_seq];
+    for (const kind of ["eq", "prefix", "unbounded", "glob", "glob_unbounded"] as const) {
+      const values = batch.filter((t) => t.kind === kind).map((t) => t.value);
+      if (!values.length) continue;
+      members.push(memberSql[kind]);
+      params.push(JSON.stringify(values));
+    }
+    params.push(q.project, q.row_cap + 1);
+    if (members.length > D1_MAX_COMPOUND_SELECT_TERMS) throw new Error(`eventsReferencingArtifactsStatements: ${members.length} compound terms exceed D1's ${D1_MAX_COMPOUND_SELECT_TERMS}`);
+    statements.push({
+      sql: `WITH w(project, after_seq, through_seq) AS (SELECT ?, ?, ?) SELECT e.body, m.seq, m.artifact_key FROM (${members.join(" UNION ")}) m CROSS JOIN events e ON e.project = ? AND e.seq = m.seq ORDER BY m.seq ASC, m.artifact_key ASC LIMIT ?`,
+      params,
+    });
+  }
+  return statements;
+}
+
+/** Single-statement form for callers that know their query is small; throws when batching would be required. */
+export function eventsReferencingArtifactsSql(q: ArtifactIndexQuery): ArtifactIndexStatement {
+  const statements = eventsReferencingArtifactsStatements(q);
+  if (statements.length !== 1) throw new Error(`eventsReferencingArtifactsSql: query needs ${statements.length} statements; use eventsReferencingArtifactsStatements`);
+  return statements[0]!;
+}
+
+/** Shared driver for the SQL stores: runs the batched statements in order, checks the deadline between them, counts
+ *  distinct matching `(seq, artifact_key)` rows against `row_cap` exactly as `eventsReferencingArtifactKeys` does,
+ *  and returns deduplicated events in sequence order. `exec` is the store's own way of running one statement. */
+export async function runArtifactIndexStatements(
+  q: ArtifactIndexQuery,
+  now: () => number,
+  exec: (statement: ArtifactIndexStatement) => Promise<ArtifactIndexHit[]>,
+): Promise<ArtifactIndexResult> {
+  if (now() >= q.deadline) return { ok: false, reason: "deadline" };
+  if (!q.artifact_keys.length && !q.artifact_prefixes?.length) return { ok: true, events: [] };
+  const seenRows = new Set<string>();
+  const bySeq = new Map<number, Event>();
+  try {
+    for (const statement of eventsReferencingArtifactsStatements(q)) {
+      if (now() >= q.deadline) return { ok: false, reason: "deadline" };
+      const rows = await exec(statement);
+      if (now() >= q.deadline) return { ok: false, reason: "deadline" };
+      for (const r of rows) {
+        const rowKey = `${r.seq}\u0000${r.artifact_key}`;
+        if (seenRows.has(rowKey)) continue;
+        seenRows.add(rowKey);
+        if (seenRows.size > q.row_cap) return { ok: false, reason: "budget" };
+        if (!bySeq.has(r.seq)) bySeq.set(r.seq, JSON.parse(r.body) as Event);
+      }
+    }
+  } catch {
+    return { ok: false, reason: "store_error" };
+  }
+  return { ok: true, events: [...bySeq.entries()].sort((a, b) => a[0] - b[0]).map(([, e]) => e) };
 }
 
 /** One-time D1 backfill. `artifact_key` is the stored artifact id (`artifactKey` is that identity). Idempotent. */
@@ -345,6 +496,8 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS idx_events_project_ts ON events(project, timestamp);
 CREATE INDEX IF NOT EXISTS idx_events_actor ON events(project, actor_id);
 CREATE INDEX IF NOT EXISTS idx_events_idem ON events(project, idempotency_key);
+CREATE INDEX IF NOT EXISTS idx_events_amendment_candidates ON events(project, seq)
+  WHERE action = 'other' AND json_extract(body, '$.action_detail') = 'amended';
 CREATE TABLE IF NOT EXISTS event_artifacts (
   event_id TEXT NOT NULL,
   project TEXT NOT NULL,

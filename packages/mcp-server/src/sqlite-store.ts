@@ -3,7 +3,7 @@ import { DatabaseSync } from "node:sqlite";
 import {
   ArtifactIndexQuery, ArtifactIndexResult, BACKFILL_ARTIFACT_INDEX_SQL, ChainHead, Event, EventStore, HeadMovedError,
   HistoryQuery, HistoryPage, PendingDelivery, SCHEMA_PENDING_LEASE_COLUMNS_SQL, SCHEMA_PENDING_ROUTE_COLUMNS_SQL, SCHEMA_SQL, Share, artifactIndexRows, clampHistoryLimit,
-  eventsReferencingArtifactsSql, historyPageFromNewestFirst, likeContains,
+  ArtifactIndexHit, runArtifactIndexStatements, historyPageFromNewestFirst, likeContains,
 } from "@retrace-dev/core";
 import type { BreakerRow, ClassificationContextRow, PolicyRouteRow, PolicySnapshot, PolicySnapshotBudget, PolicyWrite } from "@retrace-dev/core";
 import { assertRouteWriteConsistent, policyDocumentFromRow, policySnapshotFromIndex, sameBreaker } from "@retrace-dev/core";
@@ -109,8 +109,30 @@ export class SqliteStore implements EventStore {
     return row ? (JSON.parse(row.body) as Event) : null;
   }
 
+  async getMany(ids: string[]) {
+    if (!ids.length) return [];
+    const rows = this.db.prepare(
+      "SELECT body FROM events WHERE id IN (SELECT value FROM json_each(?))",
+    ).all(JSON.stringify([...new Set(ids)])) as { body: string }[];
+    return rows.map((r) => JSON.parse(r.body) as Event);
+  }
+
   async all(project: string) {
     const rows = this.db.prepare("SELECT body FROM events WHERE project = ? ORDER BY seq ASC").all(project) as { body: string }[];
+    return rows.map((r) => JSON.parse(r.body) as Event);
+  }
+
+  async amendmentEventsUpTo(project: string, throughSeq: number, limit: number) {
+    const rows = this.db.prepare(
+      `SELECT body FROM events
+       WHERE project = ? AND seq <= ? AND action = 'other'
+         AND json_extract(body, '$.action_detail') = 'amended'
+         AND (
+           json_type(body, '$.method.params.attribution') IS NOT NULL
+           OR EXISTS (SELECT 1 FROM json_each(body, '$.tags') WHERE value = 'attribution')
+         )
+       ORDER BY seq ASC LIMIT ?`,
+    ).all(project, throughSeq, limit) as { body: string }[];
     return rows.map((r) => JSON.parse(r.body) as Event);
   }
 
@@ -142,25 +164,8 @@ export class SqliteStore implements EventStore {
   }
 
   async eventsReferencingArtifacts(q: ArtifactIndexQuery, now: () => number = Date.now): Promise<ArtifactIndexResult> {
-    if (now() >= q.deadline) return { ok: false, reason: "deadline" };
-    if (!q.artifact_keys.length) return { ok: true, events: [] };
-    try {
-      const { sql, params } = eventsReferencingArtifactsSql(q);
-      const rows = this.db.prepare(sql).all(...params) as { body: string }[];
-      if (now() >= q.deadline) return { ok: false, reason: "deadline" };
-      if (rows.length > q.row_cap) return { ok: false, reason: "budget" };
-      const seen = new Set<string>();
-      const events: Event[] = [];
-      for (const r of rows) {
-        const e = JSON.parse(r.body) as Event;
-        if (seen.has(e.id)) continue;
-        seen.add(e.id);
-        events.push(e);
-      }
-      return { ok: true, events };
-    } catch {
-      return { ok: false, reason: "store_error" };
-    }
+    return runArtifactIndexStatements(q, now, async ({ sql, params }) =>
+      this.db.prepare(sql).all(...params) as unknown as ArtifactIndexHit[]);
   }
 
   async insertPendingDelivery(row: PendingDelivery) {
