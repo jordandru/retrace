@@ -1502,15 +1502,72 @@ test("diagnostics: a store without the artifact index names the window read", as
   }]);
 });
 
-test("diagnostics: an exception the classifier does not catch itself reaches classify.outer", async () => {
-  const store = new MemoryEventStore();
-  await putPolicy(store);
-  store.head = async () => { throw new Error("boom"); };
-  const s = sink();
+test("diagnostics: classify.outer names the operation the throw came from", async () => {
+  // Identical exceptions from different reads used to produce identical lines (Codex P2, round 1).
+  const cases: [string, (store: MemoryEventStore) => void][] = [
+    ["store.head", (store) => { store.head = async () => { throw new Error("D1_ERROR: network"); }; }],
+    ["store.getClassificationContext", (store) => {
+      store.getClassificationContext = async () => { throw new Error("D1_ERROR: network"); };
+    }],
+    ["store.ensureClassificationPathLowers", (store) => {
+      store.ensureClassificationPathLowers = async () => { throw new Error("D1_ERROR: network"); };
+    }],
+  ];
+  for (const [operation, breakIt] of cases) {
+    const store = new MemoryEventStore();
+    await putPolicy(store);
+    breakIt(store);
+    const s = sink();
 
-  const got = await classify(store, commitInput(), { diag: s.diag });
-  assert.deepEqual(got, { kind: "unavailable", reason: "store_error" });
-  assert.deepEqual(s.seen, [{ site: "classify.outer", reason: "store_error", detail: "Error: boom" }]);
+    const got = await classify(store, commitInput(), { diag: s.diag });
+    assert.deepEqual(got, { kind: "unavailable", reason: "store_error" });
+    assert.deepEqual(s.seen, [{
+      site: "classify.outer",
+      reason: "store_error",
+      detail: `${operation}: Error: D1_ERROR: network`,
+    }]);
+  }
+});
+
+test("diagnostics: an async sink that rejects cannot take the runtime down", async () => {
+  // `async () => { throw }` satisfies the void-returning sink type; the rejection must be observed.
+  const rejected: unknown[] = [];
+  const onUnhandled = (e: unknown) => { rejected.push(e); };
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    const store = new MemoryEventStore();
+    await putPolicy(store);
+    (store as unknown as { amendmentEventsUpTo?: unknown }).amendmentEventsUpTo = undefined;
+
+    const got = await classify(store, commitInput(), {
+      diag: async () => { throw new Error("the sink is broken"); },
+    });
+    assert.deepEqual(got, { kind: "unavailable", reason: "store_error" });
+    await new Promise((r) => setTimeout(r, 10));
+    assert.deepEqual(rejected, []);
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+  }
+});
+
+test("diagnostics: no sink, no store probe — the capability reads are thunked", async () => {
+  // A diagnostic must not read a store capability on a path that will not log (Codex nit, round 1).
+  const reads = async (diag?: (d: Diagnostic) => void) => {
+    const store = new MemoryEventStore();
+    await putPolicy(store);
+    let n = 0;
+    Object.defineProperty(store, "eventsReferencingArtifacts", {
+      configurable: true,
+      get() { n++; return undefined; },
+    });
+    const got = await classify(store, commitInput({ files: ["a.ts"] }), diag ? { diag } : {});
+    assert.deepEqual(got, { kind: "unavailable", reason: "store_error" });
+    return n;
+  };
+
+  const withoutSink = await reads();
+  const withSink = await reads(() => {});
+  assert.equal(withSink, withoutSink + 1, "the detail thunk is the only extra read, and only with a sink");
 });
 
 test("diagnostics: a sink that throws changes neither a failure nor a decision", async () => {
@@ -1539,13 +1596,28 @@ test("diagnostics: a decision emits nothing", async () => {
   assert.deepEqual(s.seen, []);
 });
 
-test("diagnostics: detail is one bounded line, never a stack", () => {
-  assert.equal(diagnosticDetail(new Error("a\n   b")), "Error: a b");
-  assert.equal(diagnosticDetail("plain"), "plain");
-  assert.equal(diagnosticDetail({ code: 7 }), '{"code":7}');
+test("diagnostics: detail forwards a store condition and withholds everything else", () => {
+  // Allow-listed store and platform conditions pass through, collapsed to one line.
+  assert.equal(diagnosticDetail(new Error("D1_ERROR: no such\n  index")), "Error: D1_ERROR: no such index");
+  assert.equal(diagnosticDetail(new Error("Network connection lost")), "Error: Network connection lost");
+  assert.equal(diagnosticDetail("a fixed phrase from a call site"), "a fixed phrase from a call site");
+
+  // A decode failure quotes the body it could not parse: the class is logged, the message is not.
+  const decode = new SyntaxError('Unexpected token } in JSON at position 5: {"secret":"hunter2"}');
+  assert.equal(diagnosticDetail(decode), "SyntaxError (message withheld)");
+  assert.ok(!diagnosticDetail(decode).includes("hunter2"));
+  assert.equal(diagnosticDetail(new TypeError("x of undefined")), "TypeError (message withheld)");
+
+  // A thrown non-Error is named by its type and never serialised.
+  assert.equal(
+    diagnosticDetail({ stack: "/home/someone/secret/path", token: "t0ken" }),
+    "non-error thrown value (object)",
+  );
+  assert.equal(diagnosticDetail(null), "non-error thrown value (null)");
+
+  // Bounded, and never a stack.
   const long = diagnosticDetail("x".repeat(DIAGNOSTIC_DETAIL_MAX + 50));
-  assert.equal(long.length, DIAGNOSTIC_DETAIL_MAX + 1);
+  assert.equal(long.length, DIAGNOSTIC_DETAIL_MAX);
   assert.ok(long.endsWith("\u2026"));
-  const stack = new Error("with a stack");
-  assert.ok(!diagnosticDetail(stack).includes("at "), "the stack never reaches the log line");
+  assert.ok(!diagnosticDetail(new Error("D1_ERROR: boom")).includes("at "));
 });

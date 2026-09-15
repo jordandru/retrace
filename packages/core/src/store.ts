@@ -6,7 +6,7 @@ import { Event, EventInput } from "./schema.js";
 import { sealEvent, verifyChain, VerifyResult } from "./chain.js";
 import { markUntrustedText } from "./explain.js";
 import { artifactKey, artifactLookup, escapeGlobLiteral, sameArtifact } from "./capture.js";
-import { emitDiagnostic, type DiagnosticSink } from "./diagnostics.js";
+import { diagnosticDetail, emitDiagnostic, type DiagnosticSink } from "./diagnostics.js";
 
 export interface HistoryQuery {
   project: string;
@@ -430,8 +430,11 @@ export async function runArtifactIndexStatements(
   if (!q.artifact_keys.length && !q.artifact_prefixes?.length) return { ok: true, events: [] };
   const seenRows = new Set<string>();
   const bySeq = new Map<number, Event>();
+  // The compound read issues several statements; which one threw is the whole question.
+  let statementIndex = -1;
   try {
     for (const statement of eventsReferencingArtifactsStatements(q)) {
+      statementIndex++;
       if (now() >= q.deadline) return { ok: false, reason: "deadline" };
       const rows = await exec(statement);
       if (now() >= q.deadline) return { ok: false, reason: "deadline" };
@@ -444,7 +447,8 @@ export async function runArtifactIndexStatements(
       }
     }
   } catch (error) {
-    emitDiagnostic(diag, "store.artifact_index", "store_error", error);
+    emitDiagnostic(diag, "store.artifact_index", "store_error",
+      () => `statement ${statementIndex}: ${diagnosticDetail(error)}`);
     return { ok: false, reason: "store_error" };
   }
   return { ok: true, events: [...bySeq.entries()].sort((a, b) => a[0] - b[0]).map(([, e]) => e) };

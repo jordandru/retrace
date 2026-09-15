@@ -13,7 +13,7 @@ import {
   type AttributionCaptureContext, type AttributionDomain, type AttributionUnit,
 } from "./attribution-context.js";
 import { canonicalize, sha256Hex } from "./chain.js";
-import { emitDiagnostic, type DiagnosticSink } from "./diagnostics.js";
+import { diagnosticDetail, emitDiagnostic, type DiagnosticSink } from "./diagnostics.js";
 import {
   CommitActorResolution, resolveCommitActor, validCausedById,
 } from "./commit-actor.js";
@@ -885,7 +885,10 @@ export interface ClassifyOpts {
   diag?: DiagnosticSink;
 }
 
-async function classifyCommitClaimInner(opts: ClassifyOpts): Promise<ClassifyResult> {
+/** What the classifier is doing, so the outer catch can name the operation a throw came from. */
+type ClassifyStage = { at: string };
+
+async function classifyCommitClaimInner(opts: ClassifyOpts, stage: ClassifyStage): Promise<ClassifyResult> {
   const policyMode = parseTrailerPolicy(opts.trailerPolicy);
   if (policyMode === "off") return { kind: "skip", reason: "policy_off" };
   if (policyMode !== "shadow") return { kind: "skip", reason: "policy_off" };
@@ -898,45 +901,51 @@ async function classifyCommitClaimInner(opts: ClassifyOpts): Promise<ClassifyRes
   const unavailable = (
     reason: "deadline" | "budget" | "store_error" | "policy_missing",
     site: string,
-    detail?: unknown,
+    detail?: unknown | (() => unknown),
   ): ClassifyResult => {
     emitDiagnostic(opts.diag, `classify.${site}`, reason, detail);
     return { kind: "unavailable", reason };
   };
+  // Thunks: a diagnostic must not read a store capability on a path that will not log (Codex nit).
   const windowUnsupported = () =>
     (opts.store.eventsReferencingArtifacts ? undefined : "store has no eventsReferencingArtifacts");
+  const snapshotUnsupported = () =>
+    (opts.store.readPolicySnapshot ? undefined : "store has no readPolicySnapshot");
 
+  stage.at = "require_context_store";
   try {
     requireContextStore(opts.store);
   } catch (error) {
     return unavailable("store_error", "context_store", error);
   }
 
+  stage.at = "derive_claim";
   const derived = deriveCommitClaim(opts.input);
   const sha = extractSha(opts.input);
   if (!sha) return unavailable("store_error", "commit", "the seal carries no sha");
   const files = fileArtifacts(opts.input);
   const parents = extractParents(opts.input);
+  stage.at = "resolve_caused_by";
   const caused = await resolveCausedBy(opts.store, opts.input, derived.resolved.trailers);
   if (now() >= deadline) return unavailable("deadline", "caused_by");
 
+  stage.at = "store.head";
   const head = await opts.store.head(opts.input.project);
   const Utry = head?.seq ?? -1;
   const headHash = head?.hash ?? GENESIS_HASH;
 
   if (now() >= deadline) return unavailable("deadline", "head");
 
+  stage.at = "store.readPolicySnapshot";
   const snapshot: PolicySnapshot = opts.store.readPolicySnapshot
     ? await opts.store.readPolicySnapshot(opts.input.project, Utry, { deadline, now })
     : { U: Utry, events: [], activations: [], unavailable: "store_error" };
-  if (snapshot.unavailable) {
-    return unavailable(snapshot.unavailable, "policy_snapshot",
-      opts.store.readPolicySnapshot ? undefined : "store has no readPolicySnapshot");
-  }
+  if (snapshot.unavailable) return unavailable(snapshot.unavailable, "policy_snapshot", snapshotUnsupported);
 
   let policyDoc: PolicyDocument | null = null;
   // New context: policy at Utry. Q4: context key is (project, canonical R, sha) — a later
   // delivery under a different R is a different key and a second context; no new recorded field.
+  stage.at = "select_policy";
   const selected = selectPolicyForContext(snapshot, snapshot.document
     ? new Map([[snapshot.document.digest, snapshot.document], [documentMapKey(opts.input.project, snapshot.document.digest), snapshot.document]])
     : new Map());
@@ -945,17 +954,20 @@ async function classifyCommitClaimInner(opts: ClassifyOpts): Promise<ClassifyRes
 
   if (!policyDoc) return unavailable("policy_missing", "policy");
 
+  stage.at = "submitted_paths";
   const pin = opts.canonicalR ?? (policyDoc.body.github_repos.length === 1 ? policyDoc.body.github_repos[0] : undefined);
   const canonicalR = canonicalRForFacts(policyDoc.body, files, pin);
   let paths = submittedPathsForRepo(canonicalR, files, policyDoc.body, pin !== undefined);
   let Fdigest = await digestOf([...paths].sort());
   const claimDigest = await digestOf({ type: derived.claim.type, id: derived.claim.id, source: derived.claim.source });
 
+  stage.at = "store.getClassificationContext";
   const found = await opts.store.getClassificationContext(opts.input.project, canonicalR, sha);
   if (now() >= deadline) return unavailable("deadline", "context_read");
   let ctx = found;
   // Existing context: retrieve the *exact* policy named by the context, never latest (P4).
   if (ctx) {
+    stage.at = "store.getPolicy";
     const named = opts.store.getPolicy ? await opts.store.getPolicy(opts.input.project, { digest: ctx.policy_digest }) : null;
     if (!named) return unavailable("store_error", "policy_by_digest", "the context's policy digest is not in the store");
     policyDoc = named;
@@ -984,8 +996,10 @@ async function classifyCommitClaimInner(opts: ClassifyOpts): Promise<ClassifyRes
       deadline,
     }, now);
   };
+  stage.at = "store.eventsReferencingArtifacts";
   let index = await readWindow();
-  if (!index.ok) return unavailable(index.reason, "window", windowUnsupported());
+  if (!index.ok) return unavailable(index.reason, "window", windowUnsupported);
+  stage.at = "evaluate_amendments";
   let evaluated = await evaluateAmendmentsAtU({
     store: opts.store, project: opts.input.project, U, headHash: pinnedHeadHash,
     policy: policyDoc.body, policyDigest: policyDoc.digest, canonicalRepo: canonicalR,
@@ -1012,10 +1026,12 @@ async function classifyCommitClaimInner(opts: ClassifyOpts): Promise<ClassifyRes
       per_path_lower: {},
       created_at: new Date(now()).toISOString(),
     };
+    stage.at = "store.insertClassificationContextIfAbsent";
     const inserted = await opts.store.insertClassificationContextIfAbsent(candidate);
     if (now() >= deadline) return unavailable("deadline", "context_insert");
     ctx = inserted.context;
     if (!inserted.inserted) {
+      stage.at = "store.getPolicy (insert race)";
       const named = opts.store.getPolicy ? await opts.store.getPolicy(opts.input.project, { digest: ctx.policy_digest }) : null;
       if (!named) return unavailable("store_error", "policy_by_digest", "the context's policy digest is not in the store (insert race)");
       policyDoc = named;
@@ -1023,8 +1039,10 @@ async function classifyCommitClaimInner(opts: ClassifyOpts): Promise<ClassifyRes
       Fdigest = await digestOf([...paths].sort());
       U = ctx.read_head_seq;
       pinnedHeadHash = ctx.read_head_hash;
+      stage.at = "store.eventsReferencingArtifacts (insert race)";
       index = await readWindow();
-      if (!index.ok) return unavailable(index.reason, "window", windowUnsupported());
+      if (!index.ok) return unavailable(index.reason, "window", windowUnsupported);
+      stage.at = "evaluate_amendments (insert race)";
       evaluated = await evaluateAmendmentsAtU({
         store: opts.store, project: opts.input.project, U, headHash: pinnedHeadHash,
         policy: policyDoc.body, policyDigest: policyDoc.digest, canonicalRepo: canonicalR,
@@ -1060,9 +1078,11 @@ async function classifyCommitClaimInner(opts: ClassifyOpts): Promise<ClassifyRes
       derivedLowers[p] = prev < 0 ? 0 : prev;
     }
   }
+  stage.at = "store.ensureClassificationPathLowers";
   const per_path_lower = await opts.store.ensureClassificationPathLowers(opts.input.project, canonicalR, sha, derivedLowers);
   if (now() >= deadline) return unavailable("deadline", "path_lowers");
 
+  stage.at = "decide";
   const windowEvents = index.events.filter((e) => e.seq <= U);
   const loose_hints = countLooseHints(windowEvents, paths.map((p) => ({ path: p })));
 
@@ -1155,6 +1175,7 @@ async function classifyCommitClaimInner(opts: ClassifyOpts): Promise<ClassifyRes
   };
 
   if (legacy) {
+    stage.at = "store.setClassificationLegacyDecision";
     if (opts.store.setClassificationLegacyDecision) {
       await opts.store.setClassificationLegacyDecision(opts.input.project, canonicalR, sha, record);
     }
@@ -1166,10 +1187,13 @@ async function classifyCommitClaimInner(opts: ClassifyOpts): Promise<ClassifyRes
 }
 
 export async function classifyCommitClaim(opts: ClassifyOpts): Promise<ClassifyResult> {
+  // The stage names the operation a throw came from: without it every rejected read looks alike
+  // at this catch, which is where the production failure lands (Codex P2, PR 57 round 1).
+  const stage: ClassifyStage = { at: "start" };
   try {
-    return await classifyCommitClaimInner(opts);
+    return await classifyCommitClaimInner(opts, stage);
   } catch (error) {
-    emitDiagnostic(opts.diag, "classify.outer", "store_error", error);
+    emitDiagnostic(opts.diag, "classify.outer", "store_error", () => `${stage.at}: ${diagnosticDetail(error)}`);
     return { kind: "unavailable", reason: "store_error" };
   }
 }

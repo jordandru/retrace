@@ -314,7 +314,7 @@ test("runArtifactIndexStatements: a throwing statement still fails closed, and s
   assert.deepEqual(seen, [{
     site: "store.artifact_index",
     reason: "store_error",
-    detail: "Error: D1_ERROR: too many SQL variables",
+    detail: "statement 0: Error: D1_ERROR: too many SQL variables",
   }]);
 
   // Without a sink the helper behaves exactly as before.
@@ -322,4 +322,29 @@ test("runArtifactIndexStatements: a throwing statement still fails closed, and s
     await runArtifactIndexStatements(q, Date.now, boom),
     { ok: false, reason: "store_error" },
   );
+});
+
+test("runArtifactIndexStatements: a decode failure logs its class, never the body it could not parse", async () => {
+  const q = {
+    project: "p",
+    artifact_keys: ["repo:acme/app#a.ts"],
+    after_seq: -1,
+    through_seq: 10,
+    row_cap: ARTIFACT_INDEX_DEFAULT_ROW_CAP,
+    deadline: Date.now() + 60_000,
+  };
+  const seen: Diagnostic[] = [];
+  const decoding = async () => {
+    JSON.parse('{"actor":{"id":"codex"},"secret":"hunter2"');
+    return [];
+  };
+
+  assert.deepEqual(
+    await runArtifactIndexStatements(q, Date.now, decoding, (d) => { seen.push(d); }),
+    { ok: false, reason: "store_error" },
+  );
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].site, "store.artifact_index");
+  assert.match(seen[0].detail ?? "", /^statement 0: SyntaxError \(message withheld\)$/);
+  assert.ok(!(seen[0].detail ?? "").includes("hunter2"));
 });

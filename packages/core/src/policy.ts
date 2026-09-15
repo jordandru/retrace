@@ -551,16 +551,19 @@ export async function policySnapshotFromIndex(opts: {
   const now = opts.budget?.now?.() ?? Date.now();
   if (opts.budget?.deadline !== undefined && now >= opts.budget.deadline)
     return { U: opts.U ?? -1, events: [], activations: [], unavailable: "deadline" };
+  // Which of the two reads threw: one site for both leaves the caller guessing (Codex, PR 57 r1).
+  let read = "document";
   try {
     const u = opts.U ?? (opts.headSeq ?? -1);
     if (u < 0) return { U: -1, events: [], activations: [] };
     const doc = await opts.getByActivationSeq(opts.project, u);
     if (!doc) return { U: u, events: [], activations: [], document: null };
+    read = "activation";
     const act = await opts.getEvent(doc.envelope.activation.event_id);
     const activations = act && act.project === opts.project && act.seq <= u ? [act] : [];
     return { U: u, events: activations, activations, document: doc };
   } catch (error) {
-    emitDiagnostic(opts.diag, "policy.snapshot", "store_error", error);
+    emitDiagnostic(opts.diag, `policy.snapshot.${read}`, "store_error", error);
     return { U: opts.U ?? -1, events: [], activations: [], unavailable: "store_error" };
   }
 }
