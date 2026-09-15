@@ -691,6 +691,37 @@ test("bounded amendment lookup skips all() with 5,000 non-amendment events", asy
   assert.equal(allCalls, 0);
 });
 
+test("a store without amendmentEventsUpTo fails closed as unavailable/store_error and never calls all()", async () => {
+  const store = new MemoryEventStore();
+  await putPolicy(store);
+  // all() answers (empty) rather than throwing: a fallback to it would produce a decision, not store_error.
+  let allCalls = 0;
+  store.all = async () => {
+    allCalls++;
+    return [];
+  };
+  (store as unknown as { amendmentEventsUpTo?: unknown }).amendmentEventsUpTo = undefined;
+
+  const got = await classify(store, commitInput());
+  assert.deepEqual(got, { kind: "unavailable", reason: "store_error" });
+  assert.equal(allCalls, 0);
+});
+
+test("a store without eventsReferencingArtifacts fails closed as unavailable/store_error and never calls all()", async () => {
+  const store = new MemoryEventStore();
+  await putPolicy(store);
+  let allCalls = 0;
+  store.all = async () => {
+    allCalls++;
+    return [];
+  };
+  (store as unknown as { eventsReferencingArtifacts?: unknown }).eventsReferencingArtifacts = undefined;
+
+  const got = await classify(store, commitInput({ files: ["a.ts"] }));
+  assert.deepEqual(got, { kind: "unavailable", reason: "store_error" });
+  assert.equal(allCalls, 0);
+});
+
 test("5,000 events plus one amendment read only the candidate and its dependencies inside 500 ms", async () => {
   const store = new MemoryEventStore();
   await putPolicy(store);

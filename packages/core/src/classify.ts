@@ -10,7 +10,6 @@ import {
   type AttributionAmendment, type AttributionCollection,
 } from "./attribution.js";
 import {
-  isAttributionAmendment,
   type AttributionCaptureContext, type AttributionDomain, type AttributionUnit,
 } from "./attribution-context.js";
 import { canonicalize, sha256Hex } from "./chain.js";
@@ -20,7 +19,7 @@ import {
 import { actorKey, captureSeals, generatesArtifact, previousCaptureTouch, sameArtifact, type CaptureSeal } from "./capture.js";
 import {
   ARTIFACT_INDEX_DEFAULT_ROW_CAP, ArtifactIndexResult, CausedByProblem, EventStore,
-  SEALED_BY_GITHUB_WEBHOOK, SEALED_BY_PARAM, causedByProblem, eventsReferencingArtifactKeys,
+  SEALED_BY_GITHUB_WEBHOOK, SEALED_BY_PARAM, causedByProblem,
 } from "./store.js";
 import { GENESIS_HASH } from "./schema.js";
 import type { Actor, Event, EventInput } from "./schema.js";
@@ -563,7 +562,7 @@ async function amendmentCaptureDependencies(opts: {
   return complete.ok ? complete : { ok: false, reason: "store_error" };
 }
 
-/** Bounded candidates plus point-read dependencies; never fetches or verifies the project prefix. */
+/** Bounded candidates plus point-read dependencies; never fetches or verifies the project prefix; fails closed on a store without the bounded read. */
 export async function evaluateAmendmentsAtU(opts: {
   store: EventStore;
   project: string;
@@ -593,16 +592,11 @@ export async function evaluateAmendmentsAtU(opts: {
     const collection = emptyAmendmentCollection();
     return { ok: true, collection, snapshotJson: amendmentSnapshotJson({ effective: [] }), captureSeals: baseSeals };
   }
+  // Fail closed: a store without the bounded candidate read never falls back to all() (NOOA F1).
+  if (!opts.store.amendmentEventsUpTo) return fail("store_error");
   let candidates: Event[];
   try {
-    if (opts.store.amendmentEventsUpTo) {
-      candidates = await opts.store.amendmentEventsUpTo(opts.project, opts.U, CLASSIFY_ROW_CAP + 1);
-    } else {
-      const events = await opts.store.all(opts.project);
-      candidates = events.filter((e) => e.seq <= opts.U && isAttributionAmendment(e))
-        .sort((a, b) => a.seq - b.seq || a.id.localeCompare(b.id))
-        .slice(0, CLASSIFY_ROW_CAP + 1);
-    }
+    candidates = await opts.store.amendmentEventsUpTo(opts.project, opts.U, CLASSIFY_ROW_CAP + 1);
   } catch {
     return fail("store_error");
   }
@@ -939,24 +933,16 @@ async function classifyCommitClaimInner(opts: ClassifyOpts): Promise<ClassifyRes
     const keys = [...new Set([...canonicalKeys, ...looseKeys])];
     windowArtifactKeys = keys;
     if (!keys.length) return { ok: true, events: [] };
-    if (opts.store.eventsReferencingArtifacts) {
-      return opts.store.eventsReferencingArtifacts({
-        project: opts.input.project,
-        artifact_keys: keys,
-        after_seq: -1,
-        through_seq: U,
-        row_cap: CLASSIFY_ROW_CAP,
-        deadline,
-      }, now);
-    }
-    return eventsReferencingArtifactKeys(await opts.store.all(opts.input.project), {
+    // Fail closed: a store without the artifact index never falls back to all() (NOOA F1).
+    if (!opts.store.eventsReferencingArtifacts) return { ok: false, reason: "store_error" };
+    return opts.store.eventsReferencingArtifacts({
       project: opts.input.project,
       artifact_keys: keys,
       after_seq: -1,
       through_seq: U,
       row_cap: CLASSIFY_ROW_CAP,
       deadline,
-    }, now());
+    }, now);
   };
   let index = await readWindow();
   if (!index.ok) return { kind: "unavailable", reason: index.reason };
