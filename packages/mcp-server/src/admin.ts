@@ -38,7 +38,7 @@ import { defaultProducerKeysDir, producerKeySlug, writeProducerPrivateKey } from
 
 /** Kept stable so `new-team` does not silently provision an experimental integration. */
 export const DEFAULT_HARNESSES = ["claude-code", "codex", "gemini", "grok", "github-copilot"] as const;
-export const HARNESSES = [...DEFAULT_HARNESSES, "openclaw", "nooa"] as const;
+export const HARNESSES = [...DEFAULT_HARNESSES, "openclaw", "nooa", "opencode"] as const;
 export type Harness = (typeof HARNESSES)[number];
 
 /** Where each harness keeps its MCP server config, for the onboarding text. */
@@ -50,6 +50,7 @@ const HARNESS_CONFIG: Record<Harness, { label: string; file: string; instruction
   "github-copilot": { label: "GitHub Copilot CLI", file: "~/.copilot/mcp-config.json", instructions: ".github/copilot-instructions.md" },
   openclaw: { label: "OpenClaw in NemoClaw", file: "NemoClaw's managed MCP provider store", instructions: "OpenClaw workspace instructions" },
   nooa: { label: "NOOA (NVIDIA Labs Object-Oriented Agents, research preview)", file: "the agent's .mcp.json (loaded via MCPManager.create_from_server)", instructions: "the agent's method docstrings / system prompt" },
+  opencode: { label: "OpenCode", file: "opencode.retrace.json, loaded through scripts/opencode-seat.sh", instructions: "docs/agents/OPENCODE.md" },
 };
 
 export interface TeamSpec {
@@ -211,6 +212,21 @@ export function renderOnboarding(spec: TeamSpec, credentials: LocalCredential[])
         ].join("\n")), "");
         continue;
       }
+      if (h === "opencode") {
+        lines.push("OpenCode takes its MCP servers as `mcp.<name>` with a `command` argv array and `environment` — not the `command`/`args`/`env` shape above. It also loads whatever `AGENTS.md` it finds, so the seat is started through `scripts/opencode-seat.sh`, which makes `docs/agents/OPENCODE.md` the session's only instruction file; the identity guard refuses a session started any other way:", "");
+        lines.push(fence("json", JSON.stringify({
+          mcp: {
+            retrace: {
+              type: "local",
+              command: ["npx", "-y", "--package=@retrace-dev/cli", "retrace-mcp"],
+              environment: mcpEnv(spec, h, member, cred),
+              timeout: 30000,
+            },
+          },
+        }, null, 2)), "");
+        lines.push("In the Retrace repo itself the token is not written into the config: the command sources `~/.retrace/opencode.env` (mode 0600) and the config carries no secret.", "");
+        continue;
+      }
       lines.push(fence("json", JSON.stringify({
         retrace: {
           command: "npx",
@@ -314,6 +330,24 @@ export function renderAgentOnboarding(spec: AgentSpec, credential: LocalCredenti
         "nemoclaw <sandbox-name> mcp list",
       ].join("\n")), "",
       "The Worker must have `RETRACE_MCP_ENABLED=1`. This compatibility pilot uses server-stamped pinned identity and does not claim producer signatures.", "",
+    );
+  } else if (spec.harness === "opencode") {
+    // OpenCode takes `mcp.<name>` with an argv `command` and `environment`; the generic
+    // command/args/env entry below is not a shape it understands (Codex review of PR 19).
+    lines.push(
+      `## ${cfg.label}`, "",
+      `Add this entry in \`${cfg.file}\` and keep the provenance instructions in \`${cfg.instructions}\`:`, "",
+      fence("json", JSON.stringify({
+        mcp: {
+          retrace: {
+            type: "local",
+            command: ["npx", "-y", "--package=@retrace-dev/cli", "retrace-mcp"],
+            environment: mcpEnv(spec, spec.harness, spec.member, credential),
+            timeout: 30000,
+          },
+        },
+      }, null, 2)), "",
+      "OpenCode loads whatever `AGENTS.md` it finds, which in a shared repository is another seat's identity file. Start this seat through `scripts/opencode-seat.sh`, which makes `docs/agents/OPENCODE.md` the session's only instruction file; the identity guard refuses a session started any other way (agent-rules 7).", "",
     );
   } else {
     lines.push(
