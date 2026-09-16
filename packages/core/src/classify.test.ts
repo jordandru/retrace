@@ -5,7 +5,7 @@ import {
   applyBreakerFailure, applyBreakerSuccess, breakerIsOpen, breakerShouldOpen, classifyCommitClaim,
   collectAttributionAmendments, createHandler, decideFromTable, emptyBreaker, prepareAttributionContext,
   recordWebhookClassifyOutcome, reconstructWithheldPayload, verifiedAttributionSnapshot,
-  webhookBreakerAdmission, wouldWrite,
+  webhookBreakerAdmission, wouldWrite, InvalidArtifactIdError,
   type ClaimRecord, type EventInput, type HistoryQuery,
 } from "./index.js";
 
@@ -783,6 +783,38 @@ test("eventsReferencingArtifacts returns a non-array: fails closed as unavailabl
   const got = await classify(store, commitInput({ files: ["a.ts"] }));
   assert.deepEqual(got, { kind: "unavailable", reason: "store_error" });
   assert.equal(allCalls, 0);
+});
+
+test("NUL or unpaired-surrogate artifact id is InvalidArtifactIdError, not store_error; no classification state", async () => {
+  for (const [label, id, re] of [
+    ["NUL", "repo:acme/a\0pp#a.ts", /U\+0000/],
+    ["lone surrogate", "repo:acme/a\uD800pp#a.ts", /unpaired surrogates/],
+  ] as const) {
+    const store = new MemoryEventStore();
+    let heads = 0;
+    const origHead = store.head.bind(store);
+    store.head = async (project) => {
+      heads++;
+      return origHead(project);
+    };
+    const input = commitInput({
+      artifacts: [
+        { id: `commit:acme/app@${SHA.slice(0, 12)}`, kind: "commit", role: "generated" },
+        { id, kind: "file", role: "generated" },
+      ],
+    });
+    await assert.rejects(
+      () => classify(store, input),
+      (e: unknown) => e instanceof InvalidArtifactIdError && re.test((e as Error).message),
+      label,
+    );
+    assert.equal(heads, 0, `${label}: no head reads`);
+    assert.equal(store.contexts.size, 0, `${label}: no classification context`);
+    assert.equal(store.events.length, 0, `${label}: no event written`);
+  }
+  const store = new MemoryEventStore();
+  const got = await classify(store, commitInput());
+  assert.deepEqual(got, { kind: "unavailable", reason: "policy_missing" });
 });
 
 test("5,000 events plus one amendment read only the candidate and its dependencies inside 500 ms", async () => {

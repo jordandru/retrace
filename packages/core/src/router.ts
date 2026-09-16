@@ -1137,19 +1137,32 @@ export async function drainPendingGithubDeliveries(store: EventStore, opts: {
       continue;
     }
     const inputs = mapGithubWebhook("push", payload, { project: row.project, includePush: true });
-    type Outcome = { status: "pending" | "sealed" | "budget_failed"; attempt_count: number; reason?: string };
+    type Outcome = { status: "pending" | "sealed" | "budget_failed" | "invalid_input"; attempt_count: number; reason?: string };
+    const terminalSha = (status: Outcome["status"] | undefined) => status === "sealed" || status === "budget_failed" || status === "invalid_input";
     const rawOutcomes: Record<string, string | Outcome> = row.outcomes ? JSON.parse(row.outcomes) as Record<string, string | Outcome> : {};
     const outcomes: Record<string, Outcome> = Object.fromEntries(Object.entries(rawOutcomes).map(([sha, value]) => [
       sha,
       typeof value === "string"
-        ? { status: value === "sealed" ? "sealed" : value === "budget_failed" ? "budget_failed" : "pending", attempt_count: value === "budget_failed" ? PENDING_BUDGET_ATTEMPTS : 0 }
+        ? { status: value === "sealed" ? "sealed" : value === "budget_failed" ? "budget_failed" : value === "invalid_input" ? "invalid_input" : "pending", attempt_count: value === "budget_failed" ? PENDING_BUDGET_ATTEMPTS : 0 }
         : value,
     ]));
     for (const input of inputs) {
       const parsed = EventInput.safeParse(input);
-      if (!parsed.success) continue;
+      if (!parsed.success) {
+        const sha = String(input.method?.params?.sha ?? "");
+        if (!sha || terminalSha(outcomes[sha]?.status)) continue;
+        const artifactIssue = parsed.error.issues.some((issue) =>
+          issue.path.includes("artifacts") || /artifact id/i.test(issue.message),
+        );
+        outcomes[sha] = {
+          status: "invalid_input",
+          attempt_count: outcomes[sha]?.attempt_count ?? 0,
+          reason: artifactIssue ? "invalid_artifact" : "invalid_input",
+        };
+        continue;
+      }
       const sha = String(parsed.data.method?.params?.sha ?? "");
-      if (!sha || outcomes[sha]?.status === "sealed" || outcomes[sha]?.status === "budget_failed") continue;
+      if (!sha || terminalSha(outcomes[sha]?.status)) continue;
       if (parsed.data.idempotency_key && await store.byIdempotencyKey(row.project, parsed.data.idempotency_key)) {
         outcomes[sha] = { status: "sealed", attempt_count: outcomes[sha]?.attempt_count ?? 0 };
         continue;
@@ -1184,7 +1197,7 @@ export async function drainPendingGithubDeliveries(store: EventStore, opts: {
     }
     const shas = inputs.map((input) => String(input.method?.params?.sha ?? "")).filter(Boolean);
     const allSealed = shas.length > 0 && shas.every((sha) => outcomes[sha]?.status === "sealed");
-    const terminal = shas.some((sha) => outcomes[sha]?.status === "budget_failed");
+    const terminal = shas.some((sha) => outcomes[sha]?.status === "budget_failed" || outcomes[sha]?.status === "invalid_input");
     const next = {
       ...row,
       outcomes: JSON.stringify(outcomes),

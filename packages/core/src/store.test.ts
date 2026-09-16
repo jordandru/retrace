@@ -5,7 +5,8 @@ import {
   EventInput, Event, EventStore, Share, likeContains, clampHistoryLimit, HISTORY_LIMIT_MAX,
   pageHistoryNewest, collectHistory, asHistoryPage, explainEvent,
   artifactIndexRows, eventsReferencingArtifactKeys, artifactKeyMatchSql, BACKFILL_ARTIFACT_INDEX_SQL, eventsReferencingArtifactsSql, eventsReferencingArtifactsStatements, prefixRangeUpperBound, ARTIFACT_INDEX_MAX_TERMS, D1_MAX_BOUND_PARAMS, D1_MAX_COMPOUND_SELECT_TERMS,
-  ARTIFACT_INDEX_DEFAULT_ROW_CAP,
+  ARTIFACT_INDEX_DEFAULT_ROW_CAP, D1_LIKE_GLOB_PATTERN_MAX_BYTES, ALIAS_KEY_RANGE_LO,
+  InvalidArtifactIdError,
 } from "./index.js";
 
 class MemStore implements EventStore {
@@ -224,17 +225,18 @@ test("eventsReferencingArtifactsStatements binds the window once and one json_ea
   assert.doesNotMatch(sql, /INDEXED BY/);
   assert.match(sql, /^WITH w\(project, after_seq, through_seq\) AS \(SELECT \?, \?, \?\) SELECT e\.body, m\.seq, m\.artifact_key FROM \(/);
   assert.match(sql, /\) m CROSS JOIN events e ON e\.project = \? AND e\.seq = m\.seq ORDER BY m\.seq ASC, m\.artifact_key ASC LIMIT \?$/);
-  assert.equal((sql.match(/ UNION /g) ?? []).length, 2, "equality member + prefix member + glob member, whatever the key count");
+  assert.equal((sql.match(/ UNION /g) ?? []).length, 2, "equality member + prefix member + suffix member, whatever the key count");
   assert.equal((sql.match(/SELECT DISTINCT i\.seq, i\.artifact_key FROM w CROSS JOIN json_each\(\?\) t CROSS JOIN event_artifact_index i/g) ?? []).length, 3, "json_each is the outer loop of every member; DISTINCT folds overlapping terms of one kind before LIMIT");
   assert.match(sql, /i\.artifact_key = t\.value AND i\.seq > w\.after_seq AND i\.seq <= w\.through_seq/);
   assert.match(sql, /i\.artifact_key >= json_extract\(t\.value, '\$\[0\]'\) AND i\.artifact_key < json_extract\(t\.value, '\$\[1\]'\)/);
-  assert.match(sql, /i\.artifact_key >= json_extract\(t\.value, '\$\[0\]'\) AND i\.artifact_key < json_extract\(t\.value, '\$\[1\]'\) AND i\.seq > w\.after_seq AND i\.seq <= w\.through_seq AND i\.artifact_key GLOB json_extract\(t\.value, '\$\[2\]'\)/, "an alias glob seeks the key range of its literal prefix, then filters");
+  assert.match(sql, /i\.artifact_key >= json_extract\(t\.value, '\$\[0\]'\) AND i\.artifact_key < json_extract\(t\.value, '\$\[1\]'\) AND i\.seq > w\.after_seq AND i\.seq <= w\.through_seq AND substr\(CAST\(i\.artifact_key AS BLOB\), -length\(CAST\(json_extract\(t\.value, '\$\[2\]'\) AS BLOB\)\)\) = CAST\(json_extract\(t\.value, '\$\[2\]'\) AS BLOB\)/, "an alias suffix seeks the repo: key range, then filters by byte-oriented suffix (length on BLOB, not TEXT)");
+  assert.doesNotMatch(sql, /\bGLOB\b|\bLIKE\b/, "classify SQL must not bind a LIKE/GLOB pattern");
   assert.doesNotMatch(sql, /artifact_key (=|>=|<|GLOB) \?/, "no per-term SQL parameters");
   assert.deepEqual(params.slice(0, 3), ["p", 3, 9]);
   assert.equal(params.length, 3 + 3 + 2, "window once, one JSON array per member, join project, limit");
   assert.deepEqual(JSON.parse(params[3] as string), ["repo:jordandru/retrace#a.ts", "repo:retrace#a.ts", "repo:retrace#b.ts"]);
   assert.deepEqual(JSON.parse(params[4] as string), [[prefix, "commit:jordandru/retrace@a123457"]], "prefix and its exclusive upper bound");
-  assert.deepEqual(JSON.parse(params[5] as string), [["repo:", "repo;", "repo:*/retrace#b.ts"]], "glob with the key range of its literal prefix");
+  assert.deepEqual(JSON.parse(params[5] as string), [[ALIAS_KEY_RANGE_LO, prefixRangeUpperBound(ALIAS_KEY_RANGE_LO), "/retrace#b.ts"]], "suffix with the repo: key range");
   assert.equal(params.at(-1), 11, "LIMIT is row_cap + 1");
   assert.deepEqual(eventsReferencingArtifactsStatements({ project: "p", artifact_keys: [], after_seq: -1, through_seq: 1, row_cap: 1, deadline: 0 }), []);
   assert.deepEqual(eventsReferencingArtifactsSql(q), only);
@@ -244,14 +246,15 @@ test("eventsReferencingArtifactsStatements keeps every statement under D1's para
   const base = { project: "p", after_seq: -1, through_seq: 9, row_cap: 10, deadline: 0 };
   const compoundTerms = (sql: string) => (sql.match(/ UNION /g) ?? []).length + 1;
   // the real four-file classifier shape under a policy with two owner-less aliases: 4 files × 3 exact spellings
-  // + 4 files × 2 alias globs — 114 parameters in round 5 (Codex F4), 28 compound terms in round 6 (D1 allows 5)
+  // + 4 files × 2 alias suffixes — 114 parameters in round 5 (Codex F4), 28 compound terms in round 6 (D1 allows 5)
   const fourFiles = ["a.ts", "b.ts", "c.ts", "d.ts"].flatMap((f) => [`repo:acme/app#${f}`, `repo:app#${f}`, `repo:old-name#${f}`]);
   const statements = eventsReferencingArtifactsStatements({ ...base, artifact_keys: fourFiles });
   assert.equal(statements.length, 1, "the four-file query is one statement");
-  assert.equal(statements[0]!.params.length, 3 + 2 + 2, "window, equality JSON, glob JSON, join project, limit");
+  assert.equal(statements[0]!.params.length, 3 + 2 + 2, "window, equality JSON, suffix JSON, join project, limit");
   assert.equal(compoundTerms(statements[0]!.sql), 2);
   assert.deepEqual(JSON.parse(statements[0]!.params[3] as string), fourFiles);
-  assert.equal((JSON.parse(statements[0]!.params[4] as string) as string[][]).length, 8, "two alias globs per file");
+  assert.equal((JSON.parse(statements[0]!.params[4] as string) as string[][]).length, 8, "two alias suffixes per file");
+  assert.doesNotMatch(statements[0]!.sql, /\bGLOB\b|\bLIKE\b/);
   const many = eventsReferencingArtifactsStatements({ ...base, artifact_keys: Array.from({ length: 501 }, (_, i) => `task:${i}`), artifact_prefixes: ["task:1", ""] });
   assert.equal(many.length, 2, "501 keys + 2 prefixes batch under ARTIFACT_INDEX_MAX_TERMS");
   let carried = 0;
@@ -286,10 +289,76 @@ test("prefixRangeUpperBound is the exclusive end of a code-point (BINARY) prefix
 test("artifactKeyMatchSql and backfill SQL are bound, not interpolated; backfill reads json artifact ids", () => {
   const match = artifactKeyMatchSql(["repo:jordandru/retrace#a.ts", "repo:retrace#b.ts"]);
   assert.match(match.sql, /i\.artifact_key IN \(\?(,\?)+\)/);
-  assert.match(match.sql, /GLOB \?/);
+  assert.match(match.sql, /substr\(CAST\(i\.artifact_key AS BLOB\), -length\(CAST\(\? AS BLOB\)\)\) = CAST\(\? AS BLOB\)/);
+  assert.doesNotMatch(match.sql, /\bGLOB\b/);
   assert.ok(match.params.includes("repo:jordandru/retrace#a.ts"));
   assert.ok(match.params.includes("repo:retrace#a.ts"), "full name also looks up the basename alias");
-  assert.ok(match.params.includes("repo:*/retrace#b.ts"));
+  assert.ok(match.params.includes("/retrace#b.ts"));
+  assert.ok(match.params.includes(ALIAS_KEY_RANGE_LO));
+  assert.ok(match.params.includes(prefixRangeUpperBound(ALIAS_KEY_RANGE_LO)!));
   assert.match(BACKFILL_ARTIFACT_INDEX_SQL, /INSERT OR IGNORE INTO event_artifact_index/);
   assert.match(BACKFILL_ARTIFACT_INDEX_SQL, /json_extract\(a\.value, '\$\.id'\)/);
+});
+
+test("alias suffix SQL matches the GLOB-equivalent hit and rejects the near-miss", () => {
+  const path = "packages/mcp-server/src/sqlite-store.test.ts";
+  const oldGlob = `repo:*/retrace#${path}`;
+  assert.ok(new TextEncoder().encode(oldGlob).length > D1_LIKE_GLOB_PATTERN_MAX_BYTES, "the pattern this query used to bind would have thrown on D1");
+  const q = {
+    project: "p", artifact_keys: [`repo:retrace#${path}`], after_seq: -1, through_seq: 10, row_cap: 10, deadline: 0,
+  };
+  const [only] = eventsReferencingArtifactsStatements(q);
+  assert.doesNotMatch(only!.sql, /\bGLOB\b|\bLIKE\b/);
+  const suffixPayload = JSON.parse(only!.params[4] as string) as [string, string, string][];
+  assert.deepEqual(suffixPayload, [[ALIAS_KEY_RANGE_LO, prefixRangeUpperBound(ALIAS_KEY_RANGE_LO), `/retrace#${path}`]]);
+  const suffix = suffixPayload[0]![2];
+  const hit = `repo:jordandru/retrace#${path}`;
+  const miss = `repo:jordandru/retrace-extra#${path}`;
+  assert.equal(hit.startsWith(suffixPayload[0]![0]) && hit < suffixPayload[0]![1] && hit.endsWith(suffix), true);
+  assert.equal(miss.endsWith(suffix), false);
+});
+
+test("alias suffix SQL uses BLOB length so a NUL in the path is not a terminator", () => {
+  const path = `a\0b`;
+  const q = {
+    project: "p", artifact_keys: [`repo:retrace#${path}`], after_seq: -1, through_seq: 10, row_cap: 10, deadline: 0,
+  };
+  const [only] = eventsReferencingArtifactsStatements(q);
+  assert.match(only!.sql, /CAST\(i\.artifact_key AS BLOB\)/);
+  assert.doesNotMatch(only!.sql, /\bGLOB\b|\bLIKE\b/);
+  const suffixPayload = JSON.parse(only!.params[4] as string) as [string, string, string][];
+  assert.equal(suffixPayload[0]![2], `/retrace#${path}`);
+  assert.ok(suffixPayload[0]![2].includes("\0"));
+});
+
+test("alias suffix SQL distinguishes U+FFFE from U+FFFF, a pair old GLOB overmatched", () => {
+  const stored = "repo:o/retrace#\uFFFE";
+  const query = "repo:retrace#\uFFFF";
+  const q = {
+    project: "p", artifact_keys: [query], after_seq: -1, through_seq: 10, row_cap: 10, deadline: 0,
+  };
+  const [only] = eventsReferencingArtifactsStatements(q);
+  assert.doesNotMatch(only!.sql, /\bGLOB\b|\bLIKE\b/);
+  const suffixPayload = JSON.parse(only!.params[4] as string) as [string, string, string][];
+  const [lo, hi, suffix] = suffixPayload[0]!;
+  assert.equal(suffix, "/retrace#\uFFFF");
+  assert.equal(stored.startsWith(lo) && stored < hi, true, "stored key is inside the repo: range the old GLOB walked");
+  assert.equal(stored.endsWith(suffix), false, "byte suffix must not treat U+FFFE as U+FFFF");
+});
+
+test("appendEvent refuses NUL and unpaired surrogates and accepts an astral-plane path", async () => {
+  const store = new MemStore();
+  const high = "repo:o/retrace#a\uD800b";
+  const low = "repo:o/retrace#a\uDC00b";
+  const nul = "repo:o/retrace#a\0b";
+  const astral = "repo:o/retrace#😀.ts";
+  for (const [id, re] of [[nul, /U\+0000/], [high, /unpaired surrogates/], [low, /unpaired surrogates/]] as const) {
+    await assert.rejects(
+      () => appendEvent(store, ev({ artifacts: [{ id }] })),
+      (e: unknown) => e instanceof InvalidArtifactIdError && re.test((e as Error).message),
+    );
+  }
+  assert.equal(store.events.length, 0, "refused ids must not be sealed");
+  const { event } = await appendEvent(store, ev({ artifacts: [{ id: astral }] }));
+  assert.equal(event.artifacts[0]?.id, astral);
 });

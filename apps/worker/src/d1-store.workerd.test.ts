@@ -96,3 +96,88 @@ test("D1 in workerd: this harness enforces the five-term compound limit the roun
     await assert.rejects(db.prepare(union(6)).all(), /too many terms in compound SELECT/);
   });
 });
+
+test("D1 in workerd: alias lookup whose old GLOB exceeded 50 bytes returns the matching row", { timeout: 60_000 }, async () => {
+  await withD1(async (db) => {
+    const glob50 = "a".repeat(50);
+    const glob51 = "a".repeat(51);
+    await db.prepare("SELECT 'x' GLOB ?").bind(glob50).all();
+    await assert.rejects(db.prepare("SELECT 'x' GLOB ?").bind(glob51).all(), /LIKE or GLOB pattern too complex/);
+
+    const path = "packages/mcp-server/src/sqlite-store.test.ts";
+    const oldGlob = `repo:*/retrace#${path}`;
+    assert.equal(new TextEncoder().encode(oldGlob).length, 59);
+    assert.ok(new TextEncoder().encode(oldGlob).length > 50);
+
+    const store = new D1Store(db);
+    const memory = new MemoryEventStore();
+    const hit = `repo:jordandru/retrace#${path}`;
+    const miss = `repo:jordandru/retrace-extra#${path}`;
+    for (const id of [hit, miss]) {
+      const input = { project: "p", actor: { type: "agent" as const, id: "A" }, action: "edited" as const, artifacts: [{ id, role: "generated" as const }] };
+      await appendEvent(memory, input);
+      await appendEvent(store, input);
+    }
+    const q: ArtifactIndexQuery = {
+      project: "p", artifact_keys: [`repo:retrace#${path}`], after_seq: -1, through_seq: 10, row_cap: 100, deadline: Date.now() + 30_000,
+    };
+    for (const st of eventsReferencingArtifactsStatements(q)) {
+      assert.doesNotMatch(st.sql, /\bGLOB\b|\bLIKE\b/);
+    }
+    const got = await store.eventsReferencingArtifacts(q);
+    const want = await memory.eventsReferencingArtifacts(q);
+    assert.equal(got.ok, true, `D1 must not throw store_error; got ${JSON.stringify(got)}`);
+    assert.deepEqual(seqs(got), seqs(want), "workerd D1 must match the memory spec");
+    assert.deepEqual(seqs(got), [0], "hit owner/retrace#path; near-miss retrace-extra must not match");
+  });
+});
+
+test("D1 in workerd: refuses NUL and unpaired surrogates and accepts an astral-plane path", { timeout: 60_000 }, async () => {
+  await withD1(async (db) => {
+    const store = new D1Store(db);
+    const high = "repo:o/retrace#a\uD800b";
+    const low = "repo:o/retrace#a\uDC00b";
+    const nul = "repo:o/retrace#a\0b";
+    const astral = "repo:o/retrace#😀.ts";
+    for (const [id, re] of [[nul, /U\+0000/], [high, /unpaired surrogates/], [low, /unpaired surrogates/]] as const) {
+      await assert.rejects(
+        () => appendEvent(store, { project: "p", actor: { type: "agent" as const, id: "A" }, action: "edited" as const, artifacts: [{ id, role: "generated" as const }] }),
+        (e: unknown) => e instanceof Error && re.test(e.message),
+      );
+    }
+    const { event } = await appendEvent(store, { project: "p", actor: { type: "agent" as const, id: "A" }, action: "edited" as const, artifacts: [{ id: astral, role: "generated" as const }] });
+    assert.equal(event.artifacts[0]?.id, astral);
+    const q: ArtifactIndexQuery = {
+      project: "p", artifact_keys: [`repo:retrace#😀.ts`], after_seq: -1, through_seq: 10, row_cap: 100, deadline: Date.now() + 30_000,
+    };
+    for (const st of eventsReferencingArtifactsStatements(q)) {
+      assert.doesNotMatch(st.sql, /\bGLOB\b|\bLIKE\b/);
+    }
+    const got = await store.eventsReferencingArtifacts(q);
+    assert.equal(got.ok, true, `D1 must not throw; got ${JSON.stringify(got)}`);
+    assert.deepEqual(seqs(got), [0]);
+  });
+});
+
+test("D1 in workerd: suffix lookup drops the U+FFFE/U+FFFF false positive old GLOB admitted", { timeout: 60_000 }, async () => {
+  await withD1(async (db) => {
+    const stored = "repo:o/retrace#\uFFFE";
+    const store = new D1Store(db);
+    await appendEvent(store, { project: "p", actor: { type: "agent" as const, id: "A" }, action: "edited" as const, artifacts: [{ id: stored, role: "generated" as const }] });
+    const glob = await db.prepare("SELECT COUNT(*) AS n FROM event_artifact_index WHERE artifact_key GLOB ?").bind("repo:*/retrace#\uFFFF").all() as { results: { n: number }[] };
+    assert.equal(glob.results[0]?.n, 1, "old GLOB overmatched U+FFFE against U+FFFF");
+    const q: ArtifactIndexQuery = {
+      project: "p", artifact_keys: ["repo:retrace#\uFFFF"], after_seq: -1, through_seq: 10, row_cap: 100, deadline: Date.now() + 30_000,
+    };
+    for (const st of eventsReferencingArtifactsStatements(q)) {
+      assert.doesNotMatch(st.sql, /\bGLOB\b|\bLIKE\b/);
+    }
+    const got = await store.eventsReferencingArtifacts(q);
+    assert.equal(got.ok, true, `D1 must not throw; got ${JSON.stringify(got)}`);
+    assert.deepEqual(seqs(got), [], "new byte predicate must not restore the overmatch");
+    const trueAlias = await store.eventsReferencingArtifacts({
+      ...q, artifact_keys: ["repo:retrace#\uFFFE"],
+    });
+    assert.deepEqual(seqs(trueAlias), [0]);
+  });
+});

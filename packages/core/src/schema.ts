@@ -56,13 +56,61 @@ export type Action = z.infer<typeof Action>;
 export const ArtifactRole = z.enum(["used", "generated", "both"]);
 export type ArtifactRole = z.infer<typeof ArtifactRole>;
 
+/** Well-formed UTF-16: every high surrogate is paired with a low surrogate, and no low surrogate stands alone. */
+export function isWellFormedUtf16(s: string): boolean {
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c >= 0xd800 && c <= 0xdbff) {
+      if (i + 1 >= s.length) return false;
+      const n = s.charCodeAt(i + 1);
+      if (n < 0xdc00 || n > 0xdfff) return false;
+      i++;
+    } else if (c >= 0xdc00 && c <= 0xdfff) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** Why `id` is not an accepted artifact id, or `undefined` if it is. Empty, U+0000, and unpaired surrogates. */
+export function artifactIdProblem(id: string): string | undefined {
+  if (typeof id !== "string" || id.length < 1) return "artifact id must be a non-empty string";
+  if (id.includes("\u0000")) return "artifact id must not contain U+0000";
+  if (!isWellFormedUtf16(id)) return "artifact id must be well-formed Unicode (no unpaired surrogates)";
+}
+
+export class InvalidArtifactIdError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InvalidArtifactIdError";
+  }
+}
+
+/** Fail closed: refuse the id. Never sanitize, coerce, or replace lone surrogates / NUL. */
+export function assertArtifactId(id: string): void {
+  const problem = artifactIdProblem(id);
+  if (problem) throw new InvalidArtifactIdError(problem);
+}
+
+export function assertEventArtifactIds(input: { artifacts: { id: string; derived_from?: string[] }[] }): void {
+  for (const a of input.artifacts) {
+    assertArtifactId(a.id);
+    for (const d of a.derived_from ?? []) assertArtifactId(d);
+  }
+}
+
+export const ArtifactId = z.string().min(1).superRefine((id, ctx) => {
+  const problem = artifactIdProblem(id);
+  if (problem) ctx.addIssue({ code: z.ZodIssueCode.custom, message: problem });
+});
+
 export const ArtifactRef = z.object({
   /** Stable id for the thing being worked on, e.g. "repo:my-app#src/main.ts" or "doc:abc123" */
-  id: z.string().min(1),
+  id: ArtifactId,
   kind: z.string().optional(), // file, doc, dataset, pr, message, decision, ...
   label: z.string().optional(),
   /** Lineage: this artifact was derived from these */
-  derived_from: z.array(z.string()).optional(),
+  derived_from: z.array(ArtifactId).optional(),
   /** PROV: input (used) / output (generated) / both. Body-only, hash-covered on new events; see ArtifactRole. */
   role: ArtifactRole.optional(),
 });
