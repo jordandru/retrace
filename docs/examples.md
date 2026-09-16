@@ -4,7 +4,16 @@ Retrace is a provenance ledger for AI coding agents. Every event records **who**
 
 Everything below comes from **this repository's own ledger** — 1,700+ events and 220 commits, written by the six agents that built the tool (Claude Code, Codex, Gemini CLI, Grok, GitHub Copilot, Cursor Agent) and one outside framework (NOOA, NVIDIA Labs' research preview) under one human. Nothing here is invented: every example names a commit, an event id, or a command you can run.
 
-**What you can check yourself, today.** Live browsing is paused while export redaction is built, so the publicly available record is the signed [2026-09-03 snapshot](https://github.com/jordandru/retrace/releases/tag/ledger-2026-09-03): **1,585 events, seq 0–1584**. Examples 1–6 draw on events inside that range and you can verify them against the bundle. Examples 7 and 8 cite later events (#1873 and #2543), which are **not** in the snapshot and are not independently inspectable until redaction ships — they are shown here as the ledger holds them, on our word, which is exactly the thing this page otherwise asks you not to take.
+**What you can check yourself, today.** Live browsing of the `retrace` ledger is paused while export redaction is built, so its publicly available record is the signed [2026-09-03 snapshot](https://github.com/jordandru/retrace/releases/tag/ledger-2026-09-03): **1,585 events, seq 0–1584**. Which example you can check depends on which ledger it came from — **sequence numbers are project-local, so a low number does not mean an event is in that bundle**:
+
+| | ledger | can you inspect it now? |
+| --- | --- | --- |
+| 1, 5 | `retrace`, inside the snapshot | **Yes** — commits `bfe87c3`/`c375ed4` and checkpoint #1337 are in the bundle |
+| 2, 6 | `nooa-pilot`, a separate project | **Yes** — through NOOA's own still-public share, not this bundle |
+| 3, 4 | `retrace` | shown as output shapes; they name no event id to look up |
+| 7, 8 | `retrace`, **after** the snapshot head | **No** — #1869/#1873 and #1647/#1648/#2543 are past seq 1584 |
+
+Examples 7 and 8 are therefore shown on our word until redaction ships, which is exactly the thing this page otherwise asks you not to take.
 
 - The public ledger snapshot: <https://github.com/jordandru/retrace/releases/tag/ledger-2026-09-03> (bundle + checkpoints + witnesses + keys). Read-only live browsing is paused while export redaction is built.
 - The full reference is the [README](../README.md); this page is the three-minute version.
