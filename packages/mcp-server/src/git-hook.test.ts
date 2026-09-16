@@ -9,8 +9,8 @@ import { fileURLToPath } from "node:url";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { SqliteStore } from "./sqlite-store.js";
-import { hookScript, parseTrailers, resolveHookToken, resolveHookProducerKeyFile, retryableHookFailure, ttySurface, guardRemoteWrite, validCausedById, validActorId } from "./git-hook.js";
-import { appendEvent, generateSigningKey, PRODUCER_SIG_FORMAT_V2, publicFromPrivate, verifyProducerSig, verifyProject, createHandler, MemoryEventStore } from "@retrace-dev/core";
+import { hookScript, parseTrailers, resolveHookToken, resolveHookProducerKeyFile, retryableHookFailure, ttySurface, guardRemoteWrite, validCausedById, validActorId, commitToEvent } from "./git-hook.js";
+import { appendEvent, generateSigningKey, PRODUCER_SIG_FORMAT_V2, publicFromPrivate, verifyProducerSig, verifyProject, createHandler, MemoryEventStore, classifyCommitClaim, InvalidArtifactIdError, ClassificationUnavailableError } from "@retrace-dev/core";
 import { RemoteApiError, RemoteCapabilityError } from "./remote-store.js";
 import { writeProducerPrivateKey } from "./producer-key.js";
 
@@ -265,6 +265,49 @@ test("capability mismatches and HTTP 426 are retryable like 5xx; 403 is not", ()
   assert.equal(retryableHookFailure(new RemoteApiError("POST", "/events", 426, new Headers(), "upgrade required")), true);
   assert.equal(retryableHookFailure(new RemoteApiError("POST", "/events", 403, new Headers(), "forbidden")), false);
   assert.equal(retryableHookFailure(new RemoteApiError("POST", "/events", 503, new Headers(), "unavailable")), true);
+  assert.equal(retryableHookFailure(new ClassificationUnavailableError("store_error")), true);
+  assert.equal(retryableHookFailure(new InvalidArtifactIdError("artifact id must not contain U+0000")), false);
+});
+
+test("local shadow classify: a NUL or lone-surrogate repoName is InvalidArtifactIdError, not store_error", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "retrace-git-bad-reponame-"));
+  sh(dir, "git", ["init", "-q", "-b", "main"]);
+  sh(dir, "git", ["config", "core.hooksPath", "/dev/null"]);
+  writeFileSync(join(dir, "a.ts"), "fixture\n");
+  sh(dir, "git", ["add", "a.ts"]);
+  sh(dir, "git", ["commit", "-qm", "fixture"]);
+
+  for (const [label, repoName, re] of [
+    ["NUL", "acme/a\0pp", /U\+0000/],
+    ["lone surrogate", "acme/a\uD800pp", /unpaired surrogates/],
+  ] as const) {
+    const input = commitToEvent(dir, "HEAD", { project: "p", repoName });
+    assert.ok(input.artifacts.some((a) => a.id.includes(repoName)), `${label}: commitToEvent embeds the unvalidated repoName`);
+    const store = new MemoryEventStore();
+    let heads = 0;
+    const origHead = store.head.bind(store);
+    store.head = async (project) => {
+      heads++;
+      return origHead(project);
+    };
+    await assert.rejects(
+      () => classifyCommitClaim({
+        store, input, producer: "git-hook", sealedBy: "unstamped", trailerPolicy: "shadow", canonicalR: "acme/app",
+      }),
+      (e: unknown) => e instanceof InvalidArtifactIdError && re.test((e as Error).message),
+      label,
+    );
+    assert.equal(heads, 0, `${label}: no head reads`);
+    assert.equal(store.contexts.size, 0, `${label}: no classification context`);
+    assert.equal(store.events.length, 0, `${label}: no event written`);
+  }
+
+  const ordinary = commitToEvent(dir, "HEAD", { project: "p", repoName: "acme/app" });
+  const got = await classifyCommitClaim({
+    store: new MemoryEventStore(), input: ordinary, producer: "git-hook", sealedBy: "unstamped",
+    trailerPolicy: "shadow", canonicalR: "acme/app",
+  });
+  assert.deepEqual(got, { kind: "unavailable", reason: "policy_missing" });
 });
 
 test("hook 426 queues the sha in retrace-pending-seal, prints stderr, and exits non-zero", async () => {

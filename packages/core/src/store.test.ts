@@ -331,6 +331,21 @@ test("alias suffix SQL uses BLOB length so a NUL in the path is not a terminator
   assert.ok(suffixPayload[0]![2].includes("\0"));
 });
 
+test("alias suffix SQL distinguishes U+FFFE from U+FFFF, a pair old GLOB overmatched", () => {
+  const stored = "repo:o/retrace#\uFFFE";
+  const query = "repo:retrace#\uFFFF";
+  const q = {
+    project: "p", artifact_keys: [query], after_seq: -1, through_seq: 10, row_cap: 10, deadline: 0,
+  };
+  const [only] = eventsReferencingArtifactsStatements(q);
+  assert.doesNotMatch(only!.sql, /\bGLOB\b|\bLIKE\b/);
+  const suffixPayload = JSON.parse(only!.params[4] as string) as [string, string, string][];
+  const [lo, hi, suffix] = suffixPayload[0]!;
+  assert.equal(suffix, "/retrace#\uFFFF");
+  assert.equal(stored.startsWith(lo) && stored < hi, true, "stored key is inside the repo: range the old GLOB walked");
+  assert.equal(stored.endsWith(suffix), false, "byte suffix must not treat U+FFFE as U+FFFF");
+});
+
 test("appendEvent refuses NUL and unpaired surrogates and accepts an astral-plane path", async () => {
   const store = new MemStore();
   const high = "repo:o/retrace#a\uD800b";

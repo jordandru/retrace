@@ -24,7 +24,7 @@ import {
   ARTIFACT_INDEX_DEFAULT_ROW_CAP, ArtifactIndexResult, CausedByProblem, EventStore,
   SEALED_BY_GITHUB_WEBHOOK, SEALED_BY_PARAM, causedByProblem,
 } from "./store.js";
-import { GENESIS_HASH, assertArtifactId } from "./schema.js";
+import { GENESIS_HASH, assertArtifactId, assertEventArtifactIds, InvalidArtifactIdError } from "./schema.js";
 import type { Actor, Event, EventInput } from "./schema.js";
 import {
   canonicalGithubRepo, canonicalRepositoryR, contextKey, documentMapKey, selectPolicyForContext,
@@ -1131,9 +1131,14 @@ async function classifyCommitClaimInner(opts: ClassifyOpts): Promise<ClassifyRes
 }
 
 export async function classifyCommitClaim(opts: ClassifyOpts): Promise<ClassifyResult> {
+  // Validate before the broad catch: a forbidden id is a deterministic input error, not a
+  // storage failure. HTTP POST /events and webhook drain schema-parse first; the exported
+  // classifier and the local shadow git-hook path do not.
+  assertEventArtifactIds(opts.input);
   try {
     return await classifyCommitClaimInner(opts);
-  } catch {
+  } catch (error) {
+    if (error instanceof InvalidArtifactIdError) throw error;
     return { kind: "unavailable", reason: "store_error" };
   }
 }

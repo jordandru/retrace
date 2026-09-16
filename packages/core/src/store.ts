@@ -356,10 +356,14 @@ export function globLiteralPrefix(pattern: string): string {
  *  `artifactLookup` (`/<alias>#<path>`) seek the same `repo:` … `repo;` key range the old `GLOB repo:*\/alias#path`
  *  used, then filter with byte-oriented suffix equality. `length()` on TEXT stops at the first U+0000
  *  (https://www.sqlite.org/lang_corefunc.html#length); CAST AS BLOB counts bytes past NUL so a suffix
- *  containing NUL is not truncated. The SQL matched-set equals the previous GLOB — including the
- *  retained first-`#` overmatch (`repo:x#/retrace#a.ts` vs query `repo:retrace#a.ts` hits the index;
- *  `sameArtifact` is false because the paths differ). It does not equal `sameArtifact` for every
- *  accepted string. The range predicates stay on the TEXT column, so the key index still seeks.
+ *  containing NUL is not truncated. The SQL matched-set is the previous GLOB minus false positives
+ *  GLOB admitted among U+FFFD / U+FFFE / U+FFFF (workerd and node sqlite: stored
+ *  `repo:o/retrace#\uFFFE` vs query `repo:retrace#\uFFFF` is old GLOB 1, new byte predicate 0,
+ *  `sameArtifact` false). That removal is intentional; do not restore the overmatch. The
+ *  documented first-`#` overmatch is unchanged (`repo:x#/retrace#a.ts` vs query `repo:retrace#a.ts`
+ *  hits the index; `sameArtifact` is false because the paths differ). The SQL matched-set does
+ *  not equal `sameArtifact` for every accepted string. The range predicates stay on the TEXT
+ *  column, so the key index still seeks.
  *  Classify still binds no LIKE/GLOB. Every
  *  member yields DISTINCT `(seq, artifact_key)` so the row budget counts distinct matching artifact rows, as the in-memory
  *  spec does (round 6, Codex F5; round 7: overlapping same-kind terms in a single member); the outer query joins `events` by its unique `(project, seq)` — `CROSS JOIN` so SQLite

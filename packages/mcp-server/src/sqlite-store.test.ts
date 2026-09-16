@@ -170,6 +170,26 @@ test("SqliteStore refuses NUL and unpaired surrogates and accepts an astral-plan
   if (hit.ok) assert.deepEqual(hit.events.map((e) => e.seq), [0]);
 });
 
+test("SqliteStore suffix lookup drops the U+FFFE/U+FFFF false positive old GLOB admitted", async () => {
+  const store = new SqliteStore(":memory:");
+  const stored = "repo:o/retrace#\uFFFE";
+  const query = "repo:retrace#\uFFFF";
+  await appendEvent(store, ev({ artifacts: [{ id: stored, role: "generated" }] }));
+  const db = (store as unknown as { db: { prepare: (sql: string) => { get: (...args: unknown[]) => { n: number } } } }).db;
+  const glob = db.prepare("SELECT COUNT(*) AS n FROM event_artifact_index WHERE artifact_key GLOB ?").get("repo:*/retrace#\uFFFF");
+  assert.equal(glob.n, 1, "old GLOB overmatched U+FFFE against U+FFFF; keep that as the documented false positive");
+  const hit = await store.eventsReferencingArtifacts({
+    project: "junk", artifact_keys: [query], after_seq: -1, through_seq: 10, row_cap: 10, deadline: Date.now() + 5_000,
+  });
+  assert.equal(hit.ok, true);
+  if (hit.ok) assert.deepEqual(hit.events.map((e) => e.seq), [], "new byte predicate must not restore the overmatch");
+  const trueAlias = await store.eventsReferencingArtifacts({
+    project: "junk", artifact_keys: ["repo:retrace#\uFFFE"], after_seq: -1, through_seq: 10, row_cap: 10, deadline: Date.now() + 5_000,
+  });
+  assert.equal(trueAlias.ok, true);
+  if (trueAlias.ok) assert.deepEqual(trueAlias.events.map((e) => e.seq), [0], "the stored U+FFFE key still matches its own alias");
+});
+
 test("SqliteStore artifact prefixes find abbreviated and full commit references", async () => {
   const store = new SqliteStore(":memory:");
   const sha = "a1234567890b".padEnd(40, "c");

@@ -158,3 +158,26 @@ test("D1 in workerd: refuses NUL and unpaired surrogates and accepts an astral-p
     assert.deepEqual(seqs(got), [0]);
   });
 });
+
+test("D1 in workerd: suffix lookup drops the U+FFFE/U+FFFF false positive old GLOB admitted", { timeout: 60_000 }, async () => {
+  await withD1(async (db) => {
+    const stored = "repo:o/retrace#\uFFFE";
+    const store = new D1Store(db);
+    await appendEvent(store, { project: "p", actor: { type: "agent" as const, id: "A" }, action: "edited" as const, artifacts: [{ id: stored, role: "generated" as const }] });
+    const glob = await db.prepare("SELECT COUNT(*) AS n FROM event_artifact_index WHERE artifact_key GLOB ?").bind("repo:*/retrace#\uFFFF").all() as { results: { n: number }[] };
+    assert.equal(glob.results[0]?.n, 1, "old GLOB overmatched U+FFFE against U+FFFF");
+    const q: ArtifactIndexQuery = {
+      project: "p", artifact_keys: ["repo:retrace#\uFFFF"], after_seq: -1, through_seq: 10, row_cap: 100, deadline: Date.now() + 30_000,
+    };
+    for (const st of eventsReferencingArtifactsStatements(q)) {
+      assert.doesNotMatch(st.sql, /\bGLOB\b|\bLIKE\b/);
+    }
+    const got = await store.eventsReferencingArtifacts(q);
+    assert.equal(got.ok, true, `D1 must not throw; got ${JSON.stringify(got)}`);
+    assert.deepEqual(seqs(got), [], "new byte predicate must not restore the overmatch");
+    const trueAlias = await store.eventsReferencingArtifacts({
+      ...q, artifact_keys: ["repo:retrace#\uFFFE"],
+    });
+    assert.deepEqual(seqs(trueAlias), [0]);
+  });
+});

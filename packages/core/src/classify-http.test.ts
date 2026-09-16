@@ -681,6 +681,65 @@ test("F9/F10: drain budgets are per-sha and terminal/policy-off work stays durab
   assert.equal(offOutcome[SHA]!.reason, "policy_off");
 });
 
+test("drain records a terminal invalid_artifact outcome for a parked NUL path and keeps the raw payload", async () => {
+  const { store, h } = handler();
+  await putPolicy(h);
+  const astralSha = "b".repeat(40);
+  const badSha = "c".repeat(40);
+  const astralPayload = pushPayload({
+    commits: [{
+      id: astralSha,
+      message: "work\n\nRetrace-Actor: codex\n",
+      timestamp: "2026-09-10T12:00:00.000Z",
+      author: { name: "Jordan", email: "jordan@example.com" },
+      added: ["😀.ts"], modified: [], removed: [],
+    }],
+  });
+  const badRaw = JSON.stringify(pushPayload({
+    commits: [{
+      id: badSha,
+      message: "work\n\nRetrace-Actor: codex\n",
+      timestamp: "2026-09-10T12:00:00.000Z",
+      author: { name: "Jordan", email: "jordan@example.com" },
+      added: ["a\u0000.ts"], modified: [], removed: [],
+    }],
+  }));
+  await store.insertPendingDelivery({
+    delivery_id: "d-astral", project: "p", raw_body: JSON.stringify(astralPayload),
+    received_at: "2026-09-10T12:00:00.000Z", repo: "acme/app", routing_state: "received", state: "received",
+  });
+  await store.insertPendingDelivery({
+    delivery_id: "d-nul", project: "p", raw_body: badRaw,
+    received_at: "2026-09-10T12:00:01.000Z", repo: "acme/app", routing_state: "received", state: "received",
+  });
+
+  const first = await drainPendingGithubDeliveries(store, { trailerPolicy: "shadow" });
+  assert.equal(first.drained, 1);
+  assert.equal(first.failed, 1);
+  assert.equal(await store.getPendingDelivery("d-astral"), null);
+  const sealed = store.events.find((e) => e.action === "committed");
+  assert.ok(sealed);
+  assert.equal(String(sealed!.method?.params?.sha), astralSha);
+
+  const parked = await store.getPendingDelivery("d-nul");
+  assert.ok(parked, "invalid delivery must be retained");
+  assert.equal(parked!.raw_body, badRaw, "original raw payload must be left intact");
+  assert.equal(parked!.state, "terminal_failure");
+  const outcomes = JSON.parse(parked!.outcomes!) as Record<string, { status: string; reason?: string }>;
+  assert.equal(outcomes[badSha]!.status, "invalid_input");
+  assert.equal(outcomes[badSha]!.reason, "invalid_artifact");
+
+  const second = await drainPendingGithubDeliveries(store, { trailerPolicy: "shadow" });
+  assert.equal(second.drained, 0);
+  assert.equal(second.failed, 0, "terminal invalid_input must not occupy another drain slot");
+  const still = await store.getPendingDelivery("d-nul");
+  assert.ok(still);
+  assert.equal(still!.raw_body, badRaw);
+  assert.equal(still!.state, "terminal_failure");
+  assert.equal(still!.outcomes, parked!.outcomes);
+  assert.equal(store.events.filter((e) => e.action === "committed").length, 1);
+});
+
 test("F11/F12: one atomic drainer wins and unresolved rows cannot starve ready work", async () => {
   const store = new MemoryEventStore();
   const { h } = handler(store);
