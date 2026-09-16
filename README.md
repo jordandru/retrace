@@ -9,7 +9,7 @@ It exists because a commit in this repo named the wrong AI agent as its author. 
 - **[Retrace by example](docs/examples.md)** — eight real problems from this repo's ledger and what Retrace shows for each. Three minutes.
 - **[Full reference](docs/reference.md)** — every adapter, the cloud Worker, team hosting, event shape, status and roadmap.
 - **[SETUP-GUIDE](SETUP-GUIDE.md)** — the guided walkthrough: clone → MCP → Worker → GitHub/Drive.
-- **Live ledger:** [browse](https://retrace-api.slcwitit.workers.dev/s/sh_ea81439e010abb1c0ec7167c) · [pre-verified snapshot](https://github.com/jordandru/retrace/releases/tag/ledger-2026-09-03) (bundle + checkpoints + witnesses + keys).
+- **Live ledger:** read-only public browsing is paused while export redaction is built; the [pre-verified snapshot](https://github.com/jordandru/retrace/releases/tag/ledger-2026-09-03) (bundle + checkpoints + witnesses + keys) is public and verifies offline against the published key.
 
 ## What you get
 

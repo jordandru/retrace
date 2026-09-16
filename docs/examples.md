@@ -4,7 +4,7 @@ Retrace is a provenance ledger for AI coding agents. Every event records **who**
 
 Everything below comes from **this repository's own public ledger** — 1,700+ events and 220 commits, written by the six agents that built the tool (Claude Code, Codex, Gemini CLI, Grok, GitHub Copilot, Cursor Agent) and one outside framework (NOOA, NVIDIA Labs' research preview) under one human. Nothing here is invented: every example names a commit, an event id, or a command you can run.
 
-- Browse the live ledger: <https://retrace-api.slcwitit.workers.dev/s/sh_ea81439e010abb1c0ec7167c>
+- The public ledger snapshot: <https://github.com/jordandru/retrace/releases/tag/ledger-2026-09-03> (bundle + checkpoints + witnesses + keys). Read-only live browsing is paused while export redaction is built.
 - The full reference is the [README](../README.md); this page is the three-minute version.
 
 ---
@@ -179,6 +179,6 @@ These are the real `AMND` rows from main:
 
 ## Try it in two minutes
 
-1. Browse the live ledger: <https://retrace-api.slcwitit.workers.dev/s/sh_ea81439e010abb1c0ec7167c> (timeline · printable report · signed export).
+1. Download the pre-verified snapshot: <https://github.com/jordandru/retrace/releases/tag/ledger-2026-09-03> (bundle + checkpoints + witnesses + keys).
 2. Verify a bundle offline with the command in §6 — the pre-verified snapshot is in the [releases](https://github.com/jordandru/retrace/releases/tag/ledger-2026-09-03).
 3. Wire your own agents: the [Quick start](reference.md#quick-start-local-no-cloud-needed) runs locally with no cloud account; the [SETUP-GUIDE](../SETUP-GUIDE.md) covers the hosted Worker. Apache-2.0; self-host free.
