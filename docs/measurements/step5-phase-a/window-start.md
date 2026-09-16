@@ -111,3 +111,69 @@ census above stays the "before"; a third start marker will be added here with it
 - **Activation is not yet proven at the time of writing** (rule 0). This note's own commit is the first attempted
   under the third start; its outcome (a seal carrying `method.params.claim_decision`, or a parked seal with an
   `unavailable` reason) is to be cited here by a dated addition, as before.
+
+## Addition 2026-09-15 21:10:45Z — window PAUSED a third time (policy reverted to off)
+
+*Recorded 2026-09-16 06:40Z, after the cause was found. The delay is itself part of the record: the third
+window was paused within two minutes, but the reason was not known for another two hours.*
+
+This note's own commit `ce9c4eb` was the first attempted under the third start. The hook's attempt
+(21:10:13.950Z) returned `503 classification_unavailable / store_error`, the seal was parked in
+`retrace-pending-seal`, and no classification completed — `classification_contexts` stayed at zero rows.
+On Jordan's pre-authorisation (`evt_181aa0a7`) the policy was set back to `off` (Worker version
+`6a284ec6-003c-4391-934d-1dac67f528da` at 21:10:45.464Z, `evt_db0d7e0a583f43ee902d23de29bd6564`) and the
+parked seal replayed (`evt_eaf5da16cd3040538ae98c26413d49b1`). **Shadow was live 21:08:49.492Z–21:10:45.464Z,
+one minute fifty-six seconds** — the first two windows ran twelve minutes each; this one was cut short
+because the failure was immediate and identical. One commit attempted; zero classifications completed; zero
+seals lost. **Activation remains NOT proven**: no seal carrying `method.params.claim_decision` exists.
+
+**Root cause — and this one was not the fix that preceded it.** The first finding
+(`evt_ea9631238e5040068c5eae82a115e810`) established only that the deployed bundle *did* carry the PR #56
+fix, that every D1 query run directly against production succeeded in single-digit milliseconds, and that
+the Worker discarded whatever actually failed. The cause was confirmed later
+(triage `evt_a942f8e2d47b4f55ae703e065189f74b`; investigation `evt_b49d53e5cfeb42caa84cca64c55a6868`;
+independent Miniflare reproduction with a real D1 binding, `evt_a2cffab4199344ec99045e89dee9098d`):
+
+> **workerd sets `SQLITE_LIMIT_LIKE_PATTERN_LENGTH` to 50 bytes**, where ordinary SQLite defaults it to
+> 50,000. The project policy gives `jordandru/retrace` the bare alias `retrace`, so `artifactLookup`
+> (`packages/core/src/capture.ts:51`) takes its GLOB branch and builds `repo:*/retrace#<path>`;
+> `eventsReferencingArtifactsStatements` (`store.ts:376`, member SQL `:387`) binds it as
+> `i.artifact_key GLOB ?`; `D1Store.eventsReferencingArtifacts` (`apps/worker/src/d1-store.ts:137-142`)
+> executes it; D1 throws `LIKE or GLOB pattern too complex: SQLITE_ERROR`; the bare catch in
+> `runArtifactIndexStatements` (`store.ts:443-445`) discards the error and returns `store_error`;
+> `classify.ts:954` renders that as `unavailable` and `router.ts:843-847` answers 503.
+
+For this commit the pattern was `repo:*/retrace#docs/measurements/step5-phase-a/window-start.md` — **62
+bytes**. `repo:*/retrace#` is 15 bytes, so **any path longer than 35 bytes throws**, which is nearly every
+real path in this repository. That is why *every* seal parked, not merely long-path ones. A boundary probe
+in the same workerd build the repo already tests against confirms 50 bytes succeeds and 51 throws. Because
+this is the *first* artifact-index read, nothing ever reached the context insert.
+
+**Why three windows failed before this was visible.** `MemoryEventStore` matches in JavaScript
+(`mem-store.ts:69-71`) and never evaluates a SQL GLOB, so every local reproduction returned `kind=decision`
+on the same seal, the same export and the same policy. The local SQLite store cannot show it either, at a
+50,000-byte limit. And the workerd test written specifically to catch workerd-only limits could not reach
+the cap: `store.ts:335-341` accounts for exactly two workerd limits — 100 bound parameters and
+`SQLITE_LIMIT_COMPOUND_SELECT=5` — and the test's fixtures top out at 24-byte alias globs.
+
+**A hypothesis, recorded as it resolved.** Jordan's stated hypothesis was that ~15 sequential D1 round
+trips exhausted the 500 ms budget. **Disconfirmed as the cause**: the failure reproduces identically at a
+20-second deadline, and the failing query returns in ~38 ms. The thing that throws is the SQL error, not
+the timer. His related prediction is nevertheless **confirmed as a separate real defect** — `classify.ts`
+collapses a rejected `Error("deadline")` into `store_error` at the amendment-candidate catch and at the
+outer catch, so a genuine budget overrun would have been indistinguishable from this fault in the logs.
+That is issue **#62**, unfixed.
+
+**A second latent instance of the same class, live today with the policy off.** `likeContains`
+(`store.ts:106-108`) wraps a history text search as `%needle%` with no length bound, so any
+`retrace_history` text search whose escaped UTF-8 pattern exceeds 50 bytes throws the same D1 error. That
+is issue **#53**, which this incident explains; the real threshold is the escaped pattern's byte length,
+not a flat 48 characters, and `%`, `_` and `!` each expand to two bytes.
+
+**What the fourth start requires.** A fix to the alias lookup that binds no LIKE or GLOB pattern on the
+classify path. That fix is in review as PR **#60** and is **not merged and not deployed** at the time of
+writing, so nothing here should be read as saying the defect is closed (rule 0). PR **#57**
+(classify-path diagnostics) is the instrument this incident argues for — the discarded SQL error text at
+that bare catch is precisely why the cause was invisible across three live windows — and its gate is
+closed, unmerged, held. The census in the first section remains the "before" for any restart; a fourth
+start marker will be added here with its date, as before.
