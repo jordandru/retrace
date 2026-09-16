@@ -137,31 +137,41 @@ independent Miniflare reproduction with a real D1 binding, `evt_a2cffab4199344ec
 > **workerd sets `SQLITE_LIMIT_LIKE_PATTERN_LENGTH` to 50 bytes**, where ordinary SQLite defaults it to
 > 50,000. The project policy gives `jordandru/retrace` the bare alias `retrace`, so `artifactLookup`
 > (`packages/core/src/capture.ts:51`) takes its GLOB branch and builds `repo:*/retrace#<path>`;
-> `eventsReferencingArtifactsStatements` (`store.ts:376`, member SQL `:387`) binds it as
-> `i.artifact_key GLOB ?`; `D1Store.eventsReferencingArtifacts` (`apps/worker/src/d1-store.ts:137-142`)
+> `eventsReferencingArtifactsStatements` (`store.ts:376`, member SQL `:387`) applies it as
+> `i.artifact_key GLOB json_extract(t.value, '$[2]')` — the pattern travels inside a bound JSON value, not
+> as a literal `GLOB ?`; `D1Store.eventsReferencingArtifacts` (`apps/worker/src/d1-store.ts:137-142`)
 > executes it; D1 throws `LIKE or GLOB pattern too complex: SQLITE_ERROR`; the bare catch in
 > `runArtifactIndexStatements` (`store.ts:443-445`) discards the error and returns `store_error`;
 > `classify.ts:954` renders that as `unavailable` and `router.ts:843-847` answers 503.
 
 For this commit the pattern was `repo:*/retrace#docs/measurements/step5-phase-a/window-start.md` — **62
-bytes**. `repo:*/retrace#` is 15 bytes, so **any path longer than 35 bytes throws**, which is nearly every
-real path in this repository. That is why *every* seal parked, not merely long-path ones. A boundary probe
-in the same workerd build the repo already tests against confirms 50 bytes succeeds and 51 throws. Because
-this is the *first* artifact-index read, nothing ever reached the context insert.
+bytes**. `repo:*/retrace#` is 15 bytes, so any path longer than 35 bytes throws on that first read. A
+boundary probe in the same workerd build the repo already tests against confirms 50 bytes succeeds and 51
+throws. Because this is the *first* artifact-index read, nothing ever reached the context insert.
+
+**Why *every* seal parked, not only long-path ones** — and this is not the prevalence of long paths. At
+this HEAD only **78 of 192** tracked paths exceed 35 bytes, so path length alone cannot explain a
+short-path commit failing. The accepted triage (`evt_a942f8e2d47b4f55ae703e065189f74b`) gives the actual
+reason: the classifier's *subsequent* amendment-target read expands to alias globs of up to **59 bytes**
+for the target of amendment `evt_51c4a8ad` (seq 2543), which is over the cap regardless of the committed
+path. A long-path commit like this one therefore fails on the first artifact-index statement; a short-path
+commit survives that and fails on the later one. Same defect, different query.
 
 **Why three windows failed before this was visible.** `MemoryEventStore` matches in JavaScript
 (`mem-store.ts:69-71`) and never evaluates a SQL GLOB, so every local reproduction returned `kind=decision`
 on the same seal, the same export and the same policy. The local SQLite store cannot show it either, at a
 50,000-byte limit. And the workerd test written specifically to catch workerd-only limits could not reach
-the cap: `store.ts:335-341` accounts for exactly two workerd limits — 100 bound parameters and
+the cap: `store.ts:315-321` accounts for exactly two workerd limits — 100 bound parameters and
 `SQLITE_LIMIT_COMPOUND_SELECT=5` — and the test's fixtures top out at 24-byte alias globs.
 
 **A hypothesis, recorded as it resolved.** Jordan's stated hypothesis was that ~15 sequential D1 round
 trips exhausted the 500 ms budget. **Disconfirmed as the cause**: the failure reproduces identically at a
 20-second deadline, and the failing query returns in ~38 ms. The thing that throws is the SQL error, not
 the timer. His related prediction is nevertheless **confirmed as a separate real defect** — `classify.ts`
-collapses a rejected `Error("deadline")` into `store_error` at the amendment-candidate catch and at the
-outer catch, so a genuine budget overrun would have been indistinguishable from this fault in the logs.
+collapses a **rejected** `Error("deadline")` into `store_error` at the amendment-candidate catch and at
+the outer catch. The qualifier matters: an ordinary explicit deadline check already returns `deadline`
+correctly, so only an overrun that surfaces as a rejected promise at those two catches is mislabelled —
+and that one would have been indistinguishable from this fault in the logs.
 That is issue **#62**, unfixed.
 
 **A second latent instance of the same class, live today with the policy off.** `likeContains`
