@@ -6,6 +6,7 @@ import {
   pageHistoryNewest, collectHistory, asHistoryPage, explainEvent,
   artifactIndexRows, eventsReferencingArtifactKeys, artifactKeyMatchSql, BACKFILL_ARTIFACT_INDEX_SQL, eventsReferencingArtifactsSql, eventsReferencingArtifactsStatements, prefixRangeUpperBound, ARTIFACT_INDEX_MAX_TERMS, D1_MAX_BOUND_PARAMS, D1_MAX_COMPOUND_SELECT_TERMS,
   ARTIFACT_INDEX_DEFAULT_ROW_CAP, D1_LIKE_GLOB_PATTERN_MAX_BYTES, ALIAS_KEY_RANGE_LO,
+  InvalidArtifactIdError,
 } from "./index.js";
 
 class MemStore implements EventStore {
@@ -328,4 +329,21 @@ test("alias suffix SQL uses BLOB length so a NUL in the path is not a terminator
   const suffixPayload = JSON.parse(only!.params[4] as string) as [string, string, string][];
   assert.equal(suffixPayload[0]![2], `/retrace#${path}`);
   assert.ok(suffixPayload[0]![2].includes("\0"));
+});
+
+test("appendEvent refuses NUL and unpaired surrogates and accepts an astral-plane path", async () => {
+  const store = new MemStore();
+  const high = "repo:o/retrace#a\uD800b";
+  const low = "repo:o/retrace#a\uDC00b";
+  const nul = "repo:o/retrace#a\0b";
+  const astral = "repo:o/retrace#😀.ts";
+  for (const [id, re] of [[nul, /U\+0000/], [high, /unpaired surrogates/], [low, /unpaired surrogates/]] as const) {
+    await assert.rejects(
+      () => appendEvent(store, ev({ artifacts: [{ id }] })),
+      (e: unknown) => e instanceof InvalidArtifactIdError && re.test((e as Error).message),
+    );
+  }
+  assert.equal(store.events.length, 0, "refused ids must not be sealed");
+  const { event } = await appendEvent(store, ev({ artifacts: [{ id: astral }] }));
+  assert.equal(event.artifacts[0]?.id, astral);
 });

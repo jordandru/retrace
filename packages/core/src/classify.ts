@@ -24,7 +24,7 @@ import {
   ARTIFACT_INDEX_DEFAULT_ROW_CAP, ArtifactIndexResult, CausedByProblem, EventStore,
   SEALED_BY_GITHUB_WEBHOOK, SEALED_BY_PARAM, causedByProblem,
 } from "./store.js";
-import { GENESIS_HASH } from "./schema.js";
+import { GENESIS_HASH, assertArtifactId } from "./schema.js";
 import type { Actor, Event, EventInput } from "./schema.js";
 import {
   canonicalGithubRepo, canonicalRepositoryR, contextKey, documentMapKey, selectPolicyForContext,
@@ -204,6 +204,7 @@ export function extractParents(input: Pick<EventInput, "method">): string[] {
 export function fileArtifacts(input: Pick<EventInput, "artifacts">): { id: string; path: string; repo: string }[] {
   const out: { id: string; path: string; repo: string }[] = [];
   for (const a of input.artifacts) {
+    assertArtifactId(a.id);
     const m = REPO_ARTIFACT.exec(a.id);
     if (!m) continue;
     out.push({ id: a.id, repo: m[1], path: m[2] });
