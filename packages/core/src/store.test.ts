@@ -228,7 +228,7 @@ test("eventsReferencingArtifactsStatements binds the window once and one json_ea
   assert.equal((sql.match(/SELECT DISTINCT i\.seq, i\.artifact_key FROM w CROSS JOIN json_each\(\?\) t CROSS JOIN event_artifact_index i/g) ?? []).length, 3, "json_each is the outer loop of every member; DISTINCT folds overlapping terms of one kind before LIMIT");
   assert.match(sql, /i\.artifact_key = t\.value AND i\.seq > w\.after_seq AND i\.seq <= w\.through_seq/);
   assert.match(sql, /i\.artifact_key >= json_extract\(t\.value, '\$\[0\]'\) AND i\.artifact_key < json_extract\(t\.value, '\$\[1\]'\)/);
-  assert.match(sql, /i\.artifact_key >= json_extract\(t\.value, '\$\[0\]'\) AND i\.artifact_key < json_extract\(t\.value, '\$\[1\]'\) AND i\.seq > w\.after_seq AND i\.seq <= w\.through_seq AND substr\(i\.artifact_key, -length\(json_extract\(t\.value, '\$\[2\]'\)\)\) = json_extract\(t\.value, '\$\[2\]'\)/, "an alias suffix seeks the repo: key range, then filters by literal suffix");
+  assert.match(sql, /i\.artifact_key >= json_extract\(t\.value, '\$\[0\]'\) AND i\.artifact_key < json_extract\(t\.value, '\$\[1\]'\) AND i\.seq > w\.after_seq AND i\.seq <= w\.through_seq AND substr\(CAST\(i\.artifact_key AS BLOB\), -length\(CAST\(json_extract\(t\.value, '\$\[2\]'\) AS BLOB\)\)\) = CAST\(json_extract\(t\.value, '\$\[2\]'\) AS BLOB\)/, "an alias suffix seeks the repo: key range, then filters by byte-oriented suffix (length on BLOB, not TEXT)");
   assert.doesNotMatch(sql, /\bGLOB\b|\bLIKE\b/, "classify SQL must not bind a LIKE/GLOB pattern");
   assert.doesNotMatch(sql, /artifact_key (=|>=|<|GLOB) \?/, "no per-term SQL parameters");
   assert.deepEqual(params.slice(0, 3), ["p", 3, 9]);
@@ -288,7 +288,7 @@ test("prefixRangeUpperBound is the exclusive end of a code-point (BINARY) prefix
 test("artifactKeyMatchSql and backfill SQL are bound, not interpolated; backfill reads json artifact ids", () => {
   const match = artifactKeyMatchSql(["repo:jordandru/retrace#a.ts", "repo:retrace#b.ts"]);
   assert.match(match.sql, /i\.artifact_key IN \(\?(,\?)+\)/);
-  assert.match(match.sql, /substr\(i\.artifact_key, -length\(\?\)\) = \?/);
+  assert.match(match.sql, /substr\(CAST\(i\.artifact_key AS BLOB\), -length\(CAST\(\? AS BLOB\)\)\) = CAST\(\? AS BLOB\)/);
   assert.doesNotMatch(match.sql, /\bGLOB\b/);
   assert.ok(match.params.includes("repo:jordandru/retrace#a.ts"));
   assert.ok(match.params.includes("repo:retrace#a.ts"), "full name also looks up the basename alias");
@@ -315,4 +315,17 @@ test("alias suffix SQL matches the GLOB-equivalent hit and rejects the near-miss
   const miss = `repo:jordandru/retrace-extra#${path}`;
   assert.equal(hit.startsWith(suffixPayload[0]![0]) && hit < suffixPayload[0]![1] && hit.endsWith(suffix), true);
   assert.equal(miss.endsWith(suffix), false);
+});
+
+test("alias suffix SQL uses BLOB length so a NUL in the path is not a terminator", () => {
+  const path = `a\0b`;
+  const q = {
+    project: "p", artifact_keys: [`repo:retrace#${path}`], after_seq: -1, through_seq: 10, row_cap: 10, deadline: 0,
+  };
+  const [only] = eventsReferencingArtifactsStatements(q);
+  assert.match(only!.sql, /CAST\(i\.artifact_key AS BLOB\)/);
+  assert.doesNotMatch(only!.sql, /\bGLOB\b|\bLIKE\b/);
+  const suffixPayload = JSON.parse(only!.params[4] as string) as [string, string, string][];
+  assert.equal(suffixPayload[0]![2], `/retrace#${path}`);
+  assert.ok(suffixPayload[0]![2].includes("\0"));
 });

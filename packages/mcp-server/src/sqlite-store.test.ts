@@ -148,6 +148,44 @@ test("SqliteStore writes event_artifact_index on insert and matches sameArtifact
   assert.deepEqual(deadline, { ok: false, reason: "deadline" });
 });
 
+test("SqliteStore matches MemoryEventStore for a U+0000 in equality, prefix, and alias-suffix lookups", async () => {
+  const store = new SqliteStore(":memory:");
+  const memory = new MemoryEventStore();
+  const path = `a\0b`;
+  const hit = `repo:o/retrace#${path}`;
+  const missExtra = `repo:o/retrace-extra#${path}`;
+  const missCase = `repo:o/retrace#A\0b`;
+  for (const id of [hit, missExtra, missCase]) {
+    const input = ev({ artifacts: [{ id, role: "generated" }] });
+    await appendEvent(store, input);
+    await appendEvent(memory, input);
+  }
+  const base = { project: "junk", after_seq: -1, through_seq: 10, row_cap: 100, deadline: Date.now() + 5_000 };
+  const cases: Record<string, { query: any; expect: number[] }> = {
+    suffix: { query: { ...base, artifact_keys: [`repo:retrace#${path}`] }, expect: [0] },
+    equality: { query: { ...base, artifact_keys: [hit] }, expect: [0] },
+    prefix: { query: { ...base, artifact_keys: [], artifact_prefixes: [`repo:o/retrace#a\0`] }, expect: [0] },
+  };
+  for (const [name, { query, expect }] of Object.entries(cases)) {
+    const sql = await store.eventsReferencingArtifacts(query);
+    const mem = await memory.eventsReferencingArtifacts(query);
+    assert.equal(sql.ok, true, name);
+    assert.equal(mem.ok, true, name);
+    if (sql.ok && mem.ok) {
+      assert.deepEqual(mem.events.map((e) => e.seq), expect, `${name}: memory spec`);
+      assert.deepEqual(sql.events.map((e) => e.seq), mem.events.map((e) => e.seq), `${name}: SQLite must match the spec for a NUL-bearing key`);
+    }
+    const statements = eventsReferencingArtifactsStatements(query);
+    assert.doesNotMatch(statements[0]!.sql, /\bGLOB\b|\bLIKE\b/, name);
+    const plan: string[] = (store as any).db.prepare(`EXPLAIN QUERY PLAN ${statements[0]!.sql}`).all(...statements[0]!.params).map((row: any) => row.detail);
+    const indexSearches = plan.filter((line) => /SEARCH i /.test(line));
+    assert.ok(indexSearches.length >= 1, `${name}: ${plan.join("\n")}`);
+    for (const line of indexSearches) {
+      assert.match(line, /idx_eai_project_key_seq \(project=\? AND artifact_key[=>]/, `${name}: range seek survives CAST AS BLOB\n${plan.join("\n")}`);
+    }
+  }
+});
+
 test("SqliteStore artifact prefixes find abbreviated and full commit references", async () => {
   const store = new SqliteStore(":memory:");
   const sha = "a1234567890b".padEnd(40, "c");

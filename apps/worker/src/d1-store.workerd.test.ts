@@ -131,3 +131,42 @@ test("D1 in workerd: alias lookup whose old GLOB exceeded 50 bytes returns the m
     assert.deepEqual(seqs(got), [0], "hit owner/retrace#path; near-miss retrace-extra must not match");
   });
 });
+
+test("D1 in workerd: equality, prefix, and alias-suffix lookups include a U+0000 in the key", { timeout: 60_000 }, async () => {
+  await withD1(async (db) => {
+    const store = new D1Store(db);
+    const memory = new MemoryEventStore();
+    const path = `a\0b`;
+    const hit = `repo:o/retrace#${path}`;
+    const missExtra = `repo:o/retrace-extra#${path}`;
+    const missCase = `repo:o/retrace#A\0b`;
+    for (const id of [hit, missExtra, missCase]) {
+      const input = { project: "p", actor: { type: "agent" as const, id: "A" }, action: "edited" as const, artifacts: [{ id, role: "generated" as const }] };
+      await appendEvent(memory, input);
+      await appendEvent(store, input);
+    }
+    const base = { project: "p", after_seq: -1, through_seq: 10, row_cap: 100, deadline: Date.now() + 30_000 };
+    const cases: Record<string, ArtifactIndexQuery> = {
+      suffix: { ...base, artifact_keys: [`repo:retrace#${path}`] },
+      equality: { ...base, artifact_keys: [hit] },
+      prefix: { ...base, artifact_keys: [], artifact_prefixes: [`repo:o/retrace#a\0`] },
+    };
+    for (const [name, q] of Object.entries(cases)) {
+      const statements = eventsReferencingArtifactsStatements(q);
+      assert.equal(statements.length, 1, name);
+      assert.doesNotMatch(statements[0]!.sql, /\bGLOB\b|\bLIKE\b/, name);
+      const plan = await db.prepare(`EXPLAIN QUERY PLAN ${statements[0]!.sql}`).bind(...statements[0]!.params).all();
+      const details = (plan.results as { detail: string }[]).map((row) => row.detail);
+      const indexSearches = details.filter((line) => /SEARCH i /.test(line));
+      assert.ok(indexSearches.length >= 1, `${name}: ${details.join("\n")}`);
+      for (const line of indexSearches) {
+        assert.match(line, /idx_eai_project_key_seq \(project=\? AND artifact_key[=>]/, `${name}: workerd D1 still seeks the key range\n${details.join("\n")}`);
+      }
+      const got = await store.eventsReferencingArtifacts(q);
+      const want = await memory.eventsReferencingArtifacts(q);
+      assert.equal(got.ok, true, `${name}: D1 must not throw; got ${JSON.stringify(got)}`);
+      assert.deepEqual(seqs(got), seqs(want), `${name}: workerd D1 must match the memory spec`);
+      assert.deepEqual(seqs(got), [0], `${name}: hit a<NUL>b; retrace-extra and A<NUL>b must not match`);
+    }
+  });
+});

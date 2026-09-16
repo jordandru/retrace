@@ -296,7 +296,7 @@ export function artifactKeyMatchSql(keys: string[]): { sql: string; params: stri
   const aliasUpper = prefixRangeUpperBound(ALIAS_KEY_RANGE_LO);
   if (suffixes.size && aliasUpper === undefined) throw new Error("artifactKeyMatchSql: alias suffix range must stay bounded");
   for (const suffix of suffixes) {
-    parts.push("(i.artifact_key >= ? AND i.artifact_key < ? AND substr(i.artifact_key, -length(?)) = ?)");
+    parts.push("(i.artifact_key >= ? AND i.artifact_key < ? AND substr(CAST(i.artifact_key AS BLOB), -length(CAST(? AS BLOB))) = CAST(? AS BLOB))");
     params.push(ALIAS_KEY_RANGE_LO, aliasUpper!, suffix, suffix);
   }
   if (!parts.length) return { sql: "0", params: [] };
@@ -354,7 +354,10 @@ export function globLiteralPrefix(pattern: string): string {
  *  `idx_eai_project_key_seq (project, artifact_key, seq)` with the window inside the seek; literal prefixes are bound
  *  key ranges (`[prefix, prefixRangeUpperBound)`, or `>= prefix` alone when unbounded); owner-less alias lookups from
  *  `artifactLookup` (`/<alias>#<path>`) seek the same `repo:` … `repo;` key range the old `GLOB repo:*\/alias#path`
- *  used, then filter with suffix equality (`substr` / `length`) so D1's 50-byte LIKE/GLOB limit cannot fire. Every
+ *  used, then filter with byte-oriented suffix equality. `length()` on TEXT stops at the first U+0000
+ *  (https://www.sqlite.org/lang_corefunc.html#length); CAST AS BLOB counts bytes past NUL so the SQL
+ *  matched-set equals `sameArtifact` for every accepted string. The range predicates stay on the TEXT
+ *  column, so the key index still seeks. Classify still binds no LIKE/GLOB. Every
  *  member yields DISTINCT `(seq, artifact_key)` so the row budget counts distinct matching artifact rows, as the in-memory
  *  spec does (round 6, Codex F5; round 7: overlapping same-kind terms in a single member); the outer query joins `events` by its unique `(project, seq)` — `CROSS JOIN` so SQLite
  *  keeps the matched seqs as the outer loop instead of walking the project's events. `LIMIT` is `row_cap + 1`;
@@ -392,7 +395,7 @@ export function eventsReferencingArtifactsStatements(
     eq: `${member}i.artifact_key = t.value AND i.seq > w.after_seq AND i.seq <= w.through_seq`,
     prefix: `${member}i.artifact_key >= json_extract(t.value, '$[0]') AND i.artifact_key < json_extract(t.value, '$[1]') AND i.seq > w.after_seq AND i.seq <= w.through_seq`,
     unbounded: `${member}i.artifact_key >= t.value AND i.seq > w.after_seq AND i.seq <= w.through_seq`,
-    suffix: `${member}i.artifact_key >= json_extract(t.value, '$[0]') AND i.artifact_key < json_extract(t.value, '$[1]') AND i.seq > w.after_seq AND i.seq <= w.through_seq AND substr(i.artifact_key, -length(json_extract(t.value, '$[2]'))) = json_extract(t.value, '$[2]')`,
+    suffix: `${member}i.artifact_key >= json_extract(t.value, '$[0]') AND i.artifact_key < json_extract(t.value, '$[1]') AND i.seq > w.after_seq AND i.seq <= w.through_seq AND substr(CAST(i.artifact_key AS BLOB), -length(CAST(json_extract(t.value, '$[2]') AS BLOB))) = CAST(json_extract(t.value, '$[2]') AS BLOB)`,
   };
   const statements: ArtifactIndexStatement[] = [];
   for (let at = 0; at < terms.length; at += maxTerms) {
