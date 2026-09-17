@@ -1,0 +1,24 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "opencode-go/qwen3.7-max",
+  "instructions": ["docs/agents/OPENCODE.md"],
+  "plugin": ["file://./packages/opencode-plugin/dist/index.js"],
+  "mcp": {
+    "retrace": {
+      "type": "local",
+      "command": [
+        "bash",
+        "-c",
+        "set -a && . \"$HOME/.retrace/opencode.env\" && set +a && exec node packages/mcp-server/dist/index.js"
+      ],
+      "environment": {
+        "RETRACE_PROJECT": "retrace",
+        "RETRACE_ACTOR": "opencode",
+        "RETRACE_ON_BEHALF_OF": "jordansboxing@gmail.com",
+        "RETRACE_SYSTEM": "opencode",
+        "RETRACE_URL": "https://retrace-api.slcwitit.workers.dev"
+      },
+      "timeout": 30000
+    }
+  }
+}
