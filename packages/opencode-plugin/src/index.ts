@@ -9,8 +9,7 @@
  * `opencode --pure` disables external plugins, so a deliberate --pure run has no guard. That
  * residual path is stated in the design note rather than papered over.
  */
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { isRetraceWorktree } from "./worktree.js";
 import {
   NO_SEAT_FILE_REASON,
   checkCommitCommand,
@@ -23,19 +22,6 @@ import {
   uncoveredFiles,
 } from "./guard.js";
 
-/** A Retrace worktree is one whose root carries `.retrace.json` and the shared agent rules. */
-export function isRetraceWorktree(dir: string): boolean {
-  if (!dir) return false;
-  const marker = join(dir, ".retrace.json");
-  if (!existsSync(marker) || !existsSync(join(dir, "docs", "agent-rules.md"))) return false;
-  try {
-    const parsed = JSON.parse(readFileSync(marker, "utf8")) as { project?: unknown };
-    return typeof parsed.project === "string" && parsed.project.length > 0;
-  } catch {
-    return false;
-  }
-}
-
 type SessionState = {
   model?: string;
   /** Some prompt in this session carried the seat instruction file. */
@@ -46,7 +32,8 @@ type SessionState = {
   logged: Set<string>;
 };
 
-export const RetraceGuardPlugin = async (input: { worktree?: string; directory?: string }) => {
+// Only plugin factories may be exported from this runtime entrypoint.
+const RetraceGuardPlugin = async (input: { worktree?: string; directory?: string }) => {
   const root = input.worktree || input.directory || "";
   if (!isRetraceWorktree(root)) return {};
 
@@ -95,7 +82,9 @@ export const RetraceGuardPlugin = async (input: { worktree?: string; directory?:
       if (!identity.foreign) return;
       if (s) s.foreign = identity.foreign;
       else foreignAnywhere = identity.foreign;
-      output.system = [refusalPrompt(identity.foreign)];
+      // OpenCode retains the original array when building the provider request.
+      // Replacing output.system changes only the hook wrapper, not that request.
+      output.system.splice(0, output.system.length, refusalPrompt(identity.foreign));
       console.error(`Retrace guard: refusing this session — ${identity.foreign}`);
     },
 

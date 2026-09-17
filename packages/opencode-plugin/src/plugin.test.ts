@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import RetraceGuardPlugin from "./index.js";
+import RetraceGuardPlugin, * as entrypoint from "./index.js";
 
 const SEAT_PROMPT =
   "You are opencode, an interactive CLI tool.\n\nRETRACE-SEAT: opencode\n\n# OpenCode — identity\n- Actor id `opencode`.";
@@ -103,3 +103,33 @@ test("a commit trailered for another seat is refused even in a clean session", a
     /another seat/,
   );
 });
+
+// OpenCode invokes every unique exported function with PluginInput, not just the default.
+test("every runtime entrypoint export is a plugin factory", async () => {
+  const input = { worktree: worktree() };
+  const factories = new Set(Object.values(entrypoint));
+  for (const factory of factories) {
+    const h = await (factory as (value: { worktree: string }) => Promise<any>)(input);
+    assert.equal(typeof h["experimental.chat.system.transform"], "function");
+  }
+});
+
+for (const source of ["project AGENTS.md", "global AGENTS.md"]) {
+  test(`${source}: refusal reaches the original provider array and remains blocked`, async () => {
+    const h = await hooks();
+    // The runtime keeps this reference after invoking the hook with { system }.
+    const providerSystem = [SEAT_PROMPT, `Instructions from: ${source}\n${CODEX_PROMPT}`, "FOREIGN_MARKER"];
+    const out = { system: providerSystem };
+    await h["experimental.chat.system.transform"]({ sessionID: "foreign" }, out);
+    assert.equal(out.system, providerSystem, "must retain the runtime's array reference");
+    assert.equal(providerSystem.length, 1);
+    assert.match(providerSystem[0], /RETRACE GUARD/);
+    assert.doesNotMatch(providerSystem[0], /FOREIGN_MARKER|RETRACE-SEAT: opencode/);
+    // A later clean prompt must not clear the refusal state.
+    await h["experimental.chat.system.transform"]({ sessionID: "foreign" }, { system: [SEAT_PROMPT] });
+    await assert.rejects(
+      () => h["tool.execute.before"]({ tool: "bash", sessionID: "foreign" }, { args: { command: "ls" } }),
+      /Retrace-Actor: codex/,
+    );
+  });
+}
