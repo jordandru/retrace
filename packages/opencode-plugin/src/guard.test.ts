@@ -15,7 +15,7 @@ import {
   retraceTool,
   uncoveredFiles,
 } from "./guard.js";
-import { isRetraceWorktree } from "./index.js";
+import { isRetraceWorktree } from "./worktree.js";
 
 /** The real opening of this repo's Codex identity file — the text the seat must never run on. */
 const CODEX_AGENTS_MD = [
