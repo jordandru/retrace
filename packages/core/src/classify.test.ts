@@ -5,8 +5,9 @@ import {
   applyBreakerFailure, applyBreakerSuccess, breakerIsOpen, breakerShouldOpen, classifyCommitClaim,
   collectAttributionAmendments, createHandler, decideFromTable, emptyBreaker, prepareAttributionContext,
   recordWebhookClassifyOutcome, reconstructWithheldPayload, verifiedAttributionSnapshot,
-  webhookBreakerAdmission, wouldWrite,
-  type ClaimRecord, type EventInput, type HistoryQuery,
+  webhookBreakerAdmission, wouldWrite, DIAGNOSTIC_DETAIL_MAX, DIAGNOSTIC_DETAIL_UNAVAILABLE,
+  diagnosticDetail, emitDiagnostic, phrase, thrown, thrownClass,
+  type ClaimRecord, type Diagnostic, type EventInput, type HistoryQuery,
 } from "./index.js";
 
 const OWNER = { authorization: "Bearer owner-token-long-enough" };
@@ -1446,4 +1447,364 @@ test("F18: bare-only and file-only evidence remains diagnostic, never a witness"
     assert.equal(got.record.decision.loose_hints, 1);
     assert.deepEqual(got.record.decision.witnesses, []);
   }
+});
+
+// --- Fail-closed diagnostics (observability only: a diagnostic never changes a result) ---
+
+function sink() {
+  const seen: Diagnostic[] = [];
+  return { seen, diag: (d: Diagnostic) => { seen.push(d); } };
+}
+
+/** The part of a diagnostic that is deterministic; `ms`/`timing` are asserted by shape. */
+function said({ site, reason, detail }: Diagnostic) {
+  return detail === undefined ? { site, reason } : { site, reason, detail };
+}
+
+/** Every classify-path line carries the elapsed total and the per-step breakdown. */
+function assertTimed(d: Diagnostic, lastStep: string) {
+  assert.equal(typeof d.ms, "number", "elapsed milliseconds");
+  assert.ok((d.ms ?? -1) >= 0);
+  assert.ok((d.timing ?? "").length > 0, "per-step timing");
+  assert.match(d.timing ?? "", /^(?:[\w.:]+=\d+ )*[\w.:]+=\d+$/, "names and milliseconds only");
+  assert.ok((d.timing ?? "").split(" ").at(-1)?.startsWith(`${lastStep}=`), `last step is ${lastStep}: ${d.timing}`);
+}
+
+test("diagnostics: a store without the bounded amendment read names the site and the condition", async () => {
+  const store = new MemoryEventStore();
+  await putPolicy(store);
+  (store as unknown as { amendmentEventsUpTo?: unknown }).amendmentEventsUpTo = undefined;
+  const s = sink();
+
+  const got = await classify(store, commitInput(), { diag: s.diag });
+  assert.deepEqual(got, { kind: "unavailable", reason: "store_error" });
+  assert.deepEqual(s.seen.map(said), [{
+    site: "classify.amendments.candidates",
+    reason: "store_error",
+    detail: "store has no amendmentEventsUpTo",
+  }]);
+  assertTimed(s.seen[0], "evaluate_amendments");
+});
+
+test("diagnostics: a throwing bounded read carries the exception text", async () => {
+  const store = new MemoryEventStore();
+  await putPolicy(store);
+  (store as unknown as { amendmentEventsUpTo?: unknown }).amendmentEventsUpTo = async () => {
+    throw new Error("D1_ERROR: no such index: idx_events_amendment_candidates");
+  };
+  const s = sink();
+
+  const got = await classify(store, commitInput({ files: ["a.ts"] }), { diag: s.diag });
+  assert.deepEqual(got, { kind: "unavailable", reason: "store_error" });
+  assert.deepEqual(s.seen.map(said), [{
+    site: "classify.amendments.candidates",
+    reason: "store_error",
+    detail: "matched(D1_ERROR, no such index)",
+  }]);
+  assertTimed(s.seen[0], "store.amendmentEventsUpTo");
+});
+
+test("diagnostics: a store without the artifact index names the window read", async () => {
+  const store = new MemoryEventStore();
+  await putPolicy(store);
+  (store as unknown as { eventsReferencingArtifacts?: unknown }).eventsReferencingArtifacts = undefined;
+  const s = sink();
+
+  const got = await classify(store, commitInput({ files: ["a.ts"] }), { diag: s.diag });
+  assert.deepEqual(got, { kind: "unavailable", reason: "store_error" });
+  assert.deepEqual(s.seen.map(said), [{
+    site: "classify.window",
+    reason: "store_error",
+    detail: "store has no eventsReferencingArtifacts",
+  }]);
+  assertTimed(s.seen[0], "store.eventsReferencingArtifacts");
+});
+
+test("diagnostics: classify.outer names the operation the throw came from", async () => {
+  // Identical exceptions from different reads used to produce identical lines (Codex P2, round 1).
+  const cases: [string, (store: MemoryEventStore) => void][] = [
+    ["store.head", (store) => { store.head = async () => { throw new Error("D1_ERROR: network"); }; }],
+    ["store.getClassificationContext", (store) => {
+      store.getClassificationContext = async () => { throw new Error("D1_ERROR: network"); };
+    }],
+    ["store.ensureClassificationPathLowers", (store) => {
+      store.ensureClassificationPathLowers = async () => { throw new Error("D1_ERROR: network"); };
+    }],
+  ];
+  for (const [operation, breakIt] of cases) {
+    const store = new MemoryEventStore();
+    await putPolicy(store);
+    breakIt(store);
+    const s = sink();
+
+    const got = await classify(store, commitInput(), { diag: s.diag });
+    assert.deepEqual(got, { kind: "unavailable", reason: "store_error" });
+    assert.deepEqual(s.seen.map(said), [{
+      site: "classify.outer",
+      reason: "store_error",
+      detail: `${operation}: matched(D1_ERROR)`,
+    }]);
+    assertTimed(s.seen[0], operation);
+  }
+});
+
+test("diagnostics: an async sink that rejects cannot take the runtime down", async () => {
+  // `async () => { throw }` satisfies the void-returning sink type; the rejection must be observed.
+  const rejected: unknown[] = [];
+  const onUnhandled = (e: unknown) => { rejected.push(e); };
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    const store = new MemoryEventStore();
+    await putPolicy(store);
+    (store as unknown as { amendmentEventsUpTo?: unknown }).amendmentEventsUpTo = undefined;
+
+    const got = await classify(store, commitInput(), {
+      diag: async () => { throw new Error("the sink is broken"); },
+    });
+    assert.deepEqual(got, { kind: "unavailable", reason: "store_error" });
+    await new Promise((r) => setTimeout(r, 10));
+    assert.deepEqual(rejected, []);
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+  }
+});
+
+test("diagnostics: no sink, no store probe — the capability reads are thunked", async () => {
+  // A diagnostic must not read a store capability on a path that will not log (Codex nit, round 1).
+  const reads = async (diag?: (d: Diagnostic) => void) => {
+    const store = new MemoryEventStore();
+    await putPolicy(store);
+    let n = 0;
+    Object.defineProperty(store, "eventsReferencingArtifacts", {
+      configurable: true,
+      get() { n++; return undefined; },
+    });
+    const got = await classify(store, commitInput({ files: ["a.ts"] }), diag ? { diag } : {});
+    assert.deepEqual(got, { kind: "unavailable", reason: "store_error" });
+    return n;
+  };
+
+  const withoutSink = await reads();
+  const withSink = await reads(() => {});
+  assert.equal(withSink, withoutSink + 1, "the detail thunk is the only extra read, and only with a sink");
+});
+
+test("diagnostics: a sink that throws changes neither a failure nor a decision", async () => {
+  const diag = () => { throw new Error("the sink is broken"); };
+
+  const broken = new MemoryEventStore();
+  await putPolicy(broken);
+  (broken as unknown as { amendmentEventsUpTo?: unknown }).amendmentEventsUpTo = undefined;
+  assert.deepEqual(
+    await classify(broken, commitInput(), { diag }),
+    { kind: "unavailable", reason: "store_error" },
+  );
+
+  const healthy = new MemoryEventStore();
+  await putPolicy(healthy);
+  // The success line goes through the same broken sink.
+  assert.equal((await classify(healthy, commitInput(), { diag })).kind, "decision");
+});
+
+test("diagnostics: a decision emits one timing line and nothing else", async () => {
+  // How much of the 500 ms budget a healthy production classification spends, and where, is the
+  // measurement the failures cannot give (Jordan's D1 round-trip hypothesis, 2026-09-15).
+  const store = new MemoryEventStore();
+  await putPolicy(store);
+  const s = sink();
+
+  const got = await classify(store, commitInput(), { diag: s.diag });
+  assert.equal(got.kind, "decision", JSON.stringify(got));
+  assert.deepEqual(s.seen.map(said), [{ site: "classify.ok", reason: "decision" }]);
+  assertTimed(s.seen[0], "decide");
+  assert.match(s.seen[0].timing ?? "", /store\.head=\d+/);
+  assert.match(s.seen[0].timing ?? "", /store\.readPolicySnapshot=\d+/);
+  assert.match(s.seen[0].timing ?? "", /evaluate_amendments=\d+/);
+});
+
+test("diagnostics: the timing ledger is names and numbers only, never data", async () => {
+  const store = new MemoryEventStore();
+  await putPolicy(store);
+  const s = sink();
+
+  await classify(store, commitInput({ files: ["a.ts"], actorId: "codex" }), { diag: s.diag });
+  const steps = (s.seen[0].timing ?? "").split(" ").map((step) => step.split("=")[0]);
+  for (const step of steps) {
+    assert.match(step, /^[a-z][\w.:]*$/, `step name carries no data: ${step}`);
+  }
+});
+
+test("diagnostics: a caught value contributes its class, never its text", () => {
+  // Three bypasses Codex reproduced in round 2: an allow-listed prefix with a body appended, a
+  // spoofed `Error.name`, and a rejection that is simply a string.
+  const withBody = new Error('D1_ERROR: near "x": body={"token":"PRIVATE"}');
+  assert.equal(diagnosticDetail(thrown(withBody)), "matched(D1_ERROR)");
+  assert.ok(!diagnosticDetail(thrown(withBody)).includes("PRIVATE"));
+
+  const spoofed = new Error("boom");
+  spoofed.name = "PRIVATE_NAME /private/repo/key";
+  assert.equal(diagnosticDetail(thrown(spoofed)), "Error");
+
+  // An identifier-shaped name is still the thrower's text: only a known class survives (round 3).
+  const credentialShaped = new Error("boom");
+  credentialShaped.name = "sk_live_SYNTHETIC_PRIVATE_TOKEN";
+  assert.equal(diagnosticDetail(thrown(credentialShaped)), "Error");
+  const proxied = new Proxy(new Error("boom"), {
+    get(target, key, receiver) {
+      if (key === "name") return "SYNTHETIC_PROXY_SECRET";
+      return Reflect.get(target, key, receiver);
+    },
+  });
+  assert.equal(diagnosticDetail(thrown(proxied)), "Error");
+  const aggregate = new AggregateError([], "private text");
+  aggregate.name = "SYNTHETIC_AGGREGATE_SECRET";
+  assert.equal(diagnosticDetail(thrown(aggregate)), "Error");
+
+  // The condition vocabulary composes our own literals: this is the line the incident needed.
+  assert.equal(
+    diagnosticDetail(thrown(new Error("D1_ERROR: LIKE or GLOB pattern too complex: SQLITE_ERROR"))),
+    "matched(D1_ERROR, LIKE or GLOB pattern too complex)",
+  );
+  assert.equal(
+    diagnosticDetail(thrown(new Error('D1_ERROR: no such index: idx_x /private/path "secret"'))),
+    "matched(D1_ERROR, no such index)",
+  );
+
+  assert.equal(diagnosticDetail(thrown("PRIVATE_THROWN_STRING")), "non-error(string)");
+  assert.equal(diagnosticDetail(thrown({ stack: "/home/someone/key", token: "t0ken" })), "non-error(object)");
+  assert.equal(diagnosticDetail(thrown(null)), "non-error(null)");
+
+  // A recognised condition is worth telling apart; an ordinary class still names itself.
+  assert.equal(
+    diagnosticDetail(thrown(new Error("Network connection lost while reading rows"))),
+    "matched(Network connection lost)",
+  );
+  assert.equal(diagnosticDetail(thrown(new SyntaxError('Unexpected token } in JSON: {"secret":"hunter2"}'))), "SyntaxError");
+  assert.equal(diagnosticDetail(thrown(new TypeError("x of undefined"))), "TypeError");
+  assert.equal(diagnosticDetail(thrown(new AggregateError([], "private text"))), "AggregateError");
+
+  // A thrown function is named, never invoked.
+  let called = false;
+  const fn = () => { called = true; return "PRIVATE_RETURNED"; };
+  assert.equal(diagnosticDetail(thrown(fn)), "non-error(function)");
+  assert.equal(called, false);
+
+  // Accessors that throw cost their text, not the line.
+  const hostile = new Error("x");
+  Object.defineProperty(hostile, "message", { get() { throw new Error("nope"); } });
+  Object.defineProperty(hostile, "name", { get() { throw new Error("nope"); } });
+  assert.equal(diagnosticDetail(thrown(hostile)), "Error");
+  assert.equal(thrownClass(hostile), "Error");
+
+  // The phrase channel is call-site text, bounded.
+  assert.equal(diagnosticDetail(phrase("a fixed phrase")), "a fixed phrase");
+  const long = diagnosticDetail(phrase("x".repeat(DIAGNOSTIC_DETAIL_MAX + 50)));
+  assert.equal(long.length, DIAGNOSTIC_DETAIL_MAX);
+  assert.ok(long.endsWith("\u2026"));
+});
+
+test("diagnostics: a hostile exception never costs the line or its stage", async () => {
+  // A throwing `message` getter used to make the whole diagnostic disappear (Codex P2, round 2).
+  const store = new MemoryEventStore();
+  await putPolicy(store);
+  store.head = async () => {
+    const hostile = new Error("x");
+    Object.defineProperty(hostile, "message", { get() { throw new Error("nope"); } });
+    throw hostile;
+  };
+  const s = sink();
+
+  const got = await classify(store, commitInput(), { diag: s.diag });
+  assert.deepEqual(got, { kind: "unavailable", reason: "store_error" });
+  assert.deepEqual(s.seen.map(said), [{ site: "classify.outer", reason: "store_error", detail: "store.head: Error" }]);
+  assertTimed(s.seen[0], "store.head");
+});
+
+test("diagnostics: a thrown function is never executed by the diagnostics layer", async () => {
+  // An async thrown function used to be run as a detail thunk, and its rejection exited the process.
+  const rejected: unknown[] = [];
+  const onUnhandled = (e: unknown) => { rejected.push(e); };
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    let called = false;
+    const store = new MemoryEventStore();
+    await putPolicy(store);
+    store.head = async () => {
+      // eslint-disable-next-line @typescript-eslint/no-throw-literal
+      throw async () => { called = true; throw new Error("PRIVATE"); };
+    };
+    const s = sink();
+
+    const got = await classify(store, commitInput(), { diag: s.diag });
+    assert.deepEqual(got, { kind: "unavailable", reason: "store_error" });
+    assert.deepEqual(s.seen.map(said), [{
+      site: "classify.outer", reason: "store_error", detail: "store.head: non-error(function)",
+    }]);
+    assert.equal(called, false, "the thrown function was not invoked");
+    await new Promise((r) => setTimeout(r, 10));
+    assert.deepEqual(rejected, []);
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+  }
+});
+
+test("diagnostics: a detail thunk that throws still emits the site, the reason and the timing", () => {
+  const seen: Diagnostic[] = [];
+  emitDiagnostic((d) => { seen.push(d); }, "test.site", "store_error",
+    () => { throw new Error("formatting failed"); },
+    () => ({ ms: 7, timing: "store.head=7" }));
+  assert.deepEqual(seen, [{
+    site: "test.site",
+    reason: "store_error",
+    detail: DIAGNOSTIC_DETAIL_UNAVAILABLE,
+    ms: 7,
+    timing: "store.head=7",
+  }]);
+});
+
+test("diagnostics: a measure that throws costs its numbers, not the line", () => {
+  const seen: Diagnostic[] = [];
+  emitDiagnostic((d) => { seen.push(d); }, "test.site", "store_error", phrase("a fixed phrase"),
+    () => { throw new Error("clock broken"); });
+  assert.deepEqual(seen, [{ site: "test.site", reason: "store_error", detail: "a fixed phrase" }]);
+});
+
+test("diagnostics: timing never touches the clock the classifier decides with", async () => {
+  // A stateful fake clock is behaviour: an observer that consumes it turns a decision into a
+  // deadline. Reads and result must be identical with and without a sink (Codex P2, round 3).
+  const run = async (diag?: (d: Diagnostic) => void) => {
+    const store = new MemoryEventStore();
+    await putPolicy(store);
+    let reads = 0;
+    const now = () => { reads++; return 1_000 + reads; };
+    const got = await classify(store, commitInput(), diag ? { now, diag } : { now });
+    return { reads, kind: got.kind, ms: got.kind === "decision" ? got.record.decision.classification_ms : -1 };
+  };
+
+  const quiet = await run();
+  const loud = await run(() => {});
+  assert.equal(quiet.kind, "decision", "the fake clock still reaches a decision");
+  assert.deepEqual(loud, quiet, "a sink changes neither the clock reads nor the record");
+});
+
+test("diagnostics: a throwing clock still fails closed, and a skipped classification reads no clock", async () => {
+  const store = new MemoryEventStore();
+  await putPolicy(store);
+
+  // The classifier's own first clock read is inside the fail-closed catch; it must stay there.
+  const got = await classify(store, commitInput(), {
+    now: () => { throw new Error("D1_ERROR: clock"); },
+    diag: () => {},
+  });
+  assert.deepEqual(got, { kind: "unavailable", reason: "store_error" });
+
+  // A skipped classification does no timing work at all.
+  let reads = 0;
+  const skipped = await classify(store, commitInput(), {
+    trailerPolicy: "off",
+    now: () => { reads++; return Date.now(); },
+    diag: () => { throw new Error("no diagnostic belongs on a skipped path"); },
+  });
+  assert.deepEqual(skipped, { kind: "skip", reason: "policy_off" });
+  assert.equal(reads, 0);
 });

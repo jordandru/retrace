@@ -6,6 +6,9 @@ import { Event, EventInput } from "./schema.js";
 import { sealEvent, verifyChain, VerifyResult } from "./chain.js";
 import { markUntrustedText } from "./explain.js";
 import { artifactKey, artifactLookup, escapeGlobLiteral, sameArtifact } from "./capture.js";
+import {
+  diagnosticDetail, emitDiagnostic, phrase, thrown, type DiagnosticSink,
+} from "./diagnostics.js";
 
 export interface HistoryQuery {
   project: string;
@@ -422,14 +425,24 @@ export async function runArtifactIndexStatements(
   q: ArtifactIndexQuery,
   now: () => number,
   exec: (statement: ArtifactIndexStatement) => Promise<ArtifactIndexHit[]>,
+  /** Observability only: emitted when a statement throws, so the caller's `store_error` has a cause. */
+  diag?: DiagnosticSink,
 ): Promise<ArtifactIndexResult> {
   if (now() >= q.deadline) return { ok: false, reason: "deadline" };
   if (!q.artifact_keys.length && !q.artifact_prefixes?.length) return { ok: true, events: [] };
   const seenRows = new Set<string>();
   const bySeq = new Map<number, Event>();
+  // The compound read issues several statements; which one threw, and how long it took, is the
+  // whole question — each is a separate round trip to D1.
+  let statementIndex = -1;
+  // `Date.now`, not `now`: the deadline clock is the caller's and may be stateful in tests, and a
+  // measurement must not consume it. Sampled only when there is a sink (Codex P2, PR 57 round 3).
+  let statementStarted = 0;
   try {
     for (const statement of eventsReferencingArtifactsStatements(q)) {
+      statementIndex++;
       if (now() >= q.deadline) return { ok: false, reason: "deadline" };
+      if (diag) statementStarted = Date.now();
       const rows = await exec(statement);
       if (now() >= q.deadline) return { ok: false, reason: "deadline" };
       for (const r of rows) {
@@ -440,7 +453,10 @@ export async function runArtifactIndexStatements(
         if (!bySeq.has(r.seq)) bySeq.set(r.seq, JSON.parse(r.body) as Event);
       }
     }
-  } catch {
+  } catch (error) {
+    emitDiagnostic(diag, "store.artifact_index", "store_error",
+      () => phrase(`statement ${statementIndex}: ${diagnosticDetail(thrown(error))}`),
+      () => ({ ms: Date.now() - statementStarted }));
     return { ok: false, reason: "store_error" };
   }
   return { ok: true, events: [...bySeq.entries()].sort((a, b) => a[0] - b[0]).map(([, e]) => e) };
