@@ -2,9 +2,20 @@
 
 Retrace is a provenance ledger for AI coding agents. Every event records **who** did **what**, **when**, **where**, **why** (a `caused_by` chain back to the human instruction) and **how**, sealed in a hash chain that anyone can verify offline.
 
-Everything below comes from **this repository's own public ledger** — 1,700+ events and 220 commits, written by the six agents that built the tool (Claude Code, Codex, Gemini CLI, Grok, GitHub Copilot, Cursor Agent) and one outside framework (NOOA, NVIDIA Labs' research preview) under one human. Nothing here is invented: every example names a commit, an event id, or a command you can run.
+Everything below comes from **this repository's own ledger** — 1,700+ events and 220 commits, written by the six agents that built the tool (Claude Code, Codex, Gemini CLI, Grok, GitHub Copilot, Cursor Agent) and one outside framework (NOOA, NVIDIA Labs' research preview) under one human. Nothing here is invented: every example names a commit, an event id, or a command you can run.
 
-- Browse the live ledger: <https://retrace-api.slcwitit.workers.dev/s/sh_ea81439e010abb1c0ec7167c>
+**What you can check yourself, today.** Live browsing of the `retrace` ledger is paused while export redaction is built, so its publicly available record is the signed [2026-09-03 snapshot](https://github.com/jordandru/retrace/releases/tag/ledger-2026-09-03): **1,585 events, seq 0–1584**. Which example you can check depends on which ledger it came from — **sequence numbers are project-local, so a low number does not mean an event is in that bundle**:
+
+| | ledger | can you inspect it now? |
+| --- | --- | --- |
+| 1, 5 | `retrace`, inside the snapshot | **Yes** — commits `bfe87c3`/`c375ed4` and checkpoint #1337 are in the bundle |
+| 2, 6 | `nooa-pilot`, a separate project | **Yes** — through NOOA's own still-public share, not this bundle |
+| 3, 4 | `retrace` | shown as output shapes; they name no event id to look up |
+| 7, 8 | `retrace`, **after** the snapshot head | **No** — #1869/#1873 and #1647/#1648/#2543 are past seq 1584 |
+
+Examples 7 and 8 are therefore shown on our word until redaction ships, which is exactly the thing this page otherwise asks you not to take.
+
+- The public ledger snapshot: <https://github.com/jordandru/retrace/releases/tag/ledger-2026-09-03> (bundle + checkpoints + witnesses + keys). Read-only live browsing is paused while export redaction is built.
 - The full reference is the [README](../README.md); this page is the three-minute version.
 
 ---
@@ -104,6 +115,8 @@ That is the real output for the public NOOA project above. And the tool refuses 
 
 ## 7. "An AI reviewed this design. Which AI, on what model, and can I check?"
 
+*Not in the public snapshot: this example's events are #1869 and #1873, above seq 1584.*
+
 **The problem.** AI reviews are becoming load-bearing: a design gets "reviewed by the model" and merged. Nothing records which harness ran, which model answered, what exact text it reviewed, or what it actually said. A month later the review is a sentence in a PR description.
 
 **With Retrace.** A review is an event like any other. The attribution-amendment design in this repo ([docs/design/attribution-amendment.md](design/attribution-amendment.md)) was reviewed under NOOA's own signing identity twice — once on an Anthropic model, once on **NVIDIA Nemotron 3 Ultra** through NVIDIA's public inference API — and each review is a producer-signed ledger event. This is #1873, the Nemotron one, as the ledger holds it:
@@ -127,6 +140,8 @@ So the record answers every question in the heading: the harness is server-stamp
 ---
 
 ## 8. Correct the actor without rewriting the sealed record
+
+*Not in the public snapshot: this example's events are #1647, #1648 and #2543, above seq 1584.*
 
 **The problem.** Commit `5d7290f` was recorded as `codex`, but seven files under `packages/mcp-server` were supported by stamped `cursor-agent` evidence #1647/#1648. The other two disputed files had mixed evidence, so a whole-commit rewrite would have overstated what the ledger proved.
 
@@ -179,6 +194,16 @@ These are the real `AMND` rows from main:
 
 ## Try it in two minutes
 
-1. Browse the live ledger: <https://retrace-api.slcwitit.workers.dev/s/sh_ea81439e010abb1c0ec7167c> (timeline · printable report · signed export).
-2. Verify a bundle offline with the command in §6 — the pre-verified snapshot is in the [releases](https://github.com/jordandru/retrace/releases/tag/ledger-2026-09-03).
+1. Download the pre-verified snapshot: <https://github.com/jordandru/retrace/releases/tag/ledger-2026-09-03> (bundle + checkpoints + witnesses + keys).
+2. Verify it offline against the published key — note the asset is `retrace-ledger.json`, so this is the command,
+   not §6's (whose `retrace.json` and 4-of-4 output are a different, smaller example):
+
+   ```
+   $ npx -y --package=@retrace-dev/cli retrace-export verify retrace-ledger.json \
+       --pubkey https://retrace-api.slcwitit.workers.dev/.well-known/retrace-pubkey
+   ```
+
+   Expect `VALID`, a trusted key, and `coverage: complete — 1585 of 1585 events`. Run outside a Retrace
+   repository it also prints `attribution evaluation unavailable: ENOENT … .retrace.json`; that is expected —
+   there is no local repo to evaluate attribution against — and the command still exits 0.
 3. Wire your own agents: the [Quick start](reference.md#quick-start-local-no-cloud-needed) runs locally with no cloud account; the [SETUP-GUIDE](../SETUP-GUIDE.md) covers the hosted Worker. Apache-2.0; self-host free.

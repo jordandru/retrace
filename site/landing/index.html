@@ -118,17 +118,16 @@ footer a{color:var(--ink-2)}
     <p><code>git blame</code> can't tell you otherwise. The commit message can't either — the agent that pushed wrote it. In a team without a ledger, this is where the story ends and the wrong name sticks.</p>
     <p>With Retrace it takes one query. Claude's edit was already sealed 17 minutes earlier under Claude's own server-issued identity, chained to the human instruction that caused it. Codex's commit sits after it with a different root. Fifteen minutes later an amendment and an empty correcting commit put the truth in both git and the ledger — <b>without rewriting history</b>. The record shows the mistake <em>and</em> the correction. That's the point.</p>
     <p style="font-family:'Bricolage Grotesque',sans-serif;font-size:15px"><b>Don't take our word for it — this ledger is public:</b><br>
-    <a href="https://retrace-api.slcwitit.workers.dev/s/sh_ea81439e010abb1c0ec7167c" rel="noopener">Browse the live ledger</a> (read-only, every event since #0) ·
-    <a href="https://retrace-api.slcwitit.workers.dev/s/sh_ea81439e010abb1c0ec7167c/report" rel="noopener">printable provenance report</a> ·
-    <a href="https://retrace-api.slcwitit.workers.dev/s/sh_ea81439e010abb1c0ec7167c/export" rel="noopener">signed export</a> — verify it yourself:
-    <code>npx -y --package=@retrace-dev/cli retrace-export verify retrace.json --pubkey https://retrace-api.slcwitit.workers.dev/.well-known/retrace-pubkey</code></p>
+    <a href="https://github.com/jordandru/retrace/releases/tag/ledger-2026-09-03" rel="noopener">Download the pre-verified snapshot</a> (bundle + checkpoints + witnesses + keys, 3 September 2026) — verify it yourself:
+    <code>npx -y --package=@retrace-dev/cli retrace-export verify retrace-ledger.json --pubkey https://retrace-api.slcwitit.workers.dev/.well-known/retrace-pubkey</code><br>
+    <span style="opacity:.75">Read-only live browsing is paused while export redaction is built.</span></p>
   </div>
   <div class="ledger" aria-label="Four ledger events from the incident">
     <div class="hd"><span>project retrace · chain intact</span><span>2026-08-28 · local time</span></div>
     <div class="ev h"><span class="dot"></span><div><span class="who">jordansboxing@… </span><span class="t">instructed · 20:28 · #217</span><div class="l">"Let's improve overall functionality of UI. Sometimes you click a highlighted section, button etc. that is clickable but…" <b>evt_0423c151</b> — the human root.</div></div><span class="link"></span></div>
     <div class="ev a"><span class="dot"></span><div><span class="who">claude-code </span><span class="t">edited · 20:37 · #231 · before server stamps</span><div class="l">retrace.html, ui-detail.test.ts, ui-html.ts (+296 −45) · caused_by evt_0423c151 · <b>evt_4231942b</b></div></div><span class="link"></span></div>
     <div class="ev a wrong"><span class="dot"></span><div><span class="who">codex </span><span class="t">committed · 20:54 · #243 · git hook</span><div class="l"><b>bfe87c3</b> "Make Retrace UI interactions reliable" · trailers name codex — <b>but the files match Claude's edit above.</b></div></div><span class="link"></span></div>
-    <div class="ev a"><span class="dot"></span><div><span class="who">claude-code </span><span class="t">amended · 21:09 · #258</span><div class="l">bfe87c3 was authored by claude-code, committed by codex. Correction commit <b>c375ed4</b>. History kept.<br>Since 0.1.7 the correction is first-class: a human-sealed <b>attribution amendment</b> changes a file's <i>effective</i> author where server-stamped evidence exists, leaving the recorded one visible. The first real one is ledger <b>#2543</b> on commit <b>5d7290f</b> (seven files, codex → cursor-agent). bfe87c3's own evidence predates server stamping, so it stays an honest gap rather than a forced demo.</div></div></div>
+    <div class="ev a"><span class="dot"></span><div><span class="who">claude-code </span><span class="t">amended · 21:09 · #258</span><div class="l">bfe87c3 was authored by claude-code, committed by codex. Correction commit <b>c375ed4</b>. History kept.<br>Since 0.1.7 the correction is first-class: a human-sealed <b>attribution amendment</b> changes a file's <i>effective</i> author where server-stamped evidence exists, leaving the recorded one visible. The first real one is ledger <b>#2543</b> on commit <b>5d7290f</b> (seven files, codex → cursor-agent) — a later event, <b>not</b> in the 2026-09-03 snapshot linked above, whose full export is not currently public. bfe87c3's own evidence predates server stamping, so it stays an honest gap rather than a forced demo.</div></div></div>
   </div>
 </div>
 </div></section>
@@ -152,6 +151,7 @@ footer a{color:var(--ink-2)}
 <p class="eyebrow">Prove it</p>
 <h2>Verify offline. It tells you when it can't.</h2>
 <p class="lede">Export a signed bundle and check it anywhere — no server, no account. Without a trusted key the verifier refuses to say "valid": a bundle that only proves it agrees with itself is <em>self-attested</em>, and the tool says so.</p>
+<p class="lede" style="margin-top:-6px"><b>What this transcript is:</b> a later 2,646-event export with checkpoint #2580 (2026-09-08). It is <b>not</b> the downloadable 2026-09-03 snapshot (1,585 events, head #1584) and its full export is not currently public — it is shown to demonstrate what the verifier says, not as something you can reproduce from that download. The snapshot verifies with the command above under &ldquo;Download the pre-verified snapshot&rdquo;, which names its own asset <code>retrace-ledger.json</code>; expect <code>1585 of 1585</code>.</p>
 <div class="term">
 <div><span class="d">$</span> retrace-export verify retrace.json</div>
 <div><span class="bad">NOT VALID</span> — signature: self_attested (kid 51f6ac4c…, key embedded in bundle — NOT a trusted key); events intact: true; links: true; coverage: complete — 2646 of 2646 events</div>
