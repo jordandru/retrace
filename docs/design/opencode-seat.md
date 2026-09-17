@@ -166,3 +166,32 @@ to `AGENTS.md`, which is Codex's own identity file.
 Not that OpenCode is supported, compatible, or a seventh seat — that is Gate 2's to say. Not that the
 copied-trailer path is closed at the harness; it is not. Not that the upstream fix is unnecessary: #47879
 remains the right outcome, and this design is a workaround this repository pinned, guarded and measured.
+
+
+## Correction — 2026-09-17 provider-boundary guard validation
+
+The v1 statements in §2 and §4 above record the 2026-09-15 hook-capture observations.
+Those observations did not establish that the refusal reached the provider. A 2026-09-17
+OpenCode 1.18.31 probe captured the actual local provider request and found that assigning
+`output.system` replaced the hook wrapper only: the runtime still sent the original array.
+The entrypoint also exported a helper that OpenCode attempted to call as a plugin factory.
+The guard repair at `3226981bf29619ea6d357708158bd9fdcbeedc78` exports only the plugin and
+mutates the original prompt array in place. The fix's clean, project-foreign, and global-foreign
+provider-request captures passed; evidence event `evt_9876842cb55c486d9c80d16ba271e998`.
+This corrects the earlier end-to-end refusal claim rather than treating hook output as proof.
+
+The loader flags exclude project AGENTS/CLAUDE/config instructions; they do not establish
+that the seat file is the sole instruction source. A global AGENTS.md can survive the flags.
+The fixed guard rejects a recognized foreign identity regardless of that instruction's source.
+A synthetic global case without an overlay confirmed the foreign marker before the guard,
+and refusal without the fixture identity markers at the provider. The same global-config
+fixture was not loaded with a synthetic OPENCODE_CONFIG_DIR overlay, so that case is not
+counted as evidence of global-identity refusal.
+
+The runtime measured for these new captures is 1.18.31. They used a deterministic local model,
+no live OpenCode credential, no Worker-reaching MCP server, and disabled built-in auth plugins
+and external skills. The Orca-style overlay was synthetic, not the actual Orca status plugin.
+These are bounded Gate 0 identity observations, not live admission or a claim of vendor support.
+Gate 1 onward, the Phase A prerequisite, operator-only credential steps and roster criteria
+in §7–8 remain in force. Global-loader isolation, active tool-hook enforcement, real overlay
+compatibility and clean-shell admission must not be inferred solely from these captures.
