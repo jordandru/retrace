@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="description" content="Retrace records which AI agent did what in your repo, on whose instruction — one tamper-evident ledger you can verify offline.">
 <meta property="og:title" content="Retrace — the flight recorder for AI coding agents">
-<meta property="og:description" content="Which agent did what, on whose instruction — provable, across Claude Code, Codex, Gemini, Grok, Copilot and Cursor.">
+<meta property="og:description" content="Which agent did what, on whose instruction — recorded in one tamper-evident ledger, across Claude Code, Codex, Grok, Copilot and Cursor.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%23ff5a1f'/%3E%3C/svg%3E">
 <title>Retrace</title>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;1,8..60,400&family=JetBrains+Mono:wght@400;500&display=swap">
@@ -116,7 +116,7 @@ footer a{color:var(--ink-2)}
     <p>Six AI agents share one checkout of this repo. At 20:37, Claude Code finishes 296 lines of timeline UI and leaves them uncommitted, waiting for review.</p>
     <p>At 20:54, Codex gets a one-word instruction — <em>"Re-integrate"</em> — and does the obvious thing: it commits whatever is in the working tree. Commit <code>bfe87c3</code> lands on <code>main</code>. Its trailers say <b>codex · gpt-5</b>. From here on, every tool that reads git believes Codex wrote the UI.</p>
     <p><code>git blame</code> can't tell you otherwise. The commit message can't either — the agent that pushed wrote it. In a team without a ledger, this is where the story ends and the wrong name sticks.</p>
-    <p>With Retrace it takes one query. Claude's edit was already sealed 17 minutes earlier under Claude's own server-issued identity, chained to the human instruction that caused it. Codex's commit sits after it with a different root. Fifteen minutes later an amendment and an empty correcting commit put the truth in both git and the ledger — <b>without rewriting history</b>. The record shows the mistake <em>and</em> the correction. That's the point.</p>
+    <p>With Retrace it takes one query. Claude's edit was already in the chain 17 minutes earlier, in Claude Code's own name — the same three files, linked by <code>caused_by</code> to the human instruction that asked for them. The server had sequenced and hashed it in ahead of <code>bfe87c3</code>'s own event — though without a credential stamp, since the server did not start recording which credential sealed an event until 28 hours later — so its place in the order is held by every hash after it, while a commit message is written by the agent committing, at the moment you'd want to doubt it. Codex's commit sits after it with a different root. Fifteen minutes later an amendment and an empty correcting commit put the truth in both git and the ledger — <b>without rewriting history</b>. The record shows the mistake <em>and</em> the correction. That's the point.</p>
     <p style="font-family:'Bricolage Grotesque',sans-serif;font-size:15px"><b>Don't take our word for it — this ledger is public:</b><br>
     <a href="https://github.com/jordandru/retrace/releases/tag/ledger-2026-09-03" rel="noopener">Download the pre-verified snapshot</a> (bundle + checkpoints + witnesses + keys, 3 September 2026) — verify it yourself:
     <code>npx -y --package=@retrace-dev/cli retrace-export verify retrace-ledger.json --pubkey https://retrace-api.slcwitit.workers.dev/.well-known/retrace-pubkey</code><br>
@@ -135,14 +135,14 @@ footer a{color:var(--ink-2)}
 <section id="records"><div class="wrap">
 <p class="eyebrow">What it records</p>
 <h2>Who. What. Why. Sealed by the server, not the agent.</h2>
-<p class="lede">Every agent and every tool writes to one chain. Each event is hashed onto the previous one; the server stamps who sealed it; the agent can't claim to be another agent — or to be you.</p>
+<p class="lede">Every agent and every tool writes to one chain. Each event is hashed onto the previous one, and since 30 August 2026 the server records which credential sealed it: an agent on its own pinned credential can only write as itself, and when it relays your instruction the ledger records that it relayed.</p>
 <div class="grid3">
-  <div class="card"><div class="k">WHO</div><h3>One identity per agent</h3><p>Claude Code, Codex, Gemini CLI, Grok, Copilot and Cursor each hold their own pinned credential. Since 4 Sept 2026 every agent credential also signs its MCP events with an Ed25519 <b>producer signature</b> the server verifies before sealing; git-hook and webhook seals, and events from before that date, are credential-stamped but unsigned, and the export says which is which. Humans appear as themselves; when an agent relays your instruction, the ledger says so.</p></div>
+  <div class="card"><div class="k">WHO</div><h3>One identity per agent</h3><p>Claude Code, Codex, Grok, Copilot and Cursor each hold their own pinned credential. Since 4 Sept 2026 every agent credential also signs its MCP events with an Ed25519 <b>producer signature</b> the server verifies before sealing; git-hook and webhook seals, and events from before that date, are credential-stamped but unsigned, and the export says which is which. Humans appear as themselves; when an agent relays your instruction, the ledger says so.</p></div>
   <div class="card"><div class="k">WHY</div><h3>Every action has a root</h3><p><code>caused_by</code> links each agent action back to the human instruction that started it. A link that can't be verified is flagged, never silently dropped.</p></div>
   <div class="card"><div class="k">WHAT · WHEN · WHERE</div><h3>Commits, PRs, docs</h3><p>Git commits via a post-commit hook, GitHub pull requests via HMAC-verified webhook, Google Drive edits via forwarder — files, hashes, session, IDE, and both timestamps.</p></div>
 </div>
-<p class="eyebrow" style="margin-top:34px">Agents — each sealing under its own identity</p>
-<div class="logos"><span>Claude Code</span><span>Codex</span><span>Gemini CLI</span><span>Grok</span><span>GitHub Copilot</span><span>Cursor Agent</span><span>NOOA (NVIDIA Labs research preview)</span><span class="soon">Others — ask us</span></div>
+<p class="eyebrow" style="margin-top:34px">Agents — each sealing under its own credential</p>
+<div class="logos"><span>Claude Code</span><span>Codex</span><span>Grok</span><span>GitHub Copilot</span><span>Cursor Agent</span><span>NOOA (NVIDIA Labs research preview)</span><span class="soon">Others — ask us</span></div>
 <p class="eyebrow" style="margin-top:22px">Sources it records from — not agents, no identity of their own</p>
 <div class="logos"><span>Git (post-commit + post-merge hook)</span><span>GitHub (HMAC-verified push webhook)</span><span>Google Drive (forwarder)</span></div>
 </div></section>
@@ -164,7 +164,7 @@ footer a{color:var(--ink-2)}
 <div class="grid3" style="margin-top:22px">
   <div class="card"><div class="k">OMISSION</div><h3>Nothing left out</h3><p>A full export must carry every event it claims, contiguous from #0 to the signed head. A dropped tail or a missing middle is <b>NOT VALID</b>, with the missing sequence numbers named.</p></div>
   <div class="card"><div class="k">CHECKPOINTS</div><h3>The head, witnessed — twice</h3><p>Every hour, each project that opted in (today: <code>retrace</code>) and whose head moved gets a signed checkpoint submitted to the public <b>Rekor transparency log</b>; once a day one is also committed to git and merged by a human — so rewriting a witnessed head means rewriting a Merkle log we don't operate, within an hour of it happening. A later export missing that head is a conflict, whatever date it claims.</p></div>
-  <div class="card"><div class="k">GATE</div><h3>Complete, or the build fails</h3><p><code>retrace doctor --gate</code> runs in CI against the <b>signed ledger only</b>: a signed export plus a chain-verified tail anchored to a signed live head, so an unsigned response can't change its answer. A commit with no provenance behind it doesn't merge. Every documented local step also runs in CI from an empty machine with our own server blocked. Completeness is enforced, not hoped for.</p></div>
+  <div class="card"><div class="k">GATE</div><h3>Complete, or the build fails</h3><p><code>retrace doctor --gate</code> runs in CI against the <b>signed ledger only</b>: a signed export plus a chain-verified tail anchored to a signed live head, so an unsigned response can't change its answer. It runs on every pull request and again on every push to <code>main</code>, so a commit with no provenance behind it turns the build red — before a merge, and again after one lands. Every documented local step also runs in CI from an empty machine with our own server blocked. Merges here are pushed by the repository owner, who is exempt from the branch ruleset, so what stops an unprovenanced commit is that red build and the merger who reads it: the check is automatic and its verdict is public; the merge itself is a person's call.</p></div>
 </div>
 </div></section>
 
@@ -175,7 +175,7 @@ footer a{color:var(--ink-2)}
 <div class="honest">
   <div class="card"><h3>What Retrace proves</h3><ul>
     <li>Any edit to a sealed event, and any removal of events after a checkpoint, is detectable offline.</li>
-    <li>Which server-issued identity sealed each event. Agents cannot impersonate each other.</li>
+    <li>Which credential sealed each event — recorded by the server since 30 August 2026. The 947 events sealed before that carry no such stamp, and the export says which is which.</li>
     <li>That an agent action is linked to a specific human instruction — or that it isn't.</li>
     <li>That a full export contains everything the server claimed at export time.</li>
   </ul></div>
@@ -183,7 +183,8 @@ footer a{color:var(--ink-2)}
     <li>It can't stop an operator with database access from rewriting history <em>before</em> a checkpoint — it can only show that the head moved.</li>
     <li>The model name an agent reports is what the agent said. We record it; we don't verify it.</li>
     <li>Line-level attribution ("this function was written by GPT") is not a feature.</li>
-    <li>It records what producers log. The CI gate makes commits complete; keystrokes are never captured.</li>
+    <li>It records what producers log. The CI gate checks that the commit it runs on is complete; keystrokes are never captured.</li>
+    <li>The gate is a check, not a lock. On this repository the owner pushes every merge and is exempt from the branch ruleset, so GitHub does not refuse a red merge — a person does.</li>
     <li>Commit attribution trusts the trailer the committing agent writes. A seal-time check that would refuse a wrong trailer is designed and peer-reviewed, not built; today a wrong trailer is caught by the gate and corrected by amendment, not prevented.</li>
   </ul></div>
 </div>
@@ -201,8 +202,8 @@ footer a{color:var(--ink-2)}
 </div></section>
 
 <footer id="contact"><div class="wrap">
-  <p><b>Retrace</b> is built by Jordan Drumiler in Salt Lake City, with six AI agents that log everything they do to the ledger you just read about, and an NVIDIA Labs research agent (NOOA, research preview) that audits that ledger every hour under its own signing key. Questions before you buy: <a href="mailto:retrace.support@gmail.com">retrace.support@gmail.com</a> · <a href="https://github.com/jordandru/retrace">github.com/jordandru/retrace</a> · <a href="https://www.npmjs.com/package/@retrace-dev/cli">npm: @retrace-dev/cli</a></p>
-  <p>This page's own provenance: drafted 2026-08-30 by claude-code under instruction from Jordan, event <code>task:retrace-landing-page-draft</code>; revised 2026-09-08 by claude-code under instruction from Jordan, event <code>evt_c38868480f4a460fb32f9e91d44760fe</code>; three claims corrected the same evening after Codex's review <code>#2679</code> (an unstamped event labelled pinned; "every agent event" signed; checkpoints for every project). Source: <a href="https://github.com/jordandru/retrace/blob/main/site/landing/index.html">github.com/jordandru/retrace · site/landing/index.html</a>.</p>
+  <p><b>Retrace</b> is built by Jordan Drumiler in Salt Lake City, with five AI agents that log everything they do to the ledger you just read about, and an NVIDIA Labs research agent (NOOA, research preview) that audits that ledger every hour under its own signing key. Questions before you buy: <a href="mailto:retrace.support@gmail.com">retrace.support@gmail.com</a> · <a href="https://github.com/jordandru/retrace">github.com/jordandru/retrace</a> · <a href="https://www.npmjs.com/package/@retrace-dev/cli">npm: @retrace-dev/cli</a></p>
+  <p>This page's own provenance, as its own ledger records it: drafted 2026-08-30 by claude-code on Jordan's instruction <code>evt_b57778cc8eba4cff86e8608e420e969a</code> (#1048, filed under the artifact <code>task:retrace-landing-page-draft</code> — that string is an artifact id, not an event id), then revised on Pages three times before it had a repo (#1115, #1172, #1565). Under version control from 2026-09-08: <b>465760c</b> and <b>18b00a8</b> on Jordan's instruction <code>evt_c38868480f4a460fb32f9e91d44760fe</code> (#2646), then three claims corrected the same evening in <b>175ad7d</b> after Codex's review <code>#2679</code> (an unstamped event labelled pinned; "every agent event" signed; checkpoints for every project). Revised 2026-09-16 in <b>76df250</b> (<code>evt_6ed52888b4ba40ba8f6b1925be3f62c0</code>) and <b>9d1ca00</b> (<code>evt_4d1ec9fb95fd4719942e090ec71bb927</code>), merged as <b>0d294eb</b> and published here 2026-09-17. Revised again 2026-09-17 under <code>evt_e2e9d556ad09411cacccb4f91b69948d</code>, correcting four claims that this page's own deploy preflight found in the bytes it had just published — among them the #231 identity claim, which the 2026-09-08 round corrected in the ledger card above and left standing in the prose. Events numbered above #1584 are past the snapshot's head, so a reader can resolve them in the repo but not yet in a public export. Source: <a href="https://github.com/jordandru/retrace/blob/main/site/landing/index.html">github.com/jordandru/retrace · site/landing/index.html</a>.</p>
 </div></footer>
 
 </body>
