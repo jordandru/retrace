@@ -31,4 +31,4 @@ Model and effort are self-reported. Orchflows' `history inspect` can read the ho
 
 ## Status
 
-Version 0.1.0. Untrialed until the trial in `trials/review-candidate/` has run; frontmatter proves no behaviour. Bounds: one review, no repairs, no further agents.
+Version 0.1.0. Two trial runs on 2026-09-20 (Claude Code 2.1.278, orchflows `6eb8af4`) stopped before a verdict and produced the composition and gap-event wording above; a run that reaches a verdict is recorded in the design note §8 when it exists. Frontmatter proves no behaviour. Bounds: one review, no repairs, no further agents.

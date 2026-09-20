@@ -114,6 +114,17 @@ verified — a gap the trial must report). Mirroring rule 11, the reviewer's own
 Retrace, the coordinator records it with `recorded_by: "coordinator"` and says why in `intent`: a relayed
 verdict, labelled.
 
+**Composition on Claude Code (T1 run 2, §8).** A wrapping skill cannot invoke `orch-review` through the
+host's skill tool: orchflows marks its primitives `disable-model-invocation: true`, and Claude Code refuses
+the call with text that also forbids replicating the skill by other means. Orchflows' own composition
+model is the other path — "Composition applies workflow files in the coordinator without native skill
+calls for every nested step. Read supplied paths directly where permitted" (hosts, *Invocation policy*);
+"A coordinator can apply declared dependencies by reading their files; it need not invoke a native skill
+tool at every step" (DESIGN, *Which skills are built in?*). The library follows orchflows: read
+`orch-review/SKILL.md` from the installed package and apply its contract (one fresh child, no repairs).
+The two hosts' texts pull against each other here, and §9 asks Dan to confirm that reading-and-applying
+is the sanctioned path on Claude Code rather than assume it.
+
 **Actor.** The host seat's own credential, model verbatim (agent-rules 4). The child is not a new actor:
 it has no credential (13) and orchflows gives it no identity of its own. Its native id, when the host
 exposes one, is evidence for §7 and goes in `method.params.child_id`; `location.session` stays the host
@@ -125,7 +136,7 @@ session so doctor's pin/session comparison keeps its meaning.
 |---|---|---|
 | A review ran against exactly this state | `reviewed_head` = routing `head_sha`, R7 | that the reviewer read all of it (`used` artifacts are the reviewer's claim) |
 | It was assigned these settings | routing `target` | that the host honoured them (§7 witness, v2) |
-| It ran at this effort | `reasoning_effort` self-report | same |
+| It ran at this effort | `reasoning_effort` self-report | same; on Claude Code the Agent launcher exposes no effort control, so a child reports `not_exposed` even when routed `high` (T1 run 1) |
 | The reviewer did not write the candidate | orchflows' `orch-review` contract + `independence` class | **anything about a second seat, credential or vendor** |
 | The event came from this project's credential | `sealed_by` server stamp; producer signature where the seat has a key | a signature for a generic install (server-stamped, unsigned — the ledger says which) |
 
@@ -178,8 +189,23 @@ separate headless session, never this pane.
   evidence), an ungated task with a known-good manual baseline (the 09-17 sweep). Measure coordinator
   turns, wall-clock, and whether the joined result needed a second pass. Compare against the manual sweep.
 
-**Result:** _not run at v1_ — recorded here when it has, with the scratch export path. Until then the
-library's `Status` says untrialed, and orchflows' own rule applies: "Frontmatter proves no behavior."
+**Result, T1 (2026-09-20, Claude Code 2.1.278, orchflows `6eb8af4`, candidate `859c59e4`, scratch
+ledger `~/.retrace/handoff-2026-09-20/orchflows-trial/`, sealed in the project ledger as
+`evt_2b1cd47f22b7458cb56081c99df48094` and the run-2 event that follows it):**
+
+- *Run 1* (36 turns, 284 s, $3.17): stopped at step 1 because the scratch server lacked
+  `RETRACE_ON_BEHALF_OF` — the coordinator's configuration error; the skill's fail-closed path worked
+  for the wrong reason. It still established that a Claude Code subagent **can** reach the Retrace tools
+  (a read-only probe child called `retrace_status`), that the Agent launcher exposes **no effort
+  control** (the child reported `not_exposed`), and the dry routing: note → class D, the ten library
+  paths → unmatched → S, effort high.
+- *Run 2* (23 turns, 158 s, $1.58): reached `retrace_instruct`, then stopped at the skill's precondition
+  because the host's skill tool refuses `orch-review` (manual-only). It recorded the stop as a gap event
+  (2 scratch events, both well-formed) and found that the server rejects `routing_event_id: null`. Three
+  defects fixed in place from it: the composition wording in step 4 (§4 above), a §3 gap-event shape in
+  the contract with "omit, never null", and an "instruct refuses" stop condition.
+- *Run 3*: pending on the fixed head; recorded here when it exists. **No run has yet reached a verdict**, so
+  the library's behaviour past the precondition is still unestablished: "Frontmatter proves no behavior."
 
 ## 9. Proposed note to Dan McInerney (Jordan sends; draft, not sent)
 
@@ -196,6 +222,11 @@ library's `Status` says untrialed, and orchflows' own rule applies: "Frontmatter
 > native transcript, children included. If `inspect` grew a `--json` whose per-child model/effort fields
 > you'd stand behind as stable, a Retrace checker could compare the self-report against the host's own
 > record, locally, without uploading anything. That's the one ask, and only if it fits your roadmap.
+>
+> One more, smaller: on Claude Code the skill tool refuses a manual-only primitive and its refusal text
+> says not to replicate the skill by other means, while your docs say composition reads the file and
+> applies it. We follow your docs. If you'd confirm that's the sanctioned path on Claude Code, we'd cite
+> it; if not, we'd rather know now.
 >
 > Everything we quote is pinned to `6eb8af4`; we learned the hard way not to cite `main`. Happy to send
 > the design note if useful.

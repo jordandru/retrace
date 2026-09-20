@@ -45,7 +45,11 @@ Every event carries `caused_by` = the instruction event for the task, and the ho
 
 `recorded_by` is `"coordinator"` only when the child could not record; say why in `intent`. `intent` carries the verdict summary and the findings in prose.
 
-## 3. What these events do and do not establish
+## 3. Gap event — when the workflow stops before a verdict (coordinator)
+
+`retrace_log`, action `other`, tags `["orchflows", "review-gap"]`, the candidate as a `used` artifact, `method.tool` `"retrace:retrace-review"`, `method.params` `{ "stage": "<precondition|routing|review>", "result": "stopped", "missing": "<what was absent or refused>", "child_launched": false, "head_sha": "<sha or null>" }` plus any settings resolved before the stop. **Omit `routing_event_id` entirely** when no routing event exists: the server rejects `null` for that field (typed non-empty string), and the same applies to `reasoning_effort`. `null` is accepted only where §1 shows it.
+
+## 4. What these events do and do not establish
 
 - They bind a verdict to the inspected state and to the assignment that produced it. A later change does not inherit the verdict.
 - They record that a **fresh child of the same credential** reviewed. They do not record a second seat, a second credential or a second vendor. In a repository governed by Retrace's `docs/agent-rules.md`, rule 11 (whoever built it does not review it) is not satisfied by them, because the seat is the same.
