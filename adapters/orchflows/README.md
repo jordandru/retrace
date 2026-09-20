@@ -27,8 +27,8 @@ Start a new session, then:
 
 It records a **same-credential, fresh-context** review: the reviewer is a fresh child of the same host session and credential, never another seat. That is the best independence a single harness can offer, and the ledger says exactly that. It is not a cross-seat or cross-vendor verdict, and it does not satisfy Retrace's agent-rules 11 in a repository that requires one.
 
-Model and effort are self-reported. Orchflows' `history inspect` can read the host's native transcript afterwards for a local comparison; nothing here uploads transcripts.
+Model and effort are self-reported. Orchflows' `history inspect` (`docs/history.md` at `6eb8af4`) can read the host's native transcript afterwards for a local comparison; nothing here uploads transcripts.
 
 ## Status
 
-Version 0.1.0. Two trial runs on 2026-09-20 (Claude Code 2.1.278, orchflows `6eb8af4`) stopped before a verdict and produced the composition and gap-event wording above; a run that reaches a verdict is recorded in the design note §8 when it exists. Frontmatter proves no behaviour. Bounds: one review, no repairs, no further agents.
+Version 0.1.0. Trialed 2026-09-20 on Claude Code 2.1.278 with orchflows `6eb8af4`: two runs stopped before a verdict and shaped the composition and gap-event wording above; the third ran end to end, with the child recording its own verdict citing the routing event (design note §8, project ledger `evt_8c25294ade3e4dfaa9511e018971d715`). Not yet trialed on Codex. Bounds: one review, no repairs, no further agents.

@@ -4,9 +4,12 @@
 instruction `evt_adc713dc24ca4f34bb48a2f8df91ad4d` ("implement orchflows into Retrace where it best fits, both
 projects"). **Class (a)** under agent-rules 12: the library it introduces governs how a review is recorded.
 Design gate per `docs/team-roles.md` §2: Codex → NOOA (Nemotron, pinned) → Grok; the author does not sit.
-Companion to `effort-model-routing.md` §5 (record shapes), §7 (portability) and §11 (prior art, PR 80 —
-this note is what §11.4's "integration seam" becomes). **Not built beyond the library in
-`adapters/orchflows/`; the library is untrialed until §8 reports otherwise.** Corrections are appended
+Companion to `effort-model-routing.md` §5 (record shapes), §7 (portability) and §11 (prior art — **§11
+exists only on PR 80's unmerged branch at `d894a58`**, head of `docs/orchflows-prior-art`, unrouted at the
+time of writing; every "§11" citation below resolves there and nowhere on `main`. This note is what §11.4's
+"integration seam" becomes). **Not built beyond the library in `adapters/orchflows/`; the library's
+behaviour on Claude Code is established by T1 run 3 (§8), its text by the gate reviewers, and it is
+untrialed on Codex.** Corrections are appended
 in place with their date and source (agent-rules 10) once merged; before merge, defects are fixed in place
 (Jordan, `evt_9dc982064d3c432bbd85ff9a64f049da`).
 
@@ -120,10 +123,15 @@ the call with text that also forbids replicating the skill by other means. Orchf
 model is the other path — "Composition applies workflow files in the coordinator without native skill
 calls for every nested step. Read supplied paths directly where permitted" (hosts, *Invocation policy*);
 "A coordinator can apply declared dependencies by reading their files; it need not invoke a native skill
-tool at every step" (DESIGN, *Which skills are built in?*). The library follows orchflows: read
-`orch-review/SKILL.md` from the installed package and apply its contract (one fresh child, no repairs).
-The two hosts' texts pull against each other here, and §9 asks Dan to confirm that reading-and-applying
-is the sanctioned path on Claude Code rather than assume it.
+tool at every step" (DESIGN, *Which skills are built in?*). The same orchflows paragraph continues:
+"Claude blocks model calls and subagent preloading for manual-only skills; never bypass rejection. Report
+blocked required native calls as capability gaps" (hosts, *Invocation policy*), and DESIGN adds "A host
+rejection is not permission to bypass its controls." Read together: composition **never calls** the host's
+skill tool for a composed primitive, and a refusal, once one has happened, is a gap to report, not a
+signal to proceed by reading. The library's step 4 says exactly that (T1 run 2 proceeded the wrong way
+round — it called the tool, was refused, and the v1 wording then told it to read instead; run 3 read
+first and no refusal occurred). The tension is inside orchflows' own text as much as between hosts, and
+§9 asks Dan to confirm that reading-and-applying is the sanctioned path on Claude Code rather than assume it.
 
 **Actor.** The host seat's own credential, model verbatim (agent-rules 4). The child is not a new actor:
 it has no credential (13) and orchflows gives it no identity of its own. Its native id, when the host
@@ -136,7 +144,7 @@ session so doctor's pin/session comparison keeps its meaning.
 |---|---|---|
 | A review ran against exactly this state | `reviewed_head` = routing `head_sha`, R7 | that the reviewer read all of it (`used` artifacts are the reviewer's claim) |
 | It was assigned these settings | routing `target` | that the host honoured them (§7 witness, v2) |
-| It ran at this effort | `reasoning_effort` self-report | same; on Claude Code the Agent launcher exposes no effort control, so a child reports `not_exposed` even when routed `high` (T1 run 1) |
+| It ran at this effort | `reasoning_effort` self-report | same; on Claude Code the Agent tool **call** exposes no effort field (an agent-definition `effort` exists — orchflows hosts, *Model and effort*, at `6eb8af4` — but writing one was outside the trial's allowed effects), so a child inherits the session's effort and self-reports whatever its harness exposes (T1 run 1: `not_exposed`; run 3: `"25"`) |
 | The reviewer did not write the candidate | orchflows' `orch-review` contract + `independence` class | **anything about a second seat, credential or vendor** |
 | The event came from this project's credential | `sealed_by` server stamp; producer signature where the seat has a key | a signature for a generic install (server-stamped, unsigned — the ledger says which) |
 
@@ -156,9 +164,15 @@ Add, in the same pass:
   `independence: "self"` or a routing target equal to the builder with no class → WARN.
 - Under `--gate`: same-credential reviews are excluded from any count of verdicts; a head whose only
   reviews are same-credential reads exactly as a head with none.
-- `target.child`/`target.host` are accepted params, not "unusable target" (line 308).
-- `reasoning_effort: "not_exposed"` is a recognised literal alongside `supports_effort: false` (closes the
-  "routed high · ran not-supported" noise the 09-18 hand-off flagged, which deserves its own issue).
+- `target.child`/`target.host` need no change: the intent check at `doctor.ts:302–308` (`0d294eb`) fires
+  only on a missing `target.agent`/`model`/`effort`, so extra keys already pass (T1 run 3 confirmed it by
+  reading the source; the v1 text of this bullet had it wrong).
+- `reasoning_effort: "not_exposed"` is a recognised literal alongside `supports_effort: false` in the
+  mismatch check at `doctor.ts:318–320`, and a **numeric** self-report (T1 run 3's child reported `"25"`,
+  the harness's raw value, verbatim) is reported as a mismatch against a routed level rather than treated
+  as unknown — `models.json` has no numeric aliases and must not grow any (agent-rules 4: verbatim, never
+  normalised). This closes the "routed high · ran not-supported" noise the 09-18 hand-off flagged, which
+  deserves its own issue.
 
 Acceptance: A1 an orchflows verdict never appears in a `--gate` review count; A2 the INFO line names the
 class in words; A3 a routing event with `target.child` passes the intent check; A4 existing PR 35 tests
@@ -189,23 +203,38 @@ separate headless session, never this pane.
   evidence), an ungated task with a known-good manual baseline (the 09-17 sweep). Measure coordinator
   turns, wall-clock, and whether the joined result needed a second pass. Compare against the manual sweep.
 
-**Result, T1 (2026-09-20, Claude Code 2.1.278, orchflows `6eb8af4`, candidate `859c59e4`, scratch
-ledger `~/.retrace/handoff-2026-09-20/orchflows-trial/`, sealed in the project ledger as
-`evt_2b1cd47f22b7458cb56081c99df48094` and the run-2 event that follows it):**
+**Result, T1 (2026-09-20, Claude Code 2.1.278 as reported by the session's `location.client`, orchflows
+`6eb8af4`, scratch ledger `~/.retrace/handoff-2026-09-20/orchflows-trial/`; the three runs are sealed in
+the project ledger as `evt_2b1cd47f22b7458cb56081c99df48094`, `evt_0e973935fdca47f9b75acc185ed0244f` and
+`evt_8c25294ade3e4dfaa9511e018971d715`, each carrying the run's turn count, duration, cost and scratch
+event ids as `method.params`):**
 
 - *Run 1* (36 turns, 284 s, $3.17): stopped at step 1 because the scratch server lacked
   `RETRACE_ON_BEHALF_OF` — the coordinator's configuration error; the skill's fail-closed path worked
   for the wrong reason. It still established that a Claude Code subagent **can** reach the Retrace tools
-  (a read-only probe child called `retrace_status`), that the Agent launcher exposes **no effort
-  control** (the child reported `not_exposed`), and the dry routing: note → class D, the ten library
+  (a read-only probe child called `retrace_status`), that the Agent tool call exposes **no per-call effort
+  field** (the child reported `not_exposed`; the agent-definition path in orchflows hosts *Model and effort*
+  was outside allowed effects), and the dry routing: note → class D, the ten library
   paths → unmatched → S, effort high.
 - *Run 2* (23 turns, 158 s, $1.58): reached `retrace_instruct`, then stopped at the skill's precondition
   because the host's skill tool refuses `orch-review` (manual-only). It recorded the stop as a gap event
   (2 scratch events, both well-formed) and found that the server rejects `routing_event_id: null`. Three
   defects fixed in place from it: the composition wording in step 4 (§4 above), a §3 gap-event shape in
   the contract with "omit, never null", and an "instruct refuses" stop condition.
-- *Run 3*: pending on the fixed head; recorded here when it exists. **No run has yet reached a verdict**, so
-  the library's behaviour past the precondition is still unestablished: "Frontmatter proves no behavior."
+- *Run 3* (candidate `00e0279d`, 38 turns, 763 s, $5.25): **the workflow ran end to end.** Scratch seq 2
+  instruction → seq 3 routing event before launch (class S, effort high, both digests, ten unmatched
+  paths, `independence`, `target.child`, candidate verified unchanged) → seq 4 verdict **recorded by the
+  child itself**: `rejected`, tags `review`+`orchflows`, all 11 changed files plus 15 evidence files as
+  `used`, `routing_event_id` citing seq 3, `reviewed_head` = candidate, `recorded_by: reviewer`.
+  `trials/review-candidate/expected-behavior.md` items 1–4 met. Two host facts: the child reaches the
+  Retrace tools and can seal its own verdict; the Agent tool call has no per-call effort field, so the
+  child inherited the session and self-reported `reasoning_effort: "25"` — the harness's raw value — against
+  a routed `high`. The verdict's six findings (F1–F6, all content defects in this draft) are fixed in place
+  at the head after `00e0279d`; the library's behaviour is established by this run, the draft's text by the
+  gate reviewers. Two consumer observations for issues: `retrace_status` returned `routing: []` for a
+  project holding a `tool: "routing"` event, and `retrace_why` was outside the run's allowed tools (the
+  coordinator's omission), so the child's citation of the routing id was verified from the scratch database
+  afterwards rather than in-session.
 
 ## 9. Proposed note to Dan McInerney (Jordan sends; draft, not sent)
 
