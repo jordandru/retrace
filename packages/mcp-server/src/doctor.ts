@@ -97,7 +97,16 @@ export type HookProbe = { ok: boolean; command?: string; detail: string };
  *  nothing about the script it names: an `npx`-installed hook pinned to `~/.npm/_npx/<hash>/…` kept passing doctor
  *  after that cache was gone while every commit went unsealed (issue #84, stranger dry run 2026-09-20 §F2). An older
  *  retrace-git without `--probe` prints its usage and exits 0, which still proves the target loads. */
-export function probeHookTarget(repo: string, script: string, timeoutMs = 60_000): HookProbe {
+export const PROBE_TIMEOUT_ENV = "RETRACE_DOCTOR_PROBE_TIMEOUT_MS";
+export const DEFAULT_PROBE_TIMEOUT_MS = 60_000;
+/** The probe's wall-clock budget: the npx form may have to fetch the pinned package, so a slow registry or a cold cache
+ *  can legitimately need more than the default. `RETRACE_DOCTOR_PROBE_TIMEOUT_MS` (a positive integer) overrides it;
+ *  anything else leaves the default. */
+export function probeTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env[PROBE_TIMEOUT_ENV];
+  return raw && /^\d+$/.test(raw) && Number(raw) > 0 ? Number(raw) : DEFAULT_PROBE_TIMEOUT_MS;
+}
+export function probeHookTarget(repo: string, script: string, timeoutMs = probeTimeoutMs()): HookProbe {
   const command = hookTargetCommand(script);
   if (!command) return { ok: false, detail: "carries the retrace-git mark but no `commit --hook` line, so nothing runs on commit" };
   const run = spawnSync("sh", ["-c", `${command} --probe`], { cwd: repo, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: timeoutMs });
@@ -107,7 +116,9 @@ export function probeHookTarget(repo: string, script: string, timeoutMs = 60_000
   // The line that names the cause: node's "Error: Cannot find module …", npm's "npm error …"; else the first line.
   const errLines = (run.stderr ?? "").split("\n").map((line) => line.trim()).filter(Boolean);
   const cause = errLines.find((line) => /^(\w*Error\b|npm (error|ERR!))/.test(line)) ?? errLines[0];
-  const outcome = run.status === null ? `did not finish (${run.signal ?? run.error?.message ?? "timeout"})` : `exited ${run.status}`;
+  const timedOut = (run.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT";
+  const outcome = timedOut ? `did not finish within ${timeoutMs} ms (raise ${PROBE_TIMEOUT_ENV} if the registry is slow)`
+    : run.status === null ? `did not finish (${run.signal ?? run.error?.message ?? "unknown"})` : `exited ${run.status}`;
   return { ok: false, command, detail: `${outcome}${cause ? `: ${cause}` : ""}` };
 }
 

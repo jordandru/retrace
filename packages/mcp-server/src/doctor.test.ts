@@ -724,7 +724,7 @@ test("gate authorization: unsigned /events omitting the seal cannot hide a verif
   } finally { globalThis.fetch = savedFetch; }
 });
 
-import { gateDualWitness, hookFindings, hookTargetCommand, objectStoreFinding, probeHookTarget, parseDoctorArgs as parseArgs2 } from "./doctor.js";
+import { gateDualWitness, hookFindings, hookTargetCommand, objectStoreFinding, probeHookTarget, probeTimeoutMs, DEFAULT_PROBE_TIMEOUT_MS, parseDoctorArgs as parseArgs2 } from "./doctor.js";
 import { hookScript as realHookScript, runningVersion as hookVersion } from "./git-hook.js";
 import { execFileSync as execGit, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync as mkTemp, readFileSync, readdirSync, statSync, truncateSync, writeFileSync as writeF } from "node:fs";
@@ -905,6 +905,14 @@ test("issue #84: doctor executes the hook's target and FAILS when the script it 
   // a non-zero exit is a failure too, and a mark with no command line at all cannot be trusted either
   const exits = realHookScript("post-commit", `node -e "process.exit(3)" --`);
   assert.match(probeHookTarget(fixture.repo, exits).detail, /^exited 3/);
+  // a target that never answers fails at the probe budget, and the FAIL names the override (PR 92 round 1, finding 4)
+  const stalls = realHookScript("post-commit", `node -e "setTimeout(() => {}, 30000)" --`);
+  const stalled = probeHookTarget(fixture.repo, stalls, 300);
+  assert.equal(stalled.ok, false);
+  assert.match(stalled.detail, /^did not finish within 300 ms \(raise RETRACE_DOCTOR_PROBE_TIMEOUT_MS/, stalled.detail);
+  assert.equal(probeTimeoutMs({}), DEFAULT_PROBE_TIMEOUT_MS);
+  assert.equal(probeTimeoutMs({ RETRACE_DOCTOR_PROBE_TIMEOUT_MS: "120000" }), 120_000);
+  for (const bad of ["", "0", "-5", "12s", "abc"]) assert.equal(probeTimeoutMs({ RETRACE_DOCTOR_PROBE_TIMEOUT_MS: bad }), DEFAULT_PROBE_TIMEOUT_MS, JSON.stringify(bad));
   writeF(joinP(fixture.repo, ".git", "hooks", "post-commit"), "#!/bin/sh\n# retrace-git hook\n");
   assert.equal(hookFindings(fixture.repo)[0].level, "fail");
   assert.match(hookFindings(fixture.repo)[0].detail, /no `commit --hook` line/);
@@ -927,8 +935,15 @@ test("issue #84: doctor executes the hook's target and FAILS when the script it 
   writeF(joinP(fixture.repo, ".git", "hooks", "post-commit"), evicted);
   const notReady = spawnSync(process.execPath, [doctorBin, "doctor", fixture.repo], { encoding: "utf8", env });
   assert.equal(notReady.status, 1, notReady.stdout + notReady.stderr);
-  assert.match(notReady.stdout, /^FAIL  post-commit hook .*Cannot find module.*run retrace-git install --repo /m);
+  const failLine = notReady.stdout.split("\n").find((line) => line.startsWith("FAIL  post-commit hook"));
+  assert.ok(failLine, notReady.stdout); // level + label
+  assert.match(failLine, /Cannot find module/); // the cause
+  assert.ok(failLine.endsWith(`run retrace-git install --repo ${fixture.repo}`), failLine); // the repair
   assert.match(notReady.stdout, /NOT READY/);
+  // the same evicted hook with the budget overridden: the override changes nothing about a target that fails fast
+  const overridden = spawnSync(process.execPath, [doctorBin, "doctor", fixture.repo], { encoding: "utf8", env: { ...env, RETRACE_DOCTOR_PROBE_TIMEOUT_MS: "5000" } });
+  assert.equal(overridden.status, 1, overridden.stdout + overridden.stderr);
+  assert.match(overridden.stdout, /^FAIL  post-commit hook .*Cannot find module/m);
 });
 
 test("doctor: a local-db repo with installed hooks and a sealed commit is READY without a credential", async () => {

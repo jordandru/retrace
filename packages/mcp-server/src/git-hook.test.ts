@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync, execFile } from "node:child_process";
+import { execFileSync, execFile, spawnSync } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdtempSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
@@ -396,8 +396,23 @@ test("hook script preserves retrace-git stderr but never propagates its failure 
   const command = lines[lines.length - 1];
   // stdout is discarded, stderr is teed into the hook log AND still reaches the terminal, and the exit is never git's
   assert.ok(command.endsWith(` ${HOOK_STDERR_REDIRECT}`), command);
-  assert.match(HOOK_STDERR_REDIRECT, /^2>&1 >\/dev\/null \| awk -v f="\$\(git rev-parse --absolute-git-dir\)\/retrace-hook\.log" '\{ print >> f; print > "\/dev\/stderr" \}' \|\| :$/);
+  assert.match(HOOK_STDERR_REDIRECT, /^2>&1 >\/dev\/null \| awk -v f="\$\(git rev-parse --absolute-git-dir\)\/retrace-hook\.log" '\{ print >> f; print \| "cat >&2" \}' \|\| :$/);
   assert.doesNotMatch(command, /2>>/, "stderr must not be swallowed into the log alone: the pending-seal notice has to reach the committer");
+  assert.doesNotMatch(command, /\/dev\/stderr/, "the terminal copy must not depend on awk treating /dev/stderr as special (PR 92 round 1, finding 2)");
+  // the wrapper itself, run under sh with a fake target: every stderr line reaches both the log and the caller's stderr,
+  // stdout is discarded, a non-zero target never leaks into the exit, and a silent target creates no log file
+  const dir = mkdtempSync(join(tmpdir(), "retrace-wrapper-"));
+  sh(dir, "git", ["init", "-q", "-b", "main"]);
+  const logPath = join(dir, ".git", "retrace-hook.log");
+  const wrap = (target: string) => spawnSync("sh", ["-c", `${target} ${HOOK_STDERR_REDIRECT}`], { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  const quiet = wrap(`printf 'stdout only\\n'`);
+  assert.deepEqual([quiet.status, quiet.stdout, quiet.stderr], [0, "", ""]);
+  assert.equal(existsSync(logPath), false, "a target that writes nothing to stderr leaves no log file");
+  const noisy = wrap(`sh -c 'printf "dropped\\n"; printf "retrace: commit abc pending seal\\nsecond line\\n" >&2; exit 7'`);
+  assert.equal(noisy.status, 0, "the target's exit 7 never becomes the hook's");
+  assert.equal(noisy.stdout, "");
+  assert.equal(noisy.stderr, "retrace: commit abc pending seal\nsecond line\n");
+  assert.equal(readFileSync(logPath, "utf8"), "retrace: commit abc pending seal\nsecond line\n");
 });
 
 test("issue #84: install writes the packed CLI by exact version from an npx cache, and the checkout path otherwise", () => {
@@ -409,6 +424,15 @@ test("issue #84: install writes the packed CLI by exact version from an npx cach
   assert.equal(isNpxCachePath(cached), true);
   assert.equal(isNpxCachePath(checkout), false);
   assert.equal(isNpxCachePath(global), false);
+  // the whole exec-cache shape decides, not the `_npx` segment alone (PR 92 round 1, finding 1)
+  const checkoutUnderNpx = "/home/dev/_npx/retrace/packages/mcp-server/dist/git-hook.js";
+  const globalUnderNpx = "/opt/_npx/lib/node_modules/@retrace-dev/cli/dist/git-hook.js";
+  const cachedWindows = "C:\\Users\\dev\\AppData\\Local\\npm-cache\\_npx\\8791fae00a73ff5d\\node_modules\\@retrace-dev\\cli\\dist\\git-hook.js";
+  assert.equal(isNpxCachePath(checkoutUnderNpx), false, "a checkout under a directory named _npx is still a checkout");
+  assert.equal(isNpxCachePath(globalUnderNpx), false, "no hex hash segment, so not the exec cache");
+  assert.equal(isNpxCachePath("/home/dev/.npm/_npx/not-a-hash/node_modules/@retrace-dev/cli/dist/git-hook.js"), false);
+  assert.equal(isNpxCachePath(cachedWindows), true);
+  assert.equal(hookCommand(checkoutUnderNpx, "0.1.9"), `node "${checkoutUnderNpx}"`);
   assert.equal(hookCommand(cached, "0.1.9"), "npx -y -p @retrace-dev/cli@0.1.9 retrace-git");
   assert.equal(hookCommand(checkout, "0.1.9"), `node "${checkout}"`);
   assert.equal(hookCommand(global, "0.1.9"), `node "${global}"`);

@@ -324,10 +324,12 @@ export function runningVersion(moduleUrl: string = import.meta.url): string {
   if (typeof pkg.version !== "string" || !pkg.version) throw new Error("cannot read the running package's version from package.json");
   return pkg.version;
 }
-/** npm's exec cache (`npx` / `npm exec`): <npm-cache>/_npx/<hash>/node_modules/… — per user, per spec, and evicted by
- *  `rm -rf ~/.npm`, a new account, a CI runner, or another HOME. */
+/** npm's exec cache (`npx` / `npm exec`): <npm-cache>/_npx/<hex hash>/node_modules/@retrace-dev/cli/… — per user, per
+ *  spec, and evicted by `rm -rf ~/.npm`, a new account, a CI runner, or another HOME. The whole shape is matched, not
+ *  the `_npx` segment alone: a checkout that merely sits under a directory named `_npx` is a checkout, and its hook
+ *  must keep the path form (NOOA, PR 92 round 1, finding 1). */
 export function isNpxCachePath(path: string): boolean {
-  return /[\\/]_npx[\\/]/.test(path);
+  return /[\\/]_npx[\\/][0-9a-f]+[\\/]node_modules[\\/]@retrace-dev[\\/]cli[\\/]/i.test(path);
 }
 /** The command the installed hook runs, without its arguments. A checkout or global install is addressed by path, so
  *  the primary checkout's built dist seals every worktree's commits (agent-ops 3). A CLI resolved from the npx cache is
@@ -340,11 +342,15 @@ export function hookCommand(selfPath: string, version: string): string {
 /** Everything the target writes to stderr is appended to <git-dir>/retrace-hook.log AND still shown to the committer
  *  (the pending-seal notice must reach the terminal); stdout is discarded; the exit is never git's. awk rather than
  *  `tee -a`: tee creates the log on every commit, awk opens it only when a line actually arrives, so a clean seal still
- *  leaves no log file behind. */
-export const HOOK_STDERR_REDIRECT = `2>&1 >/dev/null | awk -v f="$(git rev-parse --absolute-git-dir)/retrace-hook.log" '{ print >> f; print > "/dev/stderr" }' || :`;
+ *  leaves no log file behind. The terminal copy goes through `print | "cat >&2"` (awk's own stderr, inherited by the
+ *  pipe) rather than `print > "/dev/stderr"`: only some awks treat "/dev/stderr" as a special name, and where they do
+ *  not it is a file the hook would try to create (NOOA, PR 92 round 1, finding 2). */
+export const HOOK_STDERR_REDIRECT = `2>&1 >/dev/null | awk -v f="$(git rev-parse --absolute-git-dir)/retrace-hook.log" '{ print >> f; print | "cat >&2" }' || :`;
 /** node:sqlite prints an ExperimentalWarning on every local-store seal (Node 22); now that stderr is teed into the log,
  *  that noise would bury the one-line-per-failure log. Silenced for the hook process only, through NODE_OPTIONS so the
- *  npx form is covered too; the operator's own NODE_OPTIONS are kept. */
+ *  npx form is covered too; the operator's own NODE_OPTIONS are kept.
+ *  `--disable-warning` exists from Node 21.3; the hook runs this package, whose `engines.node` is `>=22`
+ *  (packages/mcp-server/package.json), so no runtime version check is needed here (NOOA, PR 92 round 1, finding 3). */
 export const HOOK_QUIET_WARNINGS = `NODE_OPTIONS="--disable-warning=ExperimentalWarning\${NODE_OPTIONS:+ \$NODE_OPTIONS}"; export NODE_OPTIONS # node:sqlite's experimental warning is not a hook failure`;
 /** Both hooks are the producing process for the commit they see, so both pass --hook (the live path).
  *  post-commit does not fire for `git merge` — git runs post-merge instead — so a repo with only post-commit never
