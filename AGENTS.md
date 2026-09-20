@@ -14,3 +14,4 @@ Read both before working. This file holds only what is specific to the Codex sea
 - This identity block is for Codex only. `AGENTS.md` is also loaded by other harnesses (OpenCode reads
   it); a harness that is not Codex must not adopt this actor id, and does not join until it can load its
   own identity file (PR 19).
+- Owner input carries the JD envelope (`docs/owner-protocol.md`, sealed `evt_aacee37d…`); that file changes only on a JD-signed instruction merged by Jordan personally, and `jdoff` never covers it.

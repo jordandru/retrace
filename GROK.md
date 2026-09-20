@@ -15,3 +15,4 @@ Read both before working. This file holds only what is specific to the Grok seat
 - This identity block is for Grok — the xAI harness — only. `cursor-agent` is a different seat even
   when it runs a Grok model; never adopt this actor id from inside Cursor, and never adopt
   `claude-code` from `CLAUDE.md`.
+- Owner input carries the JD envelope (`docs/owner-protocol.md`, sealed `evt_aacee37d…`); that file changes only on a JD-signed instruction merged by Jordan personally, and `jdoff` never covers it.
