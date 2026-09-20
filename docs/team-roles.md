@@ -35,8 +35,10 @@ repair on its own clone and the WSL-DNS root cause of the audit outage (#2174, #
 fixture that became PR 21. Grok's answers come with commands and numbers; that is its value. It also
 calibrates other reviewers' findings against reality (Nemotron's v6-vs-v7 confusion, #2355). Weekly budget
 is finite; stand it down when it reports single digits. When the coordinator is capped, Grok may spec-author
-and rank the queue on Jordan's explicit reassignment or a recorded routing event (agent-rules 12) — still
-not coordinator or merger. Evidence, 2026-09-20: queue ranking and NOOA host cutover (first host seal
+or rank the queue only for the act Jordan or a recorded routing event directs (agent-rules 12) — still
+not coordinator or merger. Evidence, 2026-09-20: ranked the queue once, under Jordan's instruction
+`evt_47c1614ac9cb486daaa0ea453d506da5` / `evt_d505999fa95f4ec090556ea7e8d097f4` (ranking events
+`evt_1e8340260e46408e810352a7fc474dd6` / `evt_b085b8146e82452fa2b3897112a9c056`); NOOA host cutover (first host seal
 `evt_e80678c58feb4878a4587c60a7f76db7`) and the PR 90 routing/verdict (`evt_4f4c20d38e3d4dbd95020df4a171deba`
 / `evt_08be04d445c74d41b0a7c5b33c801df1`) while Claude was token-capped.
 
@@ -72,10 +74,12 @@ files included — while documents that govern nothing (measurements, snapshots,
 merge on one non-author review. One addition from practice: on 2026-09-12 cursor-agent at high
 effort took the first-pass review seat for PR 37 while Codex was rate-capped (routing evt_44b11c82, verdict
 evt_a742fc51), so "reviewer when routed" is now part of that seat. *Correction 2026-09-20:* while Claude
-was token-capped, Grok ranked the queue and spec-authored the NOOA host cutover and PR 90's first-pass
-review (instruction `evt_47c1614ac9cb486daaa0ea453d506da5`, host seal `evt_e80678c58feb4878a4587c60a7f76db7`,
-PR 90 verdict `evt_08be04d445c74d41b0a7c5b33c801df1`); "substitute spec author / incident architect when
-the coordinator is capped" is now part of the Grok seat. Measurer remains the standing job. Jordan's
+was token-capped, Grok ranked the queue once, under Jordan's instruction `evt_47c1614ac9cb486daaa0ea453d506da5`
+/ `evt_d505999fa95f4ec090556ea7e8d097f4` (ranking events `evt_1e8340260e46408e810352a7fc474dd6` /
+`evt_b085b8146e82452fa2b3897112a9c056`), and spec-authored the NOOA host cutover and PR 90's first-pass
+review (host seal `evt_e80678c58feb4878a4587c60a7f76db7`, PR 90 verdict `evt_08be04d445c74d41b0a7c5b33c801df1`);
+"substitute spec author / incident architect when the coordinator is capped" is now part of the Grok seat,
+per act when so directed, not as a standing power. Measurer remains the standing job. Jordan's
 decision this session: keep measurer; do not rename the seat architect.
 
 1. **Reviewer ≠ builder for the same change.** Whoever built it does not review it. Astra's PR 15 was
