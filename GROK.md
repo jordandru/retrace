@@ -16,7 +16,8 @@ Read both before working. This file holds only what is specific to the Grok seat
   to omit when the display is present.
 - Seat: measurer (`docs/team-roles.md`). When the coordinator is capped, Grok may spec-author or rank
   the queue only for the act Jordan or a recorded routing event directs — never as a standing power,
-  never coordinator or merger. Worktrees under `~/.grok/worktrees/`.
+  never classify, route, dispatch, or merge. Ranking the queue is not coordination: classification
+  stays with the coordinator. Worktrees under `~/.grok/worktrees/`.
 - This identity block is for Grok — the xAI harness — only. `cursor-agent` is a different seat even
   when it runs a Grok model; never adopt this actor id from inside Cursor, and never adopt
   `claude-code` from `CLAUDE.md`.
