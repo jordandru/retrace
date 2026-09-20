@@ -724,7 +724,8 @@ test("gate authorization: unsigned /events omitting the seal cannot hide a verif
   } finally { globalThis.fetch = savedFetch; }
 });
 
-import { gateDualWitness, hookFindings, objectStoreFinding, parseDoctorArgs as parseArgs2 } from "./doctor.js";
+import { gateDualWitness, hookFindings, hookTargetCommand, objectStoreFinding, probeHookTarget, parseDoctorArgs as parseArgs2 } from "./doctor.js";
+import { hookScript as realHookScript, runningVersion as hookVersion } from "./git-hook.js";
 import { execFileSync as execGit, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync as mkTemp, readFileSync, readdirSync, statSync, truncateSync, writeFileSync as writeF } from "node:fs";
 import { tmpdir as tmpD } from "node:os";
@@ -863,8 +864,8 @@ test("objectStoreFinding: packed-only commit objects pass without loose files", 
 test("hookFindings: linked worktrees use hooks from the common Git directory", () => {
   const fixture = objectStoreRepo();
   fixture.commit("hooks\n");
-  writeF(joinP(fixture.repo, ".git", "hooks", "post-commit"), "#!/bin/sh\n# retrace-git hook\n");
-  writeF(joinP(fixture.repo, ".git", "hooks", "post-merge"), "#!/bin/sh\n# retrace-git hook\n");
+  writeF(joinP(fixture.repo, ".git", "hooks", "post-commit"), realHookScript("post-commit"));
+  writeF(joinP(fixture.repo, ".git", "hooks", "post-merge"), realHookScript("post-merge"));
   const parent = mkTemp(joinP(tmpD(), "retrace-hook-worktree-"));
   const worktree = joinP(parent, "linked");
   fixture.g("worktree", "add", "-q", "-b", "feature", worktree);
@@ -872,6 +873,62 @@ test("hookFindings: linked worktrees use hooks from the common Git directory", (
   const findings = hookFindings(worktree);
   assert.deepEqual(findings.map((finding) => finding.level), ["pass", "pass"]);
   assert.ok(findings.every((finding) => finding.detail.startsWith(joinP(fixture.repo, ".git", "hooks"))));
+  assert.ok(findings.every((finding) => finding.detail.includes(`(retrace-git ${hookVersion()})`)), findings.map((f) => f.detail).join("\n"));
+});
+
+test("issue #84: doctor executes the hook's target and FAILS when the script it names cannot load", () => {
+  const fixture = objectStoreRepo();
+  fixture.commit("hooks\n");
+  const hookBin = fileURLToPath(new URL("./git-hook.js", import.meta.url));
+  // the target command is whatever precedes ` commit --hook`, for either install form
+  assert.equal(hookTargetCommand(realHookScript("post-commit")), `node "${hookBin}"`);
+  assert.equal(hookTargetCommand(realHookScript("post-merge")), `node "${hookBin}"`);
+  assert.equal(hookTargetCommand(realHookScript("post-commit", "npx -y -p @retrace-dev/cli@0.1.9 retrace-git")), "npx -y -p @retrace-dev/cli@0.1.9 retrace-git");
+  assert.equal(hookTargetCommand("#!/bin/sh\n# retrace-git hook\n"), undefined);
+
+  // the dry run's hook: an npx cache path that is no longer there
+  const gone = joinP(fixture.repo, "gone", "_npx", "8791fae00a73ff5d", "node_modules", "@retrace-dev", "cli", "dist", "git-hook.js");
+  const evicted = realHookScript("post-commit", `node "${gone}"`);
+  const probe = probeHookTarget(fixture.repo, evicted);
+  assert.equal(probe.ok, false);
+  assert.match(probe.detail, /exited 1: Error: Cannot find module/);
+
+  writeF(joinP(fixture.repo, ".git", "hooks", "post-commit"), evicted);
+  writeF(joinP(fixture.repo, ".git", "hooks", "post-merge"), realHookScript("post-merge", `node "${gone}"`));
+  const broken = hookFindings(fixture.repo);
+  assert.deepEqual(broken.map((finding) => [finding.level, finding.label]), [["fail", "post-commit hook"], ["fail", "post-merge hook"]]);
+  for (const finding of broken) {
+    assert.match(finding.detail, /Cannot find module/, finding.detail);
+    assert.match(finding.detail, new RegExp(`run retrace-git install --repo ${fixture.repo.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`), finding.detail);
+  }
+
+  // a non-zero exit is a failure too, and a mark with no command line at all cannot be trusted either
+  const exits = realHookScript("post-commit", `node -e "process.exit(3)" --`);
+  assert.match(probeHookTarget(fixture.repo, exits).detail, /^exited 3/);
+  writeF(joinP(fixture.repo, ".git", "hooks", "post-commit"), "#!/bin/sh\n# retrace-git hook\n");
+  assert.equal(hookFindings(fixture.repo)[0].level, "fail");
+  assert.match(hookFindings(fixture.repo)[0].detail, /no `commit --hook` line/);
+
+  // the repaired hook passes again, and the probe runs once for both hooks with the same target
+  writeF(joinP(fixture.repo, ".git", "hooks", "post-commit"), realHookScript("post-commit"));
+  writeF(joinP(fixture.repo, ".git", "hooks", "post-merge"), realHookScript("post-merge"));
+  let probes = 0;
+  const counted = hookFindings(fixture.repo, (script) => { probes++; return probeHookTarget(fixture.repo, script); });
+  assert.deepEqual(counted.map((finding) => finding.level), ["pass", "pass"]);
+  assert.equal(probes, 1);
+
+  // end to end: the CLI prints NOT READY with the repair on the evicted hook, READY on the repaired one
+  const doctorBin = fileURLToPath(new URL("./doctor.js", import.meta.url));
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("RETRACE_")));
+  writeF(joinP(fixture.repo, ".retrace.json", ), JSON.stringify({ project: "evicted", db: joinP(fixture.repo, "ledger.db") }, null, 2) + "\n");
+  const ready = spawnSync(process.execPath, [doctorBin, "doctor", fixture.repo], { encoding: "utf8", env });
+  assert.equal(ready.status, 0, ready.stdout + ready.stderr);
+  assert.match(ready.stdout, /^PASS  post-commit hook/m);
+  writeF(joinP(fixture.repo, ".git", "hooks", "post-commit"), evicted);
+  const notReady = spawnSync(process.execPath, [doctorBin, "doctor", fixture.repo], { encoding: "utf8", env });
+  assert.equal(notReady.status, 1, notReady.stdout + notReady.stderr);
+  assert.match(notReady.stdout, /^FAIL  post-commit hook .*Cannot find module.*run retrace-git install --repo /m);
+  assert.match(notReady.stdout, /NOT READY/);
 });
 
 test("doctor: a local-db repo with installed hooks and a sealed commit is READY without a credential", async () => {

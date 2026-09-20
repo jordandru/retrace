@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { SqliteStore } from "./sqlite-store.js";
-import { hookScript, parseTrailers, resolveHookToken, resolveHookProducerKeyFile, retryableHookFailure, ttySurface, guardRemoteWrite, validCausedById, validActorId } from "./git-hook.js";
+import { hookScript, hookCommand, isNpxCachePath, probeLine, runningVersion, HOOK_STDERR_REDIRECT, parseTrailers, resolveHookToken, resolveHookProducerKeyFile, retryableHookFailure, ttySurface, guardRemoteWrite, validCausedById, validActorId } from "./git-hook.js";
 import { appendEvent, generateSigningKey, PRODUCER_SIG_FORMAT_V2, publicFromPrivate, verifyProducerSig, verifyProject, createHandler, MemoryEventStore } from "@retrace-dev/core";
 import { RemoteApiError, RemoteCapabilityError } from "./remote-store.js";
 import { writeProducerPrivateKey } from "./producer-key.js";
@@ -392,8 +392,66 @@ test("two hook commits during a 5xx are queued, then the next run drains them be
 
 test("hook script preserves retrace-git stderr but never propagates its failure to git", () => {
   const script = hookScript();
-  assert.match(script, />\/dev\/null \|\| :/);
-  assert.doesNotMatch(script, /2>&1/);
+  const lines = script.trim().split("\n");
+  const command = lines[lines.length - 1];
+  // stdout is discarded, stderr is teed into the hook log AND still reaches the terminal, and the exit is never git's
+  assert.ok(command.endsWith(` ${HOOK_STDERR_REDIRECT}`), command);
+  assert.match(HOOK_STDERR_REDIRECT, /^2>&1 >\/dev\/null \| awk -v f="\$\(git rev-parse --absolute-git-dir\)\/retrace-hook\.log" '\{ print >> f; print > "\/dev\/stderr" \}' \|\| :$/);
+  assert.doesNotMatch(command, /2>>/, "stderr must not be swallowed into the log alone: the pending-seal notice has to reach the committer");
+});
+
+test("issue #84: install writes the packed CLI by exact version from an npx cache, and the checkout path otherwise", () => {
+  const version = runningVersion();
+  assert.match(version, /^\d+\.\d+\.\d+/);
+  const cached = "/home/stranger/.npm/_npx/8791fae00a73ff5d/node_modules/@retrace-dev/cli/dist/git-hook.js";
+  const checkout = "/home/dev/provenance/retrace/packages/mcp-server/dist/git-hook.js";
+  const global = "/usr/lib/node_modules/@retrace-dev/cli/dist/git-hook.js";
+  assert.equal(isNpxCachePath(cached), true);
+  assert.equal(isNpxCachePath(checkout), false);
+  assert.equal(isNpxCachePath(global), false);
+  assert.equal(hookCommand(cached, "0.1.9"), "npx -y -p @retrace-dev/cli@0.1.9 retrace-git");
+  assert.equal(hookCommand(checkout, "0.1.9"), `node "${checkout}"`);
+  assert.equal(hookCommand(global, "0.1.9"), `node "${global}"`);
+  // the whole line, both hook kinds, both forms — the cache path itself must never be written
+  for (const kind of ["post-commit", "post-merge"] as const) {
+    const npxScript = hookScript(kind, hookCommand(cached, version));
+    assert.match(npxScript, new RegExp(`^npx -y -p @retrace-dev/cli@${version.replace(/\./g, "\\.")} retrace-git commit --hook --repo "\\$\\(git rev-parse --show-toplevel\\)" `, "m"));
+    assert.doesNotMatch(npxScript, /_npx/);
+    assert.match(hookScript(kind, hookCommand(checkout, version)), new RegExp(`^node "${checkout}" commit --hook --repo `, "m"));
+  }
+  // this checkout's own default is the checkout form (dist is not under _npx here)
+  assert.match(hookScript(), new RegExp(`^node "${bin}" commit --hook `, "m"));
+  assert.equal(probeLine("0.1.9"), "retrace-git 0.1.9 probe ok");
+});
+
+test("issue #84: --probe answers without a repo, and a hook whose target is gone leaves a trace in retrace-hook.log", () => {
+  const scratch = mkdtempSync(join(tmpdir(), "retrace-git-probe-"));
+  const probe = sh(scratch, "node", [bin, "--probe"]); // not a git repo: --probe must not need one
+  assert.equal(probe.trim(), `retrace-git ${runningVersion()} probe ok`);
+
+  const dir = mkdtempSync(join(tmpdir(), "retrace-git-evicted-"));
+  const db = join(dir, "ledger.db");
+  sh(dir, "git", ["init", "-q", "-b", "main"]);
+  writeFileSync(join(dir, "a.txt"), "one\n");
+  sh(dir, "git", ["add", "a.txt"]);
+  sh(dir, "git", ["commit", "-qm", "one"]);
+  sh(dir, "node", [bin, "install", "--repo", dir, "--project", "rpg"], { RETRACE_DB: db });
+  // the healthy hook: stdout quiet, nothing in the log (node:sqlite's ExperimentalWarning is silenced, not logged)
+  writeFileSync(join(dir, "a.txt"), "two\n");
+  const healthy = execFileSync("git", ["commit", "-qam", "two"], { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env: { ...baseEnv, GIT_AUTHOR_NAME: "Jordan", GIT_AUTHOR_EMAIL: "jordan@slcwitit.com", GIT_COMMITTER_NAME: "Jordan", GIT_COMMITTER_EMAIL: "jordan@slcwitit.com" } });
+  assert.equal(healthy, "");
+  assert.equal(existsSync(join(dir, ".git", "retrace-hook.log")), false, "a clean seal writes nothing to the hook log");
+  // simulate the evicted npx cache from the dry run: the hook names a file that no longer exists
+  const hookPath = join(dir, ".git", "hooks", "post-commit");
+  const gone = join(dir, "gone", "_npx", "deadbeef", "node_modules", "@retrace-dev", "cli", "dist", "git-hook.js");
+  writeFileSync(hookPath, readFileSync(hookPath, "utf8").replace(`node "${bin}"`, `node "${gone}"`));
+  writeFileSync(join(dir, "a.txt"), "three\n");
+  const out = sh(dir, "git", ["commit", "-qam", "three"]); // still exit 0: the hook never fails the commit
+  assert.equal(out, "");
+  assert.equal(sh(dir, "git", ["log", "--format=%s", "-1"]).trim(), "three");
+  const log = readFileSync(join(dir, ".git", "retrace-hook.log"), "utf8");
+  assert.match(log, /Cannot find module '.*_npx.*git-hook\.js'/, `the load failure must be in the log: ${log}`);
+  assert.equal(existsSync(join(dir, ".git", "retrace-pending-seal")), false, "nothing ran, so nothing could queue a seal");
 });
 
 test("keyed hook 503 on GET /api queues pending-seal like POST 5xx", async () => {
