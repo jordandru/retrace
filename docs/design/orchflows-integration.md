@@ -134,8 +134,9 @@ paragraph: "Claude blocks model calls and subagent preloading for manual-only sk
 Report blocked required native calls as capability gaps" (*Invocation policy*); a separate file, `DESIGN.md`
 (*Which skills are built in?*), adds "A host rejection is not permission to bypass its controls." Read together: composition avoids the host's skill tool for a
 composed primitive — it reads and applies the workflow file directly, which the quoted texts describe as the
-intended pattern ("without native skill calls for every nested step"; "need not invoke a native skill tool
-at every step") without stating a blanket prohibition — and a refusal, once one has happened, is a gap to
+pattern ("without native skill calls for every nested step"; "need not invoke a native skill tool at every
+step") while separately stating "never bypass rejection" and "A host rejection is not permission to bypass
+its controls" — and a refusal, once one has happened, is a gap to
 report, not a signal to proceed by reading. The library's step 4 says exactly that (T1 run 2 proceeded the wrong way
 round — it called the tool, was refused, and the v1 wording then told it to read instead; run 3 read
 first and no refusal occurred). The tension is inside orchflows' own text as much as between hosts, and
@@ -145,7 +146,7 @@ first and no refusal occurred). The tension is inside orchflows' own text as muc
 it has no credential (13) and orchflows gives it no identity of its own. Its native id, when the host
 exposes one, is evidence for §7 and goes in `method.params.child_id` on whichever event knows it (the
 child's, or the coordinator's routing event when only the transcript reveals it afterwards); trial run 3
-recorded none. `location.session` stays the host session: in run 3 the instruction, the routing event and
+recorded none and none was available at launch — whether a Claude Code child can learn its own id is untested. `location.session` stays the host session: in run 3 the instruction, the routing event and
 the child's verdict all carry `location.session` `39584f84-d48b-473b-a9b3-6b3da47afc48` (scratch seq 2–4,
 read from the scratch database), so doctor's pin/session comparison keeps its meaning.
 
@@ -156,7 +157,7 @@ read from the scratch database), so doctor's pin/session comparison keeps its me
 | A review ran against exactly this state | `reviewed_head` = routing `head_sha`, R7 | that the reviewer read all of it (`used` artifacts are the reviewer's claim) |
 | It was assigned these settings | routing `target` | that the host honoured them (§7 witness, v2) |
 | It ran at this effort | `reasoning_effort` self-report | same; on Claude Code the Agent tool **call** exposes no effort field (an agent-definition `effort` exists — orchflows hosts, *Model and effort*, at `6eb8af4` — but writing one was outside the trial's allowed effects), so a child inherits the session's effort and self-reports whatever its harness exposes (T1 run 1: `not_exposed`; run 3: `"25"`) |
-| The reviewer did not write the candidate | orchflows' `orch-review` contract — "a fresh native child who did not make it reviews without fixing" (`docs/architecture.md`, *Two primitives*) and "a fresh native reviewer … who made none of the candidate" (`skills/orch-review/SKILL.md`), both at `6eb8af4`; the `independence` class only names the arrangement | **anything about a second seat, credential or vendor** |
+| The reviewer did not write the candidate | orchflows' `orch-review` contract alone — "a fresh native child who did not make it reviews without fixing" (`docs/architecture.md`, *Two primitives*) and "a fresh native reviewer … who made none of the candidate" (`skills/orch-review/SKILL.md`), both at `6eb8af4` | **anything about a second seat, credential or vendor**; the `independence` class establishes nothing — it only names the arrangement |
 | The event came from this project's credential | `sealed_by` server stamp; producer signature where the seat has a key | a signature for a generic install (server-stamped, unsigned — the ledger says which) |
 
 **Rule 11 is not satisfied and is not amended.** "Whoever built a change does not review it" is a
@@ -243,8 +244,9 @@ event ids as `method.params`):**
   child inherited the session and self-reported `reasoning_effort: "25"` — the harness's raw value — against
   a routed `high`. The verdict's six findings (F1–F6, all content defects in this draft) were fixed in place in
   the rounds that followed, leading to the current head; the library's behaviour is established by this run
-  on `00e0279d` (the library files are unchanged in wording that affects behaviour since, but no later head
-  has been re-trialed), the draft's text by the gate reviewers. Two consumer observations for issues: `retrace_status` returned `routing: []` for a
+  on `00e0279d` **only**: the library files have changed since (step 4's composition wording in rounds 3–6,
+  `child_id` in the contract in round 4, the README status line) and no later head has been re-trialed, so
+  whether the current text still runs end to end is not established. The draft's text is for the gate reviewers. Two consumer observations for issues: `retrace_status` returned `routing: []` for a
   project holding a `tool: "routing"` event, and `retrace_why` was outside the run's allowed tools (the
   coordinator's omission), so the child's citation of the routing id was verified from the scratch database
   afterwards rather than in-session.
@@ -310,3 +312,14 @@ packet-scoped and advisory (it read one packet holding all eleven files and exec
 | 2 Medium — the `orch-review` quote in §5 row 4 was unverifiable from the packet | On checking the pinned clone it was also misattributed: "a fresh native child who did not make it" is `docs/architecture.md` *Two primitives*; the skill says "who made none of the candidate". Both now cited to their files |
 | 3 Low — "the same orchflows paragraph continues" read as if `hosts.md` and `DESIGN.md` were one paragraph | Reworded: the `hosts.md` sentence is in the same paragraph; `DESIGN.md` is a separate file |
 | 4 Low — §8 run 3 read as if it ran on the current head | Now says round-2 head `00e0279d`, and that no later head has been re-trialed |
+
+**NOOA, round 2 at `54b42084`** — routing `evt_0bec507eac074584a8e4a5ec0ff50d0f`, verdict
+`evt_04f7c2a4e7e1408e8eabf85bbbf4f69d`, *rejected*.
+
+| Finding | Disposition (fixed in place at the next head) |
+|---|---|
+| 1 Medium — "without stating a blanket prohibition" implied the texts were silent on refusal | Replaced with NOOA's wording: the texts describe the pattern *while separately stating* the two refusal sentences; skill step 4 likewise |
+| 2 Medium — §5 row 4 still placed the independence class under "Established by" | Moved to "Not established": the class establishes nothing, it names the arrangement |
+| 3 Low — "unchanged in wording that affects behaviour" was an unevidenced judgment | NOOA's suggested "unchanged since round 2" would be false (the files changed in rounds 3–6); the sentence now says they changed, lists what, and that the current text has not been re-trialed |
+| 4 Low — README cites a ledger event a solo reader cannot check | Says the event is in the project ledger, not reproduced, and that the trial was on an earlier head |
+| 5 Low — "the child does not know its own id" was asserted as a host property | Reduced to what run 3 showed; the host property is marked untested |

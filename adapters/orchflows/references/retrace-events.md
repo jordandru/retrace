@@ -44,7 +44,7 @@ Every event carries `caused_by` = the instruction event for the task, and the ho
 }
 ```
 
-`recorded_by` is `"coordinator"` only when the child could not record; say why in `intent`. `intent` carries the verdict summary and the findings in prose. `child_id` is what a later local check against the host's native transcript keys on (design note §7); on Claude Code the child does not know its own id and the coordinator learns it only from the transcript afterwards, so it is usually absent from the child's own event and, when known, goes on the coordinator's routing event instead. Trial run 3 recorded no `child_id`.
+`recorded_by` is `"coordinator"` only when the child could not record; say why in `intent`. `intent` carries the verdict summary and the findings in prose. `child_id` is what a later local check against the host's native transcript keys on (design note §7); in trial run 3 on Claude Code the child recorded no `child_id` and none was available to the coordinator at launch; when a host exposes one, or the coordinator learns it from the transcript afterwards, it goes on the coordinator's routing event.
 
 ## 3. Gap event — when the workflow stops before a verdict (coordinator)
 
