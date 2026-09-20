@@ -1,0 +1,17 @@
+---
+name: retrace-review
+description: Independent review through orch-review, with the assignment recorded in Retrace before the reviewer launches and the verdict recorded after, both bound to the inspected head. Manual only.
+disable-model-invocation: true
+---
+
+Requires orchflows core (`orch-review`) and a Retrace MCP server exposing `retrace_instruct` and `retrace_log` in this host. Without either, report the gap and stop. Never review unrecorded.
+
+Inputs: a stable candidate (a full commit sha, or an artifact with a content hash), the intended outcome, acceptance criteria, sources and check evidence, guidance paths, model and effort settings, bounds and allowed effects. The candidate stays unchanged until the verdict is recorded.
+
+1. **Root the task.** If no Retrace instruction event covers this request, call `retrace_instruct` with the request; cite its id as `caused_by` on every event below.
+2. **Resolve settings** per orchflows architecture (model and effort). If the repository carries `.claude/skills/review-effort/routing-rules/`, classify the candidate's changed paths with `1.json` and take its effort for the round; a caller setting may raise it, never lower it. Otherwise record the caller's resolved settings as the target.
+3. **Record the routing event before launch** — the shape in [retrace-events.md](../../references/retrace-events.md) §1, `independence: "same-credential-fresh-context"`. Keep the returned id. Re-check that the candidate is unchanged; if it moved, record a new routing event against the new state before continuing.
+4. **Apply `orch-review`** with the resolved settings. Give the reviewer the routing event id, the candidate identity, and §2 of the contract, and require it to record its own verdict: `retrace_log` with action `approved` or `rejected`, tags `review` and `orchflows`, every reviewed file as a `used` artifact, `method.params.routing_event_id`, `method.params.reviewed_head`, and `method.params.reasoning_effort` from its own running configuration or the literal `not_exposed`. If the host's children cannot reach Retrace tools, record the verdict yourself with the same fields plus `recorded_by: "coordinator"`.
+5. **Verify** that the verdict event exists and cites the routing event (`retrace_history` on the candidate). Otherwise the review is unrecorded: report it as a gap, not as done.
+
+Return the verdict, both event ids, the findings, coverage gaps and unresolved items. Make no repairs and launch no further agents. State in the return that independence is same-credential-fresh-context: the reviewer is a fresh child of the same host credential, not another seat, so this is not a cross-seat verdict.

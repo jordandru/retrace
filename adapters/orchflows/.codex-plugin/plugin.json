@@ -1,0 +1,18 @@
+{
+  "name": "retrace",
+  "version": "0.1.0",
+  "description": "Record orchflows assignments and verdicts in a Retrace ledger, bound to the inspected head.",
+  "author": {
+    "name": "retrace"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Retrace",
+    "shortDescription": "Independent review with the assignment and verdict recorded in Retrace.",
+    "longDescription": "Wraps orchflows' orch-review: records the routing decision before the reviewer launches and the reviewer's verdict after, both bound to the inspected commit, in a Retrace provenance ledger.",
+    "developerName": "retrace",
+    "category": "Productivity",
+    "capabilities": [],
+    "defaultPrompt": "Use retrace:retrace-review to review this candidate and record the assignment and verdict."
+  }
+}

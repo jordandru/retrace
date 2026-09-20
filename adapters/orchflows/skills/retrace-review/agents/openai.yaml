@@ -1,0 +1,6 @@
+interface:
+  display_name: "Retrace Review"
+  short_description: "Independent review through orch-review, recorded in Retrace before and after."
+
+policy:
+  allow_implicit_invocation: false
