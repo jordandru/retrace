@@ -137,7 +137,12 @@ composed primitive — it reads and applies the workflow file directly, which th
 pattern ("without native skill calls for every nested step"; "need not invoke a native skill tool at every
 step") while separately stating "never bypass rejection" and "A host rejection is not permission to bypass
 its controls" — and a refusal, once one has happened, is a gap to
-report, not a signal to proceed by reading. The library's step 4 says exactly that (T1 run 2 proceeded the wrong way
+report, not a signal to proceed by reading. **Whether the host's refusal of the skill tool is the signal to
+use composition, or whether composition is the primary path and the skill tool is never invoked for
+`orch-review`, is not stated by the pinned sources.** The library's step 4 proceeds by reading the file
+directly; if a skill-tool call were made and refused, that refusal is recorded as a gap and the workflow
+stops. That is the library's choice, stated as such, and §9 asks Dan which reading he intends. The library's
+step 4 says exactly that (T1 run 2 proceeded the wrong way
 round — it called the tool, was refused, and the v1 wording then told it to read instead; run 3 read
 first and no refusal occurred). The tension is inside orchflows' own text as much as between hosts, and
 §9 asks Dan to confirm that reading-and-applying is the sanctioned path on Claude Code rather than assume it.
@@ -157,7 +162,7 @@ read from the scratch database), so doctor's pin/session comparison keeps its me
 | A review ran against exactly this state | `reviewed_head` = routing `head_sha`, R7 | that the reviewer read all of it (`used` artifacts are the reviewer's claim) |
 | It was assigned these settings | routing `target` | that the host honoured them (§7 witness, v2) |
 | It ran at this effort | `reasoning_effort` self-report | same; on Claude Code the Agent tool **call** exposes no effort field (an agent-definition `effort` exists — orchflows hosts, *Model and effort*, at `6eb8af4` — but writing one was outside the trial's allowed effects), so a child inherits the session's effort and self-reports whatever its harness exposes (T1 run 1: `not_exposed`; run 3: `"25"`) |
-| The reviewer did not write the candidate | orchflows' `orch-review` contract alone — "a fresh native child who did not make it reviews without fixing" (`docs/architecture.md`, *Two primitives*) and "a fresh native reviewer … who made none of the candidate" (`skills/orch-review/SKILL.md`), both at `6eb8af4` | **anything about a second seat, credential or vendor**; the `independence` class establishes nothing — it only names the arrangement |
+| The reviewer did not write the candidate | two orchflows sources, both at `6eb8af4`: `docs/architecture.md` *Two primitives* — "a fresh native child who did not make it reviews without fixing"; and the skill's own contract, `skills/orch-review/SKILL.md` — "a fresh native reviewer … who made none of the candidate". The first describes the primitive, the second is its contract; they are different sentences | **anything about a second seat, credential or vendor**; the `independence` class establishes nothing — it only names the arrangement |
 | The event came from this project's credential | `sealed_by` server stamp; producer signature where the seat has a key | a signature for a generic install (server-stamped, unsigned — the ledger says which) |
 
 **Rule 11 is not satisfied and is not amended.** "Whoever built a change does not review it" is a
@@ -233,8 +238,8 @@ event ids as `method.params`):**
   (2 scratch events, both well-formed) and found that the server rejects `routing_event_id: null`. Three
   defects fixed in place from it: the composition wording in step 4 (§4 above), a §3 gap-event shape in
   the contract with "omit, never null", and an "instruct refuses" stop condition.
-- *Run 3* (on the **round-2 head** `00e0279d`, not the current one; 38 turns, 763 s, $5.25): **the workflow
-  ran end to end.** Scratch seq 2
+- *Run 3* (on the **round-2 head** `00e0279d`, not the current one; per the sealed event, 38 turns, 763 s,
+  $5.25): **the workflow ran end to end.** Scratch seq 2
   instruction → seq 3 routing event before launch (class S, effort high, both digests, ten unmatched
   paths, `independence`, `target.child`, candidate verified unchanged) → seq 4 verdict **recorded by the
   child itself**: `rejected`, tags `review`+`orchflows`, all 11 changed files plus 15 evidence files as
@@ -323,3 +328,14 @@ packet-scoped and advisory (it read one packet holding all eleven files and exec
 | 3 Low — "unchanged in wording that affects behaviour" was an unevidenced judgment | NOOA's suggested "unchanged since round 2" would be false (the files changed in rounds 3–6); the sentence now says they changed, lists what, and that the current text has not been re-trialed |
 | 4 Low — README cites a ledger event a solo reader cannot check | Says the event is in the project ledger, not reproduced, and that the trial was on an earlier head |
 | 5 Low — "the child does not know its own id" was asserted as a host property | Reduced to what run 3 showed; the host property is marked untested |
+
+**NOOA, round 3 at `b8e06a39`** — routing `evt_aa1ad1789ff84d469ea0e20ecfe74a75`, verdict
+`evt_77a2339da7ec4f54bc0ece386122946a`, *rejected*; coordinator calibration `evt_2cbf89b774f7454e81dadba6ec5c33f6`.
+
+| Finding | Disposition (fixed in place at the next head) |
+|---|---|
+| 1 Medium — §4 read as if the sources resolved the order (read first vs refusal as signal) | The text had not claimed that; NOOA's explicit sentence added anyway, in §4 and the skill: the sources do not say; reading first is the library's choice; §9 asks Dan |
+| 2 Medium — §5 row 4 presented two sources as one joint establishment | Rewritten in NOOA's form: two sources, one describes the primitive, one is its contract |
+| 3 Low — run-3 figures unverifiable from the packet | A limit of the packet, not the note (its readers have the ledger); "per the sealed event" prefix added |
+| 4 Low — README did not name the trialed head | `00e0279d` named |
+| 5 Low — contract §4 "stated by the ledger" underspecified | NOOA's wording: the event carries `sealed_by`; the library adds no signature |
