@@ -28,7 +28,7 @@ example libraries beyond their manifests.
 
 Orchflows composes a maker and an independent reviewer inside one host session and, on purpose, keeps no
 record: "No shared event format or runtime is required" (architecture, *Iteration bounds*); "Run outputs
-and evidence: Caller workspace, never a package" (libraries, *Where things live*). Retrace keeps records
+and evidence" → "Caller workspace, never a package" (a row of the *Where things live* table in libraries). Retrace keeps records
 and has no vocabulary for the thing orchflows produces: **a fresh child of the same credential reviewed
 this, at these settings, against this state.** Today such a review either goes unrecorded, or is recorded
 in a shape that a consumer could mistake for a cross-seat verdict (agent-rules 11). Both are claims-ahead-
@@ -81,14 +81,20 @@ dependencies ("Declare runtime dependencies in README; setup installs none for l
 1. **An independence class on routing and review events** (§4): `independence:
    "same-credential-fresh-context"`. The ledger already distinguishes seats by credential; this names the
    one arrangement where the reviewer *is* the builder's credential and still is not the builder's context.
-   The class is data on the event, so a consumer can never read it as `cross-seat` by omission.
+   The class is data on the event. **Today's consumer does not read it:** `isReviewEvent` at
+   `doctor.ts:240–246` (`0d294eb`) treats any agent event with action `approved`/`rejected` or a `review`
+   tag as a review, so until item 2 lands, `retrace doctor --gate` counts an orchflows verdict like any
+   other review (Grok, PR 90 round 1, F1). On this repository the merger reads `independence` by hand until
+   then; the library README states the limit.
 2. **A doctor finding** (§6): a review event whose independence is not cross-seat is reported as
    `review independence — same-credential (orchestrated child), not a rule-11 verdict`. INFO by default;
    under `--gate`, a same-credential review counts for nothing. This is a consumer change in
    `packages/mcp-server/src/doctor.ts`, class C, built by a builder seat after this note merges (§10).
 3. **A witness for self-reported settings** (§7): orchflows' `history inspect` reads the host's native
-   transcript, children included, without writing. That is the first external check Retrace has ever had
-   on `reasoning_effort` and the child's model. v1 records enough to make the check possible; v2 runs it.
+   transcript, children included, without writing. It **would be** the first external check Retrace has
+   had on `reasoning_effort` and the child's model; **no such check exists today**. v1 records enough to make
+   it possible (`child_id`, §4); v2 builds it, and only after §9's ask to Dan is answered or the output is
+   read by hand and found stable (§10 step 4).
 
 **What is deliberately not here:** a `retrace-work` workflow (a maker's edits are already ordinary
 rule-2 logs; nothing new is needed), any Retrace-side runtime for orchflows, any automatic selection
@@ -135,8 +141,11 @@ first and no refusal occurred). The tension is inside orchflows' own text as muc
 
 **Actor.** The host seat's own credential, model verbatim (agent-rules 4). The child is not a new actor:
 it has no credential (13) and orchflows gives it no identity of its own. Its native id, when the host
-exposes one, is evidence for §7 and goes in `method.params.child_id`; `location.session` stays the host
-session so doctor's pin/session comparison keeps its meaning.
+exposes one, is evidence for §7 and goes in `method.params.child_id` on whichever event knows it (the
+child's, or the coordinator's routing event when only the transcript reveals it afterwards); trial run 3
+recorded none. `location.session` stays the host session: in run 3 the instruction, the routing event and
+the child's verdict all carry `location.session` `39584f84-d48b-473b-a9b3-6b3da47afc48` (scratch seq 2–4,
+read from the scratch database), so doctor's pin/session comparison keeps its meaning.
 
 ## 5. What these events establish, and what they do not
 
@@ -145,12 +154,12 @@ session so doctor's pin/session comparison keeps its meaning.
 | A review ran against exactly this state | `reviewed_head` = routing `head_sha`, R7 | that the reviewer read all of it (`used` artifacts are the reviewer's claim) |
 | It was assigned these settings | routing `target` | that the host honoured them (§7 witness, v2) |
 | It ran at this effort | `reasoning_effort` self-report | same; on Claude Code the Agent tool **call** exposes no effort field (an agent-definition `effort` exists — orchflows hosts, *Model and effort*, at `6eb8af4` — but writing one was outside the trial's allowed effects), so a child inherits the session's effort and self-reports whatever its harness exposes (T1 run 1: `not_exposed`; run 3: `"25"`) |
-| The reviewer did not write the candidate | orchflows' `orch-review` contract + `independence` class | **anything about a second seat, credential or vendor** |
+| The reviewer did not write the candidate | orchflows' `orch-review` contract ("a fresh native child who did not make it"); the `independence` class only names the arrangement | **anything about a second seat, credential or vendor** |
 | The event came from this project's credential | `sealed_by` server stamp; producer signature where the seat has a key | a signature for a generic install (server-stamped, unsigned — the ledger says which) |
 
 **Rule 11 is not satisfied and is not amended.** "Whoever built a change does not review it" is a
 statement about seats; a fresh child is the same seat. A same-credential review can inform a builder, it
-cannot be a gate verdict, and §6 makes doctor say so. PR 80 §11.2 point 3 stands: routing gate seats
+cannot be a gate verdict, and §6 is what will make doctor say so — **it does not say so today** (§3 item 1). PR 80 §11.2 point 3 stands: routing gate seats
 through one host's subagents "would collapse" the separation the gate exists for.
 
 ## 6. Consumer: the doctor finding (follow-up PR, builder seat)
@@ -275,4 +284,14 @@ event ids as `method.params`):**
 
 ## 11. Dispositions
 
-_None yet. Review findings and their dispositions go here, in the order received, with event ids._
+**Grok, round 1 at `92126633`** — routing `evt_4f4c20d38e3d4dbd95020df4a171deba` (Jordan's reassignment
+`evt_4b6f954ffa9b4981a95dfe98354f6f10`), verdict `evt_08be04d445c74d41b0a7c5b33c801df1`, *rejected*.
+
+| Finding | Disposition (fixed in place at the next head) |
+|---|---|
+| F1 Medium — today's doctor counts an orchflows verdict as a review (`doctor.ts:240–246`) | Stated as a known limit in §3 item 1, §5, the library README and the contract §4; the verdict shape is kept (it is what the trial evidenced) and §6 remains the fix |
+| F2 Medium — §3 item 3 claimed the witness in the present tense | Rewritten: would be; does not exist; v2 |
+| F3 Medium — `child_id` named in §4/§7 but absent from the contract | Added to contract §2 and skill step 4, with where it can actually be known on Claude Code; run 3 recorded none |
+| F4 Low — §5 row credited the independence class with establishing non-authorship | Row now credits `orch-review`'s contract alone |
+| F5 Low — `location.session` claim uncited | Cited from the scratch database: seq 2–4 share one session id |
+| Nit — libraries.md quote is a table row | Rephrased as a row |

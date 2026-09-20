@@ -39,11 +39,12 @@ Every event carries `caused_by` = the instruction event for the task, and the ho
   "reasoning_effort": "<level from the reviewer's own running configuration, or 'not_exposed'>",
   "independence": "same-credential-fresh-context",
   "workflow": "retrace:retrace-review",
-  "recorded_by": "reviewer"
+  "recorded_by": "reviewer",
+  "child_id": "<the host's native id for the reviewer child, when the host exposes one; omit otherwise>"
 }
 ```
 
-`recorded_by` is `"coordinator"` only when the child could not record; say why in `intent`. `intent` carries the verdict summary and the findings in prose.
+`recorded_by` is `"coordinator"` only when the child could not record; say why in `intent`. `intent` carries the verdict summary and the findings in prose. `child_id` is what a later local check against the host's native transcript keys on (design note §7); on Claude Code the child does not know its own id and the coordinator learns it only from the transcript afterwards, so it is usually absent from the child's own event and, when known, goes on the coordinator's routing event instead. Trial run 3 recorded no `child_id`.
 
 ## 3. Gap event — when the workflow stops before a verdict (coordinator)
 
@@ -52,6 +53,6 @@ Every event carries `caused_by` = the instruction event for the task, and the ho
 ## 4. What these events do and do not establish
 
 - They bind a verdict to the inspected state and to the assignment that produced it. A later change does not inherit the verdict.
-- They record that a **fresh child of the same credential** reviewed. They do not record a second seat, a second credential or a second vendor. In a repository governed by Retrace's `docs/agent-rules.md`, rule 11 (whoever built it does not review it) is not satisfied by them, because the seat is the same.
+- They record that a **fresh child of the same credential** reviewed. They do not record a second seat, a second credential or a second vendor. In a repository governed by Retrace's `docs/agent-rules.md`, rule 11 (whoever built it does not review it) is not satisfied by them, because the seat is the same. Retrace's `doctor` at `0d294eb` does not read `independence` and counts a §2 event as a review (`doctor.ts:240–246`); the design note §6 is the fix, and until it lands a gated repository's merger must read the field by hand.
 - Model and effort in §1 are what the coordinator launched; in §2 they are the child's self-report. Neither is witnessed by the host. Orchflows' `history inspect` (`docs/history.md` at `6eb8af4120a1b9bdb8ff971705d80be02a62b432`) can read the host's native transcript afterwards; a checker may compare, locally, and must never upload transcripts ("Keep raw history local", same file).
 - Server stamps (`sealed_by`) and producer signatures are whatever the host's Retrace credential provides. A generic installation has server-stamped, unsigned events; this is stated by the ledger, not by this library.

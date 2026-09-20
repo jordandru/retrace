@@ -25,7 +25,9 @@ Start a new session, then:
 
 ## What it establishes, and what it does not
 
-It records a **same-credential, fresh-context** review: the reviewer is a fresh child of the same host session and credential, never another seat. That is the best independence a single harness can offer, and the ledger says exactly that. It is not a cross-seat or cross-vendor verdict, and it does not satisfy Retrace's agent-rules 11 in a repository that requires one.
+It records a **same-credential, fresh-context** review: the reviewer is a fresh child of the same host session and credential, never another seat. That is the best independence a single harness can offer, and the event says exactly that in `method.params.independence`. It is not a cross-seat or cross-vendor verdict, and it does not satisfy Retrace's agent-rules 11 in a repository that requires one.
+
+**Known limit (Retrace `0d294eb`):** `retrace doctor` does not yet read `independence`; its review check (`packages/mcp-server/src/doctor.ts:240–246`) counts any `approved`/`rejected` agent event as a review, so `doctor --gate` will count these verdicts until the follow-up in the design note §6 lands. On a repository with a review gate, the merger must read `independence` by hand until then.
 
 Model and effort are self-reported. Orchflows' `history inspect` (`docs/history.md` at `6eb8af4`) can read the host's native transcript afterwards for a local comparison; nothing here uploads transcripts.
 
