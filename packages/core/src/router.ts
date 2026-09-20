@@ -51,6 +51,7 @@ import {
   attachClaimDecision, classifyCommitClaim, CLASSIFY_DEADLINE_MS, PENDING_BUDGET_ATTEMPTS, PENDING_LEASE_MS,
   recordWebhookClassifyOutcome, routedCanonicalRForHook, webhookBreakerAdmission,
 } from "./classify.js";
+import { consoleDiagnosticSink } from "./diagnostics.js";
 import { renderReportHtml } from "./report.js";
 import { collectAttributionAmendments } from "./attribution.js";
 import { buildLineage, renderLineageDot, renderLineageMermaid } from "./lineage.js";
@@ -600,6 +601,7 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
                 store, input: parsed.data, producer: "github-push",
                 sealedBy: SEALED_BY_GITHUB_WEBHOOK, trailerPolicy: mode, canonicalR: repo,
                 deadline: operationDeadline,
+                diag: consoleDiagnosticSink("classify webhook"),
               }),
               operationDeadline,
             );
@@ -839,6 +841,7 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
             trailerPolicy,
             signedActor: producerCheck.signed_actor,
             canonicalR: await routedCanonicalRForHook(store, resolvedInput.project),
+            diag: consoleDiagnosticSink("classify hook"),
           });
           if (!isLegacyClientCommitSeal(resolvedInput) && classified.kind === "unavailable")
             return json({
@@ -1157,6 +1160,7 @@ export async function drainPendingGithubDeliveries(store: EventStore, opts: {
       const classified = await classifyCommitClaim({
         store, input: parsed.data, producer: "github-push",
         sealedBy: SEALED_BY_GITHUB_WEBHOOK, trailerPolicy: opts.trailerPolicy, canonicalR: row.repo,
+        diag: consoleDiagnosticSink("classify drain"),
       });
       if (classified.kind === "unavailable") {
         const attemptCount = outcomes[sha]?.attempt_count ?? 0;

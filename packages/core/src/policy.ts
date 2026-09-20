@@ -6,6 +6,7 @@
 import { Event, EventInput } from "./schema.js";
 import { newId, sealEvent, sha256Hex } from "./chain.js";
 import { ChainHead, EventStore, SEALED_BY_OWNER } from "./store.js";
+import { emitDiagnostic, thrown, type DiagnosticSink } from "./diagnostics.js";
 
 export const POLICY_PROFILE = "retrace-project-policy/1";
 export const POLICY_IDEMPOTENCY_PREFIX = "policy:";
@@ -544,19 +545,29 @@ export async function policySnapshotFromIndex(opts: {
   headSeq: number | undefined;
   getByActivationSeq: (project: string, throughSeq: number) => Promise<PolicyDocument | null>;
   getEvent: (id: string) => Promise<Event | null>;
+  /** Observability only: emitted when a read throws, so the caller's `store_error` has a cause. */
+  diag?: DiagnosticSink;
 }): Promise<PolicySnapshot> {
   const now = opts.budget?.now?.() ?? Date.now();
   if (opts.budget?.deadline !== undefined && now >= opts.budget.deadline)
     return { U: opts.U ?? -1, events: [], activations: [], unavailable: "deadline" };
+  // Which of the two reads threw: one site for both leaves the caller guessing (Codex, PR 57 r1).
+  let read = "document";
+  // `Date.now`, not the budget clock: a measurement must not consume the caller's clock.
+  let readStarted = opts.diag ? Date.now() : 0;
   try {
     const u = opts.U ?? (opts.headSeq ?? -1);
     if (u < 0) return { U: -1, events: [], activations: [] };
     const doc = await opts.getByActivationSeq(opts.project, u);
     if (!doc) return { U: u, events: [], activations: [], document: null };
+    read = "activation";
+    if (opts.diag) readStarted = Date.now();
     const act = await opts.getEvent(doc.envelope.activation.event_id);
     const activations = act && act.project === opts.project && act.seq <= u ? [act] : [];
     return { U: u, events: activations, activations, document: doc };
-  } catch {
+  } catch (error) {
+    emitDiagnostic(opts.diag, `policy.snapshot.${read}`, "store_error", thrown(error),
+      () => ({ ms: Date.now() - readStarted }));
     return { U: opts.U ?? -1, events: [], activations: [], unavailable: "store_error" };
   }
 }

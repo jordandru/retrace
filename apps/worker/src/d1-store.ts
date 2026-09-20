@@ -1,4 +1,4 @@
-import { ArtifactIndexQuery, ArtifactIndexResult, ChainHead, Event, EventStore, HeadMovedError, HistoryQuery, HistoryPage, PendingDelivery, Share, artifactIndexRows, clampHistoryLimit, runArtifactIndexStatements, ArtifactIndexHit, historyPageFromNewestFirst, likeContains, policyDocumentFromRow, policySnapshotFromIndex, assertRouteWriteConsistent, RouteConflictError } from "@retrace-dev/core";
+import { ArtifactIndexQuery, ArtifactIndexResult, ChainHead, Event, EventStore, HeadMovedError, HistoryQuery, HistoryPage, PendingDelivery, Share, artifactIndexRows, clampHistoryLimit, consoleDiagnosticSink, runArtifactIndexStatements, ArtifactIndexHit, historyPageFromNewestFirst, likeContains, policyDocumentFromRow, policySnapshotFromIndex, assertRouteWriteConsistent, RouteConflictError } from "@retrace-dev/core";
 import type { BreakerRow, ClassificationContextRow, PolicyRouteRow, PolicySnapshot, PolicySnapshotBudget, PolicyWrite } from "@retrace-dev/core";
 
 export class D1Store implements EventStore {
@@ -138,7 +138,7 @@ export class D1Store implements EventStore {
     return runArtifactIndexStatements(q, now, async ({ sql, params }) => {
       const { results } = await this.db.prepare(sql).bind(...params).all<ArtifactIndexHit>();
       return results;
-    });
+    }, consoleDiagnosticSink("d1"));
   }
 
   async insertPendingDelivery(row: PendingDelivery) {
@@ -210,6 +210,7 @@ export class D1Store implements EventStore {
       headSeq: head?.seq,
       getByActivationSeq: (p, seq) => this.getPolicyByActivationSeq(p, seq),
       getEvent: (id) => this.get(id),
+      diag: consoleDiagnosticSink("d1"),
     });
   }
 
