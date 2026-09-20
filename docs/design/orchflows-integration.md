@@ -129,12 +129,14 @@ the call with text that also forbids replicating the skill by other means. Orchf
 model is the other path — "Composition applies workflow files in the coordinator without native skill
 calls for every nested step. Read supplied paths directly where permitted" (hosts, *Invocation policy*);
 "A coordinator can apply declared dependencies by reading their files; it need not invoke a native skill
-tool at every step" (DESIGN, *Which skills are built in?*). The same orchflows paragraph continues:
-"Claude blocks model calls and subagent preloading for manual-only skills; never bypass rejection. Report
-blocked required native calls as capability gaps" (hosts, *Invocation policy*), and DESIGN adds "A host
-rejection is not permission to bypass its controls." Read together: composition **never calls** the host's
-skill tool for a composed primitive, and a refusal, once one has happened, is a gap to report, not a
-signal to proceed by reading. The library's step 4 says exactly that (T1 run 2 proceeded the wrong way
+tool at every step" (DESIGN, *Which skills are built in?*). The `hosts.md` paragraph just quoted continues, in the same
+paragraph: "Claude blocks model calls and subagent preloading for manual-only skills; never bypass rejection.
+Report blocked required native calls as capability gaps" (*Invocation policy*); a separate file, `DESIGN.md`
+(*Which skills are built in?*), adds "A host rejection is not permission to bypass its controls." Read together: composition avoids the host's skill tool for a
+composed primitive — it reads and applies the workflow file directly, which the quoted texts describe as the
+intended pattern ("without native skill calls for every nested step"; "need not invoke a native skill tool
+at every step") without stating a blanket prohibition — and a refusal, once one has happened, is a gap to
+report, not a signal to proceed by reading. The library's step 4 says exactly that (T1 run 2 proceeded the wrong way
 round — it called the tool, was refused, and the v1 wording then told it to read instead; run 3 read
 first and no refusal occurred). The tension is inside orchflows' own text as much as between hosts, and
 §9 asks Dan to confirm that reading-and-applying is the sanctioned path on Claude Code rather than assume it.
@@ -154,7 +156,7 @@ read from the scratch database), so doctor's pin/session comparison keeps its me
 | A review ran against exactly this state | `reviewed_head` = routing `head_sha`, R7 | that the reviewer read all of it (`used` artifacts are the reviewer's claim) |
 | It was assigned these settings | routing `target` | that the host honoured them (§7 witness, v2) |
 | It ran at this effort | `reasoning_effort` self-report | same; on Claude Code the Agent tool **call** exposes no effort field (an agent-definition `effort` exists — orchflows hosts, *Model and effort*, at `6eb8af4` — but writing one was outside the trial's allowed effects), so a child inherits the session's effort and self-reports whatever its harness exposes (T1 run 1: `not_exposed`; run 3: `"25"`) |
-| The reviewer did not write the candidate | orchflows' `orch-review` contract ("a fresh native child who did not make it"); the `independence` class only names the arrangement | **anything about a second seat, credential or vendor** |
+| The reviewer did not write the candidate | orchflows' `orch-review` contract — "a fresh native child who did not make it reviews without fixing" (`docs/architecture.md`, *Two primitives*) and "a fresh native reviewer … who made none of the candidate" (`skills/orch-review/SKILL.md`), both at `6eb8af4`; the `independence` class only names the arrangement | **anything about a second seat, credential or vendor** |
 | The event came from this project's credential | `sealed_by` server stamp; producer signature where the seat has a key | a signature for a generic install (server-stamped, unsigned — the ledger says which) |
 
 **Rule 11 is not satisfied and is not amended.** "Whoever built a change does not review it" is a
@@ -230,7 +232,8 @@ event ids as `method.params`):**
   (2 scratch events, both well-formed) and found that the server rejects `routing_event_id: null`. Three
   defects fixed in place from it: the composition wording in step 4 (§4 above), a §3 gap-event shape in
   the contract with "omit, never null", and an "instruct refuses" stop condition.
-- *Run 3* (candidate `00e0279d`, 38 turns, 763 s, $5.25): **the workflow ran end to end.** Scratch seq 2
+- *Run 3* (on the **round-2 head** `00e0279d`, not the current one; 38 turns, 763 s, $5.25): **the workflow
+  ran end to end.** Scratch seq 2
   instruction → seq 3 routing event before launch (class S, effort high, both digests, ten unmatched
   paths, `independence`, `target.child`, candidate verified unchanged) → seq 4 verdict **recorded by the
   child itself**: `rejected`, tags `review`+`orchflows`, all 11 changed files plus 15 evidence files as
@@ -238,9 +241,10 @@ event ids as `method.params`):**
   `trials/review-candidate/expected-behavior.md` items 1–4 met. Two host facts: the child reaches the
   Retrace tools and can seal its own verdict; the Agent tool call has no per-call effort field, so the
   child inherited the session and self-reported `reasoning_effort: "25"` — the harness's raw value — against
-  a routed `high`. The verdict's six findings (F1–F6, all content defects in this draft) are fixed in place
-  at the head after `00e0279d`; the library's behaviour is established by this run, the draft's text by the
-  gate reviewers. Two consumer observations for issues: `retrace_status` returned `routing: []` for a
+  a routed `high`. The verdict's six findings (F1–F6, all content defects in this draft) were fixed in place in
+  the rounds that followed, leading to the current head; the library's behaviour is established by this run
+  on `00e0279d` (the library files are unchanged in wording that affects behaviour since, but no later head
+  has been re-trialed), the draft's text by the gate reviewers. Two consumer observations for issues: `retrace_status` returned `routing: []` for a
   project holding a `tool: "routing"` event, and `retrace_why` was outside the run's allowed tools (the
   coordinator's omission), so the child's citation of the routing id was verified from the scratch database
   afterwards rather than in-session.
@@ -295,3 +299,14 @@ event ids as `method.params`):**
 | F4 Low — §5 row credited the independence class with establishing non-authorship | Row now credits `orch-review`'s contract alone |
 | F5 Low — `location.session` claim uncited | Cited from the scratch database: seq 2–4 share one session id |
 | Nit — libraries.md quote is a table row | Rephrased as a row |
+
+**NOOA (Nemotron 3 Ultra via NIM, from the auditor host), round 1 at `cbdae150`** — routing
+`evt_08080eb3f988438eac92c263adf97952`, verdict `evt_b84ed78a259749db92f9230987a168bc`, *rejected*;
+packet-scoped and advisory (it read one packet holding all eleven files and executed nothing).
+
+| Finding | Disposition (fixed in place at the next head) |
+|---|---|
+| 1 Medium — "composition never calls the host's skill tool" claims more than the quoted sentences carry | Reworded in §4 and the skill's step 4 to what the texts say: avoids, reads the file directly, no blanket prohibition stated |
+| 2 Medium — the `orch-review` quote in §5 row 4 was unverifiable from the packet | On checking the pinned clone it was also misattributed: "a fresh native child who did not make it" is `docs/architecture.md` *Two primitives*; the skill says "who made none of the candidate". Both now cited to their files |
+| 3 Low — "the same orchflows paragraph continues" read as if `hosts.md` and `DESIGN.md` were one paragraph | Reworded: the `hosts.md` sentence is in the same paragraph; `DESIGN.md` is a separate file |
+| 4 Low — §8 run 3 read as if it ran on the current head | Now says round-2 head `00e0279d`, and that no later head has been re-trialed |
