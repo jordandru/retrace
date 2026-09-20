@@ -262,8 +262,9 @@ event ids as `method.params`):**
 > `retrace`). One workflow, `retrace-review`: it composes `orch-review` and records two events in a
 > Retrace ledger, a routing decision before the reviewer launches and the reviewer's verdict after,
 > both bound to the inspected commit. Nothing in orchflows core changes and we're not asking for
-> anything there; your library shape and the "explicit caller amendments may change the process" clause
-> are the seam, and they're enough.
+> anything there; your library shape (`docs/libraries.md`) and the clause "Explicit caller amendments may
+> change the process; state changed guarantees, preserve primitive meanings" (`docs/architecture.md`,
+> *Invocation*, at `6eb8af4`) are the seam, and they're enough.
 >
 > Two honest limits we state in the library: the reviewer is a fresh child of the same credential, so
 > we label it `same-credential-fresh-context` and never call it an independent seat; and model/effort
@@ -339,3 +340,18 @@ packet-scoped and advisory (it read one packet holding all eleven files and exec
 | 3 Low — run-3 figures unverifiable from the packet | A limit of the packet, not the note (its readers have the ledger); "per the sealed event" prefix added |
 | 4 Low — README did not name the trialed head | `00e0279d` named |
 | 5 Low — contract §4 "stated by the ledger" underspecified | NOOA's wording: the event carries `sealed_by`; the library adds no signature |
+
+**NOOA, round 4 at `a6916bb6`** — routing `evt_ad747bcfff1a442bb8311ae92b173f2f`, verdict
+`evt_357cab56462749f7bea18dbc08a071de`, *rejected*; coordinator calibration `evt_cd79196797764defa6b6558c38f80f80`.
+
+| Finding | Disposition |
+|---|---|
+| 1 Medium — §4 should state the sources do not resolve reading-first vs refusal-as-signal | **Not a defect**: the finding quotes that sentence from §4 itself; the skill's step 4 carries it since round 7 |
+| 2 Medium — §5 "It ran at this effort" cites the routing target as establishing the self-report | **Not a defect**: that is row 2 ("assigned these settings"); row 3 cites the self-report and its "Not established" cell names the run-3 `"25"` vs routed `high` mismatch |
+| 3 Low — README's ledger event is unverifiable by a solo developer | Already stated ("not reproduced in this library"); not changed |
+| 4 Low — `sealed_by` could be read as a cryptographic binding | Applied: a server stamp only; no producer binding in a generic install |
+| 5 Low — the Dan note names the "explicit caller amendments" clause without its file | Applied: cited to `docs/architecture.md` *Invocation* at `6eb8af4` |
+
+The coordinator's assessment after four packet-scoped rounds: the last two Mediums ask for text that is present or
+misread the table, so further rounds on the same packet will not converge. NOOA's verdict of record remains *needs
+changes*; whether the witness seat's verdict is reassigned (rule 12) or a fifth look is run is Jordan's call.
