@@ -14,3 +14,4 @@ Read both before working. This file holds only what is specific to the Copilot s
   `~/.copilot/mcp-config.json` or any credential file (agent-rules 13).
 - This identity block is for GitHub Copilot only. Any other harness that reads this file must not
   adopt it.
+- Owner input carries the JD envelope (`docs/owner-protocol.md`, sealed `evt_aacee37d…`); that file changes only on a JD-signed instruction merged by Jordan personally, and `jdoff` never covers it.

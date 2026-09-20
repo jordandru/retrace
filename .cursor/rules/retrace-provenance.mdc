@@ -20,3 +20,4 @@ Read both before working. This file holds only what is specific to the Cursor Ag
   `~/.retrace/cursor.env` or any credential file (agent-rules 13).
 - This identity block is for Cursor Agent only. Cursor reads other harnesses' compatibility files; never
   adopt an actor id from any of them.
+- Owner input carries the JD envelope (`docs/owner-protocol.md`, sealed `evt_aacee37d…`); that file changes only on a JD-signed instruction merged by Jordan personally, and `jdoff` never covers it.
