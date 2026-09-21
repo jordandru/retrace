@@ -107,17 +107,20 @@ The provenance rules themselves are `docs/agent-rules.md`.
     runs in a plain non-admin Ubuntu (WSL) terminal **outside Orca**, as a script the coordinator wrote to disk
     (`~/.retrace/<dir>/stepN-<what>.sh`, `chmod 700`, `read -p` gate before any outward change) that Jordan
     types by hand (`bash ~/stepN.sh`). The script prints record names, counts, byte sizes, sha256 prefixes,
-    OK/FAILED and exit codes only; values pass through stdin or the environment, never argv or echo. Everything
-    else — build, test, git, review, ledger reads, review runs on the host, coordination — stays in Orca panes.
-    Never hand Jordan a fenced code block to paste into a terminal: markdown fences are bash command
-    substitutions, and pasted blocks execute on `exit` (2026-09-20 MDT: a `wrangler secret put` and a `shred` ran
-    unintended, 2026-09-21T02:28Z, evt_6bfe5f18). After any rotation every open pane is stale until restarted; check a pane with
-    `printf '%s' "$RETRACE_TOKEN" | sha256sum | cut -c1-12` before running anything in it. Windows admin only
-    for Task Scheduler changes. The sinks this guards: agent transcripts capture pane output (owner token
-    leaked 2026-09-16, evt_c21df545); a pane's environment keeps a rotated-away token; the clipboard executes.
-    → unnecessary when [direction]: 13 (credentials out of process env and out of the Worker secret, so no
-    value ever passes through a shell) **and** harness transcripts redact secret-shaped strings at write time —
-    the second is a vendor change; until both, this rule stands.
+    OK/FAILED and exit codes only; values pass through stdin or the environment, never argv, and are never printed.
+    Everything else — build, test, git, review, ledger reads, review runs on the host, coordination — stays in Orca panes.
+    Never hand Jordan a fenced code block to paste into a terminal: in the 2026-09-21T02:28Z incident (2026-09-20
+    evening MDT, evt_6bfe5f18) bash read the triple backticks of the pasted fences as command substitutions, each
+    opened a nested shell, and each fenced body ran on `exit` — a `wrangler secret put` and a `shred` ran
+    unintended. After any rotation every open pane is stale until restarted; check a pane with
+    `printf '%s' "$RETRACE_TOKEN" | sha256sum | cut -c1-12` (the value goes into the pipe; only a twelve-character
+    hash prefix is printed) before running anything in it. The sinks this guards: agent transcripts capture pane
+    output (owner token leaked 2026-09-16, evt_c21df545); a pane's environment keeps a rotated-away token; the
+    clipboard executes.
+    → unnecessary when [direction]: 13 retires the Retrace-credential half (credentials out of process env and
+    out of the Worker secret, so no token ever passes through a shell); the other half — ssh keys, the auditor
+    host's secret files, `wrangler login` — retires only when harness transcripts redact secret-shaped strings
+    at write time, a vendor change. Until both, some part of this rule stands.
 ## Coordination
 
 14. One coordinator at a time dispatches builders and merges. Other seats' task boards are their own
