@@ -6,6 +6,7 @@
  *   retrace-git commit [--repo <path>] [<sha>]                log one commit (default HEAD) — what the hook runs
  *   retrace-git backfill [--repo <path>] [--since <ref>] [--max <n>]   log history oldest→newest (idempotent by sha)
  *   retrace-git uninstall [--repo <path>]
+ *   retrace-git --probe                                        print "retrace-git <version> probe ok" and exit 0 (doctor's load check)
  *
  * Config precedence: CLI flags > env (RETRACE_PROJECT/RETRACE_DB/RETRACE_URL/RETRACE_TOKEN) > .retrace.json in repo root.
  * Remote-write guard: writing to a REMOTE ledger requires a .retrace.json in the repo root — see guardRemoteWrite.
@@ -17,7 +18,9 @@
  *   credentials-file entry (a path, never key material — the mirror stays Worker-uploadable). Missing both → unsigned.
  * Failures of `commit` (the hook path) are appended to <git-dir>/retrace-hook.log. Retryable remote failures are also
  *   queued in <git-dir>/retrace-pending-seal and print one stderr line through the non-blocking hook; credential
- *   rejections remain log-only and are not queued. HTTP 426 (old-client /1 commit seal under enforce) is an explicit
+ *   rejections remain log-only and are not queued. The installed shell wrapper also relays everything the target prints
+ *   on stderr into that same log, so a target that never loads (issue #84: a hook pinned to an evicted npx cache) still
+ *   leaves a trace there — the JS above cannot write a log it never ran. HTTP 426 (old-client /1 commit seal under enforce) is an explicit
  *   exception to the 4xx-is-not-retryable rule: upgrading the CLI fixes it, so the sha is queued loudly. Re-log a
  *   dropped commit with `retrace-git commit <sha>` or `backfill`.
  *
@@ -315,6 +318,40 @@ async function drainPendingSeals(repo: string, gitDir: string, cfg: Cfg): Promis
 }
 
 const HOOK_MARK = "# retrace-git hook";
+/** The exact version of the package this module runs from (dist/git-hook.js → ../package.json). */
+export function runningVersion(moduleUrl: string = import.meta.url): string {
+  const pkg = JSON.parse(readFileSync(new URL("../package.json", moduleUrl), "utf8")) as { version?: unknown };
+  if (typeof pkg.version !== "string" || !pkg.version) throw new Error("cannot read the running package's version from package.json");
+  return pkg.version;
+}
+/** npm's exec cache (`npx` / `npm exec`): <npm-cache>/_npx/<hex hash>/node_modules/@retrace-dev/cli/… — per user, per
+ *  spec, and evicted by `rm -rf ~/.npm`, a new account, a CI runner, or another HOME. The whole shape is matched, not
+ *  the `_npx` segment alone: a checkout that merely sits under a directory named `_npx` is a checkout, and its hook
+ *  must keep the path form (NOOA, PR 92 round 1, finding 1). */
+export function isNpxCachePath(path: string): boolean {
+  return /[\\/]_npx[\\/][0-9a-f]+[\\/]node_modules[\\/]@retrace-dev[\\/]cli[\\/]/i.test(path);
+}
+/** The command the installed hook runs, without its arguments. A checkout or global install is addressed by path, so
+ *  the primary checkout's built dist seals every worktree's commits (agent-ops 3). A CLI resolved from the npx cache is
+ *  NOT addressed by path — that path is a cache entry and vanishes silently (issue #84, stranger dry run 2026-09-20
+ *  §F2) — so the hook re-resolves the packed CLI by exact version; npx serves it from the cache while present and
+ *  fetches it again when not. */
+export function hookCommand(selfPath: string, version: string): string {
+  return isNpxCachePath(selfPath) ? `npx -y -p @retrace-dev/cli@${version} retrace-git` : `node "${selfPath}"`;
+}
+/** Everything the target writes to stderr is appended to <git-dir>/retrace-hook.log AND still shown to the committer
+ *  (the pending-seal notice must reach the terminal); stdout is discarded; the exit is never git's. awk rather than
+ *  `tee -a`: tee creates the log on every commit, awk opens it only when a line actually arrives, so a clean seal still
+ *  leaves no log file behind. The terminal copy goes through `print | "cat >&2"` (awk's own stderr, inherited by the
+ *  pipe) rather than `print > "/dev/stderr"`: only some awks treat "/dev/stderr" as a special name, and where they do
+ *  not it is a file the hook would try to create (NOOA, PR 92 round 1, finding 2). */
+export const HOOK_STDERR_REDIRECT = `2>&1 >/dev/null | awk -v f="$(git rev-parse --absolute-git-dir)/retrace-hook.log" '{ print >> f; print | "cat >&2" }' || :`;
+/** node:sqlite prints an ExperimentalWarning on every local-store seal (Node 22); now that stderr is teed into the log,
+ *  that noise would bury the one-line-per-failure log. Silenced for the hook process only, through NODE_OPTIONS so the
+ *  npx form is covered too; the operator's own NODE_OPTIONS are kept.
+ *  `--disable-warning` exists from Node 21.3; the hook runs this package, whose `engines.node` is `>=22`
+ *  (packages/mcp-server/package.json), so no runtime version check is needed here (NOOA, PR 92 round 1, finding 3). */
+export const HOOK_QUIET_WARNINGS = `NODE_OPTIONS="--disable-warning=ExperimentalWarning\${NODE_OPTIONS:+ \$NODE_OPTIONS}"; export NODE_OPTIONS # node:sqlite's experimental warning is not a hook failure`;
 /** Both hooks are the producing process for the commit they see, so both pass --hook (the live path).
  *  post-commit does not fire for `git merge` — git runs post-merge instead — so a repo with only post-commit never
  *  sealed its merge commits (2026-09-05: four checkpoint merges had to be replayed by hand). post-merge also fires after
@@ -327,14 +364,19 @@ const HOOK_MARK = "# retrace-git hook";
  *  (`--squash` creates no commit; its later `git commit` is post-commit's.) */
 export const HOOK_KINDS = ["post-commit", "post-merge"] as const;
 export type HookKind = (typeof HOOK_KINDS)[number];
-export function hookScript(kind: HookKind = "post-commit"): string {
-  const self = new URL(import.meta.url).pathname;
+export function hookScript(kind: HookKind = "post-commit", command: string = hookCommand(new URL(import.meta.url).pathname, runningVersion())): string {
   const merge = kind === "post-merge" ? `case "$(git reflog -1 --format=%gs 2>/dev/null)" in *"Merge made by"*) ;; *) exit 0 ;; esac # seal only a merge this invocation made; a fast-forward (even onto someone else's merge commit) produced nothing here\n` : "";
-  return `#!/bin/sh\n${HOOK_MARK}\n${merge}node "${self}" commit --hook --repo "$(git rev-parse --show-toplevel)" >/dev/null || :\n`;
+  return `#!/bin/sh\n${HOOK_MARK}\n${merge}${HOOK_QUIET_WARNINGS}\n${command} commit --hook --repo "$(git rev-parse --show-toplevel)" ${HOOK_STDERR_REDIRECT}\n`;
+}
+/** What `retrace-git --probe` prints. `retrace doctor` runs the installed hook's command with this flag to prove the
+ *  target actually loads (issue #84); it touches no repo, no ledger, no config. */
+export function probeLine(version: string = runningVersion()): string {
+  return `retrace-git ${version} probe ok`;
 }
 
 async function main() {
   const { flags, pos } = parseArgs(process.argv.slice(2));
+  if (flags.probe === true) { console.log(probeLine()); return; } // before any repo/ledger/config work: doctor's load check
   const cmd = pos[0] ?? "help";
   const repo = resolve((flags.repo as string) ?? git(process.cwd(), ["rev-parse", "--show-toplevel"]));
   const gitDir = resolve(repo, git(repo, ["rev-parse", "--git-dir"]));
@@ -418,7 +460,7 @@ async function main() {
     console.log(`backfill: ${n} logged, ${d} already present, project '${cfg.project}'`);
     return;
   }
-  console.log(`retrace-git <install|uninstall|commit [sha]|backfill [--since ref] [--max n]> [--repo path] [--project name] [--allow-remote]`);
+  console.log(`retrace-git <install|uninstall|commit [sha]|backfill [--since ref] [--max n]> [--repo path] [--project name] [--allow-remote] | retrace-git --probe`);
 }
 
 if (isMainModule(import.meta.url)) main().catch((e) => { console.error("retrace-git:", e.message ?? e); process.exit(1); });

@@ -83,17 +83,72 @@ export function objectStoreFinding(repo: string): Finding {
   );
 }
 
-export function hookFindings(repo: string): Finding[] {
+/** The command an installed hook script runs, without its arguments: whatever precedes ` commit --hook` on the line
+ *  that carries it (`node "<dist>/git-hook.js"` for a checkout install, `npx -y -p @retrace-dev/cli@<v> retrace-git`
+ *  for a packed one, or whatever a hand-edited hook uses). Undefined when the script carries the mark but no such line. */
+export function hookTargetCommand(script: string): string | undefined {
+  const line = script.split("\n").find((candidate) => candidate.includes(" commit --hook"));
+  const command = line?.slice(0, line.indexOf(" commit --hook")).trim();
+  return command || undefined;
+}
+
+export type HookProbe = { ok: boolean; command?: string; detail: string };
+/** Run the hook's command with `--probe` and report whether it resolved and exited 0. The hook file existing proves
+ *  nothing about the script it names: an `npx`-installed hook pinned to `~/.npm/_npx/<hash>/…` kept passing doctor
+ *  after that cache was gone while every commit went unsealed (issue #84, stranger dry run 2026-09-20 §F2). An older
+ *  retrace-git without `--probe` prints its usage and exits 0, which still proves the target loads. */
+export const PROBE_TIMEOUT_ENV = "RETRACE_DOCTOR_PROBE_TIMEOUT_MS";
+export const DEFAULT_PROBE_TIMEOUT_MS = 60_000;
+/** The probe's wall-clock budget: the npx form may have to fetch the pinned package, so a slow registry or a cold cache
+ *  can legitimately need more than the default. `RETRACE_DOCTOR_PROBE_TIMEOUT_MS` (a positive integer) overrides it;
+ *  anything else leaves the default. */
+export function probeTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env[PROBE_TIMEOUT_ENV];
+  return raw && /^\d+$/.test(raw) && Number(raw) > 0 ? Number(raw) : DEFAULT_PROBE_TIMEOUT_MS;
+}
+export function probeHookTarget(repo: string, script: string, timeoutMs = probeTimeoutMs()): HookProbe {
+  const command = hookTargetCommand(script);
+  if (!command) return { ok: false, detail: "carries the retrace-git mark but no `commit --hook` line, so nothing runs on commit" };
+  const run = spawnSync("sh", ["-c", `${command} --probe`], { cwd: repo, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: timeoutMs });
+  const stdout = (run.stdout ?? "").trim();
+  const version = stdout.match(/^retrace-git (\S+) probe ok$/m)?.[1];
+  if (run.status === 0) return { ok: true, command, detail: version ? `retrace-git ${version}` : "older retrace-git, no --probe" };
+  // The line that names the cause: node's "Error: Cannot find module …", npm's "npm error …"; else the first line.
+  const errLines = (run.stderr ?? "").split("\n").map((line) => line.trim()).filter(Boolean);
+  const cause = errLines.find((line) => /^(\w*Error\b|npm (error|ERR!))/.test(line)) ?? errLines[0];
+  const timedOut = (run.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT";
+  const outcome = timedOut ? `did not finish within ${timeoutMs} ms (raise ${PROBE_TIMEOUT_ENV} if the registry is slow)`
+    : run.status === null ? `did not finish (${run.signal ?? run.error?.message ?? "unknown"})` : `exited ${run.status}`;
+  return { ok: false, command, detail: `${outcome}${cause ? `: ${cause}` : ""}` };
+}
+
+export function hookFindings(repo: string, probe: (script: string) => HookProbe = (script) => probeHookTarget(repo, script)): Finding[] {
   const hooksDir = resolve(repo, git(repo, ["rev-parse", "--git-path", "hooks"]));
-  const hook = join(hooksDir, "post-commit");
-  const hookOk = existsSync(hook) && readFileSync(hook, "utf8").includes("# retrace-git hook");
-  const mergeHook = join(hooksDir, "post-merge");
-  const mergeHookOk = existsSync(mergeHook) && readFileSync(mergeHook, "utf8").includes("# retrace-git hook");
+  const repair = `run retrace-git install --repo ${repo}`;
+  // One probe per distinct command: both hooks normally name the same target.
+  const probes = new Map<string, HookProbe>();
+  const check = (kind: "post-commit" | "post-merge"): { path: string; installed: boolean; finding?: Finding } => {
+    const path = join(hooksDir, kind);
+    const script = existsSync(path) ? readFileSync(path, "utf8") : "";
+    if (!script.includes("# retrace-git hook")) return { path, installed: false };
+    const key = hookTargetCommand(script) ?? "";
+    const probed = probes.get(key) ?? probe(script);
+    probes.set(key, probed);
+    return {
+      path, installed: true,
+      finding: probed.ok
+        ? result("pass", `${kind} hook`, `${path} → ${probed.command} (${probed.detail})`)
+        : result("fail", `${kind} hook`, `installed at ${path} but its target ${probed.command ? `${probed.command} --probe ` : ""}${probed.detail}; commits would go unsealed — ${repair}`),
+    };
+  };
+  const commit = check("post-commit");
+  const merge = check("post-merge");
   return [
-    hookOk ? result("pass", "post-commit hook", hook) : result("fail", "post-commit hook", `not installed at ${hook}; run retrace-git install --repo ${repo}`),
+    commit.finding ?? result("fail", "post-commit hook", `not installed at ${commit.path}; ${repair}`),
     // git runs post-merge, not post-commit, for `git merge`; an install from before 2026-09-06 wrote only post-commit,
     // so its merge commits were never sealed by the hook. A warning, not a failure: commits still seal, merges don't.
-    mergeHookOk ? result("pass", "post-merge hook", mergeHook) : result("warn", "post-merge hook", `not installed at ${mergeHook}; merge commits are not sealed by the hook — re-run retrace-git install --repo ${repo}`),
+    // (Installed but unable to load is a failure for both, like post-commit: the file's existence is what misled #84.)
+    merge.finding ?? result("warn", "post-merge hook", `not installed at ${merge.path}; merge commits are not sealed by the hook — re-${repair}`),
   ];
 }
 
