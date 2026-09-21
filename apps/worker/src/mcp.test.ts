@@ -36,8 +36,10 @@ const request = (token = TOKEN, extra: RequestInit = {}) => new Request("https:/
   body: extra.body ?? "{}",
 });
 
-test("remote MCP authentication accepts only pinned, unsigned agent credentials scoped to one project", async () => {
+test("remote MCP authentication accepts only live, pinned, unsigned agent credentials scoped to one project", async () => {
   assert.equal((await authenticateRemoteMcp(request(), raw()))?.actor.id, "openclaw");
+  assert.equal(await authenticateRemoteMcp(request(), raw([credential({ retired_at: "2026-09-20T15:00:00Z" })])), null, "a retired credential never authenticates, as on the REST path");
+  assert.equal((await authenticateRemoteMcp(request(), raw([credential({ retired_at: "2026-09-20T15:00:00Z" }), credential({ actor: { type: "agent", id: "successor", on_behalf_of: "jordan@example.com" } })])))?.actor.id, "successor", "a live successor with the same token shape still authenticates");
   assert.equal(await authenticateRemoteMcp(request("wrong"), raw()), null);
   assert.equal(await authenticateRemoteMcp(new Request("https://retrace.example/mcp?token=" + TOKEN), raw()), null, "query tokens are never accepted");
   assert.equal(await authenticateRemoteMcp(request(), raw([credential({ trust: "assert" })])), null);
