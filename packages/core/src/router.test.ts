@@ -862,6 +862,24 @@ test("POST /events with a body that is not JSON → 400 naming the parse error, 
   assert.equal(((await invalid.json()) as { error: string }).error, "invalid event");
 });
 
+test("POST /events refuses a NUL or unpaired-surrogate artifact id with 400 and accepts an astral pair", async () => {
+  const store = new MemStore();
+  const handle = createHandler(store, { token: "tok" });
+  const post = (id: string) => handle(new Request("http://test/events", {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: "Bearer tok" },
+    body: JSON.stringify({ project: "junk", actor: { type: "agent", id: "claude" }, action: "edited", artifacts: [{ id }] }),
+  }));
+  for (const id of ["repo:o/retrace#a\0b", "repo:o/retrace#a\uD800b", "repo:o/retrace#a\uDC00b"]) {
+    const res = await post(id);
+    assert.equal(res.status, 400, JSON.stringify(id));
+    assert.equal(store.events.length, 0, "refused ids must not be sealed");
+  }
+  const ok = await post("repo:o/retrace#😀.ts");
+  assert.equal(ok.status, 201);
+  assert.equal(store.events.length, 1);
+});
+
 test("credentials: CI assert reader with empty allowed_actors can GET gate routes and cannot POST /events", async () => {
   const store = new MemStore();
   await appendEvent(store, ev({ project: "acme-app" }));

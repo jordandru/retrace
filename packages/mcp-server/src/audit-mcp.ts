@@ -6,7 +6,7 @@
  * while their handlers supply environment-specific storage and authorization.
  */
 import { McpServer, type CallToolResult } from "@modelcontextprotocol/server";
-import { markUntrustedText } from "@retrace-dev/core";
+import { markUntrustedText, artifactIdProblem } from "@retrace-dev/core";
 import { z } from "zod";
 
 export const AuditActor = z.object({
@@ -23,11 +23,18 @@ const Action = z.enum([
   "sent", "received", "moved", "renamed", "instructed", "committed", "merged", "other",
 ]);
 
+function artifactIdField() {
+  return z.string().min(1).superRefine((id, ctx) => {
+    const problem = artifactIdProblem(id);
+    if (problem) ctx.addIssue({ code: "custom", message: problem });
+  });
+}
+
 const ArtifactRef = z.object({
-  id: z.string().min(1),
+  id: artifactIdField(),
   kind: z.string().optional(),
   label: z.string().optional(),
-  derived_from: z.array(z.string()).optional(),
+  derived_from: z.array(artifactIdField()).optional(),
   role: z.enum(["used", "generated", "both"]).optional().describe("PROV role: used=input, generated=output, both=input and output."),
 });
 

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { sealEvent, verifyChain, verifyChainTail, canonicalize, computeHash, hashPayload, hashRule, HASH_VERSION, sha256Hex, EventInput, Event, GENESIS_HASH, defaultArtifactRole, applyDefaultRoles, Action } from "./index.js";
+import { sealEvent, verifyChain, verifyChainTail, canonicalize, computeHash, hashPayload, hashRule, HASH_VERSION, sha256Hex, EventInput, Event, GENESIS_HASH, defaultArtifactRole, applyDefaultRoles, Action, ArtifactRef, InvalidArtifactIdError, fileArtifacts } from "./index.js";
 
 const base = (over: Partial<EventInput> = {}): EventInput => ({
   project: "test",
@@ -165,4 +165,29 @@ test("hash_v marker: a received_at edit on a v2 event is tampering; stripping th
   assert.equal(r.ok, true, "legacy events are best-effort by design");
   assert.equal(r.legacy_events, 1);
   assert.equal((await verifyChain([e0])).legacy_events, 0);
+});
+
+test("artifact ids refuse U+0000 and unpaired surrogates and accept a well-formed astral pair", async () => {
+  const high = "repo:o/retrace#a\uD800b";
+  const low = "repo:o/retrace#a\uDC00b";
+  const nul = "repo:o/retrace#a\0b";
+  const astral = "repo:o/retrace#😀\u{20000}.ts";
+  const refused = [
+    [nul, /U\+0000/],
+    [high, /unpaired surrogates/],
+    [low, /unpaired surrogates/],
+  ] as const;
+  for (const [id, re] of refused) {
+    const parsed = ArtifactRef.safeParse({ id });
+    assert.equal(parsed.success, false, id);
+    if (!parsed.success) assert.match(parsed.error.issues.map((i) => i.message).join("\n"), re);
+    await assert.rejects(() => sealEvent(base({ artifacts: [{ id }] }), null), (e: unknown) => e instanceof InvalidArtifactIdError && re.test((e as Error).message));
+    assert.throws(() => fileArtifacts({ artifacts: [{ id }] }), (e: unknown) => e instanceof InvalidArtifactIdError && re.test((e as Error).message));
+    assert.throws(() => fileArtifacts({ artifacts: [{ id: "task:ok" }, { id }] }), InvalidArtifactIdError, "one bad id fails the whole input closed");
+    assert.equal(ArtifactRef.safeParse({ id: "ok", derived_from: [id] }).success, false);
+  }
+  assert.equal(ArtifactRef.parse({ id: astral }).id, astral);
+  const sealed = await sealEvent(base({ artifacts: [{ id: astral }] }), null);
+  assert.equal(sealed.artifacts[0]?.id, astral);
+  assert.deepEqual(fileArtifacts({ artifacts: [{ id: astral }] }), [{ id: astral, repo: "o/retrace", path: "😀\u{20000}.ts" }]);
 });

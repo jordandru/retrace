@@ -2,7 +2,7 @@
  * Hash chain: each event's hash covers its canonical content + prev_hash.
  * Uses WebCrypto so it runs in Node 20+, Cloudflare Workers and browsers.
  */
-import { Event, EventInput, GENESIS_HASH } from "./schema.js";
+import { Event, EventInput, GENESIS_HASH, assertEventArtifactIds } from "./schema.js";
 
 const cryptoImpl: Crypto = (globalThis as any).crypto;
 
@@ -77,6 +77,7 @@ export async function sealEvent(
   now: Date = new Date(),
   reserved?: { id?: string },
 ): Promise<Event> {
+  assertEventArtifactIds(input);
   const seq = prev ? prev.seq + 1 : 0;
   const prev_hash = prev ? prev.hash : GENESIS_HASH;
   const received_at = now.toISOString();
