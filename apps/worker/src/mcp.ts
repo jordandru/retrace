@@ -54,12 +54,16 @@ type RemoteMcpCredential = Credential & {
 const jsonError = (status: number, error: string) =>
   new Response(JSON.stringify({ error }), { status, headers: { "content-type": "application/json", "cache-control": "no-store" } });
 
-/** Remote MCP deliberately accepts fewer credentials than the REST API: bearer-only, pinned agent, one project. */
+/** Remote MCP deliberately accepts fewer credentials than the REST API: bearer-only, pinned agent, one project.
+ *  A retired credential never authenticates here, exactly as on the REST path (`router.ts` authenticate loop):
+ *  until 2026-09-21 this filter omitted `retired_at`, so a retired record still in the deployed secret kept its
+ *  token alive on /mcp alone (finding evt_e660b499; the deployed record was purged, evt_366db723). */
 export async function authenticateRemoteMcp(req: Request, rawCredentials?: string): Promise<RemoteMcpCredential | null> {
   const match = /^Bearer ([^\s]+)$/.exec(req.headers.get("authorization") ?? "");
   if (!match) return null;
   for (const credential of parseCredentials(rawCredentials)) {
     if (
+      !credential.retired_at &&
       credential.trust === "pinned" &&
       credential.actor.type === "agent" &&
       credential.projects?.length === 1 &&
