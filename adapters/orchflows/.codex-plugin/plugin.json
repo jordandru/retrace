@@ -13,6 +13,6 @@
     "developerName": "retrace",
     "category": "Productivity",
     "capabilities": [],
-    "defaultPrompt": "Use retrace:retrace-review to review this candidate and record the assignment and verdict."
+    "defaultPrompt": "$retrace:retrace-review — review this candidate and record the routing assignment and the verdict."
   }
 }

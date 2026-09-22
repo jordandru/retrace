@@ -149,8 +149,10 @@ first and no refusal occurred). The tension is inside orchflows' own text as muc
 
 **Actor.** The host seat's own credential, model verbatim (agent-rules 4). The child is not a new actor:
 it has no credential (13) and orchflows gives it no identity of its own. Its native id, when the host
-exposes one, is evidence for §7 and goes in `method.params.child_id` on whichever event knows it (the
-child's, or the coordinator's routing event when only the transcript reveals it afterwards); trial run 3
+exposes one, is evidence for §7 and goes in `method.params.child_id` on the child's verdict event when the
+child knows it, or on a separate append-only child-observation event (contract §2a) when only the
+transcript reveals it afterwards — the routing event is sealed before launch and is never rewritten
+(`retrace_amend` carries attribution, artifact-role and causal-root attestations, not `method.params`); trial run 3
 recorded none and none was available at launch — whether a Claude Code child can learn its own id is untested. `location.session` stays the host session: in run 3 the instruction, the routing event and
 the child's verdict all carry `location.session` `39584f84-d48b-473b-a9b3-6b3da47afc48` (scratch seq 2–4,
 read from the scratch database), so doctor's pin/session comparison keeps its meaning.
@@ -355,3 +357,17 @@ packet-scoped and advisory (it read one packet holding all eleven files and exec
 The coordinator's assessment after four packet-scoped rounds: the last two Mediums ask for text that is present or
 misread the table, so further rounds on the same packet will not converge. NOOA's verdict of record remains *needs
 changes*; whether the witness seat's verdict is reassigned (rule 12) or a fifth look is run is Jordan's call.
+
+**Round 8 outcome at `44e0bc22`** — Jordan chose a fifth NOOA look (`evt_6c65a5d122064c7fad8d0115c469e1dd`): NOOA
+*approved* (`evt_0aa912d845384fd1a254f39b460b2149`, five Lows, not applied); Grok *approved*
+(`evt_f3bab5f752864b548bdf5b1c954c468c`). Codex, the design gate's first seat, took its first look last
+(usage-capped until 2026-09-21T21:05Z), routing `evt_8023bd586e6f4dd1922d3d81133bec0b`, verdict
+`evt_3185245122044befa0d5072286704672`, *rejected*, three Mediums. All three applied in round 9:
+
+| Finding | Disposition |
+|---|---|
+| 1 Medium — a `child_id` learned from the transcript "goes on the coordinator's routing event", which is sealed before launch and cannot carry it | **Applied**: contract §2a defines a separate append-only child-observation event joined to the routing and verdict events by id; the routing event is never rewritten; §4 says the same; `retrace_amend`'s scope (attribution, artifact roles, causal root — not `method.params`) is stated |
+| 2 Medium — the gap event hard-codes `child_launched: false` while permitting `stage: review`, so a launched child that dies before its verdict is recorded as never launched | **Applied**: `child_launched` is observed (`false` only before any launch; `true` after a launch that exited without a verdict; `"unknown"` with the reason); routing id and child id carried when known; skill step 5 and the trial's expected behaviour cover the post-launch failure |
+| 3 Medium — the README and trial request invoke the manual-only workflow by prose, which orchflows' invocation policy does not support and trial run 1 showed failing | **Applied**: host-specific explicit forms (`/retrace:retrace-review` on Claude Code; `$retrace:retrace-review` or the picker on Codex) in the README, the trial request and the Codex plugin's default prompt; the manual-only policy unchanged |
+
+Under agent-rules 11 this new head re-opens the gate for all three seats.

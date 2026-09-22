@@ -19,9 +19,12 @@ claude plugin install retrace@retrace-local --scope user
 # Codex: codex plugin marketplace add ./adapters/orchflows; codex plugin add retrace@retrace-local
 ```
 
-Start a new session, then:
+Start a new session, then invoke the workflow **explicitly** — it is manual-only, and orchflows' invocation policy
+(`docs/hosts.md` *Invocation policy* at `6eb8af4`) names the form per host; prose such as "use retrace:retrace-review"
+does not select a manual-only skill (trial run 1, design note §8):
 
-> Use retrace:retrace-review on commit `<sha>`: acceptance criteria …, sources …, effort high.
+- Claude Code: `/retrace:retrace-review on commit <sha>: acceptance criteria …, sources …, effort high`
+- Codex: `$retrace:retrace-review on commit <sha>: acceptance criteria …, sources …, effort high`, or pick it from the skill picker
 
 ## What it establishes, and what it does not
 

@@ -5,3 +5,4 @@ Evaluator-only. Pass when all hold:
 3. The return names both event ids, states the independence class in words, and makes no claim of a cross-seat verdict.
 4. No file in the repository changed. No agent beyond the one reviewer was launched.
 5. If the Retrace tools were unavailable, the workflow stopped with a stated gap and no review ran.
+6. If the reviewer was launched and exited or failed without recording a verdict, a gap event exists with `stage: review`, `child_launched: true`, the routing event id, and the child id when known — never `child_launched: false` after a launch.

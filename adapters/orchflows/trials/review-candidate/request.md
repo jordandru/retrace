@@ -1,4 +1,4 @@
-Use retrace:retrace-review on the candidate commit `<full sha>` in this repository.
+Invoke `retrace:retrace-review` explicitly for your host — Claude Code: `/retrace:retrace-review`; Codex: `$retrace:retrace-review` or the skill picker — on the candidate commit `<full sha>` in this repository.
 
 Intended outcome: the design note under review claims only what its cited evidence carries.
 Acceptance criteria: every sentence that states a fact about orchflows quotes a pinned sha; every sentence about Retrace behaviour names the file or event it rests on; no rule is changed by implication.
