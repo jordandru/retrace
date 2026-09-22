@@ -1,0 +1,9 @@
+{
+  "name": "retrace",
+  "version": "0.1.0",
+  "description": "Record orchflows assignments and verdicts in a Retrace ledger, bound to the inspected head.",
+  "author": {
+    "name": "retrace"
+  },
+  "skills": "./skills/"
+}

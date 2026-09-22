@@ -1,0 +1,12 @@
+{
+  "name": "retrace-local",
+  "owner": {
+    "name": "retrace"
+  },
+  "plugins": [
+    {
+      "name": "retrace",
+      "source": "./"
+    }
+  ]
+}
