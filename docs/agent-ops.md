@@ -112,9 +112,9 @@ The provenance rules themselves are `docs/agent-rules.md`.
     Never hand Jordan a fenced code block to paste into a terminal: in the 2026-09-21T02:28Z incident (2026-09-20
     evening MDT, evt_6bfe5f18) bash read the triple backticks of the pasted fences as command substitutions, each
     opened a nested shell, and each fenced body ran on `exit` — a `wrangler secret put` and a `shred` ran
-    unintended. The same fence was measured on a second machine on 2026-09-22 (foot on Omarchy, bracketed paste
-    on; prediction evt_80150188, result evt_ff7cbf84, `docs/measurements/omarchy-trial-2026-09-21.md` F1): inert on
-    paste, its body ran on Enter. So whether and when a pasted fence runs can depend on the receiving terminal,
+    unintended. A three-line test fence was measured on a second machine on 2026-09-22 (foot on Omarchy, bracketed
+    paste on; prediction evt_80150188, result evt_ff7cbf84, `docs/measurements/omarchy-trial-2026-09-21.md` F1): inert
+    on paste, its body ran on Enter. So whether and when a pasted fence runs can depend on the receiving terminal,
     which the sender does not control and cannot know from the message alone; the rule covers every terminal,
     including one where a paste looks harmless. After any
     rotation every open pane is stale until restarted; check a pane with
