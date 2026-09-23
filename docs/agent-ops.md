@@ -121,26 +121,36 @@ The provenance rules themselves are `docs/agent-rules.md`.
     out of the Worker secret, so no token ever passes through a shell); the other half — ssh keys, the auditor
     host's secret files, `wrangler login` — retires only when harness transcripts redact secret-shaped strings
     at write time, a vendor change. Until both, some part of this rule stands.
-17. **Docker is root.** Docker Desktop's WSL integration is on (Jordan enabled it 2026-09-21 for the Omarchy
-    trial, evt_d387fa54) and `jordandrumiler` is in the `docker` group (`/var/run/docker.sock` is `root:docker`,
-    0660) — a group the Omarchy manual calls "effectively passwordless root". So every process in this account,
-    each agent pane, MCP server and hook included, can start a root container that bind-mounts any path —
-    `~/.retrace`, `~/.ssh`, the files that hold the owner token — and read it whatever its mode; a container
-    handed this shell's `RETRACE_*` environment can write to the live ledger; a bare `docker inspect` prints a
-    container's environment into the transcript; and a container with a restart policy comes back whenever
+17. **Docker is root.** Two routes reach Docker Desktop's engine from this account without a password. The Linux
+    socket: this distro's WSL integration is on (Jordan enabled it 2026-09-21 for the Omarchy trial,
+    evt_d387fa54) and `jordandrumiler` is in the `docker` group (`/var/run/docker.sock` is `root:docker`, 0660), a
+    group the Omarchy manual calls "effectively passwordless root". And the Windows CLI: `docker.exe` is on the
+    Windows PATH (evt_d387fa54), WSL interop lets any process here launch it, and Docker documents it reaching the
+    same engine without distro integration (a documented route, not tested here). Whenever the engine runs, every
+    process in this account, each agent pane, MCP server and hook included, can start a root container that
+    bind-mounts `~/.retrace`, `~/.ssh` or the files that hold the owner token and reads them whatever their mode;
+    a container handed this shell's `RETRACE_*` environment can write to the live ledger; inspecting a container
+    can print its environment into the transcript; and a container with a restart policy comes back whenever
     Docker Desktop starts. The NemoClaw sandbox did on 2026-09-21, its OpenClaw configuration recorded as holding
     the retired shared token the laptop had already shredded (evt_e660b499; stopped on Jordan's go, evt_0f756347).
     That is a fourth credential sink beside the three rule 16 names. So: Docker Desktop runs only while a
-    container task Jordan approved is in progress, and stays quit otherwise. An agent runs a `docker` command that
-    creates, changes, enters or removes a container (`run`, `create`, `start`, `exec`, `cp`, `update`, `stop`,
-    `rm`, `compose`) only on a signed go naming it; read-only queries (`ps`, `version`, `inspect --format` with
-    named fields, never a bare `inspect`) need none. A container never mounts `$HOME`, `~/.retrace`, `~/.ssh`,
-    `/mnt/c` or a repository checkout; never runs `--privileged`, with the Docker socket or with host namespaces;
-    never receives `RETRACE_*` or any other secret in its environment; uses images pinned by digest; and runs with
-    `--rm` or restart policy `no`.
-    → unnecessary when [specific]: Docker Desktop's WSL integration is off for this distro and `jordandrumiler` is
-    not in the `docker` group — Omarchy's default — so no process in this account reaches a Docker engine without
-    `sudo`.
+    container task Jordan approved is in progress, and stays quit otherwise. The only `docker` or `docker.exe`
+    commands an agent runs without a go are three reads: `docker version`; `docker ps` with a `--format` naming
+    only `.Names`, `.Status` and `.Image`; and `docker inspect --format` naming only `.Name`, `.State.Status`,
+    `.HostConfig.RestartPolicy.Name`, `len .Mounts` and `len .HostConfig.Binds`. Every other command — `run`,
+    `create`, `start`, `exec`, `cp`, `logs`, `update`, `stop`, `rm`, `compose`, any other `inspect` field
+    (`.Config` holds the environment, command and labels) or a bare `inspect` — needs a signed go naming it, and
+    rules 13 and 16 apply to all of them. A container's only bind mount is a scratch directory created for that
+    task, named in the go and holding nothing secret: never an ancestor of it (`/`, `/home`, `$HOME`, `/mnt`,
+    `/mnt/c`) and never a path that resolves, through a symlink or alias, into `~/.retrace`, `~/.ssh`, a shell
+    startup file or a repository checkout. A container never runs `--privileged`, with the Docker socket or with
+    host namespaces; never receives `RETRACE_*` or any other secret in its environment; uses images pinned by
+    digest; and runs with `--rm` or restart policy `no`.
+    → unnecessary when [specific]: no Docker engine can be reached from this account without a password by either
+    route — the Linux socket (this distro's WSL integration off and `jordandrumiler` out of the `docker` group,
+    Omarchy's own default) and the Windows CLI through interop (Docker Desktop uninstalled, or interop disabled
+    for this distro) — verified from an agent pane by `docker version` and `docker.exe version` both failing
+    while Docker Desktop runs. Until that is verified, every guard above stands.
 ## Coordination
 
 14. One coordinator at a time dispatches builders and merges. Other seats' task boards are their own
