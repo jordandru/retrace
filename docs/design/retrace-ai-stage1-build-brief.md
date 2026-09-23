@@ -1,10 +1,11 @@
 # Retrace AI stage 1 — build brief (github-copilot)
 
-**Status:** DRAFT v1, 2026-09-18, author claude-code (coordinator), on Jordan's instruction
-`evt_42add0579bc94fb6a99c8714e3ae0099`. Builder: **github-copilot** (`docs/team-roles.md`). Spec:
-`docs/design/retrace-ai-digest.md` (document revision v1.4, 2026-09-15 — reviewed, approved, unbuilt).
-Class (a) under agent-rules 12: this brief governs how a seat does bounded work, so it takes the design
-gate. **Not started**, and not startable yet — see §7.
+**Status:** DRAFT v1, round 2 (2026-09-23), author claude-code (coordinator), on Jordan's instruction
+`evt_42add0579bc94fb6a99c8714e3ae0099`. Round 2 answers Codex's round-1 rejection
+`evt_c264b94754be4c908e34081909e9be90`; the changes are listed at the end. Builder: **github-copilot**
+(`docs/team-roles.md`). Spec: `docs/design/retrace-ai-digest.md` (document revision v1.4, 2026-09-15 —
+reviewed, approved, unbuilt). Class (a) under agent-rules 12: this brief governs how a seat does bounded
+work, so it takes the design gate. **Not started**, and not startable yet — see §7.
 
 ## 0. Read this first
 
@@ -81,6 +82,17 @@ Verified state, `packages/mcp-server/src/doctor.ts` at `0d294eb`:
 - line 113 parses `--json`, but only `retrace status` honours it (line 697). **`retrace doctor --json`
   currently does nothing.**
 
+Re-verified 2026-09-23 at `1636bac`, current main when round 2 was written: the same four facts hold, now
+at line 14 (`Finding`), line 849 (the flattened line), line 851 (the `READY` / `NOT READY` summary) and
+line 168 (`--json` is parsed; only `retrace status` uses it, line 752). What changed in between is PR 92
+(`1fca5dc`, `32993c6`; merge `30fc384`; issue #84): doctor now **probes each hook's target**. A
+`post-commit` or `post-merge` PASS names the probed command and what answered
+(`<path> → <command> (retrace-git <version>)`, or `older retrace-git, no --probe`). An installed hook
+whose target cannot run is a **FAIL** for both hooks: the target exited non-zero, did not finish within
+the probe budget (`RETRACE_DOCTOR_PROBE_TIMEOUT_MS`), or the hook carries the mark but no `commit --hook`
+line. **The compatibility baseline is current `main` at the head the builder starts from, not
+`0d294eb`.** The builder re-verifies these lines there and names that head in the pull request.
+
 Two defects to fix:
 
 1. **`label` is a free-form display string doing double duty as identity.** Any consumer keying on it
@@ -90,13 +102,15 @@ Two defects to fix:
 Constraints on the fix:
 
 - The existing human output is the default and **its bytes do not change**. The push gate depends on this
-  command.
+  command (`.github/workflows/retrace-gate.yml` runs `doctor --gate`).
 - The exit-code contract is unchanged: 1 on any failure, 0 otherwise.
 - The schema carries an explicit **version**, so a consumer can refuse a version it does not understand
   rather than mis-parse it.
 - Stable keys are assigned deliberately and are **not** derived from display prose.
-- Tests: every finding a run can emit carries a stable key; the human output is byte-identical to before;
-  a version bump is visible to a consumer.
+- Tests: every finding a run can emit carries a stable key; the human output is byte-identical to the
+  baseline; a version bump is visible to a consumer. Fixtures cover the hook branches PR 92 added — target
+  probed OK, target exited non-zero, probe timed out, no `commit --hook` line — for both hooks, with probe
+  behaviour and exit results unchanged.
 
 Propose the schema in the pull request body before assuming it. Do not silently redefine what
 `pass`/`warn`/`fail` mean.
@@ -128,22 +142,33 @@ be designed against.
    (`team-roles` rule 1); the coordinator classifies and routes (rule 11).
 4. **Attribution is per seat, not per sub-task.** However the work is decomposed internally, every commit
    carries `Retrace-Actor: github-copilot`, `Retrace-Model: <the exact model id the runtime reports>`,
-   `Retrace-Caused-By: <instruction event id>`. `Co-Authored-By: Copilot` alone is not provenance
+   `Retrace-Caused-By: <instruction event id>` — except that when the runtime exposes no model identifier,
+   the `Retrace-Model` trailer and `actor.model` are omitted, never guessed (agent-rules 4 and 6).
+   `Co-Authored-By: Copilot` alone is not provenance
    (`.github/copilot-instructions.md`). Anonymous sub-agent commits under one seat are an attribution
    failure, and in this repository that is the failure we exist to catch.
 5. **Name every file changed** on the log for that change (agent-rules 3), and log before committing, in
    sequence.
-6. **Credentials** (agent-rules 13): environment variables only, never echoed. Test presence with
-   `${VAR:+SET}`, never `${VAR:-default}` — agent transcripts are a credential sink. On HTTP 402
-   `quota_exceeded`, stop (agent-ops 9).
+6. **Credentials** (agent-rules 13): the seat's token reaches its configured process through the
+   environment and is never echoed; the seat's producer signing key stays file-backed
+   (`RETRACE_PRODUCER_KEY_FILE`, mode 0600). Any step in which a secret value is in play — minting,
+   rotating or provisioning a credential — is Jordan's, in the terminal flow of agent-ops 16; the builder
+   does none of it. Test presence with `${VAR:+SET}`, never `${VAR:-default}` — agent transcripts are a
+   credential sink. On HTTP 402 `quota_exceeded`, stop, and never borrow another seat's token
+   (agent-rules 13).
 
 ## 6. Review routing
 
 Class **(a)**. This brief and deliverable 1 both govern behaviour, so each goes to all three other Core
 Four seats — **Codex → NOOA → Grok**, Claude last — per `team-roles` rule 2, with Claude recused as
-reviewer on this brief (author). Deliverable 2 is code: it follows the code order, Codex first. The
-coordinator records the class and the head sha in the routing event before each review (rule 11); a push
-after classification re-opens the gate against the new head. NOOA must be pinned to **nemotron-3-ultra**;
+reviewer on this brief (author). **Deliverable 2 is not routed by file type.** It changes `retrace doctor`,
+the executable provenance gate (`.github/workflows/retrace-gate.yml` runs `doctor --gate`), and it changes
+the `Finding` contract and adds an output path. That makes it a security/build control, class (a) under
+agent-rules 12, which assigns the gate by consequence and applies the higher gate when the class is
+uncertain. The coordinator classifies each deliverable's pull request by consequence against its actual
+head; the routing registry's surface class for `doctor.ts` (C) sets review effort only, not the rule-12
+class. The coordinator records the class and the head sha in the routing event before each review
+(rule 11); a push after classification re-opens the gate against the new head. NOOA must be pinned to **nemotron-3-ultra**;
 an unpinned NOOA review defaults to an Anthropic model and would be Anthropic reviewing Anthropic under
 an NVIDIA badge (`team-roles` rule 3).
 
@@ -174,5 +199,21 @@ as seat work and must not be treated as it. Briefs go to the seat, in the reposi
 readable from the tree.
 
 ---
+
+## Revision history
+
+- **2026-09-18, v1** (head `42cde95`): author claude-code on `claude-opus-5[1m]`.
+- **2026-09-23, round 2**: author claude-code on `claude-opus-5-5[1m]`, answering Codex's rejection
+  `evt_c264b94754be4c908e34081909e9be90` (routing `evt_4e715c7ae4b243dba9ef4f27debc7520`).
+  - M1, §6: deliverable 2 changes the executable gate and takes class (a), classified by consequence at its
+    head.
+  - L1, §3: current main is the compatibility baseline, re-verified at `1636bac`, and PR 92's hook
+    branches join the fixture requirement.
+  - L2, §5.4: the omit-when-unavailable model exception is restated.
+  - L3, §5.6: the credential wording is scoped to tokens, the file-backed signing key and agent-ops 16 are
+    named, and the 402 rule is cited where current main keeps it (agent-rules 13).
+
+  Fixed in place because this brief is an unmerged draft (Jordan's ruling, 2026-09-16,
+  `evt_9dc982064d3c432bbd85ff9a64f049da`).
 
 *Corrections to this brief are appended in place with a date (agent-rules 10).*
