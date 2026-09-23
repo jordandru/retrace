@@ -1,8 +1,8 @@
 # Retrace AI stage 1 — build brief (github-copilot)
 
-**Status:** DRAFT v1, round 2 (2026-09-23), author claude-code (coordinator), on Jordan's instruction
-`evt_42add0579bc94fb6a99c8714e3ae0099`. Round 2 answers Codex's round-1 rejection
-`evt_c264b94754be4c908e34081909e9be90`; the changes are listed at the end. Builder: **github-copilot**
+**Status:** DRAFT v1, round 4 (2026-09-23), author claude-code (coordinator), on Jordan's instruction
+`evt_42add0579bc94fb6a99c8714e3ae0099`. The revision history at the end lists the changes in each later
+round and the rejection each answers. Builder: **github-copilot**
 (`docs/team-roles.md`). Spec: `docs/design/retrace-ai-digest.md` (document revision v1.4, 2026-09-15 —
 reviewed, approved, unbuilt). Class (a) under agent-rules 12: this brief governs how a seat does bounded
 work, so it takes the design gate. **Not started**, and not startable yet — see §7.
@@ -168,12 +168,13 @@ reviewer on this brief (author). **Deliverable 2 is not routed by file type.** I
 the executable provenance gate (`.github/workflows/retrace-gate.yml` runs `doctor --gate`), and it changes
 the `Finding` contract and adds an output path. That makes it a security/build control, class (a) under
 agent-rules 12, which assigns the gate by consequence and applies the higher gate when the class is
-uncertain. The coordinator classifies each deliverable's pull request by consequence against its actual
-head; the routing registry's surface class for `doctor.ts` (C) sets review effort only, not the rule-12
-class. The coordinator records the class and the head sha in the routing event before each review
-(rule 11); a push after classification re-opens the gate against the new head. NOOA must be pinned to **nemotron-3-ultra**;
-an unpinned NOOA review defaults to an Anthropic model and would be Anthropic reviewing Anthropic under
-an NVIDIA badge (`team-roles` rule 3).
+uncertain. Under agent-rules 12 the coordinator classifies each deliverable's pull request by consequence
+before review; the routing registry's surface class for `doctor.ts` (C) sets review effort only, not the
+rule-12 class. The routing event records the class and the head sha (agent-rules 11 and 12), and a push
+after classification re-opens the gate against the new head (agent-rules 12). NOOA must be pinned to
+**nemotron-3-ultra**, the model `team-roles` names for its reviews (rule 3 keeps Nemotron primary in that
+seat); the review harness's own default is `claude-sonnet-5` (`review_agent.py` line 30,
+`os.getenv("NOOA_MODEL", "claude-sonnet-5")`, read on the auditor host on 2026-09-23).
 
 ## 7. Priority, and what blocks the start
 
@@ -226,5 +227,13 @@ readable from the tree.
   - Not adopted: F1, the digest note was printed in full in NOOA's review packet, and its anchors were measured
     at `1636bac` by the Grok-seat review `evt_6415461667a140fb8ac75d6af9f83699`; F2, packet scope, and §3
     already requires re-verification at the head the builder starts from.
+- **2026-09-23, round 4**: author claude-code on `claude-opus-5-5[1m]`, answering NOOA's rejection
+  `evt_e3309ccd5dc841dfaff4ecbbe384c61a` (routing `evt_5edbcd605e95476bb7cb9cfe2a61c40b`).
+  - Medium, status line: it still said round 2 after round 3; it now gives the current round and points to
+    this history instead of naming a single rejection.
+  - Low, §6: the NOOA pin now cites its sources, `team-roles` for the review model and `review_agent.py`
+    line 30 on the auditor host, read 2026-09-23, for the harness's default.
+  - Low, §6: the classification, routing-record and re-open sentences cite agent-rules 11 and 12, which
+    they restate.
 
 *Corrections to this brief are appended in place with a date (agent-rules 10).*
