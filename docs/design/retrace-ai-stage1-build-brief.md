@@ -14,7 +14,8 @@ explicitly deferred to a question-and-answer, no code (§4).
 
 It also draws a boundary (§1) around a proposal that must not be built. That section is not throat
 clearing: on 2026-09-18 the boundary was stated to Microsoft Copilot Desktop in a prompt that named every
-forbidden element, and Desktop returned the forbidden proposal near-verbatim. The boundary is restated
+forbidden element, and Desktop returned the forbidden proposal near-verbatim (recorded in Jordan's instruction
+`evt_42add0579bc94fb6a99c8714e3ae0099`). The boundary is restated
 here because the record shows it does not survive one hop.
 
 ## 1. The boundary: why CPIL is not being built
@@ -106,7 +107,8 @@ Constraints on the fix:
 - The exit-code contract is unchanged: 1 on any failure, 0 otherwise.
 - The schema carries an explicit **version**, so a consumer can refuse a version it does not understand
   rather than mis-parse it.
-- Stable keys are assigned deliberately and are **not** derived from display prose.
+- Stable keys come from an explicit list in the versioned schema and are **never** derived from the label or
+  detail text, so rewording a message keeps its key.
 - Tests: every finding a run can emit carries a stable key; the human output is byte-identical to the
   baseline; a version bump is visible to a consumer. Fixtures cover the hook branches PR 92 added — target
   probed OK, target exited non-zero, probe timed out, no `commit --hook` line — for both hooks, with probe
@@ -117,7 +119,8 @@ Propose the schema in the pull request body before assuming it. Do not silently 
 
 ## 4. Deliverable 3 — deferred, no code
 
-The stage-1.1 pinned-endpoint client with **GitHub Models** as the vendor is wanted: it would give
+Jordan's instruction `evt_42add0579bc94fb6a99c8714e3ae0099` includes, as a deferred item, the stage-1.1
+pinned-endpoint client with **GitHub Models** as the vendor. It would give
 Retrace a third independent inference vendor alongside Anthropic and NVIDIA, which is a cross-vendor
 independence claim we can presently only half make (`team-roles` rule 3). It is gated behind deliverable 1
 landing. **Write no code for it.**
@@ -190,7 +193,8 @@ object-store doctor (PR 14, 17), the stranger fixes (PR 20, 22), release prep (P
 test that found the broken install command.
 
 **Microsoft Copilot Desktop is not that seat.** It has no repository access, no pinned credential, no
-model self-report and no ability to honour the pull-request gate, and on 2026-09-18 it reproduced the CPIL
+model self-report and no ability to honour the pull-request gate, and on 2026-09-18
+(`evt_42add0579bc94fb6a99c8714e3ae0099`) it reproduced the CPIL
 proposal against a prompt that forbade each of its elements individually, opening with "assume ... SBOMs
 ... exist" after being handed evidence that they do not. The prompt carried a trip-wire — *if the design
 note was not attached, say so and stop* — and Desktop neither said so nor stopped, proceeding to instruct
@@ -215,5 +219,12 @@ readable from the tree.
 
   Fixed in place because this brief is an unmerged draft (Jordan's ruling, 2026-09-16,
   `evt_9dc982064d3c432bbd85ff9a64f049da`).
+- **2026-09-23, round 3**: author claude-code on `claude-opus-5-5[1m]`, answering NOOA's rejection
+  `evt_9393972f5a64481fb49253ae452f304d` (routing `evt_ad8a983b1eca41418e3c67c891144a2c`).
+  - Adopted: F3, §3 stable keys now a testable constraint; F4, §4 sources the deferred GitHub Models item to
+    Jordan's instruction; F9, §0 and §8 cite that instruction for the Copilot Desktop account.
+  - Not adopted: F1, the digest note was printed in full in NOOA's review packet, and its anchors were measured
+    at `1636bac` by the Grok-seat review `evt_6415461667a140fb8ac75d6af9f83699`; F2, packet scope, and §3
+    already requires re-verification at the head the builder starts from.
 
 *Corrections to this brief are appended in place with a date (agent-rules 10).*
