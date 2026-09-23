@@ -165,10 +165,11 @@ The provenance rules themselves are `docs/agent-rules.md`.
     `docker -H unix:///var/run/docker.sock version` fails with
     permission denied or no such socket (this distro's WSL integration off and `jordandrumiler` out of the `docker`
     group, Omarchy's own default). The Windows named pipe: `docker.exe -H npipe:////./pipe/docker_engine version`
-    is refused, or `docker.exe` cannot be launched because interop is disabled for this distro, which is shown by
-    `head -1 /proc/sys/fs/binfmt_misc/WSLInterop` printing `disabled` (or that entry being absent) together with
-    `[interop] enabled=false` in `/etc/wsl.conf` (on 2026-09-23 this distro's entry printed `enabled` and its
-    `/etc/wsl.conf` had no `[interop]` section, so interop was on). Any TCP endpoint:
+    is refused. Interop being disabled for this distro is not a substitute for that refusal: `[interop] enabled=false`
+    in `/etc/wsl.conf` takes effect only after the distro is fully restarted, and the state of the `WSLInterop`
+    binfmt entry shows only whether Windows executables dispatch automatically, not whether `/init` can still reach
+    a running interop server (Codex, `evt_1880ccc39ed5411b8d229afec6bc1fb3`, from Microsoft's WSL sources), so
+    neither setting is evidence that `docker.exe` cannot be launched. Any TCP endpoint:
     Docker Desktop's "Expose daemon on tcp://localhost:2375" is off and `docker -H tcp://localhost:2375 version`
     is refused. Every other endpoint named by `docker context ls`, `docker.exe context ls`, `DOCKER_HOST` or
     `DOCKER_CONTEXT` is checked the same way. An error about an unrelated endpoint, a missing client or a
@@ -177,9 +178,13 @@ The provenance rules themselves are `docs/agent-rules.md`.
     guard above stands.
     *Correction, 2026-09-23 (source: NOOA's round-6 verdict on #105, `evt_eeeadc50359d4b60af073adc2dc765bc`,
     findings 4 and 5, recorded as not applied at the merge in the gate check `evt_6dbc7701d5f449f5a9a0321cfeceb037`;
-    applied on Jordan's signed go `evt_a8c1272ccbdc4b1fa58dcff0a548e1f2`): the retirement condition's
-    "interop is disabled" alternative now names its check, and a transition sentence now separates the hazard
-    description from the container guards. No guard, command list or condition changed.*
+    applied on Jordan's signed go `evt_a8c1272ccbdc4b1fa58dcff0a548e1f2`; the form of the first change set by
+    Codex's review `evt_1880ccc39ed5411b8d229afec6bc1fb3`): the retirement condition's Windows named-pipe check
+    read "is refused, or `docker.exe` cannot be launched because interop is disabled for this distro". NOOA found
+    that the alternative named no check; a first draft named the binfmt entry and the `/etc/wsl.conf` setting, and
+    Codex showed that neither proves interop is off in the running distro. The alternative is removed: that route
+    retires only on the direct refusal, which is stricter than the merged text. A transition sentence now separates
+    the hazard description from the container guards. No guard or command list changed.*
 ## Coordination
 
 14. One coordinator at a time dispatches builders and merges. Other seats' task boards are their own
