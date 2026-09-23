@@ -121,6 +121,26 @@ The provenance rules themselves are `docs/agent-rules.md`.
     out of the Worker secret, so no token ever passes through a shell); the other half — ssh keys, the auditor
     host's secret files, `wrangler login` — retires only when harness transcripts redact secret-shaped strings
     at write time, a vendor change. Until both, some part of this rule stands.
+17. **Docker is root.** Docker Desktop's WSL integration is on (Jordan enabled it 2026-09-21 for the Omarchy
+    trial, evt_d387fa54) and `jordandrumiler` is in the `docker` group (`/var/run/docker.sock` is `root:docker`,
+    0660) — a group the Omarchy manual calls "effectively passwordless root". So every process in this account,
+    each agent pane, MCP server and hook included, can start a root container that bind-mounts any path —
+    `~/.retrace`, `~/.ssh`, the files that hold the owner token — and read it whatever its mode; a container
+    handed this shell's `RETRACE_*` environment can write to the live ledger; a bare `docker inspect` prints a
+    container's environment into the transcript; and a container with a restart policy comes back whenever
+    Docker Desktop starts. The NemoClaw sandbox did on 2026-09-21, its OpenClaw configuration recorded as holding
+    the retired shared token the laptop had already shredded (evt_e660b499; stopped on Jordan's go, evt_0f756347).
+    That is a fourth credential sink beside the three rule 16 names. So: Docker Desktop runs only while a
+    container task Jordan approved is in progress, and stays quit otherwise. An agent runs a `docker` command that
+    creates, changes, enters or removes a container (`run`, `create`, `start`, `exec`, `cp`, `update`, `stop`,
+    `rm`, `compose`) only on a signed go naming it; read-only queries (`ps`, `version`, `inspect --format` with
+    named fields, never a bare `inspect`) need none. A container never mounts `$HOME`, `~/.retrace`, `~/.ssh`,
+    `/mnt/c` or a repository checkout; never runs `--privileged`, with the Docker socket or with host namespaces;
+    never receives `RETRACE_*` or any other secret in its environment; uses images pinned by digest; and runs with
+    `--rm` or restart policy `no`.
+    → unnecessary when [specific]: Docker Desktop's WSL integration is off for this distro and `jordandrumiler` is
+    not in the `docker` group — Omarchy's default — so no process in this account reaches a Docker engine without
+    `sudo`.
 ## Coordination
 
 14. One coordinator at a time dispatches builders and merges. Other seats' task boards are their own
