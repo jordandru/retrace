@@ -1,11 +1,12 @@
 # Model claims: source, omission, verification — design note v1 (agent-rules 4, v2)
 
-**Status:** DRAFT v1, 2026-09-20, author claude-code (coordinator, `claude-fable-5-1`), on Jordan's instruction
+**Status:** DRAFT v1.1, 2026-09-23 (v1 2026-09-20), author claude-code (coordinator, `claude-fable-5-1`), on Jordan's instruction
 `evt_3f1973b9b8234267aeea0d238af89483`, from his rule audit `evt_376a8fc8ba4b48c3a38624f38b4335cf` ("true
 provenance means making a true claim and avoiding omission") and the coordinator's decision
 `evt_e7a318017ace472ab641e6940f7d5607`. **Class (a)** under agent-rules 12: it rewrites rule 4 and the
-model line of every identity file. Design gate: Codex (capped until 2026-09-21T21:05Z; a substitute is
-recorded if it goes before then) → NOOA (Nemotron, pinned) → Grok; the author does not sit. Companion to
+model line of every identity file. Design gate: Codex → NOOA (Nemotron, pinned) → Grok's seat; the author does not sit. Round 1 (head `45a44b0`):
+Codex rejected, one High and three Medium (`evt_107148b1745d483dace12bd8535e681a`); all four applied in place in this
+v1.1 (§8). Companion to
 `commit-trailer-consistency.md` (a claim is classified against evidence, never trusted), `effort-model-routing.md`
 §5 (`models.json`, self-reported effort) and `orchflows-integration.md` §7 (the transcript witness). **Not built.**
 Corrections before merge are made in place (Jordan, `evt_9dc98206`); after merge, appended (agent-rules 10).
@@ -18,8 +19,9 @@ option. It is not the truest, because a blank collapses at least four different 
 
 1. the harness exposes no identifier anywhere;
 2. the harness shows one (a status bar, a settings label) and the seat did not count that as "reporting";
-3. the harness reports one the seat has reason to distrust (Codex's runtime self-reported `gpt-5` while the
-   pane ran a newer model — `AGENTS.md` lines 10–12 record this as the reason Codex omits);
+3. the harness reports one the seat has reason to distrust (earlier Codex sessions wrote `gpt-5` under newer models,
+   which `AGENTS.md` lines 10–12 record as the reason Codex omits; which harness source produced `gpt-5` is not
+   recorded there — see §4.2);
 4. a producer defect dropped the field.
 
 A reader of the ledger cannot tell these apart, and the number is not small. Counted on 2026-09-20 ~10:00Z by
@@ -99,20 +101,47 @@ A new optional enum beside `actor.model`:
   source is, after adoption, a producer defect — which is what fact 4 in §1 always was.
 - **A displayed string is a report.** Grok records `Grok 4.6` with `harness-display`. Cursor already does.
   Aliasing to an id stays the registry's job (`models.json`), never the seat's (rule 4 unchanged on that).
+- **Pins resolve value and source together** (v1.1, Codex F2). Two places can replace the value a producer sent: a
+  credential that names a model (`router.ts:365–376`, `resolveActor`, which today copies only `display_name`,
+  `version` and a body `model` onto the pinned actor) and the MCP server's configured model
+  (`packages/mcp-server/src/index.ts:204–207`). Each is itself a source — a seventh value, `credential-pinned`, for the
+  first; `harness-config` for the second — and whichever replaces the value replaces the source **in the same
+  operation**, pushing the displaced `{value, source}` into `model_claims`. A value from one origin paired with a source
+  from another is never produced by a conforming resolver; a consumer that meets one (a `model_source` that cannot have
+  produced the value beside it) reports `source: inconsistent` and counts the event with the source-less ones. When
+  both `actor.model_source` and the interim `method.params.model_source` (§7 step 2) are present, the actor field is
+  the value of record and a disagreement is a producer defect that `doctor` lists.
 
-### 4.2 The Codex case, spelled out
+### 4.2 The Codex case, as far as the evidence goes
 
-Codex's runtime reported `gpt-5` while the pane showed `gpt-6-astra` (the defect `AGENTS.md` cites). Under this
-note the event carries `model: "gpt-6-astra"`, `model_source: "harness-display"`, and
-`model_claims: [{ "value": "gpt-5", "source": "harness-runtime", "note": "known defect — runtime reports the
-family, not the model; AGENTS.md" }]`. Two true statements replace one blank. When the runtime is fixed, the
-precedence flips back on its own and the note in `model_claims` stops appearing.
+`AGENTS.md` lines 10–12 record that earlier Codex sessions wrote `gpt-5` under newer models. They do **not** record
+which harness source produced `gpt-5`, what the pane displayed at the time, or that the mechanism was family-versus-model
+reporting (v1 asserted all three; Codex F3, `evt_107148b1`). So the origin of the historical `gpt-5` values is unknown and
+is not asserted here. The rule is stated conditionally: **if** a session observes two harness sources disagreeing — say a
+runtime string `X` and a displayed string `Y` — and records that observation in the session, the event carries
+`model: "Y"`, `model_source: "harness-display"`, and `model_claims: [{ "value": "X", "source": "harness-runtime",
+"note": "<what was observed, and where>" }]`, with the distrusted source in second place per §4.1. Two true statements
+replace one blank. Once the sources agree again the precedence applies unchanged and `model_claims` is empty. No
+historical event is re-attributed by this section.
 
 ### 4.3 Git trailers
 
 A fourth trailer, `Retrace-Model-Source: <value>`, parsed by `commit-actor.ts` beside `Retrace-Model`. When
-`Retrace-Model` is absent, `Retrace-Model-Source: none` is **required** on an agent commit; a commit with neither
-is classified `unresolved` by the trailer-consistency classifier exactly as a commit with no trailer is today.
+`Retrace-Model` is absent, `Retrace-Model-Source: none` is **required** on an agent commit.
+
+**Model completeness is a separate finding from contribution classification** (v1.1, Codex F1, `evt_107148b1`). The
+trailer-consistency classifier decides `supported` / `conflicting` / `unresolved` from the actor claim against pinned
+edit evidence alone (`classify.ts` `decideFromTable`, ~line 738), and `wouldWrite` (~line 701) withholds `conflicting`
+under every policy and `unresolved` only under `withhold`. Whether the commit names a model, and how, never enters that
+decision: a commit whose `Retrace-Actor` the evidence contradicts stays `conflicting` and withheld with or without a
+model trailer, and a supported actor stays `supported`. Beside the claim decision the hook and classifier record a
+**model completeness** result — `model_claim: complete` (both trailers) | `source-missing` (`Retrace-Model` without a
+source) | `none` (`Retrace-Model-Source: none`, no model) | `absent` (neither) — and `absent` is a producer defect after
+adoption, listed by `doctor` and counted by `status`, never a change of the actor's status. v1 said a commit with
+neither trailer "is classified `unresolved` … exactly as a commit with no trailer is today"; that was wrong twice: it
+would have let omission turn a `conflicting` (withheld) claim into an `unresolved` one that the `record` policy
+writes, and a commit with no trailer at all is not uniformly `unresolved` today (a human-authored commit with no
+agent evidence is `no_agent_evidence`, `classify.ts` ~line 745).
 `Co-Authored-By`-derived models get `model_source: "harness-config"` only when the harness wrote the line
 itself (VS Code, Copilot); a hand-written co-author line is `operator-stated`.
 
@@ -156,9 +185,13 @@ no config, no API" sentence becomes "the status bar is the source: `harness-disp
 - Nothing here says what model a vendor's API actually served. That is outside every harness's evidence.
 - **The 416 existing blank events are not bulk-amended.** Sealed events are corrected by amendment on evidence
   (rule 10), and for most of them the evidence is gone with the pane. They are reported as legacy (no source
-  recorded) and stay counted. Where evidence exists — Grok's 67 events all come from panes whose status bar
-  showed `Grok 4.6`, per the harness's own display — a single appended correction event citing the display and
-  the affected seq range is the honest maximum, and it is Jordan's seal (rule 14).
+  recorded) and stay counted. Where evidence exists **per event** — a Grok event whose session is identified and
+  whose display at the time is attested (a dated screenshot, a `sent`/`received` event quoting the status bar, or
+  Jordan's scoped operator statement naming the seq range he witnessed) — a single appended correction event citing
+  that evidence and the exact seq set is the honest maximum, and it is Jordan's seal (rule 14). v1 asserted that all
+  67 blank Grok events came from panes displaying `Grok 4.6`; the cited evidence is two examples in §1 and aggregate
+  counts, not a per-event mapping (Codex F4, `evt_107148b1`). The correction is restricted to the proven subset; the
+  rest remain legacy unknowns.
 - Effort already follows this pattern (`not_exposed`, `unset`); this note does not touch it.
 
 ## 6. Acceptance for v1
@@ -167,16 +200,24 @@ no config, no API" sentence becomes "the status bar is the source: `harness-disp
   none` — status reports zero source-less agent events after the adoption seq.
 - A2 Grok's next verdict carries `Grok 4.6` / `harness-display`, and doctor's `review model` check passes it
   through the registry alias.
-- A3 A Codex event under the known runtime defect carries both claims as in §4.2.
-- A4 An agent commit with no `Retrace-Model` and no `Retrace-Model-Source: none` is classified `unresolved`.
+- A3 A session that observes two harness sources disagreeing, and records the observation, carries both claims as in
+  §4.2; no historical `gpt-5` event is re-attributed.
+- A4 An agent commit with no `Retrace-Model` and no `Retrace-Model-Source: none` carries `model_claim: absent` and is
+  listed by `doctor`; its contribution status (`supported` / `conflicting` / `unresolved`) is unchanged by that.
 - A5 `status` shows the per-source split; the landing page's sentence about missing models names the causes.
 - A6 No sealed event is edited; corrections are appended (rule 10).
 
 ## 7. Build order
 
 1. This note (gate).
-2. Schema: `Actor.model_source` (`schema.ts`, class S in the routing rules) → Worker deploy on Jordan's go.
-   Until deployed, producers write `method.params.model_source` (round-trips today) and consumers read either.
+2. Schema: `Actor.model_source` (`schema.ts`, class S in the routing rules) **and, in the same deploy, the resolver**:
+   `resolveActor` (`router.ts:365–376`) copies `model_source` onto the pinned actor and, when the credential replaces
+   the model, sets `model_source: credential-pinned` and pushes the displaced pair into `method.params.model_claims`
+   (§4.1); the MCP server does the same for its configured model (`index.ts:204–207`, source `harness-config`). Until
+   that deploy, producers write `method.params.model_source` **and** `method.params.model_claimed` (the value the source
+   describes); a consumer reads the interim source only when `model_claimed` equals the sealed `actor.model`, and
+   otherwise reports `source: inconsistent` (§4.1) — because today the credential can replace the value while
+   `method.params` passes through unchanged (`router.ts:782–798`).
 3. Producers: MCP server (`RETRACE_ACTOR_MODEL_SOURCE`, and the caller's runtime source), git hook and
    `commit-actor.ts` (trailer), identity files, rule 4 text.
 4. Consumers: status split, doctor source-aware `review model`, landing/README sentence.
@@ -184,4 +225,19 @@ no config, no API" sentence becomes "the status bar is the source: `harness-disp
 
 ## 8. Dispositions
 
-_Review findings and their dispositions go here, in the order received, with event ids._
+Round 1, head `45a44b0`, Codex (`gpt-6-astra`, high; routing `evt_10ecb7f819c045b6899e8500f7f9c830`): **rejected**
+`evt_107148b1745d483dace12bd8535e681a`, 2026-09-23 22:47Z.
+
+1. **F1 High — keep model completeness separate from contribution classification.** Accepted. §4.3 and A4 rewritten:
+   the trailer decision is untouched by model trailers; a `model_claim` completeness result is recorded beside it; the
+   false "uniformly `unresolved` today" sentence withdrawn.
+2. **F2 Medium — bind the interim source to the model that survives actor resolution.** Accepted. §4.1 gains the
+   pins-resolve-together rule and the `credential-pinned` source; §7 step 2 puts the resolver in the schema deploy and
+   adds `model_claimed` to the interim carrier with an `inconsistent` outcome.
+3. **F3 Medium — do not promote an unexplained old model value into runtime evidence.** Accepted. §1 fact 3 and §4.2
+   rewritten as a conditional example; A3 no longer re-attributes history.
+4. **F4 Medium — require evidence covering the entire Grok correction set.** Accepted. §5 restricts the correction to
+   events with per-event display evidence or scoped operator testimony.
+
+Codex also recorded: class (a) correct; §2 citations match the base; displaying a model does not conflict with rule 6;
+the §4.6 wording still excludes guessing. Those are unchanged.
