@@ -65,6 +65,18 @@ Same bait, same shell, different outcomes. The difference is the receiving termi
 sender cannot see it. So rule 16's instruction — never hand Jordan a fenced code block to paste into a terminal
 — stands as written, and now has a second machine behind it.
 
+*Correction, 2026-09-23 (source: the design-gate reviews of #104 at `3ef4308`, which found the same claim in that
+pull request's wording: Codex `evt_0cd85333c70742b49c68fa8fcc247878`, NOOA `evt_b3ec941c412f461f968fd7f2fe96e809`,
+cursor-agent `evt_fa8ed501d5044995b62aa0db1094604c`; and the incident record `evt_6bfe5f181c1446579d20dfab4147bba0`).*
+The paragraph above claims more than was measured. "Same bait" means the same construct, a pasted markdown fence:
+the 02:28Z fences were a runbook message carrying `wrangler` and `shred` commands, and the trial's was the
+three-line test fence described above. Paste behaviour was measured only on foot (bracketed paste on; the paste
+was held inert). The 02:28Z terminal's paste mode was never recorded, so the two outcomes are not attributed to
+paste mode. The 02:28Z column's "on paste" row is inferred from the nested shells; the incident record does not say
+whether they opened on paste or after Enter. And "the sender cannot see it" should read: the sender does not
+control the receiving terminal and cannot know from the message alone how it will treat a paste. Rule 16's
+instruction stands on what was measured.
+
 **Hypothesis history, kept.** The trial seat first read the 02:28Z pattern (nested shells, bodies on `exit`) as
 programmatic injection into a pane, which would have meant rule 16 was aimed at the wrong actor. It labelled
 that a hypothesis and named the evidence that would settle it. Reading `evt_6bfe5f18` on 2026-09-22 falsified
