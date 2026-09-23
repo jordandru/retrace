@@ -114,9 +114,10 @@ The provenance rules themselves are `docs/agent-rules.md`.
     opened a nested shell, and each fenced body ran on `exit` — a `wrangler secret put` and a `shred` ran
     unintended. The same fence was measured on a second machine on 2026-09-22 (foot on Omarchy, bracketed paste
     on; prediction evt_80150188, result evt_ff7cbf84, `docs/measurements/omarchy-trial-2026-09-21.md` F1): inert on
-    paste, its body ran on Enter. Whether and when a pasted fence runs depends on the receiving terminal's paste
-    mode, which the sender cannot see, so the rule covers every terminal, including one where a paste looks
-    harmless. After any rotation every open pane is stale until restarted; check a pane with
+    paste, its body ran on Enter. So whether and when a pasted fence runs can depend on the receiving terminal —
+    in these two cases, on whether bracketed paste was on — which the sender does not control and cannot know from
+    the message alone; the rule covers every terminal, including one where a paste looks harmless. After any
+    rotation every open pane is stale until restarted; check a pane with
     `printf '%s' "$RETRACE_TOKEN" | sha256sum | cut -c1-12` (the value goes into the pipe; only a twelve-character
     hash prefix is printed) before running anything in it. The sinks this guards: agent transcripts capture pane
     output (owner token leaked 2026-09-16, evt_c21df545); a pane's environment keeps a rotated-away token; the
