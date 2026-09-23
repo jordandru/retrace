@@ -146,11 +146,16 @@ The provenance rules themselves are `docs/agent-rules.md`.
     startup file or a repository checkout. A container never runs `--privileged`, with the Docker socket or with
     host namespaces; never receives `RETRACE_*` or any other secret in its environment; uses images pinned by
     digest; and runs with `--rm` or restart policy `no`.
-    → unnecessary when [specific]: no Docker engine can be reached from this account without a password by either
-    route — the Linux socket (this distro's WSL integration off and `jordandrumiler` out of the `docker` group,
-    Omarchy's own default) and the Windows CLI through interop (Docker Desktop uninstalled, or interop disabled
-    for this distro) — verified from an agent pane by `docker version` and `docker.exe version` both failing
-    while Docker Desktop runs. Until that is verified, every guard above stands.
+    → unnecessary when [specific]: no Docker engine endpoint answers this account without a password, shown from
+    an agent pane while Docker Desktop runs, endpoint by endpoint, with each command naming its endpoint instead of
+    relying on the selected context. The Linux socket: `docker -H unix:///var/run/docker.sock version` fails with
+    permission denied or no such socket (this distro's WSL integration off and `jordandrumiler` out of the `docker`
+    group, Omarchy's own default). The Windows named pipe: `docker.exe -H npipe:////./pipe/docker_engine version`
+    is refused, or `docker.exe` cannot be launched because interop is disabled for this distro. Any TCP endpoint:
+    Docker Desktop's "Expose daemon on tcp://localhost:2375" is off and `docker -H tcp://localhost:2375 version`
+    is refused. Every other endpoint named by `docker context ls`, `docker.exe context ls`, `DOCKER_HOST` or
+    `DOCKER_CONTEXT` is checked the same way. An error about an unrelated endpoint, a missing client or a
+    configuration problem proves nothing. Until that evidence exists, every guard above stands.
 ## Coordination
 
 14. One coordinator at a time dispatches builders and merges. Other seats' task boards are their own
