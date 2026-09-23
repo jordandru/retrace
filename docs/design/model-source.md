@@ -1,12 +1,13 @@
 # Model claims: source, omission, verification — design note v1 (agent-rules 4, v2)
 
-**Status:** DRAFT v1.1, 2026-09-23 (v1 2026-09-20), author claude-code (coordinator, `claude-fable-5-1`), on Jordan's instruction
+**Status:** DRAFT v1.2, 2026-09-23 (v1 2026-09-20; v1.1 2026-09-23), author claude-code (coordinator, `claude-fable-5-1`), on Jordan's instruction
 `evt_3f1973b9b8234267aeea0d238af89483`, from his rule audit `evt_376a8fc8ba4b48c3a38624f38b4335cf` ("true
 provenance means making a true claim and avoiding omission") and the coordinator's decision
 `evt_e7a318017ace472ab641e6940f7d5607`. **Class (a)** under agent-rules 12: it rewrites rule 4 and the
 model line of every identity file. Design gate: Codex → NOOA (Nemotron, pinned) → Grok's seat; the author does not sit. Round 1 (head `45a44b0`):
-Codex rejected, one High and three Medium (`evt_107148b1745d483dace12bd8535e681a`); all four applied in place in this
-v1.1 (§8). Companion to
+Codex rejected, one High and three Medium (`evt_107148b1745d483dace12bd8535e681a`); all four applied in v1.1. Round 2
+(head `c261aab`): Codex approved, NOOA approved with one Medium and three Lows, the Grok seat (cursor-agent) rejected
+with one Medium and one Low; all applied in this v1.2 (§8). Companion to
 `commit-trailer-consistency.md` (a claim is classified against evidence, never trusted), `effort-model-routing.md`
 §5 (`models.json`, self-reported effort) and `orchflows-integration.md` §7 (the transcript witness). **Not built.**
 Corrections before merge are made in place (Jordan, `evt_9dc98206`); after merge, appended (agent-rules 10).
@@ -37,7 +38,8 @@ status window):
 | gemini | 7 | 2 | — |
 | cursor-agent, github-copilot, nooa, claude-cowork, openclaw | 856 | 0 | 0% |
 
-Two live examples of fact 2 and fact 3 from this very week. Grok Build's status bar reads `Grok 4.6 (xhigh)`
+Two live examples of fact 2 and fact 3 from this very week; whether the remaining 65 Grok blanks share this cause
+is unknown from the ledger (NOOA round 2, `evt_bc1cd0f7`). Grok Build's status bar reads `Grok 4.6 (xhigh)`
 and its verdicts on PR 73 and PR 90 carry no model (`evt_9bcc587e…`, `evt_08be04d4…`): a harness string
 existed and was not recorded. This session's own harness hands the coordinator `claude-fable-5-1` at runtime
 while its settings file names `claude-fable-5-1[1m]`, and the previous coordinator pane recorded
@@ -65,7 +67,8 @@ value came from.
   `models.json` aliases display strings to ids (`"Grok 4.6"`, `"GPT-5.6 Sol"`, `"claude-opus-4.8"`).
 - **Identity files disagree.** `.cursor/rules/retrace-provenance.mdc:13–16` says report Cursor's display
   string verbatim "even when it is a display name"; `AGENTS.md:10–12` and `.github/copilot-instructions.md:10`
-  say omit; `GROK.md` allows "the literal string in front of you" and Grok omitted anyway.
+  say omit; `GROK.md` allows "the literal string in front of you" and Grok omitted anyway. Whether the 65 other blank
+  Grok events had the same display is unverified from the ledger.
 
 ## 3. Principle
 
@@ -99,8 +102,15 @@ A new optional enum beside `actor.model`:
   field round-trips today, so it can be used before the schema deploys.
 - **Omission becomes a fact.** An agent event with no `model` carries `model_source: "none"`. A blank with no
   source is, after adoption, a producer defect — which is what fact 4 in §1 always was.
-- **A displayed string is a report.** Grok records `Grok 4.6` with `harness-display`. Cursor already does.
-  Aliasing to an id stays the registry's job (`models.json`), never the seat's (rule 4 unchanged on that).
+- **A displayed string is a report, recorded whole.** Grok records exactly what its status bar shows — `Grok 4.6
+  (xhigh)`, effort suffix included — with `harness-display`; Cursor already records its display name. The seat never
+  trims, splits or normalises the string (rule 4 unchanged on that). Splitting it is the registry's job: `models.json`
+  gains, per model, an optional `display_pattern` — for `grok-4.6`, `^Grok 4\.6(?: \((low|medium|high|xhigh)\))?$` —
+  that `doctor` and the routing skill apply after the exact-alias lookup; a captured level fills `reasoning_effort`
+  only when the event reports none, and a value the event does report wins. A display string that matches neither an
+  alias nor a pattern is unregistered and `doctor` warns as it does today. (v1.2, cursor-agent F1 in the Grok seat,
+  `evt_daa3354bdc984a978edacfae868e333a`: v1.1's A2 asked for `Grok 4.6`, which the registry aliases, while §4.6 asked
+  for the exact display, and a pane showing `Grok 4.6 (xhigh)` could not do both.)
 - **Pins resolve value and source together** (v1.1, Codex F2). Two places can replace the value a producer sent: a
   credential that names a model (`router.ts:365–376`, `resolveActor`, which today copies only `display_name`,
   `version` and a body `model` onto the pinned actor) and the MCP server's configured model
@@ -159,7 +169,9 @@ itself (VS Code, Copilot); a hand-written co-author line is `operator-stated`.
 
 The credential cannot verify the model (`router.ts:370`), and the server never will. What can: the host's own
 record. Orchflows' `history inspect` (pinned at `6eb8af4`, `orchflows-integration.md` §7) reads model metadata
-from Claude Code's and Codex's native transcripts, children included. A local doctor advisory compares the
+from Claude Code's native transcript, children included; for Codex that note records that delegation bodies are
+"encrypted and reported `unavailable`", so the Codex witness is limited to whatever `inspect` exposes for the host
+session and is unverified until trialed (NOOA round 2, `evt_bc1cd0f7`, finding 4). A local doctor advisory compares the
 event's `model` with the transcript's, records `method.params.model_witness: { "source": "native-transcript",
 "match": true|false, "value": "<what the transcript says>" }` on an appended, not amended, event, and never
 uploads the transcript (a credential sink, `evt_c21df545`). Where no transcript exists (Grok Build, Cursor),
@@ -170,7 +182,8 @@ the claim stays a claim and the ledger says so.
 > **Report the model and how you know it.** `actor.model` is the exact string your harness reports, configures
 > or displays for the running session — not shortened, not normalised, not a nicer name — and
 > `actor.model_source` says which of those it was (`harness-runtime`, `harness-config`, `harness-display`,
-> `operator-stated`). A harness label you can see counts as a report. A source you have documented reason to
+> `credential-pinned`, `operator-stated`; a harness source outranks `operator-stated`, which outranks the model's
+> own statement). A harness label you can see counts as a report. A source you have documented reason to
 > distrust is recorded as a second claim, never as the first. When nothing is available, `model` is absent and
 > `model_source` is `none`: the unknown is recorded, never silent. The model's own statement about itself is
 > never the sole source. Aliasing spellings to ids is the routing registry's job, not yours.
@@ -198,8 +211,8 @@ no config, no API" sentence becomes "the status bar is the source: `harness-disp
 
 - A1 Every agent event sealed after adoption carries either a `model` with a `model_source`, or `model_source:
   none` — status reports zero source-less agent events after the adoption seq.
-- A2 Grok's next verdict carries `Grok 4.6` / `harness-display`, and doctor's `review model` check passes it
-  through the registry alias.
+- A2 Grok's next verdict carries its exact status-bar string (e.g. `Grok 4.6 (xhigh)`) with `harness-display`, and
+  doctor's `review model` check passes it through the registry's alias or `display_pattern` for `grok-4.6`.
 - A3 A session that observes two harness sources disagreeing, and records the observation, carries both claims as in
   §4.2; no historical `gpt-5` event is re-attributed.
 - A4 An agent commit with no `Retrace-Model` and no `Retrace-Model-Source: none` carries `model_claim: absent` and is
@@ -220,7 +233,9 @@ no config, no API" sentence becomes "the status bar is the source: `harness-disp
    `method.params` passes through unchanged (`router.ts:782–798`).
 3. Producers: MCP server (`RETRACE_ACTOR_MODEL_SOURCE`, and the caller's runtime source), git hook and
    `commit-actor.ts` (trailer), identity files, rule 4 text.
-4. Consumers: status split, doctor source-aware `review model`, landing/README sentence.
+4. Consumers: status split, doctor source-aware `review model` and a listing of `model_claim: absent` commits as
+   producer defects (§4.3), `models.json` `display_pattern` (a class-S path under the routing skill), landing/README
+   sentence.
 5. Witness (§4.5), after the orchflows note's §9 answer or a by-hand read of `history inspect` output.
 
 ## 8. Dispositions
@@ -241,3 +256,27 @@ Round 1, head `45a44b0`, Codex (`gpt-6-astra`, high; routing `evt_10ecb7f819c045
 
 Codex also recorded: class (a) correct; §2 citations match the base; displaying a model does not conflict with rule 6;
 the §4.6 wording still excludes guessing. Those are unchanged.
+
+Round 2, head `c261aab` (v1.1). Codex re-check (medium; routing `evt_19e239af`): **approved**
+`evt_f58f5e90802540fe9b1fff651a3ae757`, F1–F4 resolved, no new findings. Grok seat, held by cursor-agent on Jordan's
+reassignment `evt_c4695784` (Cursor Grok 4.6, high; routing `evt_60806132`): **rejected**
+`evt_daa3354bdc984a978edacfae868e333a`, 2026-09-23 23:14Z.
+
+5. **F1 Medium — a Grok pane cannot jointly satisfy §4.6 and A2.** Accepted. §4.1's display bullet now records the
+   string whole and gives the registry a `display_pattern` that yields the effort level; A2 restated; §7 step 4 lists
+   the registry change.
+6. **F2 Low — the boxed §4.6 omits `credential-pinned`.** Accepted; added.
+
+cursor-agent also measured: §2 citations match; `decideFromTable` and `wouldWrite` never read the model; the §1 table is
+a dated snapshot (live 501 of 4,414 without a model at review time); class (a) correct.
+
+NOOA (Nemotron 3 Ultra, witness seat; routing `evt_f95bc45c`): **approved** `evt_bc1cd0f73d0449abb601822cc1eff095`,
+2026-09-23 23:41Z, with four findings it called non-blocking; all applied because a Medium left standing would block
+under team-roles rule 8.
+
+7. **Medium — §1/§2 present the two Grok examples as if they characterise all 67 blanks.** Accepted; the two
+   qualifying sentences NOOA proposed are added.
+8. **Low — where `operator-stated` sits is in §4.1's precedence but not in the §4.6 rule text.** Accepted; one clause.
+9. **Low — §7 step 4 did not name doctor's listing of `model_claim: absent`.** Accepted; added.
+10. **Low — §4.5 claimed `history inspect` reads Codex's native transcripts.** Accepted: the cited orchflows note itself
+    records that Codex delegation bodies are encrypted and reported unavailable; §4.5 now says so.
