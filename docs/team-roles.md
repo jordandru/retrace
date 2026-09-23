@@ -91,7 +91,7 @@ evt_a742fc51), so "reviewer when routed" is now part of that seat.
 7. **Honest self-report.** If a runtime does not expose its model identifier, omit `actor.model`; never
    pin a value that overrides the real one.
 8. **Severity governs the gate.** (Added 2026-09-23 on Jordan's signed go, evt_da1f333b1fb547018324f08cc7ccd25a;
-   round 2 after Codex's review evt_d39789d27e9443a18c6114d8a875adaf.) Every finding in a verdict carries a
+   round 2 after Codex's review evt_d39789d27e9443a18c6114d8a875adaf; round 3 after NOOA's evt_42a447523fcf44ed97ea78660884896c.) Every finding in a verdict carries a
    severity, and the severity is a claim about consequence, not a label of convenience. **High** and **Medium**
    name what a reader would wrongly believe or what capability is given away, with the evidence. **Low** is a
    finding that alleges neither: wording, placement, a citation one hop off, a check that could be stated more
@@ -99,18 +99,21 @@ evt_a742fc51), so "reviewer when routed" is now part of that seat.
    rejection whose findings are all Low does not block:** the merger records it as a rejection with its Lows,
    disposes of each Low in the gate check as applied or declined with a reason, and merges on the other seats'
    approvals. Two guards on that. (a) The seat's verdict and its labels stay on the record as written; nothing is
-   re-labelled, and any calibration note the merger makes is recorded separately, in the gate check. (b) When a
-   finding labelled Low nevertheless alleges a material wrong belief or a capability given away (an incomplete
-   security check, a weakened condition), the merger does not treat it as routine: it is resolved on the record
-   with evidence, or escalated to Jordan, before the merge, whatever its label. A seat that means to block states a
-   Medium or High. Two limits on re-rounds, because a witness that reviews against the packet can add a new
+   re-labelled, and any calibration note the merger makes is recorded separately, in the gate check. (b) A Low
+   whose text alleges, or could be read as alleging, a wrong belief or a capability given away (it names a security
+   check or a condition, or says missed, incomplete, weakened, unverified, not checked) is not routine: before the
+   merge the gate check quotes the finding, records the merger's own reading of it, and either resolves it with
+   evidence or escalates it to Jordan. The seat's label stays; the gate check carries the merger's reading, so an
+   auditor can compare the two. A seat that means to block states a Medium or High. Two limits on re-rounds, because a witness that reviews against the packet can add a new
    finding each round without end. (i) A re-check is scoped to the diff since that seat's last verdict and the
    author's dispositions of its findings. A newly found Medium or High is in scope anywhere in the reviewed
-   change, previously approved text included: it is stated with its evidence and with what changed in the seat's
-   assessment, and its severity is never lowered because the text was visible before. A new Low on text the seat
-   already approved is recorded as new. (ii) The coordinator sets a stop rule before every re-round (which
-   findings, if re-raised, end the exchange), records it on the routing event, evaluates it in the gate check, and
-   when it is met the question goes to Jordan rather than to another round. A finding that another seat has
+   change. On text the seat previously passed without a finding, it is stated with its evidence. On text where the
+   seat previously had a finding, it also states what changed in the seat's assessment, and its severity is never
+   lowered because the text was visible before. A new Low on text the seat already passed is recorded as new.
+   (ii) The coordinator sets a stop rule before every re-round: a concrete predicate the gate check can evaluate,
+   named findings or a count ("F1 or F3 re-raised", "three or more findings re-raised", "a rejection whose
+   findings are all Low"), recorded on the routing event. The gate check records the evaluation, and when the
+   predicate is met the question goes to Jordan rather than to another round. A finding that another seat has
    refuted with a command and its output is closed unless the seat re-raising it answers that output. Evidence:
    PR 90 (repeated rounds and calibration), and PR 105, where the witness went from approved with one Low (round 4,
    evt_a3220a2a) to rejected with four Lows (round 5, evt_2efcba05) to rejected with five Lows (round 6,
