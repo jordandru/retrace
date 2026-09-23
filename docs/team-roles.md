@@ -90,6 +90,25 @@ evt_a742fc51), so "reviewer when routed" is now part of that seat.
    A harness that must read another seat's identity file does not join (the OpenCode decision, PR 19).
 7. **Honest self-report.** If a runtime does not expose its model identifier, omit `actor.model`; never
    pin a value that overrides the real one.
+8. **Severity governs the gate.** (Added 2026-09-23 on Jordan's signed go, evt_da1f333b1fb547018324f08cc7ccd25a.)
+   Every finding in a verdict carries a severity, and the verdict's line says what blocks. A finding blocks a
+   merge only when it is Medium or High and names what a reader would wrongly believe or what capability is given
+   away. **A rejection whose findings are all Low does not block:** the merger records it as a rejection with its
+   Lows, disposes of each Low in the gate check as applied or declined with a reason, and merges on the other
+   seats' approvals. The seat's rejection stays on the record as written; nothing is re-labelled. A seat that
+   means to block states a Medium or High. Two limits on re-rounds, because a witness that reviews against the
+   packet can add a new Low each round without end: (i) a re-check is scoped to the diff since that seat's last
+   verdict and the author's dispositions of its findings, so a new finding on text the same seat already approved
+   is recorded as new and is Low unless it says why it was not visible before; (ii) the coordinator sets a stop
+   rule before every re-round (which findings, if re-raised, end the exchange), and when it is met the question
+   goes to Jordan rather than to another round. A finding that another seat has refuted with a command and output
+   is closed unless the seat re-raising it answers that output. Evidence: PR 90, and PR 105, where the witness went
+   from approved with one Low (round 4, evt_a3220a2a) to rejected with four Lows (round 5, evt_2efcba05) to
+   rejected with five Lows (round 6, evt_eeeadc50), re-raising two points the other seats had refuted in `/tmp`;
+   Jordan overruled the Low-only rejection and merged (evt_e0ba0951, gate check evt_6dbc7701). This rule makes
+   that decision the standing one so the merger does not need an owner decision for each Low-only rejection.
+   Agent-rules 11 is unchanged: the verdict of record is still the ledger event, approved or rejected; this rule
+   says how the merger counts it.
 
 ## How to change this
 
