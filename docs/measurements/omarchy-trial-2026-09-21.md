@@ -13,7 +13,8 @@ to the coordinator as `evt_dba37fcf14ac4c8f9b7d155e46f3c53f` and verified on rec
 (`evt_3849708ade194d67960b05b079fa8a71`). This file is the coordinator's filing of that report, written by
 `claude-code` on `claude-opus-5-5[1m]` on Jordan's instruction `evt_632f430f326c41029947e20809a3ac1e`.
 **Class (b)** under agent-rules 12: it records what was measured and governs nothing. The rule change it
-supports travels in its own class (a) pull request.
+supports travels in its own class (a) pull request. Round 2 (2026-09-23) narrows the isolation claim after
+Codex's review `evt_0e2707c8db4949e39d6c0ec9ea504243`.
 
 ## The box
 
@@ -24,9 +25,13 @@ supports travels in its own class (a) pull request.
 - TryOmarchy.exe was verified before it ran: sha256 matching the upstream release (`bef22fda…c6dd`), Authenticode
   signature valid, signed by an individual developer's identity-verified code-signing certificate that matches
   the top contributor of `omacom/try-omarchy-windows`.
-- **Isolation was proved before any measurement** (`evt_1dcebc024f454cfdbe5d86ccea817ca5`): zero `RETRACE_*`
-  variables and no `~/.retrace` in the guest. No credential, token or key entered the guest, and no Worker was
-  contacted from it.
+- **Isolation checks, before any measurement** (`evt_1dcebc024f454cfdbe5d86ccea817ca5`): zero `RETRACE_*`
+  variables in the guest's environment and no `~/.retrace` directory. No credential, token or key was
+  deliberately provisioned into the guest, and no Retrace client was installed in it (measurement 1 never ran).
+  Those two checks do not show that no secret reached the guest. F2 and F3 below measured an automatic clipboard
+  and file channel from the Windows host, and the guest's clipboard history was never searched for secrets, so
+  the absence of credentials in the guest is unmeasured. (The trial seat recorded these checks as "isolation
+  proved"; narrowed on filing review, 2026-09-23.)
 - For anyone reproducing: foot reports `TERM=xterm-256color`, so `TERM` misidentifies the terminal;
   `ps -o comm= -p $PPID` names it. `ls` is aliased to eza in the interactive shell.
 
