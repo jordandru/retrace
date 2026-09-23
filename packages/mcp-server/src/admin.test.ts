@@ -274,6 +274,37 @@ test("add-agent nooa: unlike openclaw, gets a producer key and a stdio retrace-m
   assert.doesNotMatch(doc, /does not claim producer signatures/);
 });
 
+test("add-agent opencode: OpenCode's own mcp shape, a producer key, and the seat launcher", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "retrace-admin-opencode-"));
+  const file = join(dir, "creds.json");
+  const onboarding = join(dir, "opencode.md");
+  const keysDir = join(dir, "producer-keys");
+  appendCredentials(file, [], planCredentials(spec, fakeRand()));
+
+  const lines: string[] = [];
+  const argv = ["add-agent", "acme-app", "--member", "alice@acme.dev", "--harness", "opencode", "--url", "https://retrace.example", "--credentials-file", file, "--producer-keys-dir", keysDir, "--out", onboarding];
+  assert.equal(await main(argv, {}, (line) => lines.push(line)), 0);
+  const added = readCredentialsFile(file).at(-1)!;
+  assert.deepEqual(added.actor, { type: "agent", id: "opencode", on_behalf_of: "alice@acme.dev" });
+  assert.deepEqual([added.trust, added.projects], ["pinned", ["acme-app"]]);
+  assert.equal(added.require_signature, true, "a pinned seat signs its own events");
+  assert.ok(added.producer_key_file && existsSync(added.producer_key_file));
+
+  const doc = readFileSync(onboarding, "utf8");
+  // OpenCode reads `mcp.<name>` with an argv `command` and `environment`; the generic
+  // command/args/env shape does not work there (Codex review of PR 19).
+  const fences = [...doc.matchAll(/```json\n([\s\S]*?)```/g)].map((m) => m[1]);
+  const config = JSON.parse(fences.find((f) => f.includes('"mcp"'))!);
+  assert.equal(config.mcp.retrace.type, "local");
+  assert.ok(Array.isArray(config.mcp.retrace.command));
+  assert.equal(config.mcp.retrace.environment.RETRACE_ACTOR, "opencode");
+  assert.ok(config.mcp.retrace.environment.RETRACE_PRODUCER_KEY_FILE);
+  assert.equal("args" in config.mcp.retrace, false);
+  assert.equal("env" in config.mcp.retrace, false);
+  assert.match(doc, /scripts\/opencode-seat\.sh/);
+  assert.match(doc, /docs\/agents\/OPENCODE\.md/);
+});
+
 test("add-agent validates a single member/harness and requires an existing project", async () => {
   const dir = mkdtempSync(join(tmpdir(), "retrace-admin-agent-invalid-"));
   const file = join(dir, "creds.json");

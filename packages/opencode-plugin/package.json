@@ -1,0 +1,15 @@
+{
+  "name": "@retrace-dev/opencode-plugin",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Retrace identity guard for the OpenCode seat: refuses a session whose instructions are not this seat's",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "engines": { "node": ">=20" },
+  "license": "Apache-2.0",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "node --test dist/*.test.js"
+  }
+}
