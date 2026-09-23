@@ -146,8 +146,9 @@ The provenance rules themselves are `docs/agent-rules.md`.
     task, named in the go and holding nothing secret: never an ancestor of it (`/`, `/home`, `$HOME`, `/mnt`,
     `/mnt/c`) and never a path that resolves, through a symlink or alias, into `~/.retrace`, `~/.ssh`, a shell
     startup file or a repository checkout. Before the container starts, the agent runs `realpath` on each mount
-    source and on every symlink inside it (`find <source> -type l -exec realpath {} +`) and confirms that none
-    resolves to or under `~/.retrace`, `~/.ssh`, a shell startup file or a repository checkout. A container never
+    source and on every symlink inside the directory it resolves to
+    (`find "$(realpath <source>)" -type l -exec realpath {} +`) and confirms that none resolves to or under
+    `~/.retrace`, `~/.ssh`, a shell startup file or a repository checkout. A container never
     runs `--privileged`, with the Docker socket or with host namespaces; never receives `RETRACE_*` or any other
     secret in its environment; uses images pinned by digest; and runs with `--rm` or restart policy `no`.
     → unnecessary when [specific]: no Docker engine endpoint answers this account without a password, shown from
