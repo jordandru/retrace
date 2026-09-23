@@ -155,7 +155,8 @@ The provenance rules themselves are `docs/agent-rules.md`.
     startup file or a repository checkout. Before the container starts, the agent runs `realpath` on each mount
     source and on every symlink inside the directory it resolves to
     (`find "$(realpath <source>)" -type l -exec realpath {} +`) and confirms that none resolves to or under
-    `~/.retrace`, `~/.ssh`, a shell startup file or a repository checkout. A container never
+    `~/.retrace`, `~/.ssh`, a shell startup file or a repository checkout. The hazard paragraph above says what a
+    container *can* do from this account; none of it is permitted. A container never
     runs `--privileged`, with the Docker socket or with host namespaces; never receives `RETRACE_*` or any other
     secret in its environment; uses images pinned by digest; and runs with `--rm` or restart policy `no`.
     → unnecessary when [specific]: no Docker engine endpoint answers this account without a password, shown from
@@ -164,13 +165,21 @@ The provenance rules themselves are `docs/agent-rules.md`.
     `docker -H unix:///var/run/docker.sock version` fails with
     permission denied or no such socket (this distro's WSL integration off and `jordandrumiler` out of the `docker`
     group, Omarchy's own default). The Windows named pipe: `docker.exe -H npipe:////./pipe/docker_engine version`
-    is refused, or `docker.exe` cannot be launched because interop is disabled for this distro. Any TCP endpoint:
+    is refused, or `docker.exe` cannot be launched because interop is disabled for this distro, which is shown by
+    `head -1 /proc/sys/fs/binfmt_misc/WSLInterop` printing `disabled` (or that entry being absent) together with
+    `[interop] enabled=false` in `/etc/wsl.conf` (on 2026-09-23 this distro's entry printed `enabled` and its
+    `/etc/wsl.conf` had no `[interop]` section, so interop was on). Any TCP endpoint:
     Docker Desktop's "Expose daemon on tcp://localhost:2375" is off and `docker -H tcp://localhost:2375 version`
     is refused. Every other endpoint named by `docker context ls`, `docker.exe context ls`, `DOCKER_HOST` or
     `DOCKER_CONTEXT` is checked the same way. An error about an unrelated endpoint, a missing client or a
     configuration problem proves nothing. These checks are the evidence the condition requires, not a proof of it:
     an endpoint found later that they miss means the condition was never met. Until that evidence exists, every
     guard above stands.
+    *Correction, 2026-09-23 (source: NOOA's round-6 verdict on #105, `evt_eeeadc50359d4b60af073adc2dc765bc`,
+    findings 4 and 5, recorded as not applied at the merge in the gate check `evt_6dbc7701d5f449f5a9a0321cfeceb037`;
+    applied on Jordan's signed go `evt_a8c1272ccbdc4b1fa58dcff0a548e1f2`): the retirement condition's
+    "interop is disabled" alternative now names its check, and a transition sentence now separates the hazard
+    description from the container guards. No guard, command list or condition changed.*
 ## Coordination
 
 14. One coordinator at a time dispatches builders and merges. Other seats' task boards are their own
