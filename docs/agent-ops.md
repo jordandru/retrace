@@ -126,6 +126,51 @@ The provenance rules themselves are `docs/agent-rules.md`.
     out of the Worker secret, so no token ever passes through a shell); the other half — ssh keys, the auditor
     host's secret files, `wrangler login` — retires only when harness transcripts redact secret-shaped strings
     at write time, a vendor change. Until both, some part of this rule stands.
+17. **Docker is root.** Two routes reach Docker Desktop's engine from this account without a password. The Linux
+    socket: this distro's WSL integration is on (Jordan enabled it 2026-09-21 for the Omarchy trial,
+    evt_d387fa54) and `jordandrumiler` is in the `docker` group (`/var/run/docker.sock` is `root:docker`, 0660), a
+    group the Omarchy manual calls "effectively passwordless root". And the Windows CLI: `docker.exe` is on the
+    Windows PATH (evt_d387fa54), WSL interop lets any process here launch it, and Docker documents it reaching the
+    same engine without distro integration (a documented route, not tested here). Whenever the engine runs, every
+    process in this account, each agent pane, MCP server and hook included, can start a root container that
+    bind-mounts `~/.retrace`, `~/.ssh` or the files that hold the owner token and reads them whatever their mode;
+    a container handed this shell's `RETRACE_*` environment holds the owner token, which may append events to the
+    live ledger under any actor (`packages/core/src/router.ts`: an owner write keeps the actor as sent, stamped
+    `sealed_by` owner); `docker inspect` without `--format` prints a container's environment into the transcript;
+    and a container with a restart policy comes back whenever Docker Desktop starts. The NemoClaw sandbox did on
+    2026-09-21, its OpenClaw configuration recorded as holding
+    the retired shared token the laptop had already shredded (evt_e660b499; stopped on Jordan's go, evt_0f756347).
+    That is a fourth credential sink beside the three rule 16 names. So: Docker Desktop runs only while a
+    container task Jordan approved is in progress, and stays quit otherwise. The only `docker` or `docker.exe`
+    commands an agent runs without a go are three reads: `docker version`; `docker ps` with a `--format` naming
+    only `.Names`, `.Status` and `.Image`; and `docker inspect --format` naming only `.Name`, `.State.Status`,
+    `.HostConfig.RestartPolicy.Name`, `len .Mounts` and `len .HostConfig.Binds`. Every other `docker` or
+    `docker.exe` command needs a signed go naming the exact command and its arguments: `run`, `create`, `start`,
+    `exec`, `cp`, `logs`, `update`, `stop`, `rm`, `compose`, `inspect` without `--format`, and `inspect --format`
+    naming any field outside that list (`.Config` holds the environment, command and labels). Any of them that
+    passes a secret in the environment, mounts a credential file or writes to the ledger must also satisfy rules
+    13 and 16. A container's only bind mount is a scratch directory created for that
+    task, named in the go and holding nothing secret: never an ancestor of it (`/`, `/home`, `$HOME`, `/mnt`,
+    `/mnt/c`) and never a path that resolves, through a symlink or alias, into `~/.retrace`, `~/.ssh`, a shell
+    startup file or a repository checkout. Before the container starts, the agent runs `realpath` on each mount
+    source and on every symlink inside the directory it resolves to
+    (`find "$(realpath <source>)" -type l -exec realpath {} +`) and confirms that none resolves to or under
+    `~/.retrace`, `~/.ssh`, a shell startup file or a repository checkout. A container never
+    runs `--privileged`, with the Docker socket or with host namespaces; never receives `RETRACE_*` or any other
+    secret in its environment; uses images pinned by digest; and runs with `--rm` or restart policy `no`.
+    → unnecessary when [specific]: no Docker engine endpoint answers this account without a password, shown from
+    a pane running as `jordandrumiler` (the account every seat runs under) while Docker Desktop runs, endpoint by
+    endpoint, with each command naming its endpoint instead of relying on the selected context. The Linux socket:
+    `docker -H unix:///var/run/docker.sock version` fails with
+    permission denied or no such socket (this distro's WSL integration off and `jordandrumiler` out of the `docker`
+    group, Omarchy's own default). The Windows named pipe: `docker.exe -H npipe:////./pipe/docker_engine version`
+    is refused, or `docker.exe` cannot be launched because interop is disabled for this distro. Any TCP endpoint:
+    Docker Desktop's "Expose daemon on tcp://localhost:2375" is off and `docker -H tcp://localhost:2375 version`
+    is refused. Every other endpoint named by `docker context ls`, `docker.exe context ls`, `DOCKER_HOST` or
+    `DOCKER_CONTEXT` is checked the same way. An error about an unrelated endpoint, a missing client or a
+    configuration problem proves nothing. These checks are the evidence the condition requires, not a proof of it:
+    an endpoint found later that they miss means the condition was never met. Until that evidence exists, every
+    guard above stands.
 ## Coordination
 
 14. One coordinator at a time dispatches builders and merges. Other seats' task boards are their own
