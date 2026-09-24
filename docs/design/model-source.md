@@ -114,11 +114,13 @@ A new optional enum beside `actor.model`:
   pins bullet below): after the step-2 deploy, second claims live on the actor, `actor.model_claims: [{ "value",
   "source", "note"? }]`, a schema field added in that deploy. `method.params.model_claims` stays what it was chosen
   for — the interim carrier that round-trips before the deploy — and a consumer reads both, the actor field first.*
-  *As built (v1.5; PR 114 `84095ed`; sources: Codex `evt_7388157112ac4057a22af1c01d916851`, claude-code
+  *As built (v1.5; PR 114 `84095ed`; sources: Codex round 1 `evt_b156f9428eba43208d0d823d6d495fe9` (design
+  assessment), Codex round 3 `evt_7388157112ac4057a22af1c01d916851` (approval, no findings), claude-code
   `evt_9bff330286f34259b47806c57e3ce683`): a claim is `{ value, source?, note? }` with `value` non-empty and `source`
   **optional** — a displaced legacy value that carried no `model_source` is recorded without one rather than with an
-  invented one (Codex: "displaced legacy values must not acquire an invented source"); a consumer counts a source-less
-  claim as legacy.*
+  invented one (Codex round 1: "displaced legacy values must not acquire an invented source"); a consumer counts a
+  source-less claim as legacy. (v1.5.1: the quotation is cited to the round-1 verdict where it appears; round 3 records the
+  approval — NOOA Low 1 `evt_d4eda292`, Codex Low 1 `evt_1c722c8d`.)*
 - **Omission becomes a fact.** An agent event with no `model` carries `model_source: "none"`. A blank with no
   source is, after adoption, a producer defect — which is what fact 4 in §1 always was.
 - **A displayed string is a report, recorded whole.** Grok records exactly what its status bar shows — `Grok 4.6
@@ -172,7 +174,9 @@ A new optional enum beside `actor.model`:
   older Worker (`doctor.ts` `missingSchema`). **Known limit (Low, claude-code `evt_9bff3302`):** an empty-string
   `model` paired with a non-`none` source passes the presence-based refinement because the string is defined, so an
   unpinned path can store `model: ""` with a source; no wrong belief follows and pinned paths already treat `""` as
-  absent. Step 3 treats `""` as absent in the refinement or the resolvers when producers begin sending sources.
+  absent (`packages/core/src/router.ts:385` `body.model !== ""`; `packages/mcp-server/src/index.ts:205`
+  `callerActor.model !== ""`, both at `84095ed`; cited in v1.5.1 for NOOA Low 4). Step 3 treats `""` as absent in the
+  refinement or the resolvers when producers begin sending sources.
 
 ### 4.2 The Codex case, as far as the evidence goes
 
@@ -299,8 +303,10 @@ no config, no API" sentence becomes "the status bar is the source: `harness-disp
    the `schemaSurface` actor group. Doctor's deployment-schema check failed by design from the first commit until the
    deploy (a build ahead of the Worker; owner exception `evt_a8c6b96b3fe54db18cf95ae287d472c7`, precedent 2026-09-10);
    issue #113 asks doctor to record that acknowledged gap itself instead of relying on a human to remember. Interim
-   `method.params` carrier: no producer used it before the deploy; it stays defined for producers that predate the
-   schema (§4.1).*
+   `method.params` carrier: no repository producer implemented it, and a ledger text search for `model_claimed` on
+   2026-09-24 05:19Z returned only this note's own edit events (Codex's own repository and ledger searches found the
+   same, `evt_1c722c8d`); that is a prose search, not a field-level census of historical `method.params`. It stays defined
+   for producers that predate the schema (§4.1). (v1.5.1 wording, for NOOA Low 2 and Codex Low 2.)*
 3. Producers: MCP server (`RETRACE_ACTOR_MODEL_SOURCE`, and the caller's runtime source), git hook and
    `commit-actor.ts` (trailer), identity files, rule 4 text.
 4. Consumers: status split, doctor source-aware `review model` and a listing of `model_claim: absent` commits as
