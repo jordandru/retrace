@@ -20,6 +20,12 @@ test("doctor: schema comparison names only fields the deployment would drop", ()
   assert.deepEqual(missingSchema({ ...local, future: ["x"] }), []);
 });
 
+test("doctor: missingSchema reports actor.model_source when the remote surface lacks the actor group", () => {
+  const local = schemaSurface();
+  const { actor: _drop, ...remote } = structuredClone(local);
+  assert.ok(missingSchema(remote).includes("actor.model_source"));
+});
+
 test("doctor: review effort warns only when the model supports effort, routing is absent, or routed and run effort differ", () => {
   const routing = commitEvt({
     id: "evt_route", seq: 1, action: "other", action_detail: "routed",

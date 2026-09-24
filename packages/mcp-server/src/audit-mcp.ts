@@ -9,6 +9,16 @@ import { McpServer, type CallToolResult } from "@modelcontextprotocol/server";
 import { markUntrustedText } from "@retrace-dev/core";
 import { z } from "zod";
 
+const ModelSource = z.enum([
+  "harness-runtime",
+  "harness-config",
+  "harness-display",
+  "credential-pinned",
+  "operator-stated",
+  "self-report",
+  "none",
+]);
+
 export const AuditActor = z.object({
   type: z.enum(["human", "agent", "system"]).optional(),
   id: z.string().min(1).optional(),
@@ -16,6 +26,12 @@ export const AuditActor = z.object({
   model: z.string().optional(),
   version: z.string().optional(),
   on_behalf_of: z.string().optional(),
+  model_source: ModelSource.optional(),
+  model_claims: z.array(z.object({
+    value: z.string().min(1),
+    source: ModelSource.optional(),
+    note: z.string().optional(),
+  })).optional(),
 });
 
 const Action = z.enum([

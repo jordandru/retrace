@@ -279,7 +279,7 @@ test("actor lock: agent-branch id/on_behalf_of/model come from env, not the call
   })) as any;
   assert.notEqual(ok.isError, true);
   const [evt] = await store.all("default");
-  assert.deepEqual(evt.actor, { type: "agent", id: "claude-code", model: "claude-fable-5", on_behalf_of: "jordan@example.com", display_name: "Cowork", version: "1.2" });
+  assert.deepEqual(evt.actor, { type: "agent", id: "claude-code", model: "claude-fable-5", on_behalf_of: "jordan@example.com", display_name: "Cowork", version: "1.2", model_source: "harness-config", model_claims: [{ value: "gpt-x", note: "displaced by harness-config model" }] });
 }));
 
 test("actor lock: an unpinned agent may report its runtime model without overriding identity", async () => withActorEnv({ RETRACE_ACTOR: "gemini", RETRACE_ON_BEHALF_OF: "jordan@example.com" }, async () => {
@@ -292,6 +292,39 @@ test("actor lock: an unpinned agent may report its runtime model without overrid
   assert.notEqual(ok.isError, true);
   const [evt] = await store.all("default");
   assert.deepEqual(evt.actor, { type: "agent", id: "gemini", model: "gemini-2.5-pro", on_behalf_of: "jordan@example.com" });
+}));
+
+test("actor lock: a pinned RETRACE_ACTOR_MODEL displaces a differing caller model onto actor.model_claims", async () => withActorEnv(ENV, async () => {
+  const store = new SqliteStore(":memory:");
+  const client = await connect(store);
+  const ok = (await client.callTool({
+    name: "retrace_log",
+    arguments: { action: "edited", actor: { model: "gpt-x", model_source: "harness-runtime" }, artifacts: [{ id: "repo:rpg#a.ts", kind: "file" }] },
+  })) as any;
+  assert.notEqual(ok.isError, true);
+  const [evt] = await store.all("default");
+  assert.equal(evt.actor.model, "claude-fable-5");
+  assert.equal(evt.actor.model_source, "harness-config");
+  assert.deepEqual(evt.actor.model_claims, [{ value: "gpt-x", source: "harness-runtime", note: "displaced by harness-config model" }]);
+}));
+
+test("actor lock: an unpinned agent passes through model, model_source and model_claims as sent", async () => withActorEnv({ RETRACE_ACTOR: "gemini", RETRACE_ON_BEHALF_OF: "jordan@example.com" }, async () => {
+  const store = new SqliteStore(":memory:");
+  const client = await connect(store);
+  const ok = (await client.callTool({
+    name: "retrace_log",
+    arguments: {
+      action: "edited",
+      actor: { model: "gemini-2.5-pro", model_source: "harness-runtime", model_claims: [{ value: "self", source: "self-report" }] },
+      artifacts: [{ id: "repo:rpg#a.ts", kind: "file" }],
+    },
+  })) as any;
+  assert.notEqual(ok.isError, true);
+  const [evt] = await store.all("default");
+  assert.equal(evt.actor.id, "gemini");
+  assert.equal(evt.actor.model, "gemini-2.5-pro");
+  assert.equal(evt.actor.model_source, "harness-runtime");
+  assert.deepEqual(evt.actor.model_claims, [{ value: "self", source: "self-report" }]);
 }));
 
 test("actor lock: retrace_instruct only attributes to RETRACE_ON_BEHALF_OF", async () => withActorEnv(ENV, async () => {
@@ -329,7 +362,7 @@ test("actor lock: RETRACE_ACTOR_LOCK=0 restores caller overrides for both tools"
   const evts = await store.all("default");
   assert.deepEqual(evts.map((e) => e.actor), [
     { type: "human", id: "someone@example.com" },
-    { type: "agent", id: "claude-cowork", model: "claude-fable-5", on_behalf_of: "other@example.com" },
+    { type: "agent", id: "claude-cowork", model: "claude-fable-5", model_source: "harness-config", on_behalf_of: "other@example.com" },
     { type: "human", id: "other@example.com" },
   ]);
 }));

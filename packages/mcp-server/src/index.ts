@@ -63,12 +63,16 @@ export function confinedWritePath(p: string, cwd: string = process.cwd()): strin
   return abs;
 }
 /** Read at buildServer() time (not module load) so tests and embedders can configure it via env before building. */
-const readDefaultActor = () => ({
-  type: "agent" as const,
-  id: env.RETRACE_ACTOR ?? "mcp-agent",
-  model: env.RETRACE_ACTOR_MODEL,
-  on_behalf_of: env.RETRACE_ON_BEHALF_OF,
-});
+const readDefaultActor = () => {
+  const model = env.RETRACE_ACTOR_MODEL;
+  return {
+    type: "agent" as const,
+    id: env.RETRACE_ACTOR ?? "mcp-agent",
+    model,
+    ...(model !== undefined ? { model_source: "harness-config" as const } : {}),
+    on_behalf_of: env.RETRACE_ON_BEHALF_OF,
+  };
+};
 
 /** Location keys only the server may set. These are evidence ABOUT the writer — which session and machine produced
  *  the event, which client and IDE it came from, whether a human was at a keyboard — so a caller that could assert
@@ -199,14 +203,40 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
     }
     if (callerActor?.type === "human" || callerActor?.type === "system")
       throw new Error(`actor.type "${callerActor.type}" is not allowed: this Retrace MCP server logs as its configured agent ("${defaultActor.id}"). Human instructions go through retrace_instruct; other human/system actors need the git hook or a credentialed context. ${ACTOR_LOCK_HINT}`);
-    return {
-      ...defaultActor,
-      // A configured model stays authoritative. When it is deliberately unpinned, accept the runtime model reported
-      // by the agent client; the credential and actor lock still control id/type/on_behalf_of. This lets clients such
-      // as Gemini CLI switch models without sealing stale attribution into the ledger.
-      ...(defaultActor.model === undefined && callerActor?.model !== undefined ? { model: callerActor.model } : {}),
+    const display = {
       ...(callerActor?.display_name !== undefined ? { display_name: callerActor.display_name } : {}),
       ...(callerActor?.version !== undefined ? { version: callerActor.version } : {}),
+    };
+    // A configured model stays authoritative and carries harness-config; a differing caller pair is displaced
+    // onto actor.model_claims before signing. When unpinned, pass the caller's model / model_source /
+    // model_claims through as sent.
+    if (defaultActor.model === undefined) {
+      return {
+        ...defaultActor,
+        ...display,
+        ...(callerActor?.model !== undefined ? { model: callerActor.model } : {}),
+        ...(callerActor?.model_source !== undefined ? { model_source: callerActor.model_source } : {}),
+        ...(callerActor?.model_claims !== undefined ? { model_claims: callerActor.model_claims } : {}),
+      };
+    }
+    const displacedModel = callerActor?.model !== undefined && callerActor.model !== defaultActor.model
+      ? callerActor.model
+      : undefined;
+    return {
+      ...defaultActor,
+      ...display,
+      ...(displacedModel !== undefined
+        ? {
+            model_claims: [
+              ...(callerActor?.model_claims ?? []),
+              {
+                value: displacedModel,
+                ...(callerActor?.model_source !== undefined ? { source: callerActor.model_source } : {}),
+                note: "displaced by harness-config model",
+              },
+            ],
+          }
+        : callerActor?.model_claims !== undefined ? { model_claims: callerActor.model_claims } : {}),
     };
   };
   /** Human actor for retrace_instruct. With the lock on, this server may only speak for its configured human. */

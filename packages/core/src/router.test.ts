@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createHandler, parseCredentials, Credential, EventStore, Event, Share, appendEvent, EventInput, verifyProject, ChainHead, HeadMovedError, schemaSurface, Location, MethodParams, Action, tokenEquals, parseGithubRepoProjects, resolveGithubProject, pageHistoryNewest, generateSigningKey, MemoryEventStore } from "./index.js";
+import { createHandler, parseCredentials, Credential, EventStore, Event, Share, appendEvent, EventInput, verifyProject, ChainHead, HeadMovedError, schemaSurface, Location, MethodParams, Action, tokenEquals, parseGithubRepoProjects, resolveGithubProject, pageHistoryNewest, generateSigningKey, MemoryEventStore, signProducer } from "./index.js";
 
 const MemStore = MemoryEventStore;
 
@@ -338,7 +338,32 @@ test("credentials: pinned token's actor is stamped from the credential, not the 
   const h = createHandler(store, { token: "tok", credentials: parseCredentials(JSON.stringify([CLAUDE, HOOK])) });
   const res = await post(h, "/events", ev({ actor: { type: "agent", id: "claude-cowork", on_behalf_of: "mallory@example.com", model: "gpt-x", display_name: "Cowork", version: "1.2" } }), CLAUDE.token);
   assert.equal(res.status, 201);
-  assert.deepEqual(store.events[0].actor, { type: "agent", id: "claude-code", model: "claude-fable-5", on_behalf_of: "jordan@example.com", display_name: "Cowork", version: "1.2" });
+  assert.deepEqual(store.events[0].actor, { type: "agent", id: "claude-code", model: "claude-fable-5", on_behalf_of: "jordan@example.com", display_name: "Cowork", version: "1.2", model_source: "credential-pinned", model_claims: [{ value: "gpt-x", note: "displaced by credential-pinned model" }] });
+});
+
+test("credentials: A7 producer-signed body whose model differs from the credential stays verified with the displaced pair on actor.model_claims", async () => {
+  const key = await generateSigningKey();
+  const store = new MemStore();
+  const cred = {
+    token: "pinned-model-token-01234567",
+    actor: { type: "agent" as const, id: "claude-code", model: "claude-fable-5", on_behalf_of: "jordan@example.com" },
+    trust: "pinned" as const,
+    public_key: key.publicKey,
+  };
+  const handle = createHandler(store, { token: "tok", credentials: [cred] });
+  const signed = await signProducer(ev({
+    actor: { type: "agent", id: "claude-code", on_behalf_of: "jordan@example.com", model: "gpt-x", model_source: "harness-runtime" },
+    timestamp: "2026-09-24T03:00:00.000Z",
+    idempotency_key: "a7-model-pin",
+  }), key.privateKey);
+  const res = await post(handle, "/events", signed, cred.token);
+  assert.equal(res.status, 201);
+  const e = store.events[0];
+  assert.equal(e.actor.model, "claude-fable-5");
+  assert.equal(e.actor.model_source, "credential-pinned");
+  assert.deepEqual(e.actor.model_claims, [{ value: "gpt-x", source: "harness-runtime", note: "displaced by credential-pinned model" }]);
+  assert.equal(e.method?.params?.producer_sig_verdict, "verified");
+  assert.equal(e.method?.params?.model_claims, undefined, "resolver must not write the displaced pair into signed method.params");
 });
 
 test("credentials: a pinned credential that omits model lets the producer report the model it actually ran", async () => {
@@ -349,6 +374,37 @@ test("credentials: a pinned credential that omits model lets the producer report
   assert.equal(res.status, 201);
   // identity is still stamped from the credential and stays unforgeable — only the model gets through
   assert.deepEqual(store.events[0].actor, { type: "agent", id: "claude-code", on_behalf_of: "jordan@example.com", model: "claude-opus-5" });
+});
+
+test("credentials: a pinned credential that omits model copies model_source and model_claims as sent", async () => {
+  const store = new MemStore();
+  const NO_MODEL = { token: "no-model-src-token-0123456", actor: { type: "agent" as const, id: "claude-code", on_behalf_of: "jordan@example.com" } };
+  const h = createHandler(store, { token: "tok", credentials: parseCredentials(JSON.stringify([NO_MODEL])) });
+  const res = await post(h, "/events", ev({
+    actor: {
+      type: "agent", id: "claude-cowork", on_behalf_of: "mallory@example.com",
+      model: "claude-opus-5", model_source: "harness-runtime",
+      model_claims: [{ value: "self", source: "self-report" }],
+    },
+  }), NO_MODEL.token);
+  assert.equal(res.status, 201);
+  assert.deepEqual(store.events[0].actor, {
+    type: "agent", id: "claude-code", on_behalf_of: "jordan@example.com",
+    model: "claude-opus-5", model_source: "harness-runtime",
+    model_claims: [{ value: "self", source: "self-report" }],
+  });
+});
+
+test("credentials: a matching body model is not displaced; model_source is still credential-pinned", async () => {
+  const store = new MemStore();
+  const h = createHandler(store, { token: "tok", credentials: [Credential.parse(CLAUDE)] });
+  const res = await post(h, "/events", ev({
+    actor: { type: "agent", id: "claude-code", on_behalf_of: "jordan@example.com", model: "claude-fable-5", model_source: "harness-runtime" },
+  }), CLAUDE.token);
+  assert.equal(res.status, 201);
+  assert.equal(store.events[0].actor.model, "claude-fable-5");
+  assert.equal(store.events[0].actor.model_source, "credential-pinned");
+  assert.equal(store.events[0].actor.model_claims, undefined);
 });
 
 test("credentials: model passthrough is agent-only", async () => {
@@ -425,7 +481,7 @@ test("credentials: pinned path regression — allowed_actors changes nothing for
   const h = createHandler(store, { token: "tok", credentials: parseCredentials(JSON.stringify([CLAUDE, HOOK])) });
   // pinned agent still stamped from the credential
   assert.equal((await post(h, "/events", ev({ actor: { type: "agent", id: "whoever" } }), CLAUDE.token)).status, 201);
-  assert.deepEqual(store.events[0].actor, { type: "agent", id: "claude-code", model: "claude-fable-5", on_behalf_of: "jordan@example.com" });
+  assert.deepEqual(store.events[0].actor, { type: "agent", id: "claude-code", model: "claude-fable-5", on_behalf_of: "jordan@example.com", model_source: "credential-pinned" });
   // pinned instructed-root carve-out (e0b6499) still works and still stamps relayed_by
   const res = await post(h, "/events", ev({ actor: { type: "human", id: "jordan@example.com" }, action: "instructed" }), CLAUDE.token);
   assert.equal(res.status, 201);
@@ -505,6 +561,9 @@ test("schemaSurface is derived from the zod shapes, so it cannot drift from the 
   for (const f of ["session", "client", "ide", "workspace", "surface", "device", "system"]) assert.ok(surface.location.includes(f), f);
   for (const f of ["actor", "action", "artifacts", "location", "caused_by", "idempotency_key"]) assert.ok(surface.event.includes(f), f);
   assert.ok(surface.artifact.includes("role"));
+  assert.ok(Array.isArray(surface.actor));
+  for (const f of ["model", "model_source", "model_claims", "id", "type"]) assert.ok(surface.actor.includes(f), f);
+  assert.deepEqual(surface.actor, [...surface.actor].sort());
   assert.deepEqual(Object.keys(MethodParams.shape).sort(), ["reasoning_effort", "routing_event_id"]);
 });
 

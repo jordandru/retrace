@@ -35,7 +35,7 @@ test("round-trip parity: every mutation the server is ALLOWED to make leaves the
   const { client: _c, ...loc } = signed.location!;
   const mutated = {
     ...signed,
-    actor: { ...signed.actor, model: "claude-fable-5", display_name: "Claude" },
+    actor: { ...signed.actor, model: "claude-fable-5", display_name: "Claude", model_source: "harness-runtime" as const, model_claims: [{ value: "other", source: "self-report" as const, note: "second claim" }] },
     location: loc,
     method: { ...signed.method, params: { ...signed.method!.params, [SEALED_BY_PARAM]: "pinned:x", [PRODUCER_SIG_VERDICT_PARAM]: "verified" } },
   };
