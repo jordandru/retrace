@@ -390,6 +390,21 @@ test("credentials: an empty legacy model is not displaced onto actor.model_claim
   assert.equal(e.method?.params?.producer_sig_verdict, "verified");
 });
 
+test("F2: an empty credential pin is absent; caller model/source seal without credential-pinned", async () => {
+  const store = new MemStore();
+  const EMPTY = { token: "empty-pin-token-01234567", actor: { type: "agent" as const, id: "claude-code", model: "", on_behalf_of: "jordan@example.com" } };
+  assert.equal(parseCredentials(JSON.stringify([EMPTY])).length, 1, "legacy empty credential model still parses");
+  const h = createHandler(store, { token: "tok", credentials: parseCredentials(JSON.stringify([EMPTY])) });
+  const res = await post(h, "/events", ev({
+    actor: { type: "agent", id: "claude-cowork", on_behalf_of: "mallory@example.com", model: "caller-model", model_source: "harness-runtime" },
+  }), EMPTY.token);
+  assert.equal(res.status, 201, await res.text());
+  const e = store.events[0];
+  assert.equal(e.actor.id, "claude-code");
+  assert.equal(e.actor.model, "caller-model");
+  assert.equal(e.actor.model_source, "harness-runtime");
+});
+
 test("credentials: a pinned credential that omits model lets the producer report the model it actually ran", async () => {
   const store = new MemStore();
   const NO_MODEL = { ...CLAUDE, actor: { type: "agent" as const, id: "claude-code", on_behalf_of: "jordan@example.com" } };

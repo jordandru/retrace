@@ -65,10 +65,15 @@ export function confinedWritePath(p: string, cwd: string = process.cwd()): strin
   }
   return abs;
 }
+/** Empty-string `model` is absent for resolution (PR 118 F1). */
+function presentModel(model: string | undefined): model is string {
+  return model !== undefined && model !== "";
+}
+
 /** Source of the configured model. Throws at startup (buildServer) on an invalid pairing. */
 function configuredActorModelSource(model: string | undefined): CoreActor["model_source"] | undefined {
   const raw = env.RETRACE_ACTOR_MODEL_SOURCE;
-  const hasModel = model !== undefined && model !== "";
+  const hasModel = presentModel(model);
   if (raw === undefined || raw === "") return hasModel ? "harness-config" : undefined;
   const parsed = ModelSource.safeParse(raw);
   if (!parsed.success) {
@@ -85,7 +90,7 @@ function configuredActorModelSource(model: string | undefined): CoreActor["model
 
 /** Read at buildServer() time (not module load) so tests and embedders can configure it via env before building. */
 const readDefaultActor = () => {
-  const model = env.RETRACE_ACTOR_MODEL;
+  const model = presentModel(env.RETRACE_ACTOR_MODEL) ? env.RETRACE_ACTOR_MODEL : undefined;
   const modelSource = configuredActorModelSource(model);
   return {
     type: "agent" as const,
@@ -242,7 +247,7 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
           ...(callerActor.model_claims !== undefined ? { model_claims: callerActor.model_claims } : {}),
         };
       }
-      if (defaultActor.model !== undefined) {
+      if (presentModel(defaultActor.model)) {
         return {
           ...identity,
           model: defaultActor.model,
@@ -261,7 +266,7 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
     // A configured model stays authoritative and carries harness-config; a differing caller pair is displaced
     // onto actor.model_claims before signing. When unpinned, pass the caller's model / model_source /
     // model_claims through as sent. An empty legacy model is absent for displacement (no claim from "").
-    if (defaultActor.model === undefined) {
+    if (!presentModel(defaultActor.model)) {
       return {
         ...defaultActor,
         ...display,

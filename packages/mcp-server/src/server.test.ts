@@ -436,6 +436,32 @@ test("actor lock: an empty legacy caller model is not displaced onto actor.model
   assert.equal(evt.actor.model_claims, undefined);
 }));
 
+test("F1: empty RETRACE_ACTOR_MODEL with lock off seals a log without actor and a log with model_source none", async () => withActorEnv({
+  RETRACE_ACTOR: "claude-code",
+  RETRACE_ACTOR_MODEL: "",
+  RETRACE_ON_BEHALF_OF: "jordan@example.com",
+  RETRACE_ACTOR_LOCK: "0",
+}, async () => {
+  const store = new SqliteStore(":memory:");
+  const client = await connect(store);
+  const none = (await client.callTool({
+    name: "retrace_log",
+    arguments: { action: "edited", actor: { model_source: "none" }, artifacts: [{ id: "repo:rpg#a.ts", kind: "file" }] },
+  })) as any;
+  assert.notEqual(none.isError, true, none.content?.[0]?.text);
+  const bare = (await client.callTool({
+    name: "retrace_log",
+    arguments: { action: "edited", artifacts: [{ id: "repo:rpg#b.ts", kind: "file" }] },
+  })) as any;
+  assert.notEqual(bare.isError, true, bare.content?.[0]?.text);
+  const events = await store.all("default");
+  assert.equal(events.length, 2);
+  assert.equal(events[0].actor.model, undefined);
+  assert.equal(events[0].actor.model_source, "none");
+  assert.equal(events[1].actor.model, undefined);
+  assert.equal(events[1].actor.model_source, undefined);
+}));
+
 test("RETRACE_ACTOR_MODEL_SOURCE: valid source stamps the configured model", async () => withActorEnv({ ...ENV, RETRACE_ACTOR_MODEL_SOURCE: "harness-runtime" }, async () => {
   const store = new SqliteStore(":memory:");
   const client = await connect(store);
