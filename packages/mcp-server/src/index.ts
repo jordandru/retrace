@@ -220,9 +220,17 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
           ...(callerActor.model_claims !== undefined ? { model_claims: callerActor.model_claims } : {}),
         };
       }
+      if (defaultActor.model !== undefined) {
+        return {
+          ...identity,
+          model: defaultActor.model,
+          model_source: "harness-config" as const,
+          ...(callerActor?.model_claims !== undefined ? { model_claims: callerActor.model_claims } : {}),
+        };
+      }
       return {
         ...identity,
-        ...(defaultActor.model !== undefined ? { model: defaultActor.model, model_source: "harness-config" as const } : {}),
+        ...(callerActor?.model_source !== undefined ? { model_source: callerActor.model_source } : {}),
         ...(callerActor?.model_claims !== undefined ? { model_claims: callerActor.model_claims } : {}),
       };
     }

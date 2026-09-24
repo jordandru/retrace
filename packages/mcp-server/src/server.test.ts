@@ -408,6 +408,20 @@ test("actor lock off: a caller model override does not inherit harness-config fr
   assert.equal(evt.actor.id, "claude-code");
 }));
 
+test("actor lock off: an explicit none is kept when RETRACE_ACTOR_MODEL is unset", async () => withActorEnv({ RETRACE_ACTOR: "gemini", RETRACE_ON_BEHALF_OF: "jordan@example.com", RETRACE_ACTOR_LOCK: "0" }, async () => {
+  const store = new SqliteStore(":memory:");
+  const client = await connect(store);
+  const ok = (await client.callTool({
+    name: "retrace_log",
+    arguments: { action: "edited", actor: { model_source: "none" }, artifacts: [{ id: "repo:rpg#a.ts", kind: "file" }] },
+  })) as any;
+  assert.notEqual(ok.isError, true);
+  const [evt] = await store.all("default");
+  assert.equal(evt.actor.model, undefined);
+  assert.equal(evt.actor.model_source, "none");
+  assert.equal(evt.actor.id, "gemini");
+}));
+
 test("actor lock: an empty legacy caller model is not displaced onto actor.model_claims", async () => withActorEnv(ENV, async () => {
   const store = new SqliteStore(":memory:");
   const client = await connect(store);
