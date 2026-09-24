@@ -1,6 +1,6 @@
 # Model claims: source, omission, verification — design note v1 (agent-rules 4, v2)
 
-**Status:** DRAFT v1.3, 2026-09-23 (v1 2026-09-20; v1.1, v1.2 2026-09-23), author claude-code (coordinator, `claude-fable-5-1`), on Jordan's instruction
+**Status:** DRAFT v1.4, 2026-09-24 (v1 2026-09-20; v1.1, v1.2, v1.3 2026-09-23; v1.3 merged `6c208d9`), author claude-code (coordinator, `claude-fable-5-1`), on Jordan's instruction
 `evt_3f1973b9b8234267aeea0d238af89483`, from his rule audit `evt_376a8fc8ba4b48c3a38624f38b4335cf` ("true
 provenance means making a true claim and avoiding omission") and the coordinator's decision
 `evt_e7a318017ace472ab641e6940f7d5607`. **Class (a)** under agent-rules 12: it rewrites rule 4 and the
@@ -8,7 +8,10 @@ model line of every identity file. Design gate: Codex → NOOA (Nemotron, pinned
 Codex rejected, one High and three Medium (`evt_107148b1745d483dace12bd8535e681a`); all four applied in v1.1. Round 2
 (head `c261aab`): Codex approved, NOOA approved with one Medium and three Lows, the Grok seat (cursor-agent) rejected
 with one Medium and one Low; all applied in v1.2. Round 3 (head `8cdba1a`): Codex approved, NOOA approved, the Grok
-seat rejected with one Medium (§4.4 not updated with the §4.1 change) and one Low; both applied in this v1.3 (§8). Companion to
+seat rejected with one Medium (§4.4 not updated with the §4.1 change) and one Low; both applied in v1.3 (§8). Round 4 (head `99616bd`):
+all three seats approved; merged. **v1.4 (round 5):** a dated correction to §4.1 and §7 step 2, found by the coordinator preparing
+the step-2 build (`evt_f450c07129944f6d98cee30d6be9e5fc`): the resolver's displaced model pair cannot live inside the
+producer-signed `method.params`; second claims move to `actor.model_claims` (§8 item 13). Companion to
 `commit-trailer-consistency.md` (a claim is classified against evidence, never trusted), `effort-model-routing.md`
 §5 (`models.json`, self-reported effort) and `orchflows-integration.md` §7 (the transcript witness). **Not built.**
 Corrections before merge are made in place (Jordan, `evt_9dc98206`); after merge, appended (agent-rules 10).
@@ -101,6 +104,10 @@ A new optional enum beside `actor.model`:
   first (§4.2). `self-report` alone never fills `model`: it goes in `model_claims` and `model_source` is `none`.
 - Every other claim the seat holds goes in `method.params.model_claims: [{ "value", "source", "note"? }]`. This
   field round-trips today, so it can be used before the schema deploys.
+  *Correction, 2026-09-24 01:45Z (2026-09-23 19:45 MDT; source `evt_f450c07129944f6d98cee30d6be9e5fc`, see the
+  pins bullet below): after the step-2 deploy, second claims live on the actor, `actor.model_claims: [{ "value",
+  "source", "note"? }]`, a schema field added in that deploy. `method.params.model_claims` stays what it was chosen
+  for — the interim carrier that round-trips before the deploy — and a consumer reads both, the actor field first.*
 - **Omission becomes a fact.** An agent event with no `model` carries `model_source: "none"`. A blank with no
   source is, after adoption, a producer defect — which is what fact 4 in §1 always was.
 - **A displayed string is a report, recorded whole.** Grok records exactly what its status bar shows — `Grok 4.6
@@ -122,6 +129,19 @@ A new optional enum beside `actor.model`:
   produced the value beside it) reports `source: inconsistent` and counts the event with the source-less ones. When
   both `actor.model_source` and the interim `method.params.model_source` (§7 step 2) are present, the actor field is
   the value of record and a disagreement is a producer defect that `doctor` lists.
+  *Correction, 2026-09-24 01:45Z (2026-09-23 19:45 MDT; source: the coordinator's step-2 preparation,
+  `evt_f450c07129944f6d98cee30d6be9e5fc`, from `packages/core/src/producer-sig.ts` lines 11–20 and 78–90 at `6c208d9`):
+  "pushing the displaced `{value, source}` into `model_claims`" cannot mean `method.params.model_claims` when the Worker's
+  resolver does the pushing. The producer signature covers `method.params` minus the server's reserved list (`sealed_by`,
+  `producer_sig_verdict`, `relayed_by`, `caused_by_problem`; on /2 also `claim_decision`, `producer_signed_actor`), and
+  that list is fixed per signature format — adding a name is `retrace-producer-sig/3`. A server that wrote into
+  `method.params` after resolution would make every producer-signed event sealed on a model-pinning credential verify
+  `invalid`. The signature deliberately does not cover `actor.model`, `display_name` or `version`, so the actor object is
+  the surface the server already rewrites. Therefore the displaced pair goes to `actor.model_claims` (previous bullet),
+  in the same operation as before; nothing is dropped. Scope today: the credentials mirror (read 2026-09-24 01:40Z,
+  names and the presence of a `model` key only) lists nine pinned credentials and none names a model, so the
+  `credential-pinned` branch is exercised by tests until an operator pins one. The MCP server's `harness-config`
+  replacement happens client-side before signing and is unaffected. The v1.3 sentence above stays visible (rule 10).*
 
 ### 4.2 The Codex case, as far as the evidence goes
 
@@ -223,6 +243,9 @@ no config, no API" sentence becomes "the status bar is the source: `harness-disp
   listed by `doctor`; its contribution status (`supported` / `conflicting` / `unresolved`) is unchanged by that.
 - A5 `status` shows the per-source split; the landing page's sentence about missing models names the causes.
 - A6 No sealed event is edited; corrections are appended (rule 10).
+- A7 (v1.4) A producer-signed event sealed on a credential that names a model, whose body reports a different model,
+  verifies `verified` after resolution and carries the displaced pair in `actor.model_claims`; a test in
+  `producer-sig.test.ts` or `server.test.ts` shows it.
 
 ## 7. Build order
 
@@ -230,7 +253,8 @@ no config, no API" sentence becomes "the status bar is the source: `harness-disp
 2. Schema: `Actor.model_source` (`schema.ts`, class S in the routing rules) **and, in the same deploy, the resolver**:
    `resolveActor` (`router.ts:365–376`) copies `model_source` onto the pinned actor and, when the credential replaces
    the model, sets `model_source: credential-pinned` and pushes the displaced pair into `method.params.model_claims`
-   (§4.1); the MCP server does the same for its configured model (`index.ts:204–207`, source `harness-config`). Until
+   (§4.1) — *corrected 2026-09-24 (`evt_f450c071…`, §4.1): into `actor.model_claims`, a second optional `Actor` field
+   added in this step, because the signature covers `method.params`; the interim carrier below is unchanged*; the MCP server does the same for its configured model (`index.ts:204–207`, source `harness-config`). Until
    that deploy, producers write `method.params.model_source` **and** `method.params.model_claimed` (the value the source
    describes); a consumer reads the interim source only when `model_claimed` equals the sealed `actor.model`, and
    otherwise reports `source: inconsistent` (§4.1) — because today the credential can replace the value while
@@ -294,3 +318,11 @@ reloaded). Grok seat, cursor-agent (medium; routing `evt_1f500953`): **rejected*
 11. **Medium — §4.4's doctor PASS path was still alias-only, so a Grok pane showing `Grok 4.6 (xhigh)` could pass A2
     but not §4.4.** Accepted: §4.4 now reads alias or `display_pattern`. The round-2 fix had not been propagated there.
 12. **Low — §5 still said this note does not touch effort.** Accepted: §5 now names the one place it does.
+
+Round 5, v1.4, after merge (`6c208d9`). Coordinator's own finding while preparing the step-2 build
+(`evt_f450c07129944f6d98cee30d6be9e5fc`, 2026-09-24 01:45Z), on Jordan's go `evt_9677a658d78a49bd9dc314cd8da9ec8e`.
+
+13. **Design gap — the resolver's displaced pair would land inside the producer-signed `method.params`.** Corrected in
+    place, dated and sourced, in §4.1 and §7 step 2: second claims move to `actor.model_claims` (a second `Actor` field in
+    the step-2 deploy); the interim `method.params` carrier is unchanged; A7 names the test that closes it. Gate: Codex →
+    NOOA → Grok seat (cursor-agent, Jordan's reassignment `evt_9677a658`) → claude-code last.
