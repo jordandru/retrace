@@ -204,9 +204,25 @@ The provenance rules themselves are `docs/agent-rules.md`.
     The channel is `orca-ide terminal send --terminal <handle> --text <text> --enter`. Order of operations, because the
     event must exist before its id can be appended: write the enveloped text (`SEAT … SEAT`) to disk, hash it, log the
     `sent` event with that hash, the target handle and `enter_pressed_by`, then send the text with ` [sent-event <id>]`
-    appended — the hash covers the text *before* the suffix, and a verifier strips the suffix before hashing.
+    appended. **Serialization** (NOOA round 1, `evt_69673ea1…`): the hashed text is the exact UTF-8 bytes of the file
+    as written — one line, no trailing whitespace, no terminal newline, the `SEAT` markers at the start and end of that
+    line — and the ` [sent-event <id>]` suffix (a single space, then the bracketed id) is appended only when sending; a
+    verifier removes exactly that final suffix and hashes the remaining bytes unchanged. Markers are not put on their
+    own lines: a multi-line paste is what Cursor folds (below). **Verification route:** `GET /events/<id>` on
+    the Worker with the seat's own credential returns the raw sealed event (`actor.id`, `method.params.text_sha256`,
+    `brief_sha256`, `producer_sig_verdict`); the model-facing `retrace_why` / `retrace_history` views omit ids and hashes
+    by design (`packages/core/src/explain.ts`) and cannot verify a message. A `curl` with the credential in the
+    `Authorization` header from the environment — never on the command line, never printed — is the check today.
     Read the pane before sending (a trust prompt or an update prompt takes a keystroke, not a message; that keystroke
-    is logged, not enveloped). Never send into a human's pane; never press Enter for a human (2026-09-20,
+    is logged, not enveloped). **Keep the pane message short and on one line — at most 240 bytes including the envelope
+    and the suffix** — of the form `SEAT <verb and object> — brief <path> sha256 <first 12 hex> — routing <id> SEAT
+    [sent-event <id>]`, with everything else in the brief on disk whose hash the `sent` event records. Reason, measured
+    2026-09-24 (`evt_7b1b2a4fb7544709adc7f0c5ed7656bf`, probe series `evt_8d7ab8ec…` and `evt_452744b9…`): Cursor's TUI folds a pasted
+    input that wraps past a few visual lines into "[Pasted text #N +M lines]" — 850 bytes folded and 750 did not in a
+    200-column pane, and a 758-byte pointer folded in the owner's narrower pane — so the human watching sees neither the
+    message nor the envelope; the receiving agent still gets every byte (it verified 841 bytes it never displayed). The
+    envelope exists for the reader, so the message must render unfolded in the harness that folds soonest. Codex's TUI
+    showed every pointer in full. Never send into a human's pane; never press Enter for a human (2026-09-20,
     `evt_2e3cdae1295b40c48ee70cdb7cbf57ed`). NOOA is not a pane: its dispatch is `push-and-launch.sh`, whose
     `sent` event records the packet, wrapper and launcher hashes the host echoed back, and its verdict is
     producer-signed under its own key — that pair is its signature. A brief on disk that a pointer names is part of
@@ -214,8 +230,9 @@ The provenance rules themselves are `docs/agent-rules.md`.
     Since the Orca restart of 2026-09-24 the CLI prints a crash-reporter line on stderr before its JSON; parse stdout
     only.
     → unnecessary when [direction]: a `retrace-send` helper does (b) and (c) of agent-rules 15 itself — logs, hashes,
-    envelopes and sends in one step, and refuses a target that is a human's pane — so no seat composes the signature
-    by hand; the envelope stays, because it is for the reader, not the machine.
+    envelopes and sends in one step, and refuses a target that is a human's pane — and a narrow `retrace_verify_send`
+    tool exposes exactly the four fields a receiver checks, so no seat composes the signature by hand or curls the
+    Worker; the envelope stays, because it is for the reader, not the machine.
 
 ## Build order (Grok's read, PR 40, evt_1626b03aea8d4911ae1c7523c94903d9)
 
