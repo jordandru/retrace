@@ -405,6 +405,42 @@ test("F2: an empty credential pin is absent; caller model/source seal without cr
   assert.equal(e.actor.model_source, "harness-runtime");
 });
 
+test("F2: credential model_source none is dropped with the empty pin so a source-less caller model seals", async () => {
+  const key = await generateSigningKey();
+  const store = new MemStore();
+  const actor = { type: "agent" as const, id: "claude-code", model: "", model_source: "none" as const, on_behalf_of: "jordan@example.com" };
+  assert.equal(parseCredentials(JSON.stringify([{ token: "empty-none-parse-012345", actor }])).length, 1);
+  const cred = {
+    token: "empty-none-token-01234567",
+    actor,
+    trust: "pinned" as const,
+    public_key: key.publicKey,
+    require_signature: true,
+  };
+  const handle = createHandler(store, { token: "tok", credentials: [cred] });
+  const signedNone = await signProducer(ev({
+    actor: { type: "agent", id: "claude-code", on_behalf_of: "jordan@example.com", model: "caller-model" },
+    timestamp: "2026-09-24T03:48:00.000Z",
+    idempotency_key: "f2-none-inherit",
+  }), key.privateKey);
+  const resNone = await post(handle, "/events", signedNone, cred.token);
+  assert.equal(resNone.status, 201, await resNone.text());
+  assert.equal(store.events[0].actor.model, "caller-model");
+  assert.equal(store.events[0].actor.model_source, undefined);
+  assert.equal(store.events[0].method?.params?.producer_sig_verdict, "verified");
+
+  const signedPair = await signProducer(ev({
+    actor: { type: "agent", id: "claude-code", on_behalf_of: "jordan@example.com", model: "caller-model", model_source: "harness-runtime" },
+    timestamp: "2026-09-24T03:48:01.000Z",
+    idempotency_key: "f2-none-pair",
+  }), key.privateKey);
+  const resPair = await post(handle, "/events", signedPair, cred.token);
+  assert.equal(resPair.status, 201, await resPair.text());
+  assert.equal(store.events[1].actor.model, "caller-model");
+  assert.equal(store.events[1].actor.model_source, "harness-runtime");
+  assert.equal(store.events[1].method?.params?.producer_sig_verdict, "verified");
+});
+
 test("credentials: a pinned credential that omits model lets the producer report the model it actually ran", async () => {
   const store = new MemStore();
   const NO_MODEL = { ...CLAUDE, actor: { type: "agent" as const, id: "claude-code", on_behalf_of: "jordan@example.com" } };

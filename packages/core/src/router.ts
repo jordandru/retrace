@@ -373,10 +373,13 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
     // model / model_source / model_claims as sent — do not invent a source. Empty-string model is absent (PR 118 F2).
     const pinModel = actor.model !== undefined && actor.model !== "" ? actor.model : undefined;
     if (actor.type === "agent" && pinModel === undefined) {
+      // No model pin: WHO stays the credential; model and source resolve together from the body.
+      // Drop the credential's empty model and its model_source so a source-less caller model
+      // cannot inherit none (PR 118 F2 residual).
+      const { model: _noPinModel, model_source: _noPinSource, model_claims: _noPinClaims, ...identity } = stamped;
       return {
         actor: {
-          ...stamped,
-          ...(actor.model === "" ? { model: undefined } : {}),
+          ...identity,
           ...(body.model !== undefined ? { model: body.model } : {}),
           ...(body.model_source !== undefined ? { model_source: body.model_source } : {}),
           ...(body.model_claims !== undefined ? { model_claims: body.model_claims } : {}),
