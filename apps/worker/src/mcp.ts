@@ -84,9 +84,13 @@ function requirePinnedProject(requested: string | undefined, credential: RemoteM
 function pinnedActor(caller: Partial<Actor> | undefined, credential: RemoteMcpCredential): Actor {
   if (caller?.type === "human" || caller?.type === "system")
     throw new Error(`actor.type "${caller.type}" is not allowed: this MCP credential records agent "${credential.actor.id}"`);
+  // Identity is pinned here; model / model_source / model_claims pass through as sent so router resolveActor
+  // performs the authoritative displacement. Do not invent a source.
   return {
     ...credential.actor,
-    ...(credential.actor.model === undefined && caller?.model !== undefined ? { model: caller.model } : {}),
+    ...(caller?.model !== undefined ? { model: caller.model } : {}),
+    ...(caller?.model_source !== undefined ? { model_source: caller.model_source } : {}),
+    ...(caller?.model_claims !== undefined ? { model_claims: caller.model_claims } : {}),
     ...(caller?.display_name !== undefined ? { display_name: caller.display_name } : {}),
     ...(caller?.version !== undefined ? { version: caller.version } : {}),
   };

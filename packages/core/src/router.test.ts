@@ -366,6 +366,30 @@ test("credentials: A7 producer-signed body whose model differs from the credenti
   assert.equal(e.method?.params?.model_claims, undefined, "resolver must not write the displaced pair into signed method.params");
 });
 
+test("credentials: an empty legacy model is not displaced onto actor.model_claims", async () => {
+  const key = await generateSigningKey();
+  const store = new MemStore();
+  const cred = {
+    token: "empty-model-token-012345678",
+    actor: { type: "agent" as const, id: "claude-code", model: "claude-fable-5", on_behalf_of: "jordan@example.com" },
+    trust: "pinned" as const,
+    public_key: key.publicKey,
+  };
+  const handle = createHandler(store, { token: "tok", credentials: [cred] });
+  const signed = await signProducer(ev({
+    actor: { type: "agent", id: "claude-code", on_behalf_of: "jordan@example.com", model: "" },
+    timestamp: "2026-09-24T03:00:00.000Z",
+    idempotency_key: "empty-legacy-model",
+  }), key.privateKey);
+  const res = await post(handle, "/events", signed, cred.token);
+  assert.equal(res.status, 201);
+  const e = store.events[0];
+  assert.equal(e.actor.model, "claude-fable-5");
+  assert.equal(e.actor.model_source, "credential-pinned");
+  assert.equal(e.actor.model_claims, undefined);
+  assert.equal(e.method?.params?.producer_sig_verdict, "verified");
+});
+
 test("credentials: a pinned credential that omits model lets the producer report the model it actually ran", async () => {
   const store = new MemStore();
   const NO_MODEL = { ...CLAUDE, actor: { type: "agent" as const, id: "claude-code", on_behalf_of: "jordan@example.com" } };

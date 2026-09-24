@@ -198,18 +198,39 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
    *  "claude-cowork" event from a server configured as "claude-code") now needs the escape hatch; the credentialed
    *  per-actor version is backlog #6. */
   const resolveActor = (callerActor?: Partial<CoreActor>): CoreActor => {
-    if (!actorLock) {
-      return (callerActor?.type && callerActor.type !== "agent" ? callerActor : { ...defaultActor, ...(callerActor ?? {}) }) as CoreActor;
-    }
-    if (callerActor?.type === "human" || callerActor?.type === "system")
-      throw new Error(`actor.type "${callerActor.type}" is not allowed: this Retrace MCP server logs as its configured agent ("${defaultActor.id}"). Human instructions go through retrace_instruct; other human/system actors need the git hook or a credentialed context. ${ACTOR_LOCK_HINT}`);
     const display = {
       ...(callerActor?.display_name !== undefined ? { display_name: callerActor.display_name } : {}),
       ...(callerActor?.version !== undefined ? { version: callerActor.version } : {}),
     };
+    const callerModel = callerActor?.model !== undefined && callerActor.model !== "" ? callerActor.model : undefined;
+    if (!actorLock) {
+      if (callerActor?.type && callerActor.type !== "agent") return callerActor as CoreActor;
+      const identity = {
+        type: "agent" as const,
+        id: callerActor?.id ?? defaultActor.id,
+        ...(callerActor?.on_behalf_of !== undefined ? { on_behalf_of: callerActor.on_behalf_of } : defaultActor.on_behalf_of !== undefined ? { on_behalf_of: defaultActor.on_behalf_of } : {}),
+        ...display,
+      };
+      // Caller model and source resolve together: an override must not inherit harness-config from the pin.
+      if (callerActor?.model !== undefined) {
+        return {
+          ...identity,
+          model: callerActor.model,
+          ...(callerActor.model_source !== undefined ? { model_source: callerActor.model_source } : {}),
+          ...(callerActor.model_claims !== undefined ? { model_claims: callerActor.model_claims } : {}),
+        };
+      }
+      return {
+        ...identity,
+        ...(defaultActor.model !== undefined ? { model: defaultActor.model, model_source: "harness-config" as const } : {}),
+        ...(callerActor?.model_claims !== undefined ? { model_claims: callerActor.model_claims } : {}),
+      };
+    }
+    if (callerActor?.type === "human" || callerActor?.type === "system")
+      throw new Error(`actor.type "${callerActor.type}" is not allowed: this Retrace MCP server logs as its configured agent ("${defaultActor.id}"). Human instructions go through retrace_instruct; other human/system actors need the git hook or a credentialed context. ${ACTOR_LOCK_HINT}`);
     // A configured model stays authoritative and carries harness-config; a differing caller pair is displaced
     // onto actor.model_claims before signing. When unpinned, pass the caller's model / model_source /
-    // model_claims through as sent.
+    // model_claims through as sent. An empty legacy model is absent for displacement (no claim from "").
     if (defaultActor.model === undefined) {
       return {
         ...defaultActor,
@@ -219,9 +240,7 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
         ...(callerActor?.model_claims !== undefined ? { model_claims: callerActor.model_claims } : {}),
       };
     }
-    const displacedModel = callerActor?.model !== undefined && callerActor.model !== defaultActor.model
-      ? callerActor.model
-      : undefined;
+    const displacedModel = callerModel !== undefined && callerModel !== defaultActor.model ? callerModel : undefined;
     return {
       ...defaultActor,
       ...display,

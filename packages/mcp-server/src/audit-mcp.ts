@@ -19,7 +19,7 @@ const ModelSource = z.enum([
   "none",
 ]);
 
-export const AuditActor = z.object({
+const auditActorObject = z.object({
   type: z.enum(["human", "agent", "system"]).optional(),
   id: z.string().min(1).optional(),
   display_name: z.string().optional(),
@@ -33,6 +33,17 @@ export const AuditActor = z.object({
     note: z.string().optional(),
   })).optional(),
 });
+
+/** Same pairing rule as Actor: a source other than none requires model; none requires model absent.
+ *  Legacy forms (model only; neither) stay accepted. Enforced here so retrace_log cannot repair an invalid caller body. */
+export const AuditActor = auditActorObject.refine(
+  (actor) => {
+    if (actor.model_source === "none") return actor.model === undefined;
+    if (actor.model_source !== undefined) return actor.model !== undefined;
+    return true;
+  },
+  { message: "model_source other than none requires model; model_source none requires model absent", path: ["model_source"] },
+);
 
 const Action = z.enum([
   "created", "edited", "deleted", "read", "executed", "approved", "rejected",

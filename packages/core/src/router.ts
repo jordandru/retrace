@@ -382,7 +382,7 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
       };
     }
     if (actor.model !== undefined) {
-      const displacedModel = body.model !== undefined && body.model !== actor.model ? body.model : undefined;
+      const displacedModel = body.model !== undefined && body.model !== "" && body.model !== actor.model ? body.model : undefined;
       return {
         actor: {
           ...stamped,

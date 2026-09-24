@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { EventInput } from "@retrace-dev/core";
-import { LogArgs } from "./audit-mcp.js";
+import { AuditActor, LogArgs } from "./audit-mcp.js";
 
 test("shared retrace_log schema covers every client-suppliable core EventInput field", () => {
   // producer_sig belongs to the producer-signing adapter, not the compatibility-first audit MCP surface.
@@ -15,4 +15,13 @@ test("shared retrace_log schema retains capture-role and causal-link operating g
   assert.match(LogArgs.shape.artifacts.description ?? "", /Always set role explicitly for OUTPUTS/);
   assert.match(LogArgs.shape.caused_by.description ?? "", /existing same-project event/);
   assert.match(LogArgs.shape.caused_by.description ?? "", /dangling or cross-project ids are rejected/);
+});
+
+test("AuditActor rejects an inconsistent model_source and keeps legacy model-only and neither forms", () => {
+  assert.equal(AuditActor.safeParse({ model_source: "harness-runtime" }).success, false);
+  assert.equal(AuditActor.safeParse({ model: "caller", model_source: "none" }).success, false);
+  assert.equal(AuditActor.safeParse({ model: "caller" }).success, true, "legacy: model without source");
+  assert.equal(AuditActor.safeParse({}).success, true, "legacy: neither field");
+  assert.equal(AuditActor.safeParse({ model_source: "none" }).success, true);
+  assert.equal(AuditActor.safeParse({ model: "caller", model_source: "harness-runtime" }).success, true);
 });
