@@ -34,7 +34,16 @@ with doc quotes and scratch-ledger events (#2411, #2428), the bfe87c3 dry run th
 repair on its own clone and the WSL-DNS root cause of the audit outage (#2174, #2180), and the seq-123
 fixture that became PR 21. Grok's answers come with commands and numbers; that is its value. It also
 calibrates other reviewers' findings against reality (Nemotron's v6-vs-v7 confusion, #2355). Weekly budget
-is finite; stand it down when it reports single digits.
+is finite; stand it down when it reports single digits. When the coordinator is capped, Grok may spec-author
+or rank the queue only for the act Jordan or a recorded routing event directs (agent-rules 12) — still
+not coordinator or merger. Ranking the queue is not coordination: the coordinator keeps classification
+authority; the act exists only under Jordan's instruction or a recorded routing event. Evidence, 2026-09-20:
+ranked the queue once, under Jordan's instruction `evt_47c1614ac9cb486daaa0ea453d506da5` /
+`evt_d505999fa95f4ec090556ea7e8d097f4` (ranking events `evt_1e8340260e46408e810352a7fc474dd6` /
+`evt_b085b8146e82452fa2b3897112a9c056`); advised Jordan on the NOOA host cutover he performed on the
+2026-09-18 close-out steps (first host seal `evt_e80678c58feb4878a4587c60a7f76db7`); and took PR 90's
+first-pass review on his reassignment (`evt_4f4c20d38e3d4dbd95020df4a171deba` /
+`evt_08be04d445c74d41b0a7c5b33c801df1`) while Claude was token-capped.
 
 **NVIDIA — NOOA on Nemotron (NVIDIA Labs research preview) — the witness.** The only seat whose judgment
 and signing key belong to a vendor that wrote none of the code under review. Hourly independent audits of
@@ -67,7 +76,15 @@ gate (rule 2) applies to anything that governs behaviour, whatever its file type
 files included — while documents that govern nothing (measurements, snapshots, references, dated corrections)
 merge on one non-author review. One addition from practice: on 2026-09-12 cursor-agent at high
 effort took the first-pass review seat for PR 37 while Codex was rate-capped (routing evt_44b11c82, verdict
-evt_a742fc51), so "reviewer when routed" is now part of that seat.
+evt_a742fc51), so "reviewer when routed" is now part of that seat. *Correction 2026-09-20:* while Claude
+was token-capped, Grok ranked the queue once, under Jordan's instruction `evt_47c1614ac9cb486daaa0ea453d506da5`
+/ `evt_d505999fa95f4ec090556ea7e8d097f4` (ranking events `evt_1e8340260e46408e810352a7fc474dd6` /
+`evt_b085b8146e82452fa2b3897112a9c056`); advised Jordan on the NOOA host cutover he performed on the
+2026-09-18 close-out steps (first host seal `evt_e80678c58feb4878a4587c60a7f76db7`); and took PR 90's
+first-pass review on his reassignment (`evt_4f4c20d38e3d4dbd95020df4a171deba` /
+`evt_08be04d445c74d41b0a7c5b33c801df1`). "Substitute spec author when the coordinator is capped" is now
+part of the Grok seat, per act when so directed, not as a standing power. Measurer remains the standing
+job. Jordan's decision this session: keep measurer; do not rename the seat architect.
 
 1. **Reviewer ≠ builder for the same change.** Whoever built it does not review it. Astra's PR 15 was
    reviewed by Grok, NOOA and Claude; cursor-agent's PR 16 by Codex (read-only) and Claude; Claude's design
