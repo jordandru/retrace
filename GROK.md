@@ -5,15 +5,16 @@ This repository records verifiable provenance through the `retrace` MCP server. 
 Read both before working. This file holds only what is specific to the Grok seat.
 
 - Actor id `grok`. Trailers on every commit: `Retrace-Actor: grok`,
-  `Retrace-Model: <exactly what the runtime exposes, or omitted when it exposes nothing — never a slug
-  you normalised yourself>`,
+  `Retrace-Model: <exactly what the status bar displays, whole, e.g. Grok 4.6 (xhigh); omitted only when nothing
+  is displayed — never a slug you normalised yourself>`,
+  `Retrace-Model-Source: harness-display` (`none` when `Retrace-Model` is omitted),
   `Retrace-Caused-By: <instruction event id>`.
 - `actor.model` is the string this harness displays for the session (its status bar, e.g. `Grok 4.6
-  (xhigh)`), reported verbatim with the source named as the harness display (coordinator decision
-  `evt_e7a318017ace472ab641e6940f7d5607`, on Jordan's rule audit `evt_376a8fc8ba4b48c3a38624f38b4335cf`);
-  `grok-4.6` is the registry alias for it. Omit only if nothing is displayed either; never guess. This
-  harness exposes no env, config, or API model identifier — that is a fact about sources, not a reason
-  to omit when the display is present.
+  (xhigh)`), reported verbatim and whole, with `actor.model_source: harness-display` (agent-rules 4 v2; coordinator
+  decision `evt_e7a318017ace472ab641e6940f7d5607`, on Jordan's rule audit `evt_376a8fc8ba4b48c3a38624f38b4335cf`);
+  `grok-4.6` is the registry alias for it and the registry's `display_pattern` reads the effort suffix. This
+  harness exposes no env, config, or API model identifier, so the status bar is the source; when nothing is
+  displayed either, `model` is absent and `model_source` is `none` — recorded, never guessed.
 - Seat: measurer (`docs/team-roles.md`). When the coordinator is capped, Grok may spec-author or rank
   the queue only for the act Jordan or a recorded routing event directs — never as a standing power,
   never classify, route, dispatch, or merge. Ranking the queue is not coordination: classification

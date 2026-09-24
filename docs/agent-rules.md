@@ -31,11 +31,26 @@ each one names the product change that would make it unnecessary.
    construction. That is why merges are the merger's alone, `--no-ff`, with no manual edits (rule 12,
    agent-ops 12), until reconcile evaluates merge-introduced content.
 
-4. **Report the model verbatim.** `actor.model` is the exact string your harness reports for the
-   running session — not shortened, not normalised, not a nicer name. If the harness exposes nothing,
-   omit the field; never pin a value and never guess. Spelling differences between harnesses
-   (`gpt-5.6-sol` / `GPT-5.6 Sol`, `claude-opus-4-8` / `claude-opus-4.8`) are the routing registry's job
-   to alias (`.claude/skills/review-effort/routing-rules/models.json`, PR 35), not yours to fix.
+4. **Report the model and how you know it.** (v2, 2026-09-24, model-source §7 step 3b, on Jordan's instruction
+   `evt_5849cb3f10c04ab5bf67dcf072e389e5`. The text is `docs/design/model-source.md` §4.6, gated by Codex, NOOA and the
+   Grok seat and merged as v1.3 `6c208d9`, from Jordan's rule audit `evt_376a8fc8ba4b48c3a38624f38b4335cf` — "true
+   provenance means making a true claim and avoiding omission" — and the coordinator's decision
+   `evt_e7a318017ace472ab641e6940f7d5607`. The v1 text of 2026-09-12 read: "Report the model verbatim. `actor.model` is the
+   exact string your harness reports for the running session — not shortened, not normalised, not a nicer name. If the
+   harness exposes nothing, omit the field; never pin a value and never guess." Verbatim and never-guess stand; silent
+   omission is replaced by a recorded `none`.) `actor.model` is the exact string your harness reports, configures or
+   displays for the running session — not shortened, not normalised, not a nicer name — and `actor.model_source` says
+   which of those it was (`harness-runtime`, `harness-config`, `harness-display`, `credential-pinned`, `operator-stated`;
+   a harness source outranks `operator-stated`, which outranks the model's own statement). A harness label you can see
+   counts as a report. A source you have documented reason to distrust is recorded as a second claim
+   (`actor.model_claims`), never as the first. When nothing is available, `model` is absent and `model_source` is
+   `none`: the unknown is recorded, never silent. The model's own statement about itself is never the sole source. A
+   seat's own MCP server names the source of a configured model with `RETRACE_ACTOR_MODEL_SOURCE` (PR 118); a
+   credential that pins a model stamps `credential-pinned` and keeps the seat's own pair as a second claim (§4.1 as
+   built). Spelling differences between harnesses (`gpt-5.6-sol` / `GPT-5.6 Sol`, `claude-opus-4-8` /
+   `claude-opus-4.8`) and a display string carrying an effort suffix (`Grok 4.6 (xhigh)`) are the routing registry's
+   job to alias (`.claude/skills/review-effort/routing-rules/models.json`, PR 35; `display_pattern`, §7 step 4), not
+   yours to fix.
 
 5. **Never log a commit through MCP.** The Git hook seals commits and merges with authoritative
    metadata, and the GitHub webhook seals them again. Two producers, one sha: that agreement is the check.
@@ -43,7 +58,13 @@ each one names the product change that would make it unnecessary.
 6. **Commit trailers are a claim, not the proof.** Every commit — merges included — carries
    `Retrace-Actor: <your seat>`, `Retrace-Model: <verbatim model>`, `Retrace-Caused-By: <instruction
    event id>`. `Retrace-Model` follows rule 4: when the runtime exposes no identifier the trailer is
-   omitted, never guessed. The ledger classifies that claim against pinned edit evidence
+   omitted, never guessed. *(v2, 2026-09-24, same sources as rule 4 v2.)* `Retrace-Model-Source: <source>` sits beside
+   `Retrace-Model`, and an agent commit that omits `Retrace-Model` carries `Retrace-Model-Source: none` — the omission
+   recorded, not silent. The hook and the webhook record the pair's completeness as `method.params.model_claim`
+   (`complete` | `source-missing` | `none` | `absent` | `inconsistent`; `docs/design/model-source.md` §4.3, PR 118): an
+   inconsistent pair still seals, with no `actor.model_source`; `absent` is a producer defect after adoption; a
+   `Co-Authored-By`-derived model with no source trailer is `source-missing`. Completeness never enters the contribution
+   decision that follows. The ledger classifies that claim against pinned edit evidence
    (`docs/design/commit-trailer-consistency.md`, §4 decision table, §15 step 3 onward): a claim the
    evidence **contradicts** is `conflicting` and, after step 6, the actor it names is withheld; a claim
    with **no** evidence is `unresolved` and stays written, labelled, under the default `record` policy
