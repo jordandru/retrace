@@ -1,13 +1,14 @@
 # Model claims: source, omission, verification — design note v1 (agent-rules 4, v2)
 
-**Status:** DRAFT v1.2, 2026-09-23 (v1 2026-09-20; v1.1 2026-09-23), author claude-code (coordinator, `claude-fable-5-1`), on Jordan's instruction
+**Status:** DRAFT v1.3, 2026-09-23 (v1 2026-09-20; v1.1, v1.2 2026-09-23), author claude-code (coordinator, `claude-fable-5-1`), on Jordan's instruction
 `evt_3f1973b9b8234267aeea0d238af89483`, from his rule audit `evt_376a8fc8ba4b48c3a38624f38b4335cf` ("true
 provenance means making a true claim and avoiding omission") and the coordinator's decision
 `evt_e7a318017ace472ab641e6940f7d5607`. **Class (a)** under agent-rules 12: it rewrites rule 4 and the
 model line of every identity file. Design gate: Codex → NOOA (Nemotron, pinned) → Grok's seat; the author does not sit. Round 1 (head `45a44b0`):
 Codex rejected, one High and three Medium (`evt_107148b1745d483dace12bd8535e681a`); all four applied in v1.1. Round 2
 (head `c261aab`): Codex approved, NOOA approved with one Medium and three Lows, the Grok seat (cursor-agent) rejected
-with one Medium and one Low; all applied in this v1.2 (§8). Companion to
+with one Medium and one Low; all applied in v1.2. Round 3 (head `8cdba1a`): Codex approved, NOOA approved, the Grok
+seat rejected with one Medium (§4.4 not updated with the §4.1 change) and one Low; both applied in this v1.3 (§8). Companion to
 `commit-trailer-consistency.md` (a claim is classified against evidence, never trusted), `effort-model-routing.md`
 §5 (`models.json`, self-reported effort) and `orchflows-integration.md` §7 (the transcript witness). **Not built.**
 Corrections before merge are made in place (Jordan, `evt_9dc98206`); after merge, appended (agent-rules 10).
@@ -160,7 +161,8 @@ itself (VS Code, Copilot); a hand-written co-author line is `operator-stated`.
 - `status`: `agent_events_by_model_source` per actor, and `agent_events_without_model` split into
   `source none` vs `no source recorded` (legacy).
 - `doctor`: the existing `review model` finding reads the source: `none` → WARN as today; `self-report` only →
-  WARN "model is the reviewer's own word"; `harness-display` with a registry alias → PASS. Under `--gate`, a
+  WARN "model is the reviewer's own word"; `harness-display` with a registry alias **or a `display_pattern` match** (§4.1) → PASS (v1.3, cursor-agent round 3,
+  `evt_52b36fe4`: v1.2 left this line alias-only, so a pane showing `Grok 4.6 (xhigh)` passed A2 but not §4.4). Under `--gate`, a
   review whose model source is `none` or `self-report` counts as no model, which is what R1/R3 already need.
 - Landing page and README: the count of agent events without a model becomes a sentence with its cause split, not
   a footnote.
@@ -205,7 +207,9 @@ no config, no API" sentence becomes "the status bar is the source: `harness-disp
   67 blank Grok events came from panes displaying `Grok 4.6`; the cited evidence is two examples in §1 and aggregate
   counts, not a per-event mapping (Codex F4, `evt_107148b1`). The correction is restricted to the proven subset; the
   rest remain legacy unknowns.
-- Effort already follows this pattern (`not_exposed`, `unset`); this note does not touch it.
+- Effort already follows this pattern (`not_exposed`, `unset`). This note changes effort in one place only: when a
+  displayed model string carries an effort suffix and the event reports no `reasoning_effort`, the registry's
+  `display_pattern` fills it (§4.1); a reported value always wins.
 
 ## 6. Acceptance for v1
 
@@ -280,3 +284,13 @@ under team-roles rule 8.
 9. **Low — §7 step 4 did not name doctor's listing of `model_claim: absent`.** Accepted; added.
 10. **Low — §4.5 claimed `history inspect` reads Codex's native transcripts.** Accepted: the cited orchflows note itself
     records that Codex delegation bodies are encrypted and reported unavailable; §4.5 now says so.
+
+Round 3, head `8cdba1a` (v1.2). Codex re-check (medium; routing `evt_069bd460`): **approved**
+`evt_c8546fa5ba7f46ee99534ce626538c0a`, no findings. NOOA (routing `evt_83357fb5`): **approved**
+`evt_5d58ba90820243a78a8bf6c959d4f7f7`, no new Medium/High per its sealed summary (full text read after the host key is
+reloaded). Grok seat, cursor-agent (medium; routing `evt_1f500953`): **rejected** `evt_52b36fe4998d480aa46fc9f9fd900aac`,
+2026-09-23 23:59Z.
+
+11. **Medium — §4.4's doctor PASS path was still alias-only, so a Grok pane showing `Grok 4.6 (xhigh)` could pass A2
+    but not §4.4.** Accepted: §4.4 now reads alias or `display_pattern`. The round-2 fix had not been propagated there.
+12. **Low — §5 still said this note does not touch effort.** Accepted: §5 now names the one place it does.
