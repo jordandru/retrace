@@ -1,6 +1,6 @@
 # Model claims: source, omission, verification — design note v1 (agent-rules 4, v2)
 
-**Status:** DRAFT v1.4, 2026-09-24 (v1 2026-09-20; v1.1, v1.2, v1.3 2026-09-23; v1.3 merged `6c208d9`), author claude-code (coordinator, `claude-fable-5-1`), on Jordan's instruction
+**Status:** DRAFT v1.5, 2026-09-24 (v1 2026-09-20; v1.1, v1.2, v1.3 2026-09-23; v1.3 merged `6c208d9`; v1.4 merged `4c6443d`), author claude-code (coordinator, `claude-fable-5-1`), on Jordan's instruction
 `evt_3f1973b9b8234267aeea0d238af89483`, from his rule audit `evt_376a8fc8ba4b48c3a38624f38b4335cf` ("true
 provenance means making a true claim and avoiding omission") and the coordinator's decision
 `evt_e7a318017ace472ab641e6940f7d5607`. **Class (a)** under agent-rules 12: it rewrites rule 4 and the
@@ -13,7 +13,10 @@ all three seats approved; merged. **v1.4 (round 5):** a dated correction to §4.
 the step-2 build (`evt_f450c07129944f6d98cee30d6be9e5fc`): the resolver's displaced model pair cannot live inside the
 producer-signed `method.params`; second claims move to `actor.model_claims` (§8 item 13). Companion to
 `commit-trailer-consistency.md` (a claim is classified against evidence, never trusted), `effort-model-routing.md`
-§5 (`models.json`, self-reported effort) and `orchflows-integration.md` §7 (the transcript witness). **Not built.**
+§5 (`models.json`, self-reported effort) and `orchflows-integration.md` §7 (the transcript witness). **Not built** (v1–v1.4).
+**v1.5 (round 6): §7 step 2 is built and deployed** — PR 114 (builder cursor-agent) merged as `84095ed` 2026-09-24 04:59Z, Worker version
+`798c1b7e` 05:03Z, doctor READY `evt_f340c19e24e44bf99bef5efb4aeccbcf`; steps 3–5 are not built. v1.5 records what was built where
+it differs from or adds to the design (§4.1 "as built", A7, §7, §8 round 6).
 Corrections before merge are made in place (Jordan, `evt_9dc98206`); after merge, appended (agent-rules 10).
 
 ## 1. The problem
@@ -51,6 +54,9 @@ while its settings file names `claude-fable-5-1[1m]`, and the previous coordinat
 value came from.
 
 ## 2. What is true today, from the code at `0d294eb`
+
+*v1.5, 2026-09-24: this section is the dated snapshot at `0d294eb` that the design was written against. The schema, resolver
+and MCP facts below changed when step 2 shipped (`84095ed`); the as-built state is in §4.1.*
 
 - **Schema.** `Actor.model` is `z.string().optional()` with no source field (`packages/core/src/schema.ts:14–25`).
   `Actor` has no `catchall`, so an unknown key on the actor is **stripped silently** by the deployed Worker
@@ -108,6 +114,13 @@ A new optional enum beside `actor.model`:
   pins bullet below): after the step-2 deploy, second claims live on the actor, `actor.model_claims: [{ "value",
   "source", "note"? }]`, a schema field added in that deploy. `method.params.model_claims` stays what it was chosen
   for — the interim carrier that round-trips before the deploy — and a consumer reads both, the actor field first.*
+  *As built (v1.5; PR 114 `84095ed`; sources: Codex round 1 `evt_b156f9428eba43208d0d823d6d495fe9` (design
+  assessment), Codex round 3 `evt_7388157112ac4057a22af1c01d916851` (approval, no findings), claude-code
+  `evt_9bff330286f34259b47806c57e3ce683`): a claim is `{ value, source?, note? }` with `value` non-empty and `source`
+  **optional** — a displaced legacy value that carried no `model_source` is recorded without one rather than with an
+  invented one (Codex round 1: "displaced legacy values must not acquire an invented source"); a consumer counts a
+  source-less claim as legacy. (v1.5.1: the quotation is cited to the round-1 verdict where it appears; round 3 records the
+  approval — NOOA Low 1 `evt_d4eda292`, Codex Low 1 `evt_1c722c8d`.)*
 - **Omission becomes a fact.** An agent event with no `model` carries `model_source: "none"`. A blank with no
   source is, after adoption, a producer defect — which is what fact 4 in §1 always was.
 - **A displayed string is a report, recorded whole.** Grok records exactly what its status bar shows — `Grok 4.6
@@ -142,6 +155,28 @@ A new optional enum beside `actor.model`:
   names and the presence of a `model` key only) lists nine pinned credentials and none names a model, so the
   `credential-pinned` branch is exercised by tests until an operator pins one. The MCP server's `harness-config`
   replacement happens client-side before signing and is unaffected. The v1.3 sentence above stays visible (rule 10).*
+  *As built (v1.5; PR 114 `84095ed`, three review rounds, §8 round 6).* **Refinement.** `Actor` and the MCP tool input
+  schema carry a presence-based rule: `model_source` other than `none` requires `model`; `none` requires `model` absent. A
+  body that violates it is an invalid event — 400 at `POST /events`, a refusal at the tool boundary of the local and the
+  hosted MCP servers before any write — never repaired into a sealed contradiction (Codex F1). Legacy forms (model only;
+  neither) stay valid. **Worker resolver** (`router.ts` `resolveActor`): a credential that names no model copies
+  `model`, `model_source` and `model_claims` as sent, inventing nothing; a credential that names a model stamps
+  `model_source: credential-pinned` and, only when the body's model is non-empty and differs, appends the displaced pair
+  `{ value, source? (the body's), note }` to `actor.model_claims`; an empty-string legacy model is treated as absent for
+  displacement — no claim is built from it and the legacy string contract is unchanged (Codex F4). **MCP server**
+  (`index.ts`): `RETRACE_ACTOR_MODEL` carries `harness-config`; with the actor lock on the configured model is
+  authoritative and a differing caller pair is displaced onto the actor before signing; with the lock off model and
+  source resolve together — a caller override never inherits `harness-config`, and an explicit caller `none` is kept when
+  no configured model replaces it (Codex F2 and follow-up). **Hosted MCP** (`apps/worker/src/mcp.ts`): the adapter
+  forwards the credential's identity (`type`, `id`, `on_behalf_of`) plus the caller's fields exactly as sent and never
+  the credential's model, so the router remains the one place that pins a model (Codex F3, re-raised once; scope grew by
+  this file). **Advertised surface:** `schemaSurface()` gains an `actor` group so doctor's "would drop" check sees an
+  older Worker (`doctor.ts` `missingSchema`). **Known limit (Low, claude-code `evt_9bff3302`):** an empty-string
+  `model` paired with a non-`none` source passes the presence-based refinement because the string is defined, so an
+  unpinned path can store `model: ""` with a source; no wrong belief follows and pinned paths already treat `""` as
+  absent (`packages/core/src/router.ts:385` `body.model !== ""`; `packages/mcp-server/src/index.ts:205`
+  `callerActor.model !== ""`, both at `84095ed`; cited in v1.5.1 for NOOA Low 4). Step 3 treats `""` as absent in the
+  refinement or the resolvers when producers begin sending sources.
 
 ### 4.2 The Codex case, as far as the evidence goes
 
@@ -246,6 +281,10 @@ no config, no API" sentence becomes "the status bar is the source: `harness-disp
 - A7 (v1.4) A producer-signed event sealed on a credential that names a model, whose body reports a different model,
   verifies `verified` after resolution and carries the displaced pair in `actor.model_claims`; a test in
   `producer-sig.test.ts` or `server.test.ts` shows it.
+  *Met at `8557981e` (PR 114): `packages/core/src/router.test.ts` "credentials: A7 producer-signed body whose model
+  differs from the credential stays verified with the displaced pair on actor.model_claims" — through `POST /events`
+  with a producer-signed body on a model-pinning credential, beside the resolver fixture (cursor-agent's round-5 Low,
+  `evt_8b40023e632c41d5814a2d727b492a23`, resolved there rather than in the files this line named).*
 
 ## 7. Build order
 
@@ -259,6 +298,16 @@ no config, no API" sentence becomes "the status bar is the source: `harness-disp
    describes); a consumer reads the interim source only when `model_claimed` equals the sealed `actor.model`, and
    otherwise reports `source: inconsistent` (§4.1) — because today the credential can replace the value while
    `method.params` passes through unchanged (`router.ts:782–798`).
+   *Built and deployed (v1.5): PR 114, merge `84095ed` (2026-09-24 04:59Z), Worker `798c1b7e` (05:03Z), doctor READY
+   `evt_f340c19e`. Two `Actor` fields shipped (`model_source`, `model_claims`), both resolvers, the hosted MCP adapter and
+   the `schemaSurface` actor group. Doctor's deployment-schema check failed by design from the first commit until the
+   deploy (a build ahead of the Worker; owner exception `evt_a8c6b96b3fe54db18cf95ae287d472c7`, precedent 2026-09-10);
+   issue #113 asks doctor to record that acknowledged gap itself instead of relying on a human to remember. Interim
+   `method.params` carrier: no repository producer implemented it, and a ledger text search for `model_claimed` on
+   2026-09-24 05:19Z returned only prose about this note (its edit, commit and review events), not a producer write
+   (Codex's own repository and ledger searches found the same, `evt_1c722c8d`); that is a prose search, not a field-level
+   census of historical `method.params`. It stays defined for producers that predate the schema (§4.1). (v1.5.1 wording
+   for NOOA Low 2 and Codex Low 2; v1.5.2 describes the returned events accurately, Codex round-2 Low `evt_06953aa6`.)*
 3. Producers: MCP server (`RETRACE_ACTOR_MODEL_SOURCE`, and the caller's runtime source), git hook and
    `commit-actor.ts` (trailer), identity files, rule 4 text.
 4. Consumers: status split, doctor source-aware `review model` and a listing of `model_claim: absent` commits as
@@ -326,3 +375,22 @@ Round 5, v1.4, after merge (`6c208d9`). Coordinator's own finding while preparin
     place, dated and sourced, in §4.1 and §7 step 2: second claims move to `actor.model_claims` (a second `Actor` field in
     the step-2 deploy); the interim `method.params` carrier is unchanged; A7 names the test that closes it. Gate: Codex →
     NOOA → Grok seat (cursor-agent, Jordan's reassignment `evt_9677a658`) → claude-code last.
+
+Round 6, v1.5, after the step-2 build (PR 114, builder cursor-agent on Jordan's decision `evt_9677a658`; brief
+`~/.retrace/handoff-2026-09-23/brief-cursor-build-step2.md`). Class S code gate: Codex first, claude-code last; Grok's
+seat skipped (capped; the builder cannot review its own PR).
+
+14. **Codex round 1 (`4fe6f445`, high; routing `evt_95ff412d`): rejected `evt_b156f9428eba43208d0d823d6d495fe9`, four
+    Medium.** F1 the MCP tool input repaired an inconsistent body instead of rejecting it; F2 lock-off inherited
+    `harness-config` for a caller model; F3 the hosted MCP adapter dropped `model_source`/`model_claims` (the build brief
+    had missed `apps/worker/src/mcp.ts`; scope amended, `evt_df5ca9c7`); F4 an empty legacy model became a 500. All
+    applied (`d380739b`).
+15. **Codex round 2 (`d380739b`, high; routing `evt_78f5be04`): rejected `evt_53a7033aa5bd4d7890d39fc29c74db2a`, two
+    Medium re-raises** — F3: the adapter still spread the credential's model before the caller's source; F2 follow-up: the
+    rebuilt lock-off branch dropped an explicit `none`. Stop rule met; Jordan's go `evt_9514ca0b` for a second fix round;
+    both applied (`8557981e`). F1 and F4 closed.
+16. **Codex round 3 (`8557981e`, medium; routing `evt_c0932287`): approved `evt_7388157112ac4057a22af1c01d916851`, no
+    findings.** claude-code last seat (routing `evt_bf1d2e53`): approved `evt_9bff330286f34259b47806c57e3ce683`, one Low
+    (the empty-string limit above, carried to step 3). Both coordinator's decisions from the brief (optional claim
+    `source`; presence-based refinement) endorsed by Codex and recorded as built in §4.1. Gate check `evt_d9e696ca`;
+    merge `84095ed` (`evt_eb99d293`); deploy `798c1b7e` (`evt_c53a506e`, verified `evt_f340c19e`).
