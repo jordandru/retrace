@@ -125,7 +125,7 @@ export function mapGithubWebhook(event: string, payload: any, opts: GithubMapOpt
         method: { tool: "git", automated: r.actor.type !== "human", params: {
           sha: c.id, producer: "github-push", ref: payload.ref, pusher: payload.pusher?.name,
           raw_message: String(c.message ?? ""), author: { name: c.author?.name, email: c.author?.email ?? (c.author?.username ? `github:${c.author.username}` : undefined) },
-          parents, parents_complete: parentsComplete,
+          parents, parents_complete: parentsComplete, model_claim: r.modelClaim,
         } },
         idempotency_key: `gh:push:${repoFull}:${c.id}`, tags: ["github", "push"],
       };

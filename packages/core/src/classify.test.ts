@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {
   CLAIM_DECISION_PARAM, MemoryEventStore, POLICY_PROFILE, SEALED_BY_PARAM, appendEvent,
   applyBreakerFailure, applyBreakerSuccess, breakerIsOpen, breakerShouldOpen, classifyCommitClaim,
-  collectAttributionAmendments, createHandler, decideFromTable, emptyBreaker, prepareAttributionContext,
+  collectAttributionAmendments, createHandler, decideFromTable, deriveCommitClaim, emptyBreaker, prepareAttributionContext,
   recordWebhookClassifyOutcome, reconstructWithheldPayload, verifiedAttributionSnapshot,
   webhookBreakerAdmission, wouldWrite,
   type ClaimRecord, type EventInput, type HistoryQuery,
@@ -106,7 +106,40 @@ async function classify(store: MemoryEventStore, input: EventInput, extra: Recor
 }
 
 const agentClaim = (id = "codex"): ClaimRecord => ({
-  type: "agent", id, source: "retrace-actor", raw_trailers: { "retrace-actor": id },
+  type: "agent", id, source: "retrace-actor", model_claim: "absent", raw_trailers: { "retrace-actor": id },
+});
+
+test("model_claim is recorded from trailers; decideFromTable and wouldWrite ignore it", () => {
+  const claims: ClaimRecord[] = [
+    { ...agentClaim(), model: "gpt-5", model_claim: "complete" },
+    { ...agentClaim(), model: "gpt-5", model_claim: "source-missing" },
+    { ...agentClaim(), model_claim: "none" },
+    { ...agentClaim(), model_claim: "absent" },
+    { ...agentClaim(), model: "gpt-5", model_claim: "inconsistent" },
+  ];
+  for (const claim of claims) {
+    assert.deepEqual(
+      decideFromTable({ claim, wall: [{ type: "agent", id: "opencode" }], looseHints: 0, authenticatedIngress: true, isMergeNoFiles: false }),
+      { status: "conflicting", reason: "no_match" },
+    );
+    assert.deepEqual(
+      decideFromTable({ claim, wall: [{ type: "agent", id: "codex" }], looseHints: 0, authenticatedIngress: true, isMergeNoFiles: false }),
+      { status: "supported" },
+    );
+  }
+  assert.deepEqual(wouldWrite("conflicting", "record", "no_match"), { actor_written: "withheld", reason: "no_match" });
+  assert.deepEqual(wouldWrite("supported", "record"), { actor_written: "claim" });
+
+  const complete = deriveCommitClaim(commitInput({ raw: "work\n\nRetrace-Actor: codex\nRetrace-Model: gpt-5\nRetrace-Model-Source: harness-runtime\n" }));
+  assert.equal(complete.claim.model_claim, "complete");
+  assert.equal(complete.resolved.actor.model_source, "harness-runtime");
+  const missing = deriveCommitClaim(commitInput({ raw: "work\n\nRetrace-Actor: codex\nRetrace-Model: gpt-5\n" }));
+  assert.equal(missing.claim.model_claim, "source-missing");
+  assert.equal(missing.resolved.actor.model_source, undefined);
+  const inconsistent = deriveCommitClaim(commitInput({ raw: "work\n\nRetrace-Actor: codex\nRetrace-Model: gpt-5\nRetrace-Model-Source: none\n" }));
+  assert.equal(inconsistent.claim.model_claim, "inconsistent");
+  assert.equal(inconsistent.resolved.actor.model_source, undefined);
+  assert.equal(inconsistent.resolved.actor.model, "gpt-5");
 });
 
 test("wouldWrite / A1 table: conflicting withholds, unresolved follows policy, else claim", () => {
@@ -147,7 +180,7 @@ test("T2 decideFromTable: empty wall is unresolved, reason by evidence kind", ()
 });
 
 test("T8/T9 decideFromTable: malformed is conflicting iff Wall nonempty", () => {
-  const malformed: ClaimRecord = { type: "human", id: "jordan@example.com", source: "malformed", raw_trailers: { "retrace-actor": "not valid" } };
+  const malformed: ClaimRecord = { type: "human", id: "jordan@example.com", source: "malformed", model_claim: "absent", raw_trailers: { "retrace-actor": "not valid" } };
   assert.deepEqual(
     decideFromTable({ claim: malformed, wall: [{ type: "agent", id: "github-copilot" }], looseHints: 0, authenticatedIngress: true, isMergeNoFiles: false }),
     { status: "conflicting", reason: "malformed_claim" },

@@ -30,9 +30,14 @@ export const ModelClaim = z.object({
 });
 export type ModelClaim = z.infer<typeof ModelClaim>;
 
+/** Empty-string `model` is absent for the presence-based pairing rule (model-source §4.1 Low, step 3). */
+function actorModelPresent(model: string | undefined): boolean {
+  return model !== undefined && model !== "";
+}
+
 function actorModelSourceConsistent(actor: { model?: string; model_source?: ModelSource }): boolean {
-  if (actor.model_source === "none") return actor.model === undefined;
-  if (actor.model_source !== undefined) return actor.model !== undefined;
+  if (actor.model_source === "none") return !actorModelPresent(actor.model);
+  if (actor.model_source !== undefined) return actorModelPresent(actor.model);
   return true;
 }
 

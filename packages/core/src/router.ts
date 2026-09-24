@@ -370,18 +370,23 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
     // A pinned credential fixes WHO is acting. If it names a model that value is authoritative and the source
     // becomes credential-pinned in the same operation (model-source.md §4.1); the displaced pair lands on
     // actor.model_claims, never method.params (producer-signed). If it omits a model, the producer reports
-    // model / model_source / model_claims as sent — do not invent a source.
-    if (actor.type === "agent" && actor.model === undefined) {
+    // model / model_source / model_claims as sent — do not invent a source. Empty-string model is absent (PR 118 F2).
+    const pinModel = actor.model !== undefined && actor.model !== "" ? actor.model : undefined;
+    if (actor.type === "agent" && pinModel === undefined) {
+      // No model pin: WHO stays the credential; model and source resolve together from the body.
+      // Drop the credential's empty model and its model_source so a source-less caller model
+      // cannot inherit none (PR 118 F2 residual).
+      const { model: _noPinModel, model_source: _noPinSource, model_claims: _noPinClaims, ...identity } = stamped;
       return {
         actor: {
-          ...stamped,
+          ...identity,
           ...(body.model !== undefined ? { model: body.model } : {}),
           ...(body.model_source !== undefined ? { model_source: body.model_source } : {}),
           ...(body.model_claims !== undefined ? { model_claims: body.model_claims } : {}),
         },
       };
     }
-    if (actor.model !== undefined) {
+    if (pinModel !== undefined) {
       const displacedModel = body.model !== undefined && body.model !== "" && body.model !== actor.model ? body.model : undefined;
       return {
         actor: {

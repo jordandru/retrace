@@ -175,6 +175,8 @@ test("Actor.model_source refinement: a source other than none requires model; no
   assert.equal(Actor.safeParse({ ...id, model: "claude-fable-5" }).success, true, "legacy: model without source is still valid");
   assert.equal(Actor.safeParse({ ...id, model_source: "harness-runtime" }).success, false);
   assert.equal(Actor.safeParse({ ...id, model: "claude-fable-5", model_source: "none" }).success, false);
+  assert.equal(Actor.safeParse({ ...id, model: "", model_source: "harness-runtime" }).success, false, "empty-string model is absent: non-none source needs a non-empty model");
+  assert.equal(Actor.safeParse({ ...id, model: "", model_source: "none" }).success, true, "empty-string model is absent: none is consistent");
   assert.equal(EventInput.safeParse({
     project: "p", actor: { ...id, model_source: "harness-config" }, action: "edited", artifacts: [{ id: "a" }],
   }).success, false, "a violating body is an invalid event");

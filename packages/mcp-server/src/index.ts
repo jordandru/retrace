@@ -15,6 +15,9 @@
  *                    Set 0 to allow caller overrides (backfill / trusted contexts only).
  *   RETRACE_ACTOR    default actor id for this agent (e.g. "claude-code")
  *   RETRACE_ACTOR_MODEL default model string
+ *   RETRACE_ACTOR_MODEL_SOURCE source of RETRACE_ACTOR_MODEL (one of the seven ModelSource values).
+ *                    Unset → harness-config when a model is configured, as before. Set with a model to name that
+ *                    model's source. `none` with a configured model, or any value without one, is a startup error.
  *   RETRACE_ON_BEHALF_OF the human this agent works for (e.g. jordan@...)
  *   RETRACE_SESSION  override location.session (default: CLAUDE_CODE_SESSION_ID or GROK_SESSION_ID, else a run id)
  *   RETRACE_DEVICE   override location.device (default: os.hostname() — an opt-out, since a hostname is sealed into
@@ -34,7 +37,7 @@ import { homedir, hostname } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import {
-  Actor as CoreActor, Location, EventInput, applyDefaultRoles,
+  Actor as CoreActor, Location, EventInput, ModelSource, applyDefaultRoles,
   appendEvent, CausedByError, causedByProblem, causedByErrorMessage,
   verifyProject, explainEvent, renderTimeline, renderWhyChain, describeEvent, eventForModel, markUntrustedText,
   buildExportBundle, verifyExportBundle, renderReportHtml, parseSigningKey, publicFromPrivate, newShareId,
@@ -62,14 +65,38 @@ export function confinedWritePath(p: string, cwd: string = process.cwd()): strin
   }
   return abs;
 }
+/** Empty-string `model` is absent for resolution (PR 118 F1). */
+function presentModel(model: string | undefined): model is string {
+  return model !== undefined && model !== "";
+}
+
+/** Source of the configured model. Throws at startup (buildServer) on an invalid pairing. */
+function configuredActorModelSource(model: string | undefined): CoreActor["model_source"] | undefined {
+  const raw = env.RETRACE_ACTOR_MODEL_SOURCE;
+  const hasModel = presentModel(model);
+  if (raw === undefined || raw === "") return hasModel ? "harness-config" : undefined;
+  const parsed = ModelSource.safeParse(raw);
+  if (!parsed.success) {
+    throw new Error(`RETRACE_ACTOR_MODEL_SOURCE "${raw}" is not a valid model source (one of: ${ModelSource.options.join(", ")})`);
+  }
+  if (!hasModel) {
+    throw new Error(`RETRACE_ACTOR_MODEL_SOURCE is "${parsed.data}" but RETRACE_ACTOR_MODEL is unset; a source other than none requires a configured model`);
+  }
+  if (parsed.data === "none") {
+    throw new Error(`RETRACE_ACTOR_MODEL_SOURCE is "none" but RETRACE_ACTOR_MODEL is set; none requires no configured model`);
+  }
+  return parsed.data;
+}
+
 /** Read at buildServer() time (not module load) so tests and embedders can configure it via env before building. */
 const readDefaultActor = () => {
-  const model = env.RETRACE_ACTOR_MODEL;
+  const model = presentModel(env.RETRACE_ACTOR_MODEL) ? env.RETRACE_ACTOR_MODEL : undefined;
+  const modelSource = configuredActorModelSource(model);
   return {
     type: "agent" as const,
     id: env.RETRACE_ACTOR ?? "mcp-agent",
     model,
-    ...(model !== undefined ? { model_source: "harness-config" as const } : {}),
+    ...(modelSource !== undefined ? { model_source: modelSource } : {}),
     on_behalf_of: env.RETRACE_ON_BEHALF_OF,
   };
 };
@@ -220,11 +247,11 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
           ...(callerActor.model_claims !== undefined ? { model_claims: callerActor.model_claims } : {}),
         };
       }
-      if (defaultActor.model !== undefined) {
+      if (presentModel(defaultActor.model)) {
         return {
           ...identity,
           model: defaultActor.model,
-          model_source: "harness-config" as const,
+          model_source: defaultActor.model_source ?? "harness-config" as const,
           ...(callerActor?.model_claims !== undefined ? { model_claims: callerActor.model_claims } : {}),
         };
       }
@@ -239,7 +266,7 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
     // A configured model stays authoritative and carries harness-config; a differing caller pair is displaced
     // onto actor.model_claims before signing. When unpinned, pass the caller's model / model_source /
     // model_claims through as sent. An empty legacy model is absent for displacement (no claim from "").
-    if (defaultActor.model === undefined) {
+    if (!presentModel(defaultActor.model)) {
       return {
         ...defaultActor,
         ...display,
@@ -259,7 +286,7 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
               {
                 value: displacedModel,
                 ...(callerActor?.model_source !== undefined ? { source: callerActor.model_source } : {}),
-                note: "displaced by harness-config model",
+                note: `displaced by ${defaultActor.model_source ?? "harness-config"} model`,
               },
             ],
           }

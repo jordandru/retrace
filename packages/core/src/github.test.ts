@@ -46,6 +46,15 @@ test("reviews, comments, workflow_run, bots, push opt-in", () => {
   const [ag] = mapGithubWebhook("push", { repository: repo, commits: [{ id: "0123456789abcdef", message: "Fix\n\nRetrace-Actor: codex\nRetrace-Model: gpt-5\nRetrace-Caused-By: evt_" + "a".repeat(32), timestamp: "2026-08-16T14:00:00Z", author: { email: "j@x", name: "J" }, added: [], modified: ["b.ts"], removed: [] }] }, { includePush: true });
   assert.deepEqual(ag.actor, { type: "agent", id: "codex", model: "gpt-5", on_behalf_of: "j@x" });
   assert.equal(ag.caused_by, "evt_" + "a".repeat(32)); assert.equal(ag.intent, "Fix"); assert.equal(ag.method?.automated, true);
+  assert.equal(ag.method?.params?.model_claim, "source-missing");
+  const [agSrc] = mapGithubWebhook("push", { repository: repo, commits: [{ id: "1123456789abcdef", message: "Fix\n\nRetrace-Actor: codex\nRetrace-Model: gpt-5\nRetrace-Model-Source: harness-runtime\nRetrace-Caused-By: evt_" + "a".repeat(32), timestamp: "2026-08-16T14:00:00Z", author: { email: "j@x", name: "J" }, added: [], modified: ["b.ts"], removed: [] }] }, { includePush: true });
+  assert.equal(agSrc.actor.model_source, "harness-runtime");
+  assert.equal(agSrc.method?.params?.model_claim, "complete");
+  const [agBad] = mapGithubWebhook("push", { repository: repo, commits: [{ id: "2123456789abcdef", message: "Fix\n\nRetrace-Actor: codex\nRetrace-Model: gpt-5\nRetrace-Model-Source: none", timestamp: "2026-08-16T14:00:00Z", author: { email: "j@x", name: "J" }, added: [], modified: ["b.ts"], removed: [] }] }, { includePush: true });
+  assert.equal(agBad.actor.model_source, undefined);
+  assert.equal(agBad.actor.model, "gpt-5");
+  assert.equal(agBad.method?.params?.model_claim, "inconsistent");
+  EventInput.parse(agBad);
   const [bot] = mapGithubWebhook("push", { repository: repo, commits: [{ id: "fedcba9876543210", message: "Checkpoint", timestamp: "2026-08-16T14:00:00Z", author: { email: "41898282+github-actions[bot]@users.noreply.github.com", name: "retrace-checkpoint[bot]" }, added: [".retrace/checkpoints.jsonl"], modified: [], removed: [] }] }, { includePush: true });
   assert.equal(bot.actor.type, "system");
   assert.deepEqual(mapGithubWebhook("ping", {}), []);
