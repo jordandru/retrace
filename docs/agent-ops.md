@@ -200,7 +200,7 @@ The provenance rules themselves are `docs/agent-rules.md`.
     → unnecessary when [direction]: Orca's `terminal create` inherits the worktree's approval policy, and the
     routing skill launches reviewers itself with the routed model id.
 
-18. **Signed pane messages — the mechanics of agent-rules 15.** (Added 2026-09-24, same sources as agent-rules 15.)
+18. **Signed pane messages — the mechanics of agent-rules 15.** (Added 2026-09-24, same sources as agent-rules 15; Codex round-2 F4 `evt_8ad99634…` applied here too.)
     The channel is `orca-ide terminal send --terminal <handle> --text <text> --enter`. Order of operations, because the
     event must exist before its id can be appended: write the enveloped text (`SEAT … SEAT`) to disk, hash it, log the
     `sent` event with that hash, the target handle and `enter_pressed_by`, then send the text with ` [sent-event <id>]`
@@ -209,8 +209,10 @@ The provenance rules themselves are `docs/agent-rules.md`.
     line — and the ` [sent-event <id>]` suffix (a single space, then the bracketed id) is appended only when sending; a
     verifier removes exactly that final suffix and hashes the remaining bytes unchanged. Markers are not put on their
     own lines: a multi-line paste is what Cursor folds (below). **Verification route:** `GET /events/<id>` on
-    the Worker with the seat's own credential returns the raw sealed event (`actor.id`, `method.params.text_sha256`,
-    `brief_sha256`, `producer_sig_verdict`); the model-facing `retrace_why` / `retrace_history` views omit ids and hashes
+    the Worker with the seat's own credential returns the raw sealed event (`actor.id`, `method.params.sealed_by`,
+    `producer_sig_verdict`, `text_sha256`, `brief_sha256` — the seal and the verdict are what tie the seat name to its
+    pinned credential; an owner-relayed or asserted event carries the same shape with `sealed_by: owner` and verdict
+    `none` and is a refusal); the model-facing `retrace_why` / `retrace_history` views omit ids and hashes
     by design (`packages/core/src/explain.ts`) and cannot verify a message. A `curl` with the credential in the
     `Authorization` header from the environment — never on the command line, never printed — is the check today.
     Read the pane before sending (a trust prompt or an update prompt takes a keystroke, not a message; that keystroke
@@ -231,7 +233,7 @@ The provenance rules themselves are `docs/agent-rules.md`.
     only.
     → unnecessary when [direction]: a `retrace-send` helper does (b) and (c) of agent-rules 15 itself — logs, hashes,
     envelopes and sends in one step, and refuses a target that is a human's pane — and a narrow `retrace_verify_send`
-    tool exposes exactly the four fields a receiver checks, so no seat composes the signature by hand or curls the
+    tool exposes exactly the six fields a receiver checks, so no seat composes the signature by hand or curls the
     Worker; the envelope stays, because it is for the reader, not the machine.
 
 ## Build order (Grok's read, PR 40, evt_1626b03aea8d4911ae1c7523c94903d9)
