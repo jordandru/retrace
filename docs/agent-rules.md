@@ -46,8 +46,9 @@ each one names the product change that would make it unnecessary.
    (`actor.model_claims`), never as the first. When nothing is available, `model` is absent and `model_source` is
    `none`: the unknown is recorded, never silent. The model's own statement about itself is never the sole source. A
    seat's own MCP server names the source of a configured model with `RETRACE_ACTOR_MODEL_SOURCE` (PR 118); a
-   credential that pins a model stamps `credential-pinned` and keeps the seat's own pair as a second claim (§4.1 as
-   built). Spelling differences between harnesses (`gpt-5.6-sol` / `GPT-5.6 Sol`, `claude-opus-4-8` /
+   credential that pins a model stamps `credential-pinned`, and the seat's own value survives as a second claim on
+   `actor.model_claims` only when it is non-empty and differs from the pin — a matching value is absorbed and its
+   source is not kept (§4.1 as built, `router.ts` `resolveActor`; PR 119 round 1, Codex F2 `evt_752b8e82…`). Spelling differences between harnesses (`gpt-5.6-sol` / `GPT-5.6 Sol`, `claude-opus-4-8` /
    `claude-opus-4.8`) and a display string carrying an effort suffix (`Grok 4.6 (xhigh)`) are the routing registry's
    job to alias (`.claude/skills/review-effort/routing-rules/models.json`, PR 35; `display_pattern`, §7 step 4), not
    yours to fix.
@@ -57,10 +58,13 @@ each one names the product change that would make it unnecessary.
 
 6. **Commit trailers are a claim, not the proof.** Every commit — merges included — carries
    `Retrace-Actor: <your seat>`, `Retrace-Model: <verbatim model>`, `Retrace-Caused-By: <instruction
-   event id>`. `Retrace-Model` follows rule 4: when the runtime exposes no identifier the trailer is
-   omitted, never guessed. *(v2, 2026-09-24, same sources as rule 4 v2.)* `Retrace-Model-Source: <source>` sits beside
-   `Retrace-Model`, and an agent commit that omits `Retrace-Model` carries `Retrace-Model-Source: none` — the omission
-   recorded, not silent. The hook and the webhook record the pair's completeness as `method.params.model_claim`
+   event id>`. `Retrace-Model` follows rule 4: it carries the model the seat records under rule 4 v2 — runtime,
+   configured or displayed — and is omitted only when no usable source is available; never guessed. *(v1 read "when
+   the runtime exposes no identifier the trailer is omitted", which under rule 4 v2 would omit a displayed or configured
+   model; changed 2026-09-24 on Codex's PR 119 round-1 finding F1, `evt_752b8e82101a4618955e11d4e38d5c40`.)* *(v2,
+   2026-09-24, same sources as rule 4 v2.)* `Retrace-Model-Source: <source>` sits beside `Retrace-Model`, and an agent
+   commit that omits `Retrace-Model` — no usable source — carries `Retrace-Model-Source: none` — the omission recorded,
+   not silent. The hook and the webhook record the pair's completeness as `method.params.model_claim`
    (`complete` | `source-missing` | `none` | `absent` | `inconsistent`; `docs/design/model-source.md` §4.3, PR 118): an
    inconsistent pair still seals, with no `actor.model_source`; `absent` is a producer defect after adoption; a
    `Co-Authored-By`-derived model with no source trailer is `source-missing`. Completeness never enters the contribution

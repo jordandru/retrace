@@ -22,7 +22,7 @@ cursor-agent, class S; Codex rounds 1–3, claude-code last) merged as `1bbb5a7`
 **not deployed** at the time of writing (Worker still `798c1b7e` from step 2). Two coordinator decisions Jordan accepted
 before the build (proposal `evt_a11a4e3f…`, go `evt_835a645d3f924ebeb383670945063259`) are recorded in §4.3 as dated corrections
 (Decisions A and B); §4.1's known limit is closed; §4.6 records the adoption; §7 step 3 records what was built; §8 round 7 lists
-the dispositions. v1.5 merged `38c58b0`.
+the dispositions; §8 round 8 records this pull request's own gate. v1.5 merged `38c58b0`.
 Corrections before merge are made in place (Jordan, `evt_9dc98206`); after merge, appended (agent-rules 10).
 
 ## 1. The problem
@@ -222,7 +222,9 @@ adoption, listed by `doctor` and counted by `status`, never a change of the acto
 2026-09-24; built in PR 118): a fifth value, `inconsistent`, for a pair the resolver cannot pair — `Retrace-Model-Source:
 none` beside a model, a source other than `none` with no model, or a source value outside the seven. An inconsistent pair
 sets **no** `actor.model_source` (the actor still passes the presence-based refinement and the commit seals, never a 400)
-and is reported as `model_claim: inconsistent`; the raw trailers stay in `raw_trailers`. Reason: a producer defect in a
+and is reported as `model_claim: inconsistent`; the original trailer text stays in `method.params.raw_message` (both
+git producers preserve the whole message; `ClaimRecord.raw_trailers` holds only `retrace-actor` and `co-authored-by` —
+PR 119 round 1, Codex F4 `evt_752b8e82…`). Reason: a producer defect in a
 trailer must not cost the seal that records it, and the value must not be silently coerced into one of the four.* v1 said a commit with
 neither trailer "is classified `unresolved` … exactly as a commit with no trailer is today"; that was wrong twice: it
 would have let omission turn a `conflicting` (withheld) claim into an `unresolved` one that the `record` policy
@@ -277,9 +279,12 @@ no config, no API" sentence becomes "the status bar is the source: `harness-disp
 *Adopted (v1.6, 2026-09-24, step 3b): the boxed text is now `docs/agent-rules.md` rule 4 v2, with its v1 text kept
 visible in the rule; rule 6 gains the `Retrace-Model-Source` trailer sentence (`none` when `Retrace-Model` is omitted;
 `model_claim` completeness recorded by hook and webhook). The five identity files changed with it; each names the source
-that is true for its harness: `claude-code` `harness-runtime`; `codex` `harness-runtime`, or `model` absent with
-`none` while its runtime exposes nothing to the model; `grok` and `cursor-agent` `harness-display`; `github-copilot`
-whichever of the three harness sources is true for the session.*
+that is true for its harness: `claude-code` `harness-runtime`; `codex` `harness-runtime` — its session's native
+rollout `turn_context`, found by Codex itself while reviewing this pull request (`evt_75c70d32ffe84cd3a5d74cc3bea8e4ba`;
+first verdict carrying a model `evt_752b8e82101a4618955e11d4e38d5c40`), which retires the "runtime exposes nothing"
+sentence the first draft of this PR carried; `grok` and `cursor-agent` `harness-display`; `github-copilot` whichever of
+the three harness sources is true for the session. Rule 6's omission condition changed with it (Codex F1): a trailer
+is omitted only when no usable source exists, not merely when the runtime exposes none.*
 
 ## 5. What is not claimed, and the limits
 
@@ -460,3 +465,20 @@ cannot review its own PR; PR 114 precedent).
     coordinator's own record, that its routing events were not in doctor's `method.tool: "routing"` shape. Gate check
     `evt_bfee5327…`; merge `1bbb5a7` (`evt_f5f75ea8…`). Codex's verdicts again carry no `actor.model` ("exact runtime
     model identifier not exposed"); the `codex` identity file now says what to record instead (§4.6, adopted).
+    *(Superseded in round 8: Codex's next verdict carries `gpt-6-astra` / `harness-runtime`.)*
+
+Round 8, v1.6, the step-3b pull request (PR 119, author claude-code; class (a) design gate: Codex → NOOA → Grok seat;
+the author does not review).
+
+20. **Codex round 1 (`4d19f35`, high; routing `evt_f23e627c9de44618bfc1dc0514cc3a1a`): rejected
+    `evt_752b8e82101a4618955e11d4e38d5c40`, three Medium and one Low, all applied in place (unmerged draft).** F1 rule 6's
+    v1 omission condition contradicted rule 4 v2 for a displayed or configured model — changed to "no usable source",
+    v1 text kept. F2 rule 4's added sentence overstated the credential-pin case — the second claim exists only when the
+    caller's non-empty model differs from the pin. F3 `GROK.md` claimed `display_pattern` reads the effort suffix — it is
+    unbuilt (step 4) and doctor resolves aliases only; the file now says so. F4 Decision A named `raw_trailers` for the
+    preserved text — it is `method.params.raw_message`. **And the finding that was not a finding:** the brief asked Codex
+    whether its runtime exposes an identifier it can read. It does — the native rollout file named by `CODEX_THREAD_ID`
+    carries a `turn_context` with the model and effort of the current turn — so this verdict is the first Codex event
+    with `actor.model` (`gpt-6-astra`, `harness-runtime`, effort `high`), the earlier "not exposed" statements were
+    corrected by an appended event (`evt_75c70d32ffe84cd3a5d74cc3bea8e4ba`), and `AGENTS.md` records the source and
+    its discovery instead of the omission rule the first draft carried.
