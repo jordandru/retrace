@@ -1,21 +1,24 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-test("packed CLI resolves PRODUCER_SIG_FORMAT_V2 and parseTrailerPolicy from packed core 0.1.9", { timeout: 180_000 }, async () => {
+test("packed CLI resolves PRODUCER_SIG_FORMAT_V2 and parseTrailerPolicy from the packed core at the manifest versions", { timeout: 180_000 }, async () => {
   const repoRoot = fileURLToPath(new URL("../../..", import.meta.url));
+  // Versions come from the manifests, never from a literal: a release bump must not break this test (PR 121, Codex F1).
+  const coreVersion = (JSON.parse(readFileSync(join(repoRoot, "packages/core/package.json"), "utf8")) as { version: string }).version;
+  const cliVersion = (JSON.parse(readFileSync(join(repoRoot, "packages/mcp-server/package.json"), "utf8")) as { version: string }).version;
   const tmp = mkdtempSync(join(tmpdir(), "retrace-pack-cli-"));
   execFileSync("npm", ["pack", "--pack-destination", tmp], { cwd: join(repoRoot, "packages/core"), encoding: "utf8" });
   execFileSync("npm", ["pack", "--pack-destination", tmp], { cwd: join(repoRoot, "packages/mcp-server"), encoding: "utf8" });
   const tarballs = readdirSync(tmp).filter((name) => name.endsWith(".tgz"));
-  const coreTgz = tarballs.find((name) => name.includes("core-0.1.9"));
-  const cliTgz = tarballs.find((name) => name.includes("cli-0.1.9"));
-  assert.ok(coreTgz, `core 0.1.9 tarball in ${tarballs.join(", ")}`);
-  assert.ok(cliTgz, `cli 0.1.9 tarball in ${tarballs.join(", ")}`);
+  const coreTgz = tarballs.find((name) => name.includes(`core-${coreVersion}`));
+  const cliTgz = tarballs.find((name) => name.includes(`cli-${cliVersion}`));
+  assert.ok(coreTgz, `core ${coreVersion} tarball in ${tarballs.join(", ")}`);
+  assert.ok(cliTgz, `cli ${cliVersion} tarball in ${tarballs.join(", ")}`);
 
   const app = join(tmp, "app");
   mkdirSync(app);
