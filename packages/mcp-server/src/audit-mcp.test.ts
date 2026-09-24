@@ -24,4 +24,6 @@ test("AuditActor rejects an inconsistent model_source and keeps legacy model-onl
   assert.equal(AuditActor.safeParse({}).success, true, "legacy: neither field");
   assert.equal(AuditActor.safeParse({ model_source: "none" }).success, true);
   assert.equal(AuditActor.safeParse({ model: "caller", model_source: "harness-runtime" }).success, true);
+  assert.equal(AuditActor.safeParse({ model: "", model_source: "harness-runtime" }).success, false, "empty-string model is absent");
+  assert.equal(AuditActor.safeParse({ model: "", model_source: "none" }).success, true, "none with empty-string model");
 });

@@ -15,6 +15,7 @@ import {
 import { canonicalize, sha256Hex } from "./chain.js";
 import {
   CommitActorResolution, resolveCommitActor, validCausedById,
+  type ModelClaimCompleteness,
 } from "./commit-actor.js";
 import {
   actorKey, captureSealEligible, captureSeals, firstStampedSeq, generatesArtifact, previousCaptureTouch, sameArtifact,
@@ -89,6 +90,8 @@ export interface ClaimRecord {
   id: string;
   source: ClaimSource;
   model?: string;
+  /** Completeness of model trailers. Never a selector for supported/conflicting/unresolved. */
+  model_claim: ModelClaimCompleteness;
   raw_trailers: { "retrace-actor"?: string; "co-authored-by"?: string[] };
 }
 
@@ -248,6 +251,7 @@ export function deriveCommitClaim(input: EventInput): {
       id: actor.id,
       source,
       ...(actor.model ? { model: actor.model } : {}),
+      model_claim: resolved.modelClaim,
       raw_trailers: rawTrailersOf(resolved.trailers),
     },
     submittedDiffers,

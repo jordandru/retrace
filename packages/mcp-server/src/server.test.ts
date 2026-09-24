@@ -13,7 +13,7 @@ import { SqliteStore } from "./sqlite-store.js";
  *  may run inside an Orca pane, which exports ORCA_*. Left inherited, the session/ide assertions would pass on this
  *  machine and fail in CI (or vice versa). */
 const withActorEnv = async (vars: Record<string, string | undefined>, fn: () => Promise<void>) => {
-  const keys = ["RETRACE_ACTOR", "RETRACE_ACTOR_MODEL", "RETRACE_ON_BEHALF_OF", "RETRACE_ACTOR_LOCK", "RETRACE_SYSTEM", "RETRACE_ENVIRONMENT", "RETRACE_ENV", "RETRACE_SESSION",
+  const keys = ["RETRACE_ACTOR", "RETRACE_ACTOR_MODEL", "RETRACE_ACTOR_MODEL_SOURCE", "RETRACE_ON_BEHALF_OF", "RETRACE_ACTOR_LOCK", "RETRACE_SYSTEM", "RETRACE_ENVIRONMENT", "RETRACE_ENV", "RETRACE_SESSION",
     "RETRACE_DEVICE", "RETRACE_IDE", "RETRACE_WORKSPACE", "CLAUDE_CODE_SESSION_ID", "GROK_SESSION_ID", "ORCA_PANE_KEY", "ORCA_TAB_ID", "ORCA_WORKTREE_ID", "ORCA_TERMINAL_HANDLE",
     "RETRACE_PRODUCER_KEY", "RETRACE_PRODUCER_KEY_FILE"];
   const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
@@ -434,6 +434,34 @@ test("actor lock: an empty legacy caller model is not displaced onto actor.model
   assert.equal(evt.actor.model, "claude-fable-5");
   assert.equal(evt.actor.model_source, "harness-config");
   assert.equal(evt.actor.model_claims, undefined);
+}));
+
+test("RETRACE_ACTOR_MODEL_SOURCE: valid source stamps the configured model", async () => withActorEnv({ ...ENV, RETRACE_ACTOR_MODEL_SOURCE: "harness-runtime" }, async () => {
+  const store = new SqliteStore(":memory:");
+  const client = await connect(store);
+  const ok = (await client.callTool({
+    name: "retrace_log",
+    arguments: { action: "edited", artifacts: [{ id: "repo:rpg#a.ts", kind: "file" }] },
+  })) as any;
+  assert.notEqual(ok.isError, true);
+  const [evt] = await store.all("default");
+  assert.equal(evt.actor.model, "claude-fable-5");
+  assert.equal(evt.actor.model_source, "harness-runtime");
+}));
+
+test("RETRACE_ACTOR_MODEL_SOURCE: invalid value is a startup error", async () => withActorEnv({ ...ENV, RETRACE_ACTOR_MODEL_SOURCE: "made-up" }, async () => {
+  const store = new SqliteStore(":memory:");
+  assert.throws(() => buildServer(store), /RETRACE_ACTOR_MODEL_SOURCE "made-up" is not a valid model source/);
+}));
+
+test("RETRACE_ACTOR_MODEL_SOURCE: none with a configured model is a startup error", async () => withActorEnv({ ...ENV, RETRACE_ACTOR_MODEL_SOURCE: "none" }, async () => {
+  const store = new SqliteStore(":memory:");
+  assert.throws(() => buildServer(store), /RETRACE_ACTOR_MODEL_SOURCE is "none" but RETRACE_ACTOR_MODEL is set/);
+}));
+
+test("RETRACE_ACTOR_MODEL_SOURCE: any value without a configured model is a startup error", async () => withActorEnv({ RETRACE_ACTOR: "claude-code", RETRACE_ACTOR_MODEL_SOURCE: "harness-runtime" }, async () => {
+  const store = new SqliteStore(":memory:");
+  assert.throws(() => buildServer(store), /RETRACE_ACTOR_MODEL_SOURCE is "harness-runtime" but RETRACE_ACTOR_MODEL is unset/);
 }));
 
 // ---- PROV artifact role (used / generated) on the MCP write path ----

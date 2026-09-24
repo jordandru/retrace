@@ -226,7 +226,7 @@ export function commitToEvent(repo: string, sha: string, cfg: Cfg, live = false)
     },
     intent: resolved.intent, // prose "Key: value" lines survive (backlog #12)
     caused_by: causedBy,
-    method: { tool: "git", automated: actor.type !== "human", params: { branch, parents: parentList, files: files.length, insertions: ins, deletions: del, sha: fullSha, raw_message: message, author: { name: an, email: ae } } },
+        method: { tool: "git", automated: actor.type !== "human", params: { branch, parents: parentList, files: files.length, insertions: ins, deletions: del, sha: fullSha, raw_message: message, author: { name: an, email: ae }, model_claim: resolved.modelClaim } },
     idempotency_key: `git:${fullSha}`,
     tags: ["git", ...(isMerge ? ["merge"] : [])],
   };

@@ -9,8 +9,8 @@ import { fileURLToPath } from "node:url";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { SqliteStore } from "./sqlite-store.js";
-import { hookScript, hookCommand, isNpxCachePath, probeLine, runningVersion, HOOK_STDERR_REDIRECT, parseTrailers, resolveHookToken, resolveHookProducerKeyFile, retryableHookFailure, ttySurface, guardRemoteWrite, validCausedById, validActorId } from "./git-hook.js";
-import { appendEvent, generateSigningKey, PRODUCER_SIG_FORMAT_V2, publicFromPrivate, verifyProducerSig, verifyProject, createHandler, MemoryEventStore } from "@retrace-dev/core";
+import { hookScript, hookCommand, isNpxCachePath, probeLine, runningVersion, HOOK_STDERR_REDIRECT, parseTrailers, resolveHookToken, resolveHookProducerKeyFile, retryableHookFailure, ttySurface, guardRemoteWrite, validCausedById, validActorId, commitToEvent } from "./git-hook.js";
+import { appendEvent, generateSigningKey, PRODUCER_SIG_FORMAT_V2, publicFromPrivate, verifyProducerSig, verifyProject, createHandler, MemoryEventStore, EventInput } from "@retrace-dev/core";
 import { RemoteApiError, RemoteCapabilityError } from "./remote-store.js";
 import { writeProducerPrivateKey } from "./producer-key.js";
 
@@ -129,6 +129,31 @@ test("git adapter: install hook, human commit, agent commit with trailers, backf
   events = await store.all("rpg");
   assert.equal(events.length, 4, "3 commits + 1 seeded instruct");
   assert.equal((await verifyProject(store, "rpg")).ok, true);
+});
+
+test("hook event carries actor.model_source and method.params.model_claim; inconsistent pair still seals", () => {
+  const dir = mkdtempSync(join(tmpdir(), "retrace-git-source-"));
+  sh(dir, "git", ["init", "-q", "-b", "main"]);
+  sh(dir, "git", ["config", "core.hooksPath", "/dev/null"]);
+  writeFileSync(join(dir, "a.ts"), "export const a = 1;\n");
+  sh(dir, "git", ["add", "."]);
+  sh(dir, "git", ["commit", "-qm", "initial"]);
+  writeFileSync(join(dir, "a.ts"), "export const a = 2;\n");
+  sh(dir, "git", ["commit", "-qam", "complete\n\nRetrace-Actor: claude-code\nRetrace-Model: claude-fable-5\nRetrace-Model-Source: harness-runtime"]);
+  const completeSha = sh(dir, "git", ["rev-parse", "HEAD"]).trim();
+  writeFileSync(join(dir, "a.ts"), "export const a = 3;\n");
+  sh(dir, "git", ["commit", "-qam", "inconsistent\n\nRetrace-Actor: claude-code\nRetrace-Model: claude-fable-5\nRetrace-Model-Source: none"]);
+  const inconsistentSha = sh(dir, "git", ["rev-parse", "HEAD"]).trim();
+  const cfg = { project: "rpg", environment: "local" };
+  const complete = commitToEvent(dir, completeSha, cfg);
+  assert.equal(complete.actor.model_source, "harness-runtime");
+  assert.equal(complete.method?.params?.model_claim, "complete");
+  EventInput.parse(complete);
+  const inconsistent = commitToEvent(dir, inconsistentSha, cfg);
+  assert.equal(inconsistent.actor.model_source, undefined);
+  assert.equal(inconsistent.actor.model, "claude-fable-5");
+  assert.equal(inconsistent.method?.params?.model_claim, "inconsistent");
+  EventInput.parse(inconsistent);
 });
 
 // Owner-token migration 2026-08-23: the retrace repo's hook names a scoped assert credential in .retrace.json; the

@@ -38,8 +38,9 @@ const auditActorObject = z.object({
  *  Legacy forms (model only; neither) stay accepted. Enforced here so retrace_log cannot repair an invalid caller body. */
 export const AuditActor = auditActorObject.refine(
   (actor) => {
-    if (actor.model_source === "none") return actor.model === undefined;
-    if (actor.model_source !== undefined) return actor.model !== undefined;
+    const modelPresent = actor.model !== undefined && actor.model !== "";
+    if (actor.model_source === "none") return !modelPresent;
+    if (actor.model_source !== undefined) return modelPresent;
     return true;
   },
   { message: "model_source other than none requires model; model_source none requires model absent", path: ["model_source"] },
