@@ -200,6 +200,23 @@ The provenance rules themselves are `docs/agent-rules.md`.
     → unnecessary when [direction]: Orca's `terminal create` inherits the worktree's approval policy, and the
     routing skill launches reviewers itself with the routed model id.
 
+18. **Signed pane messages — the mechanics of agent-rules 15.** (Added 2026-09-24, same sources as agent-rules 15.)
+    The channel is `orca-ide terminal send --terminal <handle> --text <text> --enter`. Order of operations, because the
+    event must exist before its id can be appended: write the enveloped text (`SEAT … SEAT`) to disk, hash it, log the
+    `sent` event with that hash, the target handle and `enter_pressed_by`, then send the text with ` [sent-event <id>]`
+    appended — the hash covers the text *before* the suffix, and a verifier strips the suffix before hashing.
+    Read the pane before sending (a trust prompt or an update prompt takes a keystroke, not a message; that keystroke
+    is logged, not enveloped). Never send into a human's pane; never press Enter for a human (2026-09-20,
+    `evt_2e3cdae1295b40c48ee70cdb7cbf57ed`). NOOA is not a pane: its dispatch is `push-and-launch.sh`, whose
+    `sent` event records the packet, wrapper and launcher hashes the host echoed back, and its verdict is
+    producer-signed under its own key — that pair is its signature. A brief on disk that a pointer names is part of
+    the message: the `sent` event records the brief's sha256 too, and the receiver states the hash it read.
+    Since the Orca restart of 2026-09-24 the CLI prints a crash-reporter line on stderr before its JSON; parse stdout
+    only.
+    → unnecessary when [direction]: a `retrace-send` helper does (b) and (c) of agent-rules 15 itself — logs, hashes,
+    envelopes and sends in one step, and refuses a target that is a human's pane — so no seat composes the signature
+    by hand; the envelope stays, because it is for the reader, not the machine.
+
 ## Build order (Grok's read, PR 40, evt_1626b03aea8d4911ae1c7523c94903d9)
 
 For priority 3 and the stranger-install bar: **13** (credentials out of the Worker secret, with the store
