@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { sealEvent, verifyChain, verifyChainTail, canonicalize, computeHash, hashPayload, hashRule, HASH_VERSION, sha256Hex, EventInput, Event, GENESIS_HASH, defaultArtifactRole, applyDefaultRoles, Action } from "./index.js";
+import { sealEvent, verifyChain, verifyChainTail, canonicalize, computeHash, hashPayload, hashRule, HASH_VERSION, sha256Hex, EventInput, Event, GENESIS_HASH, defaultArtifactRole, applyDefaultRoles, Action, Actor, schemaSurface } from "./index.js";
 
 const base = (over: Partial<EventInput> = {}): EventInput => ({
   project: "test",
@@ -165,4 +165,41 @@ test("hash_v marker: a received_at edit on a v2 event is tampering; stripping th
   assert.equal(r.ok, true, "legacy events are best-effort by design");
   assert.equal(r.legacy_events, 1);
   assert.equal((await verifyChain([e0])).legacy_events, 0);
+});
+
+test("Actor.model_source refinement: a source other than none requires model; none requires model absent", () => {
+  const id = { type: "agent" as const, id: "claude-code" };
+  assert.equal(Actor.safeParse({ ...id, model: "claude-fable-5", model_source: "harness-runtime" }).success, true);
+  assert.equal(Actor.safeParse({ ...id, model_source: "none" }).success, true);
+  assert.equal(Actor.safeParse({ ...id }).success, true, "legacy: neither field is still valid");
+  assert.equal(Actor.safeParse({ ...id, model: "claude-fable-5" }).success, true, "legacy: model without source is still valid");
+  assert.equal(Actor.safeParse({ ...id, model_source: "harness-runtime" }).success, false);
+  assert.equal(Actor.safeParse({ ...id, model: "claude-fable-5", model_source: "none" }).success, false);
+  assert.equal(EventInput.safeParse({
+    project: "p", actor: { ...id, model_source: "harness-config" }, action: "edited", artifacts: [{ id: "a" }],
+  }).success, false, "a violating body is an invalid event");
+});
+
+test("Actor.model_claims source is optional so a displaced legacy value can carry none", () => {
+  const parsed = Actor.parse({
+    type: "agent", id: "claude-code", model: "claude-fable-5", model_source: "credential-pinned",
+    model_claims: [{ value: "gpt-5", note: "displaced by credential-pinned model" }],
+  });
+  assert.equal("source" in parsed.model_claims![0], false);
+  assert.equal(Actor.safeParse({
+    type: "agent", id: "x", model: "m", model_source: "harness-runtime",
+    model_claims: [{ value: "n", source: "self-report" }],
+  }).success, true);
+  assert.equal(Actor.safeParse({
+    type: "agent", id: "x", model: "m", model_source: "harness-runtime",
+    model_claims: [{ value: "" }],
+  }).success, false);
+});
+
+test("schemaSurface advertises actor keys so an old Worker dropping model_source is visible", () => {
+  const surface = schemaSurface();
+  assert.ok(Array.isArray(surface.actor));
+  assert.ok(surface.actor.includes("model_source"));
+  assert.ok(surface.actor.includes("model_claims"));
+  assert.deepEqual(surface.actor, [...surface.actor].sort());
 });

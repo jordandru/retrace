@@ -11,7 +11,32 @@ import { z } from "zod";
 export const ActorType = z.enum(["human", "agent", "system"]);
 export type ActorType = z.infer<typeof ActorType>;
 
-export const Actor = z.object({
+export const ModelSource = z.enum([
+  "harness-runtime",
+  "harness-config",
+  "harness-display",
+  "credential-pinned",
+  "operator-stated",
+  "self-report",
+  "none",
+]);
+export type ModelSource = z.infer<typeof ModelSource>;
+
+/** A second model claim. `source` is optional so a displaced legacy value that carried none can still be recorded. */
+export const ModelClaim = z.object({
+  value: z.string().min(1),
+  source: ModelSource.optional(),
+  note: z.string().optional(),
+});
+export type ModelClaim = z.infer<typeof ModelClaim>;
+
+function actorModelSourceConsistent(actor: { model?: string; model_source?: ModelSource }): boolean {
+  if (actor.model_source === "none") return actor.model === undefined;
+  if (actor.model_source !== undefined) return actor.model !== undefined;
+  return true;
+}
+
+const actorObject = z.object({
   type: ActorType,
   /** Stable identifier: email, agent name, service id */
   id: z.string().min(1),
@@ -21,8 +46,17 @@ export const Actor = z.object({
   version: z.string().optional(),
   /** Delegation: an agent acting for a human, or a sub-agent for a parent agent */
   on_behalf_of: z.string().optional(),
+  /** How `model` was obtained. Absent on legacy events; after adoption, omission is a producer defect. */
+  model_source: ModelSource.optional(),
+  /** Other model values the producer holds; a pin that replaces `model` pushes the displaced pair here. */
+  model_claims: z.array(ModelClaim).optional(),
 });
-export type Actor = z.infer<typeof Actor>;
+
+export const Actor = actorObject.refine(actorModelSourceConsistent, {
+  message: "model_source other than none requires model; model_source none requires model absent",
+  path: ["model_source"],
+});
+export type Actor = z.infer<typeof actorObject>;
 
 /** Small controlled verb vocabulary. `other` requires `action_detail`. */
 export const Action = z.enum([
@@ -197,10 +231,13 @@ export type Event = z.infer<typeof Event>;
  * anywhere — the event is accepted, sealed and hashed without them. It has happened twice (`location.session`,
  * `bacabed`; `location.client`/`ide`/`workspace`/`surface`, 2026-08-28), both times found by eye.
  * `GET /api` publishes this, and `npm run check-deploy` diffs a deployment against the local build.
+ * The `actor` group exists so an older Worker that would silently drop `actor.model_source` at
+ * `EventInput.parse` fails doctor's "would drop" check instead of staying invisible.
  */
-export function schemaSurface(): { event: string[]; location: string[]; artifact: string[]; actions: string[] } {
+export function schemaSurface(): { event: string[]; actor: string[]; location: string[]; artifact: string[]; actions: string[] } {
   return {
     event: Object.keys(EventInput.shape).sort(),
+    actor: Object.keys(actorObject.shape).sort(),
     location: Object.keys(Location.shape).sort(),
     artifact: Object.keys(ArtifactRef.shape).sort(),
     actions: [...Action.options].sort(),

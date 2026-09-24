@@ -362,19 +362,47 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
     }
     if (body.type !== actor.type)
       return { error: `actor.type "${body.type}" is not allowed: this credential is pinned to ${actor.type} "${actor.id}". Use an owner or assert-trust credential to record other actors.` };
-    return {
-      actor: {
-        ...actor,
-        ...(body.display_name !== undefined ? { display_name: body.display_name } : {}),
-        ...(body.version !== undefined ? { version: body.version } : {}),
-        // A pinned credential fixes WHO is acting, not WHICH MODEL ran: it is issued once and outlives every model
-        // swap, so a model pinned here goes stale silently and seals the wrong author into an append-only ledger.
-        // If the credential names a model it stays authoritative; if it omits one, the producer — the only side that
-        // knows what actually ran — reports it. Identity is stamped from the credential either way, so this widens
-        // nothing an operator did not opt into by leaving `model` out.
-        ...(actor.type === "agent" && actor.model === undefined && body.model !== undefined ? { model: body.model } : {}),
-      },
+    const stamped: Actor = {
+      ...actor,
+      ...(body.display_name !== undefined ? { display_name: body.display_name } : {}),
+      ...(body.version !== undefined ? { version: body.version } : {}),
     };
+    // A pinned credential fixes WHO is acting. If it names a model that value is authoritative and the source
+    // becomes credential-pinned in the same operation (model-source.md §4.1); the displaced pair lands on
+    // actor.model_claims, never method.params (producer-signed). If it omits a model, the producer reports
+    // model / model_source / model_claims as sent — do not invent a source.
+    if (actor.type === "agent" && actor.model === undefined) {
+      return {
+        actor: {
+          ...stamped,
+          ...(body.model !== undefined ? { model: body.model } : {}),
+          ...(body.model_source !== undefined ? { model_source: body.model_source } : {}),
+          ...(body.model_claims !== undefined ? { model_claims: body.model_claims } : {}),
+        },
+      };
+    }
+    if (actor.model !== undefined) {
+      const displacedModel = body.model !== undefined && body.model !== "" && body.model !== actor.model ? body.model : undefined;
+      return {
+        actor: {
+          ...stamped,
+          model_source: "credential-pinned",
+          ...(displacedModel !== undefined
+            ? {
+                model_claims: [
+                  ...(body.model_claims ?? []),
+                  {
+                    value: displacedModel,
+                    ...(body.model_source !== undefined ? { source: body.model_source } : {}),
+                    note: "displaced by credential-pinned model",
+                  },
+                ],
+              }
+            : body.model_claims !== undefined ? { model_claims: body.model_claims } : {}),
+        },
+      };
+    }
+    return { actor: stamped };
   };
 
   const lineageResponse = async (events: any[], fmt: string | null, actors: boolean, scoped = false) => {
