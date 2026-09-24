@@ -1,6 +1,6 @@
 # Model claims: source, omission, verification — design note v1 (agent-rules 4, v2)
 
-**Status:** DRAFT v1.5, 2026-09-24 (v1 2026-09-20; v1.1, v1.2, v1.3 2026-09-23; v1.3 merged `6c208d9`; v1.4 merged `4c6443d`), author claude-code (coordinator, `claude-fable-5-1`), on Jordan's instruction
+**Status:** DRAFT v1.6, 2026-09-24 (v1 2026-09-20; v1.1, v1.2, v1.3 2026-09-23; v1.3 merged `6c208d9`; v1.4 merged `4c6443d`), author claude-code (coordinator, `claude-fable-5-1`), on Jordan's instruction
 `evt_3f1973b9b8234267aeea0d238af89483`, from his rule audit `evt_376a8fc8ba4b48c3a38624f38b4335cf` ("true
 provenance means making a true claim and avoiding omission") and the coordinator's decision
 `evt_e7a318017ace472ab641e6940f7d5607`. **Class (a)** under agent-rules 12: it rewrites rule 4 and the
@@ -17,6 +17,12 @@ producer-signed `method.params`; second claims move to `actor.model_claims` (§8
 **v1.5 (round 6): §7 step 2 is built and deployed** — PR 114 (builder cursor-agent) merged as `84095ed` 2026-09-24 04:59Z, Worker version
 `798c1b7e` 05:03Z, doctor READY `evt_f340c19e24e44bf99bef5efb4aeccbcf`; steps 3–5 are not built. v1.5 records what was built where
 it differs from or adds to the design (§4.1 "as built", A7, §7, §8 round 6).
+**v1.6 (round 7): §7 step 3 is built — 3a (code) merged, 3b (this pull request) adopts rule 4 v2.** PR 118 (builder
+cursor-agent, class S; Codex rounds 1–3, claude-code last) merged as `1bbb5a7` 2026-09-24 10:11Z (`evt_f5f75ea824704571b446e8e5d6100179`);
+**not deployed** at the time of writing (Worker still `798c1b7e` from step 2). Two coordinator decisions Jordan accepted
+before the build (proposal `evt_a11a4e3f…`, go `evt_835a645d3f924ebeb383670945063259`) are recorded in §4.3 as dated corrections
+(Decisions A and B); §4.1's known limit is closed; §4.6 records the adoption; §7 step 3 records what was built; §8 round 7 lists
+the dispositions; §8 round 8 records this pull request's own gate. v1.5 merged `38c58b0`.
 Corrections before merge are made in place (Jordan, `evt_9dc98206`); after merge, appended (agent-rules 10).
 
 ## 1. The problem
@@ -177,6 +183,14 @@ A new optional enum beside `actor.model`:
   absent (`packages/core/src/router.ts:385` `body.model !== ""`; `packages/mcp-server/src/index.ts:205`
   `callerActor.model !== ""`, both at `84095ed`; cited in v1.5.1 for NOOA Low 4). Step 3 treats `""` as absent in the
   refinement or the resolvers when producers begin sending sources.
+  *Closed in step 3 (v1.6; PR 118 `1bbb5a7`, 2026-09-24): the refinement in `schema.ts`, its mirror in `audit-mcp.ts` and
+  both resolvers treat `""` as absent. The resolver halves were found by Codex, not by the build: round 1
+  (`evt_f3075806b5244ebcbaee9303b50389fb`) F1 — an empty configured model with the actor lock off re-acquired
+  `harness-config` and the refinement then refused the seat's own logs — and F2 — an empty credential pin acquired
+  `credential-pinned` and every write on that credential returned 500; round 2 (`evt_316307aaee59460bb9d0297ab81078ac`)
+  re-raised F2 for the credential's `model_source: none` inherited by a source-less caller model. Both are fixed at
+  `fb431c3` (`evt_3e05f3a34b2542848b8389ec4e25b254`): a credential with no model pin contributes identity only, and
+  the sealed actor carries the caller's `model` / `model_source` / `model_claims` exactly as sent.*
 
 ### 4.2 The Codex case, as far as the evidence goes
 
@@ -203,13 +217,27 @@ decision: a commit whose `Retrace-Actor` the evidence contradicts stays `conflic
 model trailer, and a supported actor stays `supported`. Beside the claim decision the hook and classifier record a
 **model completeness** result — `model_claim: complete` (both trailers) | `source-missing` (`Retrace-Model` without a
 source) | `none` (`Retrace-Model-Source: none`, no model) | `absent` (neither) — and `absent` is a producer defect after
-adoption, listed by `doctor` and counted by `status`, never a change of the actor's status. v1 said a commit with
+adoption, listed by `doctor` and counted by `status`, never a change of the actor's status.
+*Decision A (v1.6; coordinator proposal `evt_a11a4e3f…` accepted by Jordan `evt_835a645d3f924ebeb383670945063259`,
+2026-09-24; built in PR 118): a fifth value, `inconsistent`, for a pair the resolver cannot pair — `Retrace-Model-Source:
+none` beside a model, a source other than `none` with no model, or a source value outside the seven. An inconsistent pair
+sets **no** `actor.model_source` (the actor still passes the presence-based refinement and the commit seals, never a 400)
+and is reported as `model_claim: inconsistent`; the original trailer text stays in `method.params.raw_message` (both
+git producers preserve the whole message; `ClaimRecord.raw_trailers` holds only `retrace-actor` and `co-authored-by` —
+PR 119 round 1, Codex F4 `evt_752b8e82…`). Reason: a producer defect in a
+trailer must not cost the seal that records it, and the value must not be silently coerced into one of the four.* v1 said a commit with
 neither trailer "is classified `unresolved` … exactly as a commit with no trailer is today"; that was wrong twice: it
 would have let omission turn a `conflicting` (withheld) claim into an `unresolved` one that the `record` policy
 writes, and a commit with no trailer at all is not uniformly `unresolved` today (a human-authored commit with no
 agent evidence is `no_agent_evidence`, `classify.ts` ~line 745).
 `Co-Authored-By`-derived models get `model_source: "harness-config"` only when the harness wrote the line
 itself (VS Code, Copilot); a hand-written co-author line is `operator-stated`.
+*Decision B (v1.6; same proposal and go as Decision A; built in PR 118): the sentence above is withdrawn as a resolver
+rule. A `Co-Authored-By`-derived model carries **no** `model_source` and completeness `source-missing`, unless a
+`Retrace-Model-Source` trailer is present, in which case the trailer rule applies. Reason: the commit message alone cannot
+tell a harness-written co-author line from a hand-written one, and a resolver that guessed between `harness-config` and
+`operator-stated` would seal a source it has no evidence for — the v1 error in a new place. The distinction stays a
+consumer's question (§4.4) for a harness that states it.*
 
 ### 4.4 Consumers
 
@@ -248,6 +276,15 @@ the claim stays a claim and the ledger says so.
 Identity files change with it: `AGENTS.md:10–12`, `.github/copilot-instructions.md:10`, `GROK.md` (the "no env,
 no config, no API" sentence becomes "the status bar is the source: `harness-display`"), `CLAUDE.md`, and
 `.cursor/rules/retrace-provenance.mdc` (already compliant; gains the source word).
+*Adopted (v1.6, 2026-09-24, step 3b): the boxed text is now `docs/agent-rules.md` rule 4 v2, with its v1 text kept
+visible in the rule; rule 6 gains the `Retrace-Model-Source` trailer sentence (`none` when `Retrace-Model` is omitted;
+`model_claim` completeness recorded by hook and webhook). The five identity files changed with it; each names the source
+that is true for its harness: `claude-code` `harness-runtime`; `codex` `harness-runtime` — its session's native
+rollout `turn_context`, found by Codex itself while reviewing this pull request (`evt_75c70d32ffe84cd3a5d74cc3bea8e4ba`;
+first review verdict after that discovery to record the model, `evt_752b8e82101a4618955e11d4e38d5c40`), which retires the "runtime exposes nothing"
+sentence the first draft of this PR carried; `grok` and `cursor-agent` `harness-display`; `github-copilot` whichever of
+the three harness sources is true for the session. Rule 6's omission condition changed with it (Codex F1): a trailer
+is omitted only when no usable source exists, not merely when the runtime exposes none.*
 
 ## 5. What is not claimed, and the limits
 
@@ -310,6 +347,13 @@ no config, no API" sentence becomes "the status bar is the source: `harness-disp
    for NOOA Low 2 and Codex Low 2; v1.5.2 describes the returned events accurately, Codex round-2 Low `evt_06953aa6`.)*
 3. Producers: MCP server (`RETRACE_ACTOR_MODEL_SOURCE`, and the caller's runtime source), git hook and
    `commit-actor.ts` (trailer), identity files, rule 4 text.
+   *Built (v1.6). 3a, code — PR 118, merge `1bbb5a7` (2026-09-24 10:11Z, `evt_f5f75ea8…`): `commit-actor.ts` parses
+   `Retrace-Model-Source` beside `Retrace-Model` and exposes the five-value `modelClaim` (Decisions A and B); `classify.ts`
+   records `ClaimRecord.model_claim` and the decision table is untouched (a test drives all five values through
+   `decideFromTable` and `wouldWrite`); `git-hook.ts` and `github.ts` carry `actor.model_source` from the resolver and
+   `method.params.model_claim` in parity; `index.ts` validates `RETRACE_ACTOR_MODEL_SOURCE` at startup; the empty-string
+   limit above is closed. 622 tests. 3b, docs — this pull request. Not deployed: the Worker at `798c1b7e` runs step 2;
+   the hook that sealed PR 118's own commits ran the pre-3a dist, so those commits carry no `model_claim`.*
 4. Consumers: status split, doctor source-aware `review model` and a listing of `model_claim: absent` commits as
    producer defects (§4.3), `models.json` `display_pattern` (a class-S path under the routing skill), landing/README
    sentence.
@@ -394,3 +438,48 @@ seat skipped (capped; the builder cannot review its own PR).
     (the empty-string limit above, carried to step 3). Both coordinator's decisions from the brief (optional claim
     `source`; presence-based refinement) endorsed by Codex and recorded as built in §4.1. Gate check `evt_d9e696ca`;
     merge `84095ed` (`evt_eb99d293`); deploy `798c1b7e` (`evt_c53a506e`, verified `evt_f340c19e`).
+
+Round 7, v1.6, after the step-3a build (PR 118, builder cursor-agent on Jordan's go `evt_570d8fb2170b4793a558a8c9630a44af`;
+brief `~/.retrace/handoff-2026-09-23/brief-cursor-build-step3a.md` sha256 `0a33840b…`). Class S code gate: Codex first at
+high, claude-code last; Grok's seat vacant by Jordan's decision `evt_6742fc9cc1dd401da2e65a82da6eeb3d` (the builder
+cannot review its own PR; PR 114 precedent).
+
+17. **Codex round 1 (`d02c3999`, high; routing `evt_e2df6066e8374a5b9d86981986f032d8`): rejected
+    `evt_f3075806b5244ebcbaee9303b50389fb`, two Medium.** F1 an empty configured model with the actor lock off re-acquired
+    `harness-config` and the refinement refused the seat's logs; F2 an empty credential pin acquired `credential-pinned`
+    and `POST /events` returned 500. Both reproduced by a scratch probe; Decisions A/B, parity and the decision table
+    confirmed clean across 60 trailer combinations. Root cause recorded in the gate check `evt_894536f5…`: the build
+    brief's claim that the resolvers already treated `""` as absent was true for displacement and false for the
+    source-fallback branches. Fix round on Jordan's go `evt_1f0440c7…` (`8cfc941`).
+18. **Codex round 2 (`8cfc941`, high; routing `evt_e6aae3cd151f411a9006ae59df2c636f`, stop rule "F1 or F2 re-raised at
+    Medium or higher, or two or more new findings"): rejected `evt_316307aaee59460bb9d0297ab81078ac`** — F1 closed; F2
+    re-raised at Medium on the residual case (a credential pinned `{model:"", model_source:"none"}` plus a source-less
+    caller model inherited `none` through the stamped actor). Stop rule met; Jordan chose one more fix round scoped to F2
+    (`evt_dd91f36c8edf4796b14bd4e20fa854ff`; `fb431c3`: the no-pin branch drops the credential's model, source and claims
+    together and copies the caller's fields as sent, with a signed `createHandler` regression).
+19. **Codex round 3 (`fb431c3`, high; routing `evt_8b16136993bb4a79b0481d497b272424`): approved
+    `evt_3e05f3a34b2542848b8389ec4e25b254`, no findings** — F2 closed (24/24 on its own probe under both signature formats);
+    the dropped credential-level `model_claims` implements §4.1's no-pin rule (credentials *can* carry claims by schema,
+    the admin factories never emit them). claude-code last seat (routing `evt_30ba9b85…`): approved
+    `evt_b2df13ec55854a98b8809f0b842794ab`, two Lows — L1 a cosmetic indentation in `git-hook.ts:229`; L2 on the
+    coordinator's own record, that its routing events were not in doctor's `method.tool: "routing"` shape. Gate check
+    `evt_bfee5327…`; merge `1bbb5a7` (`evt_f5f75ea8…`). Codex's verdicts again carry no `actor.model` ("exact runtime
+    model identifier not exposed"); the `codex` identity file now says what to record instead (§4.6, adopted).
+    *(Superseded in round 8: Codex's next verdict carries `gpt-6-astra` / `harness-runtime`.)*
+
+Round 8, v1.6, the step-3b pull request (PR 119, author claude-code; class (a) design gate: Codex → NOOA → Grok seat;
+the author does not review).
+
+20. **Codex round 1 (`4d19f35`, high; routing `evt_f23e627c9de44618bfc1dc0514cc3a1a`): rejected
+    `evt_752b8e82101a4618955e11d4e38d5c40`, three Medium and one Low, all applied in place (unmerged draft).** F1 rule 6's
+    v1 omission condition contradicted rule 4 v2 for a displayed or configured model — changed to "no usable source",
+    v1 text kept. F2 rule 4's added sentence overstated the credential-pin case — the second claim exists only when the
+    caller's non-empty model differs from the pin. F3 `GROK.md` claimed `display_pattern` reads the effort suffix — it is
+    unbuilt (step 4) and doctor resolves aliases only; the file now says so. F4 Decision A named `raw_trailers` for the
+    preserved text — it is `method.params.raw_message`. **And the finding that was not a finding:** the brief asked Codex
+    whether its runtime exposes an identifier it can read. It does — the native rollout file named by `CODEX_THREAD_ID`
+    carries a `turn_context` with the model and effort of the current turn — so this verdict is the first review
+    verdict after that discovery to record the model from the native `turn_context` (`gpt-6-astra`, `harness-runtime`,
+    effort `high`), the earlier "not exposed" statements were
+    corrected by an appended event (`evt_75c70d32ffe84cd3a5d74cc3bea8e4ba`), and `AGENTS.md` records the source and
+    its discovery instead of the omission rule the first draft carried.

@@ -11,10 +11,11 @@ Read both before working. This file holds only what is specific to the Cursor Ag
 
 - Actor id `cursor-agent`. Trailers on every commit: `Retrace-Actor: cursor-agent`,
   `Retrace-Model: <the exact string Cursor reports for the running model, e.g. "GPT-5.6 Sol" or
-  "Cursor Grok 4.6">`, `Retrace-Caused-By: <instruction event id>`.
-- `actor.model` is that same string, verbatim, even when it is a display name; the routing registry
-  aliases it (agent-rules 4). Identity is the credential: the model changes with Cursor's setting and
-  is self-reported per session.
+  "Cursor Grok 4.6">`, `Retrace-Model-Source: harness-display`, `Retrace-Caused-By: <instruction event id>`.
+- `actor.model` is that same string, verbatim, even when it is a display name, with
+  `actor.model_source: harness-display`; the routing registry aliases it (agent-rules 4 v2). Identity is the
+  credential: the model changes with Cursor's setting and is reported per session from what Cursor shows; when
+  Cursor shows nothing, `model` absent and `model_source: none`.
 - Seat: builder; reviewer when the coordinator routes a review to this seat (`docs/team-roles.md`).
 - MCP launch mechanics for this harness: agent-ops 4, 6, 8. Never read, print, copy, or commit
   `~/.retrace/cursor.env` or any credential file (agent-rules 13).

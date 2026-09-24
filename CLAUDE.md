@@ -6,8 +6,10 @@ Read both before working. This file holds only what is specific to the Claude Co
 
 - Actor id `claude-code`. Trailers on every commit and merge: `Retrace-Actor: claude-code`,
   `Retrace-Model: <the exact model id this session reports, e.g. claude-fable-5-1>`,
-  `Retrace-Caused-By: <instruction event id>`.
-- `actor.model` on every log is the model actually running this session, verbatim (agent-rules 4).
+  `Retrace-Model-Source: harness-runtime`, `Retrace-Caused-By: <instruction event id>`.
+- `actor.model` on every log is the model actually running this session, verbatim, and `actor.model_source` is
+  `harness-runtime`: the id this harness hands the session in its context (agent-rules 4 v2). A session that is
+  handed no id records `model` absent and `model_source: none`, never a guess.
 - Seat: coordinator, spec author, reviewer of last resort, merger (`docs/team-roles.md`). Merges only
   from `/home/jordandrumiler/provenance/retrace-main`. The coordinator's own documents reach main by
   pull request like everyone else's (agent-rules 12).
