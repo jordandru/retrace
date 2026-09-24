@@ -304,9 +304,10 @@ no config, no API" sentence becomes "the status bar is the source: `harness-disp
    deploy (a build ahead of the Worker; owner exception `evt_a8c6b96b3fe54db18cf95ae287d472c7`, precedent 2026-09-10);
    issue #113 asks doctor to record that acknowledged gap itself instead of relying on a human to remember. Interim
    `method.params` carrier: no repository producer implemented it, and a ledger text search for `model_claimed` on
-   2026-09-24 05:19Z returned only this note's own edit events (Codex's own repository and ledger searches found the
-   same, `evt_1c722c8d`); that is a prose search, not a field-level census of historical `method.params`. It stays defined
-   for producers that predate the schema (§4.1). (v1.5.1 wording, for NOOA Low 2 and Codex Low 2.)*
+   2026-09-24 05:19Z returned only prose about this note (its edit, commit and review events), not a producer write
+   (Codex's own repository and ledger searches found the same, `evt_1c722c8d`); that is a prose search, not a field-level
+   census of historical `method.params`. It stays defined for producers that predate the schema (§4.1). (v1.5.1 wording
+   for NOOA Low 2 and Codex Low 2; v1.5.2 describes the returned events accurately, Codex round-2 Low `evt_06953aa6`.)*
 3. Producers: MCP server (`RETRACE_ACTOR_MODEL_SOURCE`, and the caller's runtime source), git hook and
    `commit-actor.ts` (trailer), identity files, rule 4 text.
 4. Consumers: status split, doctor source-aware `review model` and a listing of `model_claim: absent` commits as
