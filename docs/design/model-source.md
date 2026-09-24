@@ -281,7 +281,7 @@ visible in the rule; rule 6 gains the `Retrace-Model-Source` trailer sentence (`
 `model_claim` completeness recorded by hook and webhook). The five identity files changed with it; each names the source
 that is true for its harness: `claude-code` `harness-runtime`; `codex` `harness-runtime` — its session's native
 rollout `turn_context`, found by Codex itself while reviewing this pull request (`evt_75c70d32ffe84cd3a5d74cc3bea8e4ba`;
-first verdict carrying a model `evt_752b8e82101a4618955e11d4e38d5c40`), which retires the "runtime exposes nothing"
+first review verdict after that discovery to record the model, `evt_752b8e82101a4618955e11d4e38d5c40`), which retires the "runtime exposes nothing"
 sentence the first draft of this PR carried; `grok` and `cursor-agent` `harness-display`; `github-copilot` whichever of
 the three harness sources is true for the session. Rule 6's omission condition changed with it (Codex F1): a trailer
 is omitted only when no usable source exists, not merely when the runtime exposes none.*
@@ -478,7 +478,8 @@ the author does not review).
     unbuilt (step 4) and doctor resolves aliases only; the file now says so. F4 Decision A named `raw_trailers` for the
     preserved text — it is `method.params.raw_message`. **And the finding that was not a finding:** the brief asked Codex
     whether its runtime exposes an identifier it can read. It does — the native rollout file named by `CODEX_THREAD_ID`
-    carries a `turn_context` with the model and effort of the current turn — so this verdict is the first Codex event
-    with `actor.model` (`gpt-6-astra`, `harness-runtime`, effort `high`), the earlier "not exposed" statements were
+    carries a `turn_context` with the model and effort of the current turn — so this verdict is the first review
+    verdict after that discovery to record the model from the native `turn_context` (`gpt-6-astra`, `harness-runtime`,
+    effort `high`), the earlier "not exposed" statements were
     corrected by an appended event (`evt_75c70d32ffe84cd3a5d74cc3bea8e4ba`), and `AGENTS.md` records the source and
     its discovery instead of the omission rule the first draft carried.
