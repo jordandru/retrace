@@ -19,6 +19,11 @@
     "levels": ["low", "medium", "high", "xhigh"],
     "aliases": ["claude-opus-4.8"]
   },
+  "claude-opus-5-5": {
+    "supports_effort": true,
+    "levels": ["low", "medium", "high", "xhigh", "max"],
+    "aliases": []
+  },
   "grok-4.6": {
     "supports_effort": true,
     "levels": ["low", "medium", "high", "xhigh"],

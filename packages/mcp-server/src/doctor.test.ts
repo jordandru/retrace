@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Credential, Event, EventInput, EventStore, HistoryQuery, Share, appendEvent, buildExportBundle, generateSigningKey, pageHistoryNewest, schemaSurface, signCanonical } from "@retrace-dev/core";
-import { attributionFinding, cliVersionGap, credentialAuthorization, doctorHistoryEvents, gateRemoteAuthorization, headDelivery, instructRootFinding, issuanceFindingsFromStatus, loadReviewEffortEvents, loadRoutingModels, missingSchema, modelClaimAbsentFinding, parseDoctorArgs, pendingSealsFinding, pinSessionFinding, remoteCaptureCoverage, REVIEW_EFFORT_RECENT_LIMIT, REVIEW_EFFORT_ROUTING_PAGE, resolveRoutingModel, reviewEffortFindings, sealedCommitEvent, sealedLooksAgent } from "./doctor.js";
+import { attributionFinding, cliVersionGap, credentialAuthorization, doctorHistoryEvents, gateRemoteAuthorization, headDelivery, instructRootFinding, issuanceFindingsFromStatus, loadReviewEffortEvents, loadRoutingModels, missingSchema, modelClaimAbsentFinding, advisoryUnsignedFindings, parseDoctorArgs, pendingSealsFinding, pinSessionFinding, remoteCaptureCoverage, REVIEW_EFFORT_RECENT_LIMIT, REVIEW_EFFORT_ROUTING_PAGE, resolveRoutingModel, reviewEffortFindings, sealedCommitEvent, sealedLooksAgent } from "./doctor.js";
 import { RemoteStore } from "./remote-store.js";
 import { SqliteStore } from "./sqlite-store.js";
 
@@ -33,7 +33,7 @@ test("doctor: review effort warns only when the model supports effort, routing i
     method: { tool: "routing", params: { target: { agent: "codex", model: "gpt-6-astra", effort: "high" } } },
   });
   const review = (id: string, model: string, params: Record<string, unknown>): Event => commitEvt({
-    id, seq: 2, action: "approved", actor: { type: "agent", id: "codex", model },
+    id, seq: 2, action: "approved", actor: { type: "agent", id: "codex", model, model_source: "harness-runtime" },
     tags: ["review"], method: { tool: "review", params },
   });
   const models = {
@@ -127,7 +127,7 @@ test("doctor: un-routed review finding count does not grow with ledger size", ()
   };
   const unrouted = (count: number): Event[] => Array.from({ length: count }, (_, i) => commitEvt({
     id: `evt_unrouted_${i}`, seq: 2 + i, action: "approved",
-    actor: { type: "agent", id: "codex", model: "gpt-6-astra" },
+    actor: { type: "agent", id: "codex", model: "gpt-6-astra", model_source: "harness-runtime" },
     tags: ["review"], method: { tool: "review", params: {} },
   }));
 
@@ -171,7 +171,7 @@ test("doctor: routed missing-metadata finding count does not grow with ledger si
   });
   const missingEffort = (count: number): Event[] => Array.from({ length: count }, (_, i) => commitEvt({
     id: `evt_missing_effort_${i}`, seq: 2 + i, action: "approved",
-    actor: { type: "agent", id: "codex", model: "gpt-6-astra" },
+    actor: { type: "agent", id: "codex", model: "gpt-6-astra", model_source: "harness-runtime" },
     tags: ["review"], method: { tool: "review", params: { routing_event_id: effortRouting.id } },
   }));
   const fiveEfforts = reviewEffortFindings([effortRouting, ...missingEffort(5)], models);
@@ -190,7 +190,7 @@ test("doctor: routing model aliases resolve exactly and remain case-sensitive", 
     method: { tool: "routing", params: { target: { agent: "codex", model: "canonical-model", effort: "high" } } },
   });
   const review = (id: string, model: string): Event => commitEvt({
-    id, seq: 2, action: "approved", actor: { type: "agent", id: "codex", model },
+    id, seq: 2, action: "approved", actor: { type: "agent", id: "codex", model, model_source: "harness-runtime" },
     tags: ["review"], method: { tool: "review", params: { routing_event_id: routing.id, reasoning_effort: "high" } },
   });
   const models = {
@@ -214,6 +214,7 @@ test("doctor: shipped routing registry resolves exact harness model spellings an
     ["Cursor Grok 4.6", "grok-4.6"],
     ["claude-opus-4-8", "claude-opus-4-8"],
     ["claude-opus-4.8", "claude-opus-4-8"],
+    ["claude-opus-5-5", "claude-opus-5-5"],
   ]);
   for (const [reported, canonical] of expected) {
     assert.equal(resolveRoutingModel(models, reported)?.id, canonical, reported);
@@ -275,6 +276,64 @@ test("doctor: source-aware review model — one review per source; gate counts n
   assert.deepEqual(reviewEffortFindings([routing, review("evt_display_gate", registered("harness-display"))], models, undefined, { gate: true }), []);
 });
 
+test("doctor: a registered source-less model warns even when the name resolves", () => {
+  const routing = commitEvt({
+    id: "evt_route", seq: 1, action: "other", action_detail: "routed",
+    actor: { type: "agent", id: "claude-code" },
+    method: { tool: "routing", params: { target: { agent: "codex", model: "gpt-6-astra", effort: "high" } } },
+  });
+  const models = {
+    "gpt-6": { supports_effort: true, levels: ["low", "medium", "high", "xhigh"], aliases: ["gpt-6-astra"] },
+  };
+  const review = (id: string, actor: Event["actor"], seq = 2): Event => commitEvt({
+    id, seq, action: "approved", actor,
+    tags: ["review"], method: { tool: "review", params: { routing_event_id: routing.id, reasoning_effort: "high" } },
+  });
+  const aliasLegacy = reviewEffortFindings([routing, review("evt_alias_legacy", { type: "agent", id: "codex", model: "gpt-6-astra" })], models);
+  assert.equal(aliasLegacy[0]?.label, "review model");
+  assert.match(aliasLegacy[0]!.detail, /registered actor.model with no model_source \(no source recorded\)/);
+  assert.doesNotMatch(aliasLegacy[0]!.detail, /unknown models have no inferred fallback/);
+  const aliasSourced = reviewEffortFindings([routing, review("evt_alias_sourced", { type: "agent", id: "codex", model: "gpt-6-astra", model_source: "harness-runtime" })], models);
+  assert.equal(aliasSourced.filter((finding) => finding.label === "review model").length, 0);
+
+  const shipped = loadRoutingModels(fileURLToPath(new URL("../../../", import.meta.url)))!;
+  const grokRouting = commitEvt({
+    id: "evt_route_grok", seq: 1, action: "other", action_detail: "routed",
+    actor: { type: "agent", id: "claude-code" },
+    method: { tool: "routing", params: { target: { agent: "cursor-agent", model: "cursor-grok-4.6-high", effort: "high" } } },
+  });
+  const patternLegacy = reviewEffortFindings([grokRouting, {
+    ...review("evt_pattern_legacy", { type: "agent", id: "cursor-agent", model: "Cursor Grok 4.6" }),
+    method: { tool: "review", params: { routing_event_id: grokRouting.id, reasoning_effort: "high" } },
+  }], shipped);
+  assert.equal(patternLegacy[0]?.label, "review model");
+  assert.match(patternLegacy[0]!.detail, /registered actor.model with no model_source \(no source recorded\)/);
+  const patternSourced = reviewEffortFindings([grokRouting, {
+    ...review("evt_pattern_sourced", { type: "agent", id: "cursor-agent", model: "Cursor Grok 4.6", model_source: "harness-display" }),
+    method: { tool: "review", params: { routing_event_id: grokRouting.id, reasoning_effort: "high" } },
+  }], shipped);
+  assert.equal(patternSourced.filter((finding) => finding.label === "review model").length, 0);
+
+  const unlisted = reviewEffortFindings([routing, review("evt_legacy", { type: "agent", id: "codex", model: "unlisted-model" })], models);
+  assert.equal(unlisted[0]?.label, "review model");
+  assert.match(unlisted[0]!.detail, /unknown models have no inferred fallback\) \(no source recorded\)/);
+});
+
+test("doctor: claude-opus-5-5 at max with harness-runtime is not a review model or effort finding", () => {
+  const models = loadRoutingModels(fileURLToPath(new URL("../../../", import.meta.url)))!;
+  const routing = commitEvt({
+    id: "evt_route_opus", seq: 1, action: "other", action_detail: "routed",
+    actor: { type: "agent", id: "claude-code" },
+    method: { tool: "routing", params: { target: { agent: "claude-code", model: "claude-opus-5-5", effort: "max" } } },
+  });
+  const review = commitEvt({
+    id: "evt_opus", seq: 2, action: "approved",
+    actor: { type: "agent", id: "claude-code", model: "claude-opus-5-5", model_source: "harness-runtime" },
+    tags: ["review"], method: { tool: "review", params: { routing_event_id: routing.id, reasoning_effort: "max" } },
+  });
+  assert.deepEqual(reviewEffortFindings([routing, review], models).map((finding) => finding.label), []);
+});
+
 test("doctor: Cursor display vs launch id is not a review model mismatch; captured display effort fills a missing self-report", () => {
   const models = loadRoutingModels(fileURLToPath(new URL("../../../", import.meta.url)))!;
   const routing = commitEvt({
@@ -324,6 +383,46 @@ test("doctor: model claim absent lists only commits whose model_claim is absent"
   assert.equal(modelClaimAbsentFinding([complete]), undefined);
 });
 
+test("doctor: without a routing registry, the absent-claim listing still inspects the recent window", async () => {
+  const project = "retrace";
+  const absent = commitEvt({
+    id: "evt_absent_recent", seq: 10, project,
+    method: { tool: "git", params: { model_claim: "absent" } },
+  });
+  const queries: HistoryQuery[] = [];
+  const store = {
+    async all() { throw new Error("absent-claim listing must not read the whole ledger"); },
+    async history(q: HistoryQuery) {
+      queries.push({ ...q });
+      assert.ok(typeof q.limit === "number" && q.limit <= REVIEW_EFFORT_RECENT_LIMIT, `unbounded history limit: ${q.limit}`);
+      return pageHistoryNewest([absent], q);
+    },
+  };
+
+  const withoutRegistry = await advisoryUnsignedFindings(store, project, undefined);
+  assert.deepEqual(withoutRegistry.map((finding) => finding.label), ["model claim absent"]);
+  assert.ok(withoutRegistry.every((finding) => !finding.label.startsWith("review")));
+  assert.match(withoutRegistry[0]!.detail, /unsigned history; --gate uses the verified ledger/);
+  assert.equal(queries.length, 1, "one recent-window history call, no routing walk");
+  assert.equal(queries[0]!.limit, REVIEW_EFFORT_RECENT_LIMIT);
+  assert.equal(queries[0]!.text, undefined);
+
+  queries.length = 0;
+  const models = { "gpt-6-astra": { supports_effort: true, levels: ["low", "medium", "high", "xhigh"] } };
+  const withRegistry = await advisoryUnsignedFindings(store, project, models);
+  assert.equal(withRegistry.some((finding) => finding.label === "model claim absent"), true);
+  assert.equal(queries.some((q) => q.text?.includes("routing")), true);
+  assert.equal(queries.some((q) => !q.text && q.limit === REVIEW_EFFORT_RECENT_LIMIT), true);
+
+  const failing = {
+    async all() { throw new Error("must not read the whole ledger"); },
+    async history() { throw new Error("history unavailable"); },
+  };
+  const failed = await advisoryUnsignedFindings(failing, project, undefined);
+  assert.equal(failed[0]?.label, "model claim absent");
+  assert.match(failed[0]!.detail, /advisory model-claim listing not checked/);
+});
+
 test("doctor: review-routing history is bounded and still fires when adoption is outside the recent window", async () => {
   const project = "retrace";
   const models = { "gpt-6-astra": { supports_effort: true, levels: ["low", "medium", "high", "xhigh"] } };
@@ -346,7 +445,7 @@ test("doctor: review-routing history is bounded and still fires when adoption is
   }
   ledger.push(evt({
     id: "evt_unrouted_recent", seq: 401, action: "approved",
-    actor: { type: "agent", id: "codex", model: "gpt-6-astra" },
+    actor: { type: "agent", id: "codex", model: "gpt-6-astra", model_source: "harness-runtime" },
     tags: ["review"], method: { tool: "review", params: {} },
   }));
 
@@ -399,7 +498,7 @@ test("doctor: exhausted routing search reports incomplete history without droppi
   }
   ledger.push(commitEvt({
     project, id: "evt_recent_review", seq: 3203, action: "rejected",
-    actor: { type: "agent", id: "codex", model: "gpt-6-astra" },
+    actor: { type: "agent", id: "codex", model: "gpt-6-astra", model_source: "harness-runtime" },
     tags: ["review"], method: { tool: "review", params: {} },
   }));
   let calls = 0;
@@ -438,7 +537,7 @@ test("doctor: capped real routing rows never claim the oldest observed row is ad
   }
   ledger.push(commitEvt({
     project, id: "evt_recent_review", seq: 3203, action: "rejected",
-    actor: { type: "agent", id: "codex", model: "gpt-6-astra" },
+    actor: { type: "agent", id: "codex", model: "gpt-6-astra", model_source: "harness-runtime" },
     tags: ["review"], method: { tool: "review", params: {} },
   }));
   let calls = 0;

@@ -324,6 +324,7 @@ export function reviewEffortFindings(events: Event[], models: RoutingModelRegist
   const missingModelsNone: Event[] = [];
   const missingModelsSelfReport: Event[] = [];
   const missingModelsLegacy: Event[] = [];
+  const missingModelsRegisteredNoSource: Event[] = [];
   const missingEfforts: Event[] = [];
   let reviewCount = 0;
   for (const review of events.filter((event) => event.seq > adoptionSeq && isReviewEvent(event))) {
@@ -345,9 +346,11 @@ export function reviewEffortFindings(events: Event[], models: RoutingModelRegist
     } else if (source === "self-report") {
       if (capability) missingModelsSelfReport.push(review);
       else missingModels.push(review);
+    } else if (source === undefined) {
+      if (capability) missingModelsRegisteredNoSource.push(review);
+      else missingModelsLegacy.push(review);
     } else if (!capability) {
-      if (source === undefined) missingModelsLegacy.push(review);
-      else missingModels.push(review);
+      missingModels.push(review);
     }
 
     if (capability?.supports_effort && !effort) {
@@ -410,6 +413,7 @@ export function reviewEffortFindings(events: Event[], models: RoutingModelRegist
     summary(unrouted, "review routing", "cite no routing_event_id"),
     summary(missingModelsNone, "review model", "no model; source none"),
     summary(missingModelsSelfReport, "review model", "model is the reviewer's own word"),
+    summary(missingModelsRegisteredNoSource, "review model", "report a registered actor.model with no model_source (no source recorded)"),
     summary(missingModelsLegacy, "review model", "do not report an actor.model listed in the routing model registry (unknown models have no inferred fallback) (no source recorded)"),
     summary(missingModels, "review model", "do not report an actor.model listed in the routing model registry (unknown models have no inferred fallback)"),
     summary(missingEfforts, "review reasoning effort", "use an effort-capable model but do not self-report method.params.reasoning_effort"),
@@ -424,6 +428,34 @@ export function modelClaimAbsentFinding(events: Event[]): Finding | undefined {
   if (!absent.length) return undefined;
   const oldest = absent.reduce((a, b) => (a.seq < b.seq ? a : b));
   return result("warn", "model claim absent", `${absent.length} of ${commits.length} commits in the inspected window have method.params.model_claim absent (producer defect after adoption; contribution status unchanged) (oldest ${oldest.id})`);
+}
+
+const unsignedHistorySuffix = " (unsigned history; --gate uses the verified ledger)";
+
+/** Non-gate advisory: review checks need a registry; the A4 absent-claim listing does not. */
+export async function advisoryUnsignedFindings(
+  store: Pick<EventStore, "history">,
+  project: string,
+  routingModels: RoutingModelRegistry | undefined,
+): Promise<Finding[]> {
+  const unsigned = (finding: Finding): Finding => ({ ...finding, detail: `${finding.detail}${unsignedHistorySuffix}` });
+  try {
+    if (routingModels) {
+      const loaded = await loadReviewEffortEvents(store, project);
+      const findings = reviewEffortFindings(loaded.events, routingModels, loaded.scope).map(unsigned);
+      const absent = modelClaimAbsentFinding(loaded.events);
+      if (absent) findings.push(unsigned(absent));
+      return findings;
+    }
+    const recent = await store.history({ project, limit: REVIEW_EFFORT_RECENT_LIMIT });
+    const absent = modelClaimAbsentFinding(recent.events);
+    return absent ? [unsigned(absent)] : [];
+  } catch (error: any) {
+    const unchecked = routingModels
+      ? "advisory review history and model-claim listing not checked"
+      : "advisory model-claim listing not checked";
+    return [result("warn", routingModels ? "review routing" : "model claim absent", `${error?.message ?? error}; ${unchecked}`)];
+  }
 }
 
 /** Model ids are exact, case-sensitive keys, then aliases, then display_patterns. */
@@ -900,17 +932,10 @@ async function main() {
           } catch (e: any) { findings.push(result("fail", "capture coverage", e.message)); }
         } catch (e: any) { findings.push(result("fail", "HEAD delivery", e.message)); }
       } else {
-        if (routingModels) {
-          try {
-            const loaded = await loadReviewEffortEvents(new RemoteStore(url, auth.token), project);
-            const reviewFindings = reviewEffortFindings(loaded.events, routingModels, loaded.scope);
-            const unsigned = (finding: Finding): Finding => ({ ...finding, detail: `${finding.detail} (unsigned history; --gate uses the verified ledger)` });
-            findings.push(...reviewFindings.map(unsigned));
-            const absent = modelClaimAbsentFinding(loaded.events);
-            if (absent) findings.push(unsigned(absent));
-          } catch (e: any) {
-            findings.push(result("warn", "review routing", `${e.message}; advisory review history not checked`));
-          }
+        try {
+          findings.push(...await advisoryUnsignedFindings(new RemoteStore(url, auth.token), project, routingModels));
+        } catch (e: any) {
+          findings.push(result("warn", "review routing", `${e.message}; advisory review history and model-claim listing not checked`));
         }
         try {
           const action = headEvent.action === "merged" ? "merged" : "committed";
