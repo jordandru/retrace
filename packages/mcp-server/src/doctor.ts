@@ -421,13 +421,42 @@ export function reviewEffortFindings(events: Event[], models: RoutingModelRegist
   ].filter((finding): finding is Finding => finding !== undefined);
 }
 
-/** Advisory listing of commits whose producers omitted both model trailers after adoption (A4). Contribution status is untouched. */
+function commitArtifactId(event: Event): string | undefined {
+  return event.artifacts.find((artifact) => artifact.kind === "commit" || artifact.id.startsWith("commit:"))?.id;
+}
+
+/** Advisory listing of agent commits whose producers omitted both model trailers after adoption (A4). Contribution status is untouched. */
 export function modelClaimAbsentFinding(events: Event[]): Finding | undefined {
-  const commits = events.filter((event) => event.artifacts.some((artifact) => artifact.kind === "commit" || artifact.id.startsWith("commit:")));
-  const absent = commits.filter((event) => paramsOf(event).model_claim === "absent");
-  if (!absent.length) return undefined;
-  const oldest = absent.reduce((a, b) => (a.seq < b.seq ? a : b));
-  return result("warn", "model claim absent", `${absent.length} of ${commits.length} commits in the inspected window have method.params.model_claim absent (producer defect after adoption; contribution status unchanged) (oldest ${oldest.id})`);
+  const byCommit = new Map<string, Event[]>();
+  for (const event of events) {
+    const id = commitArtifactId(event);
+    if (!id) continue;
+    const group = byCommit.get(id);
+    if (group) group.push(event);
+    else byCommit.set(id, [event]);
+  }
+  const population: { absent: Event[]; agent: boolean }[] = [];
+  for (const group of byCommit.values()) {
+    if (!group.some((event) => typeof paramsOf(event).model_claim === "string")) continue;
+    population.push({
+      absent: group.filter((event) => paramsOf(event).model_claim === "absent"),
+      agent: group.some(sealedLooksAgent),
+    });
+  }
+  const counted = population.length;
+  const defects = population.filter((row) => row.absent.length && row.agent);
+  const withoutAgent = population.filter((row) => row.absent.length && !row.agent);
+  const n = defects.length;
+  const k = withoutAgent.length;
+  if (n === 0 && k === 0) return undefined;
+  const humanNote = `${k} ${n > 0 ? "more carry" : "carry"} no model claim and no agent evidence (human-authored, or an agent commit whose hook seal is missing) — not counted as defects`;
+  if (n === 0) {
+    return result("pass", "model claim absent", `0 of ${counted} commits in the inspected window have model_claim absent with agent evidence; ${humanNote}`);
+  }
+  const oldest = defects.flatMap((row) => row.absent).reduce((a, b) => (a.seq < b.seq ? a : b));
+  let detail = `${n} of ${counted} commits in the inspected window have model_claim absent with agent evidence (producer defect after adoption; contribution status unchanged) (oldest ${oldest.id})`;
+  if (k > 0) detail += `; ${humanNote}`;
+  return result("warn", "model claim absent", detail);
 }
 
 const unsignedHistorySuffix = " (unsigned history; --gate uses the verified ledger)";

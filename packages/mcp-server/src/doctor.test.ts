@@ -369,24 +369,96 @@ test("doctor: Cursor display vs launch id is not a review model mismatch; captur
   assert.deepEqual(reviewEffortFindings([routing, reportedWins], models).map((finding) => finding.label), []);
 });
 
+const commitArt = (sha: string) => [{ id: `commit:jordandru/retrace@${sha}`, kind: "commit" as const, role: "generated" as const }];
+
 test("doctor: model claim absent lists only commits whose model_claim is absent", () => {
   const absent = commitEvt({
-    id: "evt_absent", seq: 1, method: { tool: "git", params: { model_claim: "absent" } },
+    id: "evt_absent", seq: 1, actor: { type: "agent", id: "cursor-agent" }, artifacts: commitArt("absent"),
+    method: { tool: "git", params: { model_claim: "absent" } },
   });
   const complete = commitEvt({
-    id: "evt_complete", seq: 2, method: { tool: "git", params: { model_claim: "complete" } },
+    id: "evt_complete", seq: 2, artifacts: commitArt("complete"),
+    method: { tool: "git", params: { model_claim: "complete" } },
   });
   const finding = modelClaimAbsentFinding([absent, complete]);
   assert.equal(finding?.label, "model claim absent");
-  assert.match(finding!.detail, /1 of 2 commits in the inspected window/);
+  assert.equal(finding?.level, "warn");
+  assert.match(finding!.detail, /1 of 2 commits in the inspected window have model_claim absent with agent evidence/);
   assert.match(finding!.detail, /oldest evt_absent/);
   assert.equal(modelClaimAbsentFinding([complete]), undefined);
+});
+
+test("doctor: model claim absent is a producer defect only with agent evidence, counted once per sha", () => {
+  const humanAbsent = commitEvt({
+    id: "evt_human_absent", seq: 1, actor: { type: "human", id: "jordan@example.com" },
+    artifacts: commitArt("human"), method: { tool: "git", params: { model_claim: "absent" } },
+  });
+  const humanOnly = modelClaimAbsentFinding([humanAbsent]);
+  assert.equal(humanOnly?.label, "model claim absent");
+  assert.equal(humanOnly?.level, "pass");
+  assert.match(humanOnly!.detail, /0 of 1 commits in the inspected window have model_claim absent with agent evidence/);
+  assert.match(humanOnly!.detail, /1 carry no model claim and no agent evidence/);
+  assert.doesNotMatch(humanOnly!.detail, /producer defect/);
+
+  const hook = commitEvt({
+    id: "evt_hook_agent_surface", seq: 10, actor: { type: "human", id: "jordan@example.com" },
+    location: { surface: "agent" }, artifacts: commitArt("mixed"),
+    method: { tool: "git", params: { model_claim: "absent" } },
+  });
+  const webhook = commitEvt({
+    id: "evt_webhook_human", seq: 11, actor: { type: "human", id: "jordan@example.com" },
+    artifacts: commitArt("mixed"), method: { tool: "git", params: { model_claim: "absent" } },
+  });
+  const mixed = modelClaimAbsentFinding([hook, webhook]);
+  assert.equal(mixed?.level, "warn");
+  assert.match(mixed!.detail, /1 of 1 commits in the inspected window have model_claim absent with agent evidence/);
+  assert.match(mixed!.detail, /oldest evt_hook_agent_surface/);
+  assert.doesNotMatch(mixed!.detail, /more carry/);
+
+  const agentActor = commitEvt({
+    id: "evt_agent_actor", seq: 20, actor: { type: "agent", id: "cursor-agent" },
+    artifacts: commitArt("agent"), method: { tool: "git", params: { model_claim: "absent" } },
+  });
+  const agentOnly = modelClaimAbsentFinding([agentActor]);
+  assert.equal(agentOnly?.level, "warn");
+  assert.match(agentOnly!.detail, /1 of 1 commits/);
+  assert.match(agentOnly!.detail, /oldest evt_agent_actor/);
+
+  const fourProducers = [
+    commitEvt({
+      id: "evt_hook", seq: 30, actor: { type: "agent", id: "cursor-agent" }, location: { surface: "agent" },
+      artifacts: commitArt("ce335c31f4e0"), method: { tool: "git", params: { model_claim: "absent" } },
+    }),
+    commitEvt({
+      id: "evt_webhook", seq: 31, actor: { type: "human", id: "jordan@example.com" },
+      artifacts: commitArt("ce335c31f4e0"), method: { tool: "git", params: { model_claim: "absent" } },
+    }),
+    commitEvt({
+      id: "evt_pr_merge", seq: 32, action: "merged", actor: { type: "human", id: "jordan@example.com" },
+      artifacts: commitArt("ce335c31f4e0"), method: { tool: "github" },
+    }),
+    commitEvt({
+      id: "evt_ci", seq: 33, action: "other", actor: { type: "system", id: "github-actions" },
+      artifacts: commitArt("ce335c31f4e0"), method: { tool: "github" },
+    }),
+  ];
+  const once = modelClaimAbsentFinding(fourProducers);
+  assert.equal(once?.level, "warn");
+  assert.match(once!.detail, /1 of 1 commits in the inspected window have model_claim absent with agent evidence/);
+  assert.doesNotMatch(once!.detail, /2 of |4 of /);
+
+  const complete = commitEvt({
+    id: "evt_complete_only", seq: 40, artifacts: commitArt("complete"),
+    method: { tool: "git", params: { model_claim: "complete" } },
+  });
+  assert.equal(modelClaimAbsentFinding([complete, fourProducers[2]!, fourProducers[3]!]), undefined);
 });
 
 test("doctor: without a routing registry, the absent-claim listing still inspects the recent window", async () => {
   const project = "retrace";
   const absent = commitEvt({
     id: "evt_absent_recent", seq: 10, project,
+    actor: { type: "agent", id: "cursor-agent" }, location: { surface: "agent" },
     method: { tool: "git", params: { model_claim: "absent" } },
   });
   const queries: HistoryQuery[] = [];

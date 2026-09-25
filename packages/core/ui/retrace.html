@@ -485,7 +485,7 @@
     </div>`;
     html += `<h2>Capture gaps</h2><table class="stable"><tr><th>gap</th><th>count</th><th>what closes it</th></tr>
       <tr><td>commits without a causal root</td><td>${num(c.unlinked_commits)} / ${esc(c.commits)}</td><td>a <span class="mono">Retrace-Caused-By</span> trailer naming the instruction</td></tr>
-      <tr><td>agent events without a model</td><td>${num(c.agent_events_without_model)} / ${esc(c.agent_events)}</td><td>${(c.agent_events_without_model_by_cause?.source_none ?? 0)} declared none · ${(c.agent_events_without_model_by_cause?.no_source_recorded ?? c.agent_events_without_model)} no source recorded</td></tr>
+      <tr><td>agent events without a model</td><td>${num(c.agent_events_without_model)} / ${esc(c.agent_events)}</td><td>${num(c.agent_events_without_model_by_cause?.source_none ?? 0)} declared none · ${num(c.agent_events_without_model_by_cause?.no_source_recorded ?? c.agent_events_without_model)} no source recorded</td></tr>
       <tr><td>instructions without follow-up</td><td>${num(c.instructions_without_followup)} / ${esc(c.instructions)}</td><td>at least one event whose caused_by is the instruction</td></tr>
       <tr><td>artifact refs without a role</td><td>${num(c.artifact_refs_without_role)} / ${esc(c.artifact_refs)}</td><td><span class="mono">role</span>: used · generated · both on each ref</td></tr>
       <tr><td>attribution amendments</td><td>${esc(c.attribution_attempts ?? 0)} attempts</td><td>${c.attribution_unavailable ? "attribution evaluation unavailable: " + esc(c.attribution_unavailable) : esc(c.attribution_amendments ?? 0) + " effective"}</td></tr>
