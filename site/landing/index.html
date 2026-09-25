@@ -181,7 +181,7 @@ footer a{color:var(--ink-2)}
   </ul></div>
   <div class="card"><h3>What it doesn't</h3><ul>
     <li>It can't stop an operator with database access from rewriting history <em>before</em> a checkpoint — it can only show that the head moved.</li>
-    <li>The model name an agent reports is what the agent said. We record it; we don't verify it.</li>
+    <li>The model name an agent reports is what the agent said. We record it; we don't verify it. Agent events missing a model are counted as declared none (<code>model_source: none</code>) or no source recorded (legacy events with no <code>model_source</code> field).</li>
     <li>Line-level attribution ("this function was written by GPT") is not a feature.</li>
     <li>It records what producers log. The CI gate checks that the commit it runs on is complete; keystrokes are never captured.</li>
     <li>The gate is a check, not a lock. On this repository the owner pushes every merge and is exempt from the branch ruleset, so GitHub does not refuse a red merge — a person does.</li>

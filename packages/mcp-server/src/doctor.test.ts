@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Credential, Event, EventInput, EventStore, HistoryQuery, Share, appendEvent, buildExportBundle, generateSigningKey, pageHistoryNewest, schemaSurface, signCanonical } from "@retrace-dev/core";
-import { attributionFinding, cliVersionGap, credentialAuthorization, doctorHistoryEvents, gateRemoteAuthorization, headDelivery, instructRootFinding, issuanceFindingsFromStatus, loadReviewEffortEvents, loadRoutingModels, missingSchema, parseDoctorArgs, pendingSealsFinding, pinSessionFinding, remoteCaptureCoverage, REVIEW_EFFORT_RECENT_LIMIT, REVIEW_EFFORT_ROUTING_PAGE, resolveRoutingModel, reviewEffortFindings, sealedCommitEvent, sealedLooksAgent } from "./doctor.js";
+import { attributionFinding, cliVersionGap, credentialAuthorization, doctorHistoryEvents, gateRemoteAuthorization, headDelivery, instructRootFinding, issuanceFindingsFromStatus, loadReviewEffortEvents, loadRoutingModels, missingSchema, modelClaimAbsentFinding, parseDoctorArgs, pendingSealsFinding, pinSessionFinding, remoteCaptureCoverage, REVIEW_EFFORT_RECENT_LIMIT, REVIEW_EFFORT_ROUTING_PAGE, resolveRoutingModel, reviewEffortFindings, sealedCommitEvent, sealedLooksAgent } from "./doctor.js";
 import { RemoteStore } from "./remote-store.js";
 import { SqliteStore } from "./sqlite-store.js";
 
@@ -211,6 +211,7 @@ test("doctor: shipped routing registry resolves exact harness model spellings an
     ["claude-fable-5-1", "claude-fable-5-1"],
     ["grok-4.6", "grok-4.6"],
     ["Grok 4.6", "grok-4.6"],
+    ["Cursor Grok 4.6", "grok-4.6"],
     ["claude-opus-4-8", "claude-opus-4-8"],
     ["claude-opus-4.8", "claude-opus-4-8"],
   ]);
@@ -238,6 +239,89 @@ test("doctor: routing model registry rejects invalid and colliding aliases", () 
     a: { ...row, aliases: ["shared"] },
     b: { ...row, aliases: ["shared"] },
   })), /collides with an alias for a/);
+});
+
+test("doctor: source-aware review model — one review per source; gate counts none and self-report as no model", () => {
+  const routing = commitEvt({
+    id: "evt_route", seq: 1, action: "other", action_detail: "routed",
+    actor: { type: "agent", id: "claude-code" },
+    method: { tool: "routing", params: { target: { agent: "codex", model: "gpt-6-astra", effort: "high" } } },
+  });
+  const models = { "gpt-6-astra": { supports_effort: true, levels: ["low", "medium", "high", "xhigh"] } };
+  const review = (id: string, actor: Event["actor"]): Event => commitEvt({
+    id, seq: 2, action: "approved", actor,
+    tags: ["review"], method: { tool: "review", params: { routing_event_id: routing.id, reasoning_effort: "high" } },
+  });
+  const registered = (source: NonNullable<Event["actor"]["model_source"]>): Event["actor"] => ({
+    type: "agent", id: "codex", model: "gpt-6-astra", model_source: source,
+  });
+  const passSources = ["harness-runtime", "harness-config", "harness-display", "credential-pinned", "operator-stated"] as const;
+  for (const source of passSources) {
+    assert.deepEqual(reviewEffortFindings([routing, review(`evt_${source}`, registered(source))], models), [], source);
+  }
+  const none = reviewEffortFindings([routing, review("evt_none", { type: "agent", id: "codex", model_source: "none" })], models);
+  assert.equal(none[0]?.label, "review model");
+  assert.match(none[0]!.detail, /no model; source none/);
+  const self = reviewEffortFindings([routing, review("evt_self", registered("self-report"))], models);
+  assert.equal(self[0]?.label, "review model");
+  assert.match(self[0]!.detail, /model is the reviewer's own word/);
+  const legacy = reviewEffortFindings([routing, review("evt_legacy", { type: "agent", id: "codex", model: "unlisted-model" })], models);
+  assert.equal(legacy[0]?.label, "review model");
+  assert.match(legacy[0]!.detail, /no source recorded/);
+  const gatedNone = reviewEffortFindings([routing, review("evt_none_gate", { type: "agent", id: "codex", model_source: "none" })], models, undefined, { gate: true });
+  const gatedSelf = reviewEffortFindings([routing, review("evt_self_gate", registered("self-report"))], models, undefined, { gate: true });
+  assert.equal(gatedNone[0]?.label, "review model");
+  assert.equal(gatedSelf[0]?.label, "review model");
+  assert.deepEqual(reviewEffortFindings([routing, review("evt_display_gate", registered("harness-display"))], models, undefined, { gate: true }), []);
+});
+
+test("doctor: Cursor display vs launch id is not a review model mismatch; captured display effort fills a missing self-report", () => {
+  const models = loadRoutingModels(fileURLToPath(new URL("../../../", import.meta.url)))!;
+  const routing = commitEvt({
+    id: "evt_route_grok", seq: 1, action: "other", action_detail: "routed",
+    actor: { type: "agent", id: "claude-code" },
+    method: { tool: "routing", params: { target: { agent: "cursor-agent", model: "cursor-grok-4.6-high", effort: "high" } } },
+  });
+  const display = commitEvt({
+    id: "evt_display", seq: 2, action: "approved",
+    actor: { type: "agent", id: "cursor-agent", model: "Cursor Grok 4.6", model_source: "harness-display" },
+    tags: ["review"], method: { tool: "review", params: { routing_event_id: routing.id, reasoning_effort: "high" } },
+  });
+  assert.deepEqual(reviewEffortFindings([routing, display], models).map((finding) => finding.label), []);
+  const fromDisplay = commitEvt({
+    id: "evt_from_display", seq: 2, action: "approved",
+    actor: { type: "agent", id: "cursor-agent", model: "Cursor Grok 4.6 (high)", model_source: "harness-display" },
+    tags: ["review"], method: { tool: "review", params: { routing_event_id: routing.id } },
+  });
+  assert.deepEqual(reviewEffortFindings([routing, fromDisplay], models).map((finding) => finding.label), []);
+  const mismatchDisplay = commitEvt({
+    id: "evt_mismatch_display", seq: 2, action: "approved",
+    actor: { type: "agent", id: "cursor-agent", model: "Cursor Grok 4.6 (low)", model_source: "harness-display" },
+    tags: ["review"], method: { tool: "review", params: { routing_event_id: routing.id } },
+  });
+  const mismatch = reviewEffortFindings([routing, mismatchDisplay], models);
+  assert.equal(mismatch[0]?.label, "review effort mismatch");
+  assert.match(mismatch[0]!.detail, /effort from display string/);
+  const reportedWins = commitEvt({
+    id: "evt_reported", seq: 2, action: "approved",
+    actor: { type: "agent", id: "cursor-agent", model: "Cursor Grok 4.6 (low)", model_source: "harness-display" },
+    tags: ["review"], method: { tool: "review", params: { routing_event_id: routing.id, reasoning_effort: "high" } },
+  });
+  assert.deepEqual(reviewEffortFindings([routing, reportedWins], models).map((finding) => finding.label), []);
+});
+
+test("doctor: model claim absent lists only commits whose model_claim is absent", () => {
+  const absent = commitEvt({
+    id: "evt_absent", seq: 1, method: { tool: "git", params: { model_claim: "absent" } },
+  });
+  const complete = commitEvt({
+    id: "evt_complete", seq: 2, method: { tool: "git", params: { model_claim: "complete" } },
+  });
+  const finding = modelClaimAbsentFinding([absent, complete]);
+  assert.equal(finding?.label, "model claim absent");
+  assert.match(finding!.detail, /1 of 2 commits in the inspected window/);
+  assert.match(finding!.detail, /oldest evt_absent/);
+  assert.equal(modelClaimAbsentFinding([complete]), undefined);
 });
 
 test("doctor: review-routing history is bounded and still fires when adoption is outside the recent window", async () => {

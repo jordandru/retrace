@@ -69,7 +69,7 @@ Commits, GitHub PRs and Google Drive become events through adapters; the hosted 
 ## What it deliberately does not do
 
 - It is **tamper-evident, not tamper-proof** — between hourly checkpoints there is a window in which an operator could rewrite; after a checkpoint, rewriting means rewriting Rekor.
-- **Model names are asserted** by the agent and labeled as such; the identity and time are what's cryptographically bound.
+- **Model names are asserted** by the agent and labeled as such; the identity and time are what's cryptographically bound. Agent events missing a model are counted as declared none (`model_source: none`) or no source recorded (legacy events with no `model_source` field).
 - **Coverage is what producers log** — complete for commits (enforced by the gate), not keystrokes, prompts, the harness's system prompt, or the model's reasoning.
 - **A wrong actor stays sealed.** Tier 1 human-sealed attribution amendments shipped in 0.1.7; the first real one is ledger #2543 (`evt_51c4a8ad2b3b450788ebc8f7b69969fe`): commit `5d7290f`, recorded as `codex`, with seven files under `packages/mcp-server` amended to `cursor-agent` on stamped evidence #1647/#1648. The recorded actor stays visible.
 - **No line-level attribution** ("GPT wrote this function") — not a feature, not planned.

@@ -22,7 +22,11 @@
   "grok-4.6": {
     "supports_effort": true,
     "levels": ["low", "medium", "high", "xhigh"],
-    "aliases": ["Cursor Grok 4.6", "Grok 4.6"]
+    "aliases": ["Cursor Grok 4.6", "Grok 4.6"],
+    "display_patterns": [
+      "^(?:Cursor )?Grok 4\\.6(?: \\((low|medium|high|xhigh)\\))?$",
+      "^cursor-grok-4\\.6(?:-(low|medium|high|xhigh))?$"
+    ]
   },
   "nvidia_nim/nvidia/nemotron-3-ultra-550b-a55b": {
     "supports_effort": false,
