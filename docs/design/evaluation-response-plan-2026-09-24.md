@@ -1,10 +1,11 @@
 # Response plan: the ChatGPT evaluation "Evaluate Retrace Pros Cons" — design note v1
 
-**Status:** DRAFT v1.1, 2026-09-24 MDT (2026-09-25 UTC). v1 was head `64f243f`, PR 122. Codex round 1 rejected it with four
-Medium findings (`evt_ceed04c11c5b49f8ab60555cf73a63c7`), and all four are applied here, in place: an unmerged draft is
-corrected in place (Jordan, `evt_9dc982064d3c432bbd85ff9a64f049da`). §7 lists the dispositions. Author: claude-code acting
-as a **study-and-plan seat**, not the coordinator (agent-ops 14); session `1d17116d-8d22-4b16-9128-f5acf2ecad82`, model `claude-opus-5-5`, source
-`harness-runtime`. Written on Jordan's signed instruction `evt_dc691219358244a09f1e55ffd48758cf`, which names the hand-off
+**Status:** DRAFT v1.2, 2026-09-25. v1 was head `64f243f`, PR 122. Codex round 1 rejected it with four Medium findings
+(`evt_ceed04c11c5b49f8ab60555cf73a63c7`), applied in v1.1, head `7627bec`. Codex round 2 closed those four and raised one new
+Medium, F5 (`evt_9469f115cb88422ab1dff28b04769410`), applied here. All fixes are in place: an unmerged draft is corrected in
+place (Jordan, `evt_9dc982064d3c432bbd85ff9a64f049da`). §7 lists the dispositions. Author: claude-code acting as a
+**study-and-plan seat**, not the coordinator (agent-ops 14); session `1d17116d-8d22-4b16-9128-f5acf2ecad82`, model
+`claude-opus-5-5`, source `harness-runtime`. Written on Jordan's signed instruction `evt_dc691219358244a09f1e55ffd48758cf`, which names the hand-off
 prompt `~/.retrace/handoff-2026-09-24/prompt-opus-evaluate-retrace.md` (sha256 `ae7fa11c6c5599f56bf6a95828bd03ac51ad4ca6052c0ab0707a58af54141e6f`).
 The coordinator wrote that prompt on Jordan's instruction `evt_1d55bfbb136a408d9b7ca329ac434525` (read raw: `instructed`,
 relayed by claude-code, verdict `verified`). **Class (a)** under agent-rules 12, as the prompt states: it proposes what gets
@@ -101,7 +102,7 @@ recommended thing already exists (**true** or **partly true**), is planned but n
 "Status 04:27Z" means `retrace_status` for project `retrace` at 2026-09-25T04:27:30Z (log `evt_ce24e5e7…`).
 
 **Counts:** 110 rows, which are claims C1–C103 with C38's eight Retrace cells checked one by one. 47 true, 21 partly true,
-0 false, 6 planned, 36 unverifiable. No claim is false outright. The false parts sit inside partly-true verdicts: Cursor as a
+0 false, 5 planned, 37 unverifiable. No claim is false outright. The false parts sit inside partly-true verdicts: Cursor as a
 product harness (C57), "the live public ledger was paused" (C72), "enforce capture" as something Retrace does (C31), and
 "server-stamped identity" on owner and assert writes (C18).
 
@@ -247,7 +248,7 @@ product harness (C57), "the live public ledger was paused" (C72), "enforce captu
 | C94 | 555 | "Run five design-partner pilots" | unverifiable | Market; no programme exists (PR 43 is research only). |
 | C95 | 557 | "Installation in under ten minutes." | unverifiable | Never measured: the stranger trial's install step was not run (`omarchy-trial-2026-09-21.md:173–175`). |
 | C96 | 558 | "More than 95% of AI-assisted commits linked automatically." | unverifiable | Not the project's existing bar. That bar is per-file coverage under manual logging (`docs/second-project-baseline.md:73–86`, `docs/reference.md:265`). It computes `covered / (covered + uncovered)` over evaluated file transitions after at least five consecutive agent commits (Pass: "that ratio ≥ 0.95, `missing_commit` 0, `misattributed` 0"), and it fails a commit with no per-file `retrace_log`. It measures neither the share of commits linked automatically nor automatic against manual capture. Only commits themselves are sealed without an agent action (C43), and nothing measures "linked automatically". So C96 is a distinct proposed metric, which P3b would define. The existing bar is not met either (C64). |
-| C97 | 559 | "Near-zero false agent attribution." | planned | The trailer classifier is designed to find conflicting claims (`commit-trailer-consistency.md`, v2.5) but is not active. #82 is a live source of false human attribution. |
+| C97 | 559 | "Near-zero false agent attribution." | unverifiable | Nothing measures an attribution-error rate, and nothing plans to. The trailer classifier (`commit-trailer-consistency.md` v2.5, not active) finds `conflicting` claims: claims the pinned evidence contradicts. Those are not attribution errors. It judges the contribution claim and does not authenticate who committed (:75–89). It has a documented false negative: A logs the edits, B commits with A's trailer, the verdict is `supported`, and the wrong committer is written (§4, :185–207; test T31, `classify.test.ts:462–471`; `classify.ts:743–748`). Zero conflicts is therefore not evidence of zero false attribution. Enforce withholds contradicted claims (:796–797), and P1 addresses #82's human attributions; neither measures a rate. |
 | C98 | 560 | "No routine manual logging by developers or agents." | unverifiable | It contradicts the current design (agent-rules 1–3), and nothing plans to remove manual logging. |
 | C99 | 561 | "An audit or incident question answered in minutes instead of hours." | unverifiable | Nothing measures it. |
 | C100 | 562 | "At least three of five partners willing to pay." | unverifiable | Market. |
@@ -384,8 +385,17 @@ decision (agent-rules 11–12). Every merge, deploy, publish, credential change 
     and evidence of automation:
     - C96: AI-assisted commits whose edit evidence was captured with no agent tool call, over AI-assisted commits. How a
       commit counts as AI-assisted is part of the definition.
-    - C97: false agent attributions over attributed commits, from the classifier's `conflicting` verdicts and #82's
-      owner-login cases.
+    - C97, in two parts that are never merged:
+      - A diagnostic, named as what it measures: the classifier's `conflicting` rate, meaning contribution claims the
+        pinned evidence contradicts, over classified agent claims. It is not an attribution-error rate. The classifier does
+        not authenticate who committed (`commit-trailer-consistency.md:75–89`), and it returns `supported` in the
+        documented false negative where A logs the edits and B commits with A's trailer (§4, :185–207; T31,
+        `classify.test.ts:462–471`). #82's owner-login cases are a separate, human-attribution failure; P1 reports them.
+      - The attribution-error rate itself: only independently adjudicated cases can measure it. That means a defined
+        population or sample of attributed commits, each checked against evidence the classifier does not use, with
+        unassessable cases reported apart. The design includes T31-shaped cases in the sample. Until such an adjudication
+        exists, the rate is reported as unmeasured, and a count of zero conflicts is never reported as zero attribution
+        errors.
     - C98: edits captured without a `retrace_log` call, over edits.
 - **Claims.** C43, C63, C64, C65, C85, C93, C96, C98, C9.
 - **Touches.** `docs/reference.md:265`, :267; `docs/second-project-baseline.md`; the phase-A brief; `window-start.md:25`.
@@ -397,7 +407,9 @@ decision (agent-rules 11–12). Every merge, deploy, publish, credential change 
     labelled as manual capture, with per-harness numbers. The second project passing that bar on a live window is the
     project's own target (`docs/reference.md:265`).
   - The design note merged, with C96–C98 defined as above.
-  - After any capture change it leads to, C96–C98 measured on a live window.
+  - After any capture change it leads to, C96 and C98 measured on a live window. For C97, the `conflicting` diagnostic is
+    reported under its own name. The attribution-error rate is reported from adjudicated cases, with unassessable cases
+    counted apart, or reported as unmeasured.
 
 ### P4. Correct the public claims the evidence does not carry
 
@@ -597,7 +609,8 @@ Each gives a recommendation and how to overrule it.
 9. **Q9. Pilots and validation gates (C94–C100).** *Recommendation:* take up the three gates that measure truth as metrics
    that P3b defines and measures:
    - C96, commits linked automatically;
-   - C97, near-zero false attribution;
+   - C97, false attribution, which P3b splits into a `conflicting` diagnostic and an adjudicated error rate (unmeasured
+     until adjudicated);
    - C98, read as "no routine manual logging of *what* happened", with the *why* staying manual.
 
    They are reported apart from the existing per-file baseline, and they are not P3's acceptance until P3b defines them.
@@ -651,9 +664,27 @@ the evidence shows. P3b, Q1 and C93 no longer read the Not-next line as barring 
 says the project's own text is already right. Counts after round 1: 47 true, 21 partly true, 0 false, 6 planned,
 36 unverifiable.
 
+### 7.1b Dispositions — round 2
+
+Codex (`gpt-6-astra`, effort high; routing `evt_51fa8951c83e4edfb19341a4c36d867e`) re-checked v1.1 at head `7627bec`.
+It closed F1–F4 and **rejected** on one new Medium, F5 (`evt_9469f115cb88422ab1dff28b04769410`, 2026-09-25 06:02Z). The gate
+check is `evt_b704c142b3614921a0f0b15f758e61ab`. Jordan's go for an in-place fix (option 1) is
+`evt_9faa2283683646deb8fa0c59153faaa8`, relayed in the signed pane message `evt_66d7f4d651f8472390edb6cf2e6b9b94` (verified;
+receipt `evt_f245453324824dbeb1e1e3aeab39239e`). The fix's own instruct is `evt_9e7c993a3701433ab65bb92263899fad`.
+
+5. **F5, Medium: the new C97 definition read the classifier's conflict rate as the false-attribution rate.** Accepted.
+   - P3b now splits C97 into a `conflicting` diagnostic, named as claims the evidence contradicts, and an attribution-error
+     rate measured only by independently adjudicated cases. Unassessable cases are reported apart, and the rate is reported
+     as unmeasured until then.
+   - The design names the T31 false negative, so zero conflicts cannot be promoted to zero errors.
+   - Carried through to P3's done-evidence, Q9 and the C97 row. C97 moves from planned to unverifiable, because nothing
+     measures or plans to measure the rate.
+
+   Counts after round 2: 47 true, 21 partly true, 0 false, 5 planned, 37 unverifiable.
+
 ### 7.2 Events this seat created, in order
 
-`location.session` is `1d17116d-8d22-4b16-9128-f5acf2ecad82` throughout. The edit event naming v1.1, the v1.1 commit's
+`location.session` is `1d17116d-8d22-4b16-9128-f5acf2ecad82` throughout. The edit event naming v1.2, the v1.2 commit's
 seals and its push come after this text was fixed, so the pane report lists them.
 
 | # | Event | Action | What |
@@ -674,3 +705,8 @@ seals and its push come after this text was fixed, so the pane report lists them
 | 13 | `evt_c0924b80f5814ca6b2ab541cbac83e18` | created | PR 122 opened, class (a), head `64f243f`. |
 | 14 | `evt_ce2b18b930074ffb919b5e5f9247e24e` | instructed | The round-1 fix task, relayed (Jordan's go `evt_ab24591b`, via `evt_20b49ae9`). |
 | 15 | `evt_e7d5603a96684e089764723f91b2b572` | received | The fix relay verified under agent-rules 15. The first attempt failed with "fetch failed" before sealing, so it sealed after event 14. |
+| 16 | `evt_ba669caa8d1949239291531e0fdf4cb7` | edited | v1.1, the round-1 fixes, sha256 `17d24875…1179`. |
+| — | `evt_2f2f45a2aa6c48fc94c6c15552b251e5`, `evt_763a3677ac65482bbae971a39d21df03` | committed | v1.1 commit `7627bec`, sealed by the git hook and by the push webhook; both name claude-code, with `model_claim` `complete`. |
+| 17 | `evt_4d4b0876ba1c47e19ccf864e436a541e` | executed | v1.1 pushed; PR 122 head `7627bec`. |
+| 18 | `evt_f245453324824dbeb1e1e3aeab39239e` | received | The round-2 fix relay verified under agent-rules 15 (sent `evt_66d7f4d6`). |
+| 19 | `evt_9e7c993a3701433ab65bb92263899fad` | instructed | The round-2 fix task, relayed (Jordan's go `evt_9faa2283`). |
