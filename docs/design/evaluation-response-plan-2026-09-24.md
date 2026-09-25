@@ -1,7 +1,9 @@
 # Response plan: the ChatGPT evaluation "Evaluate Retrace Pros Cons" — design note v1
 
-**Status:** DRAFT v1, 2026-09-24 MDT (2026-09-25 UTC). Author: claude-code acting as a **study-and-plan seat**, not the
-coordinator (agent-ops 14); session `1d17116d-8d22-4b16-9128-f5acf2ecad82`, model `claude-opus-5-5`, source
+**Status:** DRAFT v1.1, 2026-09-24 MDT (2026-09-25 UTC). v1 was head `64f243f`, PR 122. Codex round 1 rejected it with four
+Medium findings (`evt_ceed04c11c5b49f8ab60555cf73a63c7`), and all four are applied here, in place: an unmerged draft is
+corrected in place (Jordan, `evt_9dc982064d3c432bbd85ff9a64f049da`). §7 lists the dispositions. Author: claude-code acting
+as a **study-and-plan seat**, not the coordinator (agent-ops 14); session `1d17116d-8d22-4b16-9128-f5acf2ecad82`, model `claude-opus-5-5`, source
 `harness-runtime`. Written on Jordan's signed instruction `evt_dc691219358244a09f1e55ffd48758cf`, which names the hand-off
 prompt `~/.retrace/handoff-2026-09-24/prompt-opus-evaluate-retrace.md` (sha256 `ae7fa11c6c5599f56bf6a95828bd03ac51ad4ca6052c0ab0707a58af54141e6f`).
 The coordinator wrote that prompt on Jordan's instruction `evt_1d55bfbb136a408d9b7ca329ac434525` (read raw: `instructed`,
@@ -99,8 +101,8 @@ recommended thing already exists (**true** or **partly true**), is planned but n
 "Status 04:27Z" means `retrace_status` for project `retrace` at 2026-09-25T04:27:30Z (log `evt_ce24e5e7…`).
 
 **Counts:** 110 rows, which are claims C1–C103 with C38's eight Retrace cells checked one by one. 47 true, 21 partly true,
-0 false, 7 planned, 35 unverifiable. No claim is false outright. The false parts sit inside partly-true verdicts: Gemini as
-a supported harness (C57), "the live public ledger was paused" (C72), "enforce capture" as something Retrace does (C31), and
+0 false, 6 planned, 36 unverifiable. No claim is false outright. The false parts sit inside partly-true verdicts: Cursor as a
+product harness (C57), "the live public ledger was paused" (C72), "enforce capture" as something Retrace does (C31), and
 "server-stamped identity" on owner and assert writes (C18).
 
 ### 2.1 Bottom line and summary table (l. 317–334)
@@ -130,7 +132,7 @@ a supported harness (C57), "the live public ledger was paused" (C72), "enforce c
 | C16 | 338–340 | Better positioning: "A vendor-neutral, tamper-evident chain of custody for AI-assisted software changes." | unverifiable | Positioning is a choice, not a fact. "Chain of custody" appears nowhere in the repository; `docs/reference.md:256` calls Retrace "the causal evidence plane for human-directed AI work". |
 | C17 | 342–350 | It connects human instruction → agent and model → files and artifacts → commit and PR → signed audit evidence | true | This is the documented design (`docs/reference.md:256`, README.md:17, :22, :67). "Attempts" is the right word, because three links are weak. The model is asserted (README.md:72). Commit and PR links depend on agents writing trailers or a PR-body line (`SETUP-GUIDE.md:204`, `docs/reference.md:89`). Signatures are trusted only in hosted mode (README.md:22). |
 | C18 | 354 | "Server-stamped agent identity and time." | partly true | Pinned credentials have the actor stamped from the credential (`packages/core/src/router.ts:165`, :814). `seq` and `received_at` are server-set and hash-covered (`packages/core/src/chain.ts:80–87`). Owner-token and assert writes keep the body's actor (`router.ts:203`, :335); local SQLite has no stamp; `timestamp` is caller-supplied when present (`chain.ts:87`). Of 7,909 events: 394 assert, 57 owner, 947 unstamped (status 04:27Z). |
-| C19 | 355 | "A `caused_by` chain linking work back to a human instruction." | true | `packages/core/src/schema.ts:201–202`; `explainEvent` (`store.ts:848`). Only the MCP paths reject a dangling link (`packages/mcp-server/src/index.ts:329`); REST and the adapters seal it tagged `caused_by:unverified` (`store.ts:633`, :826). So README.md:17's "rejected at write time, never silently stored" holds for MCP writes only. The "human instruction" is usually relayed by an agent (C44). |
+| C19 | 355 | "A `caused_by` chain linking work back to a human instruction." | true | `packages/core/src/schema.ts:201–202`; `explainEvent` (`store.ts:848`). Only the MCP paths reject a dangling link (`packages/mcp-server/src/index.ts:329`); REST and the adapters seal it tagged `caused_by:unverified` (`store.ts:633`, :826). So README.md:17's "rejected at write time, never silently stored" holds for MCP writes only. The "human instruction" at the root may have been recorded by an agent on the human's behalf, or asserted by another credential (C44). |
 | C20 | 356 | "Git reconciliation that can identify uncovered or apparently misattributed files." | true | `reconcile.ts:33`, :351, :360. Gaps: merge commits and human-sealed commits get no coverage check (`reconcile.ts:328–331`), and `uncovered` is a warning by default (`reconcile.ts:181`). |
 | C21 | 357 | "Hash-chained events, producer signatures, signed exports, and optional Rekor witnessing." | true | `chain.ts:80–81`, :113; `producer-sig.ts:5–6`, :59; `export.ts:4`, :125; `packages/mcp-server/src/witness.ts:5–6`. The witness is optional (`export-cli.ts:163`): daily from `.github/workflows/retrace-checkpoint.yml:22`, and hourly for `retrace` only (`wrangler.toml:24`). |
 | C22 | 358 | "Cross-harness support rather than dependence on one AI vendor." | true | The live ledger holds events from ten agent actor ids, among them claude-code, codex, cursor-agent, github-copilot, grok, nooa, gemini and openclaw (status 04:27Z actor list); per-harness setup is at `SETUP-GUIDE.md:124–132`. |
@@ -167,7 +169,7 @@ a supported harness (C57), "the live public ledger was paused" (C72), "enforce c
 | C38a | 422 | Retrace: exact committed diff — "References it" | true | Commit seals name the commit and its files as artifacts; the diff stays in Git. |
 | C38b | 423 | Detailed prompts and tool calls — "Partial by design" | true | README.md:73. |
 | C38c | 424 | Cross-vendor agent record — "Strong" | true | Ten agent actor ids in one ledger (status 04:27Z). |
-| C38d | 425 | Human instruction → commit chain — "Core feature" | partly true | It is the core design (C19), but roots are usually agent-relayed (C44). Causal coverage is 98.1% on `retrace` and 42.8% on `boxing-rpg` (`retrace_status`, 2026-09-25 04:27Z and 04:31Z). |
+| C38d | 425 | Human instruction → commit chain — "Core feature" | partly true | It is the core design (C19), but a root's provenance varies: recorded via a pinned agent, asserted, owner-sealed or unstamped (C44). Causal coverage is 98.1% on `retrace` and 42.8% on `boxing-rpg` (`retrace_status`, 2026-09-25 04:27Z and 04:31Z). |
 | C38e | 426 | Detect unlogged or misattributed files — "Strong ambition" | true | "Ambition" is accurate: the check exists and only warns (C20). |
 | C38f | 427 | Tamper-evident ledger — "Strong" | true | C21. There is an operator rewrite window between checkpoints (README.md:71). |
 | C38g | 428 | Offline third-party verification — "Strong" | partly true | Offline verify works against a trusted key; without one the result is `self_attested` (`export.ts:125`, :212). Public live browsing is paused (README.md:12). The repository's committed checkpoint pin stops at seq 4098 (`.retrace/checkpoints.jsonl`, last line, 2026-09-14), with ten daily checkpoint PRs unmerged since (PRs 52, 64, 70, 75, 81, 94, 100, 102, 106 and 120). The public 2026-09-03 snapshot does verify offline (README.md:5). |
@@ -177,7 +179,7 @@ a supported harness (C57), "the live public ledger was paused" (C72), "enforce c
 | C41 | 441 | "Retrace can help prove that a recorded event was not subsequently altered. It cannot prove that every event was captured or that every original claim was truthful." | true | `docs/reference.md:113` ("a hash chain only proves the events that are present were not altered"); README.md:71–73; `reconcile.ts:12–13`. Two nuances: "not altered" holds after a checkpoint (README.md:71), and full exports do detect omission against the server's claimed head (`site/landing/index.html:180`). |
 | C42 | 443 | "Model identity is asserted." | true | README.md:72; `producer-sig.ts:20` ("the model stays asserted — never claim it"). Since PRs 114 and 118 it carries a source label (`schema.ts:14–20`, :54–61) that nothing verifies. |
 | C43 | 443 | "Agent activity can be omitted." | true | Only commits (git hooks), GitHub webhooks and the Drive poller capture without the agent (`git-hook.ts:5`, `github.ts:5–10`, `adapters/google-apps-script/Code.gs:42`); everything else is `retrace_log` (agent-rules 1–3). Status 04:27Z: 93 unlinked commits and 152 instructions without follow-up on `retrace`; 96 of 140 commits unlinked on `boxing-rpg` (04:31Z). |
-| C44 | 443 | "A relayed 'human instruction' is still being submitted by an agent configured to act for that human." | true | `router.ts:6–7` and :904–908 stamp `relayed_by`. Nothing downstream reads it: `causality.ts:12` counts any human `instructed` event as a root, so status's `rooted_in_human_instruction` (4,977 of 5,116) mixes relayed roots with direct ones. `docs/owner-protocol.md` §7 records that the envelope does not prove who typed. |
+| C44 | 443 | "A relayed 'human instruction' is still being submitted by an agent configured to act for that human." | true | `router.ts:6–7` and :904–908 stamp `relayed_by`, and only for the pinned-agent carve-out. Nothing downstream reads it: `causality.ts:12` counts any human `instructed` event as a root. So status's `rooted_in_human_instruction` (4,977 of 5,116) mixes roots recorded via a pinned agent with roots of other provenance. Owner-token and assert writes keep a body's human actor with no relay stamp (`router.ts:335–342`; `router.test.ts:501–504`). A caller-supplied `relayed_by` is stripped (`router.ts:817`). Local and pre-stamp roots carry no stamp at all. A root without `relayed_by` is therefore not thereby written by a human. `docs/owner-protocol.md` §7 records that the envelope does not prove who typed. |
 | C45 | 443 | "tamper-evident, but not automatically truth-complete" | true | Follows from C41–C44; README.md:71–73. |
 
 ### 2.6 What the evaluation says is good (l. 445–467)
@@ -195,7 +197,7 @@ a supported harness (C57), "the live public ledger was paused" (C72), "enforce c
 | C54 | 461 | "Rekor provides an external witness." | true | `witness.ts:5–6`, :12. It witnesses a signed head at a time, not content or completeness (`checkpoint.ts:26`). The repository's copy of the pins is stale (C38g). |
 | C55 | 461 | "The system does not falsely call itself tamper-proof." | true | README.md:71, `docs/examples.md:93`, `site/landing/index.html:173`. No doc calls it tamper-proof or immutable. `landing:103` "without trusting anyone, including us" is the strongest claim and sits beside README.md:71's rewrite window. |
 | C56 | 463 | "substantially better than putting a hash in a database and calling it immutable" | unverifiable | A judgment. |
-| C57 | 467 | "Supporting Claude Code, Codex, Gemini, Grok, Copilot, Cursor, and external frameworks" | partly true | **Gemini is false.** Gemini was retired 2026-09-10 (`docs/team-roles.md:153`; commit `e514d2a` removed `GEMINI.md`). Yet `SETUP-GUIDE.md:5`, :24, :127, :155, :163, `docs/reference.md:41`, `docs/examples.md:5` and `packages/mcp-server/src/admin.ts:40` (`DEFAULT_HARNESSES`) still offer or provision it. Cursor works but `retrace-admin` does not mint it (`SETUP-GUIDE.md:328`). Of the "external frameworks", NOOA signs (README.md:21); OpenClaw is an unsigned pilot, parked (`SETUP-GUIDE.md:161`, :186; `wrangler.toml:27–28`); OpenCode is on hold (PR 19). The evaluation repeated the stale docs, which shows they mislead a careful reader. |
+| C57 | 467 | "Supporting Claude Code, Codex, Gemini, Grok, Copilot, Cursor, and external frameworks" | partly true | Claude Code, Codex, Gemini CLI, Grok and GitHub Copilot are the product's default harnesses (`packages/mcp-server/src/admin.ts:39–40`, asserted by `admin.test.ts:197`), and NOOA is an opt-in (`admin.ts:41`; README.md:21). **Cursor as a product harness is the false part.** It has setup notes (`SETUP-GUIDE.md:124–132`) and is dogfooded here as a pinned seat, but `retrace-admin` does not mint it (`SETUP-GUIDE.md:328`), and "treating it as a sixth product harness" is Not next (`docs/reference.md:267`). The "external frameworks" are one signing framework, NOOA, plus an unsigned OpenClaw pilot that is parked (`SETUP-GUIDE.md:161`, :186; `wrangler.toml:27–28`); OpenCode is on hold (PR 19). Separately, this repository's own Gemini seat was retired on 2026-09-10 for not calling the provenance tools (`docs/team-roles.md:66–67`, :153; commit `e514d2a`). That is a fact about one seat's participation, not a withdrawal of product support. Some docs still describe that local seat as live (P4). Whether to withdraw Gemini from onboarding is an owner decision (§6 Q12). |
 | C58 | 467 | "the most strategically interesting part. Enterprises are unlikely to use only one agent forever." | unverifiable | Market. |
 
 ### 2.7 The problems the evaluation names (l. 469–528)
@@ -217,7 +219,7 @@ a supported harness (C57), "the live public ledger was paused" (C72), "enforce c
 | C71 | 493, 501 | These are not cosmetic, and until they are "resolved and independently assessed, Retrace should not be sold as an authoritative enterprise control" | partly true | The defects are real (C66–C70), and a paid Team plan is on offer while they are open (`site/landing/index.html:199–201`). No independent assessment is recorded in the repository: the 2026-08-30 assessment was the project's own (`fdcf01e`; `docs/reference.md:261`). Whether it should be sold is a recommendation. |
 | C72 | 505 | "The live public ledger was paused after events from an unrelated private repository entered the public project." | partly true | A public share of project `retrace` served "two events that recorded work on an unrelated private repository" (commit `76df250`); the share was deleted 2026-09-16T16:35:54Z, `evt_8691bc0d43de488d9558688f76c4638e` (#5150, read raw). The ledger was not paused; public browsing was (README.md:12). The reason is recorded only in commit messages (`76df250`, `0d294eb`). |
 | C73 | 505 | The events were hash-chained, so they "could not simply be removed without breaking the record" | true | Commit `76df250`: "hash-chained ahead of ~1400 successors, so they cannot be removed without tampering". See also `docs/reference.md:218`, and :83, where the only removal primitive is deleting a whole project. |
-| C74 | 505 | "Payload redaction remains an open design item: issue #67" | true | #67 is open, and no design note, brief or code exists on any branch. README.md:12, `docs/examples.md:16` and `site/landing/index.html:123` say browsing is paused "while export redaction is built", which overstates: nothing is being built. |
+| C74 | 505 | "Payload redaction remains an open design item: issue #67" | true | #67 is open, and no design note, brief or code exists on any branch. README.md:12, `docs/examples.md:16` and `site/landing/index.html:123` say browsing is paused "while export redaction is built". That claims more than the evidence shows: no design note, brief or code for redaction exists in the repository or on any branch read. Uncommitted work elsewhere cannot be ruled out. |
 | C75 | 507–514 | Provenance data may contain repository names and paths, prompts and intentions, vulnerability descriptions, internal identities, customer names and incident details | true | Free-text and identity fields sit inside the hashed body: `intent` (`schema.ts:199–200`), `action_detail` (:193), `actor.id` and `on_behalf_of` (:46–53), artifact ids and labels (:99–102), `change.diff` and `summary` (:137–138), `location` path, url and device (:142–146), and open `method.params` (:175). `retrace_instruct` copies the instruction into `intent` (`index.ts:409–410`). |
 | C76 | 516 | "Redaction, access controls, retention, legal hold, and data classification should be first-class" | partly true | Some access control exists: per-credential project allow-lists (`router.ts:180`), share expiry and owner-only revoke (`router.ts:1121`, :33), and whole-project delete (`router.ts:20`). Redaction is an open issue with no design. Retention, legal hold and classification are absent and unplanned. |
 | C77 | 520 | Retrace "deliberately does not capture every prompt, system prompt, keystroke, reasoning step, or line-level authorship" | true | README.md:73, :75; `docs/examples.md:189`. |
@@ -241,10 +243,10 @@ a supported harness (C57), "the live public ledger was paused" (C72), "enforce c
 | C90 | 546 | "Redaction, RBAC, retention, and SSO." | planned | Only redaction is planned, as issue #67 with no design. Roles are owner, pinned and assert only, and there is no retention. An IdP is ruled out (`docs/reference.md:256`, :267; `SETUP-GUIDE.md:330`). |
 | C91 | 547 | "SIEM/API export." | partly true | A pull API exists (`router.ts:10–32`: events, why, head, verify, status, signed export, report, lineage JSON/DOT/Mermaid). There is no push, stream or SIEM format. A W3C PROV export is only a comment (`schema.ts:7`). |
 | C92 | 549 | "Postpone Google Drive and generalized work provenance" | planned | Drive is already deferred: "Out of scope until a Drive user exists" (`docs/reconciliation-plan.md:58`); `docs/producer-signing-plan.md:22`. Yet `docs/reference.md:98`, :258, :269 and `SETUP-GUIDE.md:282` present Drive as live while #61 is open. |
-| C93 | 551 | "Replace cooperative `retrace_log` calls with automatic harness hooks wherever possible." | unverifiable | Not planned, and it conflicts with the recorded rejection of the Claude-only form (C85). The project's own prevention idea is a pre-commit refusal of unlogged paths (`docs/agent-ops.md:34–36`, a direction). |
+| C93 | 551 | "Replace cooperative `retrace_log` calls with automatic harness hooks wherever possible." | unverifiable | Not planned. The project rejected only the Claude-Code-only form as the completeness strategy (C85); a cross-harness form is neither rejected nor designed. The project's own prevention idea is a pre-commit refusal of unlogged paths (`docs/agent-ops.md:34–36`, a direction). |
 | C94 | 555 | "Run five design-partner pilots" | unverifiable | Market; no programme exists (PR 43 is research only). |
 | C95 | 557 | "Installation in under ten minutes." | unverifiable | Never measured: the stranger trial's install step was not run (`omarchy-trial-2026-09-21.md:173–175`). |
-| C96 | 558 | "More than 95% of AI-assisted commits linked automatically." | planned | This is the project's own bar: `docs/second-project-baseline.md:73–84` ("Pass: that ratio ≥ 0.95, `missing_commit` 0, `misattributed` 0") and `docs/reference.md:265`. It is not met (C64). |
+| C96 | 558 | "More than 95% of AI-assisted commits linked automatically." | unverifiable | Not the project's existing bar. That bar is per-file coverage under manual logging (`docs/second-project-baseline.md:73–86`, `docs/reference.md:265`). It computes `covered / (covered + uncovered)` over evaluated file transitions after at least five consecutive agent commits (Pass: "that ratio ≥ 0.95, `missing_commit` 0, `misattributed` 0"), and it fails a commit with no per-file `retrace_log`. It measures neither the share of commits linked automatically nor automatic against manual capture. Only commits themselves are sealed without an agent action (C43), and nothing measures "linked automatically". So C96 is a distinct proposed metric, which P3b would define. The existing bar is not met either (C64). |
 | C97 | 559 | "Near-zero false agent attribution." | planned | The trailer classifier is designed to find conflicting claims (`commit-trailer-consistency.md`, v2.5) but is not active. #82 is a live source of false human attribution. |
 | C98 | 560 | "No routine manual logging by developers or agents." | unverifiable | It contradicts the current design (agent-rules 1–3), and nothing plans to remove manual logging. |
 | C99 | 561 | "An audit or incident question answered in minutes instead of hours." | unverifiable | Nothing measures it. |
@@ -275,7 +277,7 @@ does not depend on it.
 | Rank | Plan item | Tier | Main claims |
 |---|---|---|---|
 | 1 | P1 — agents' GitHub actions sealed as the human owner | truthfulness | C66, C11, C97, C80 |
-| 2 | P2 — agent-relayed instruction roots counted as human roots | truthfulness | C44, C19, C27, C38d |
+| 2 | P2 — instruction roots counted as human, with their provenance unreported | truthfulness | C44, C19, C27, C38d |
 | 3 | P3 — capture completeness: measure a live window, then design capture without cooperation | completeness | C43, C63, C64, C65, C85, C93, C96, C98 |
 | 4 | P4 — public claims the evidence does not carry | truthfulness (public) | C57, C74, C19, C25, C55, C92 |
 | 5 | P5 — the committed checkpoint pin is 11 days stale | verifiability | C38g, C41, C54 |
@@ -296,8 +298,9 @@ does not depend on it.
   public share already leaked a third party's work, C72); RBAC, SSO and SIEM are features (P11).
 - It frames the trust defects as a sales blocker (C71). Here they are ranked by what they do to the record: #82 writes false
   human attributions every day (P1); the credential defects are defense (P8).
-- Its validation gates are commercial pilot gates (C94–C100). Here the three that measure truth become acceptance criteria
-  for P3 (C96, C97, C98), and the commercial ones wait (§6 Q9).
+- Its validation gates are commercial pilot gates (C94–C100). Here the three that measure truth (C96, C97, C98) become
+  proposed metrics that P3b defines and measures, reported apart from the existing file-coverage baseline. The commercial
+  ones wait (§6 Q9).
 
 ## 4. The plan
 
@@ -333,73 +336,98 @@ decision (agent-rules 11–12). Every merge, deploy, publish, credential change 
   - `retrace_status` splits owner-login events by classification.
   - A week of live operation adds no unlabelled human `github:jordandru` events from agent sessions.
 
-### P2. Say which instruction roots were relayed by an agent
+### P2. Report each instruction root's provenance, and never infer that a human wrote it
 
 - **What changes.**
-  - Code, in two places. `packages/core/src/causality.ts` and status count roots that carry `method.params.relayed_by`
-    separately from roots a human wrote, splitting `rooted_in_human_instruction` into direct and relayed. `doctor --gate` says
-    which kind rooted HEAD.
-  - Docs: README.md:3 and :17 say "the instruction recorded for the human, directly or relayed by their agent".
+  - Code: `packages/core/src/causality.ts` and status report the roots behind `rooted_in_human_instruction` by the
+    provenance the root event itself carries. No category is "a human wrote it" merely because `relayed_by` is absent.
+    - Recorded via a pinned agent: `relayed_by` present, `sealed_by` `pinned:` plus an agent credential (`router.ts:904–908`).
+      The agent recorded it on the human's behalf.
+    - Sealed by a pinned credential whose own actor is that human. This is the only category that is the human's own
+      write, and its count may be zero.
+    - Asserted: `sealed_by` `assert:…`. An allow-listed credential named the human (`router.ts:336–342`).
+    - Owner-sealed: `sealed_by` `owner`. The actor is whatever the owner-token caller sent (`router.ts:335`).
+    - Unstamped: no `sealed_by`, meaning local SQLite or history before stamping.
+
+    `doctor --gate` names the category of the root behind HEAD.
+  - Docs: README.md:3 and :17 say the root is "the instruction as recorded", and say that status reports how it was
+    recorded. They do not say "the human instruction".
   - The `input_channel` claim (`direct | pasted | relayed | unknown`) that `docs/owner-protocol.md` §7 lists as a design item
     gets its own small note. It records a claim; it proves nothing about who typed.
 - **Claims.** C44, C19, C27, C38d.
-- **Touches.** `router.ts:904–908`, `causality.ts:12`, status; owner-protocol §7. The note does not change
-  `docs/owner-protocol.md`, which only Jordan merges (§8).
+- **Touches.** `router.ts:335–342`, :817, :904–908; `router.test.ts:501–504`; `causality.ts:12`; status; owner-protocol §7.
+  The note does not change `docs/owner-protocol.md`, which only Jordan merges (§8).
 - **Class and size.** Code, S; README, (b), S; `input_channel` note, (a), S.
 - **Seats.** Build: cursor-agent. Review: Codex → claude-code. Note: the coordinator, then the gate.
-- **Done when.** Status on `retrace` prints direct and relayed root counts that add up to `rooted_in_human_instruction`
-  (4,977 at 04:27Z), and README.md:17 says the same thing the code does.
+- **Done when.**
+  - Tests seal one root each through an owner token, an assert credential, the pinned-agent carve-out, a local store and a
+    pre-stamp fixture, and each lands in its own category, with none counted as the human's own write.
+  - On `retrace`, the categories add up to `rooted_in_human_instruction` (4,977 at 04:27Z).
+  - README.md:17 says what the code does.
 
 ### P3. Capture completeness: measure first, then design capture without cooperation
 
 - **Step 3a, measurement (b).** Run a live window of real work in the second project, with every harness used there holding
   a `boxing-rpg`-scoped pinned credential. Only claude-code is pinned there today (`docs/second-project-baseline.md:69–71`).
   Judge it by the project's own pass rule (`second-project-baseline.md:84`: ratio ≥ 0.95, `missing_commit` 0,
-  `misattributed` 0), report the rate per harness, and include the cost profile the phase-A brief defined
+  `misattributed` 0) and report it as what that rule is: per-file coverage under manual logging (:79–86). It is not a
+  measure of automatic capture. Report the rate per harness, and include the cost profile the phase-A brief defined
   (`docs/design/step5-phase-a-measurement-brief.md:29–35`). It needs Jordan's real work in `boxing-rpg` (§6 Q2).
 - **Step 3b, design (a).** A cross-harness note: for each harness whose hooks are verified at source (C29 is not evidence),
   a hook-side producer seals *what* happened (file edits, commands). It signs with the seat's own producer key (agent-rules 7
   and 13), is marked `automated`, and never shares an identity. The agent's `retrace_instruct` and `retrace_log` stay for
   *why*: a hook cannot know the instruction. The note must also:
   - weigh agent-ops 2's prevention direction, a pre-commit refusal of unlogged paths (`docs/agent-ops.md:34–36`);
-  - meet `docs/reference.md:267`, which rejects the Claude-Code-only form. A cross-harness form needs Jordan to lift "Not
-    next" for it (§6 Q1).
+  - respect `docs/reference.md:267`, which rejects only the Claude-Code-only form as the completeness strategy and does not
+    bar a cross-harness design. That design is still new scope, so it waits for Jordan (§6 Q1);
+  - define the evaluation's proposed metrics as measures distinct from the existing baseline, each with its own denominator
+    and evidence of automation:
+    - C96: AI-assisted commits whose edit evidence was captured with no agent tool call, over AI-assisted commits. How a
+      commit counts as AI-assisted is part of the definition.
+    - C97: false agent attributions over attributed commits, from the classifier's `conflicting` verdicts and #82's
+      owner-login cases.
+    - C98: edits captured without a `retrace_log` call, over edits.
 - **Claims.** C43, C63, C64, C65, C85, C93, C96, C98, C9.
 - **Touches.** `docs/reference.md:265`, :267; `docs/second-project-baseline.md`; the phase-A brief; `window-start.md:25`.
 - **Class and size.** (b), M; then (a), L.
 - **Seats.** Measurement: the Grok seat (measurer), reviewed by Codex or NOOA (one non-author review). Design: the
   coordinator, with the gate Codex → NOOA → the Grok seat.
-- **Done when.**
-  - A merged live-window measurement with per-harness numbers.
-  - The design note merged.
-  - In the end, the second project passes the 0.95 bar on a live window (`docs/reference.md:265`).
+- **Done when.** Three results, reported apart. A pass on the first is not evidence for the third.
+  - A merged live-window measurement against the existing per-file baseline (≥ 0.95, `second-project-baseline.md:84`),
+    labelled as manual capture, with per-harness numbers. The second project passing that bar on a live window is the
+    project's own target (`docs/reference.md:265`).
+  - The design note merged, with C96–C98 defined as above.
+  - After any capture change it leads to, C96–C98 measured on a live window.
 
 ### P4. Correct the public claims the evidence does not carry
 
 - **What changes.** Dated in-place corrections (agent-rules 10), folded into #74, the open public-claim sweep:
-  - **Gemini** is offered as supported in `SETUP-GUIDE.md:5`, :24, :127, :155 and :163 (`GEMINI.md` is gone since `e514d2a`)
-    and in `docs/reference.md:41`. `docs/examples.md:5` is history and gains the retirement date.
+  - **The retired local Gemini seat:** statements that this checkout has a live Gemini seat have been stale since
+    2026-09-10 (`e514d2a`):
+    - `SETUP-GUIDE.md:5`: "pinned credentials for … Gemini";
+    - `SETUP-GUIDE.md:155`: `GEMINI.md`, which `e514d2a` deleted;
+    - `docs/reference.md:270`: "Gemini CLI … now have separate scoped identities".
+
+    They become dated history. `docs/examples.md:5` is already history and gains the retirement date. Gemini's product
+    support is not changed here: `admin.ts:40`, the setup table at `SETUP-GUIDE.md:127`, and `docs/reference.md:41`
+    describe it. Withdrawing it is the owner decision in §6 Q12.
   - **Redaction:** "while export redaction is built" (README.md:12, `docs/examples.md:16`, `site/landing/index.html:123`)
     becomes "until export redaction is designed and built (#67)".
   - README.md:17: "rejected at write time" holds for MCP writes only (C19).
   - `site/landing/index.html:103`: "verify without trusting anyone, including us" is reconciled with README.md:71.
   - **Drive** is described as live (`docs/reference.md:98`, :258, :269; `SETUP-GUIDE.md:282`); it is idle, and #61 is open.
   - **Stale records:** "v0.1.6" at `SETUP-GUIDE.md:1` and :46, and the 2026-09-01 deploy record at `docs/reference.md:270`.
-  - **Code:** `packages/mcp-server/src/admin.ts:40` still provisions `gemini` by default for new teams.
 - **Claims.** C57, C74, C19, C25, C55, C92, C4.
 - **Class and size.**
   - (b) for README, SETUP-GUIDE, reference and examples: dated corrections that change no rule. Where the coordinator
     judges a sentence governing, the higher gate applies (agent-rules 12).
   - The landing page is (b) text; its redeploy is Jordan's go.
-  - `admin.ts` is code.
   - All S.
-- **Seats.** Docs: github-copilot or cursor-agent, reviewed by Codex. `admin.ts`: cursor-agent, reviewed by Codex →
-  claude-code.
+- **Seats.** Docs: github-copilot or cursor-agent, reviewed by Codex.
 - **Done when.**
-  - No file presents Gemini as supported except as dated history.
+  - No file describes this checkout's retired Gemini seat as live.
   - The redaction sentence names #67.
   - The landing sentence matches README.md:71.
-  - `DEFAULT_HARNESSES` excludes `gemini`, with a test.
 
 ### P5. Land the independent checkpoint pins
 
@@ -448,20 +476,31 @@ decision (agent-rules 11–12). Every merge, deploy, publish, credential change 
 ### P8. Credentials: scope, signing, retirement, the store
 
 - **What changes.**
-  - Route PR 42 (`docs/design/credential-store.md` v1.2, open since 2026-09-12) through the class-(a) gate. It answers
-    agent-ops 13's three questions and checks the kid "against the **authenticating** row, not `event.actor`" (PR 42 body),
-    which covers #96. It makes retirement a sealed event, which covers #97.
-  - Then build it.
-  - Before the build, Jordan scopes the four unscoped credentials (#69) and sets `require_signature` on every pinned seat
-    credential (`router.ts:847`), through typed scripts under agent-ops 16.
+  - Route PR 42 (`docs/design/credential-store.md` v1.2, open since 2026-09-12) through the class-(a) gate, then build it.
+    It answers agent-ops 13's three questions and makes retirement a sealed event (`credential-store.md:55–58` at
+    `8979b02`). That covers #97's retire-a-record half.
+  - **PR 42 does not fix #96, and says so.** Its read path keeps `unknown_kid` for a signature under another credential's
+    key and does not newly enforce optional-signature seats (§2 read path step 5, lines 122–125 at `8979b02`).
+    `producerSigCheck` is unchanged (§3, :194–195). Its test T4 expects another credential's kid to stay `unknown_kid`
+    (:462–465). The authenticating-row check it describes already exists (`router.ts:841–849`).
+  - **So P8 adds an explicit #96 obligation**, a design-and-test item. A signature whose kid belongs to a different
+    registered credential is refused, or sealed under a distinct verdict and refused, whatever that credential's
+    `require_signature` says. A test covers it. Build: cursor-agent. Review: Codex → claude-code.
+  - **A separate mitigation, not a store fix:** `require_signature` on every pinned seat credential (`router.ts:847`) closes
+    #96's live path for those credentials once it is applied. It is an owner policy, because a client that cannot sign
+    would be refused (§6 Q11).
+  - Before the build, Jordan scopes the four unscoped credentials (#69), through typed scripts under agent-ops 16.
   - A doctor check compares the mirror with the deployed set (#97 drift). This is code, S.
 - **Claims.** C11, C53, C69, C70, C71.
 - **Touches.** PR 42, #69, #96, #97; agent-ops 13 and the build order.
-- **Class and size.** (a), exists; code, L; owner actions.
+- **Class and size.** (a), exists; code, L; the #96 item, code, S; owner actions.
 - **Seats.** PR 42's author is the Grok seat, so the coordinator routes a substitute for that seat (agent-rules 12). Build:
   github-copilot or cursor-agent. Review: Codex → claude-code.
-- **Done when.** #69, #96 and #97 are closed with tests, and doctor shows every live credential project-scoped and
-  signature-required.
+- **Done when.**
+  - #69 and #97 are closed with tests.
+  - #96 is closed by a test that refuses another credential's kid.
+  - Doctor shows every live credential project-scoped.
+  - Signatures are mandatory for every seat or only some, as Q11 decides.
 
 ### P9. Export redaction
 
@@ -514,8 +553,13 @@ decision (agent-rules 11–12). Every merge, deploy, publish, credential change 
 
 ## 5. Declined, and why
 
-- **False parts** are corrected where the project states them, not planned around. Gemini in the harness list (C57) is P4.
-  "The live public ledger was paused" (C72) is P4's redaction sentence.
+- **False parts** need no plan item where the project's own text is already right.
+  - Cursor as a product harness (C57): the docs say it is not minted (`SETUP-GUIDE.md:328`) and that making it a product
+    harness is Not next (`docs/reference.md:267`).
+  - "The live public ledger was paused" (C72): the project's text says public browsing is paused (README.md:12). The error
+    is the evaluation's.
+
+  Withdrawing Gemini from onboarding is not planned here; it is an owner decision (Q12).
 - **Unverifiable market, user and competitor claims.** C1, C5–C8, C14, C16, C24, C26, C28–C30, C32–C36, C39, C40, C48, C56,
   C58, C78, C94, C99–C102. Nothing is planned on them. C29 enters P3 only as something to verify at source.
 - **Changes that would trade truthfulness for something else:**
@@ -532,10 +576,11 @@ decision (agent-rules 11–12). Every merge, deploy, publish, credential change 
 Each gives a recommendation and how to overrule it.
 
 1. **Q1. Capture strategy (P3b).** `docs/reference.md:267` rejects "Claude-Code-only managed hooks as the completeness
-   strategy". *Recommendation:* keep that rejection, and authorize a cross-harness capture note after the P3a measurement.
-   *To overrule:* say "keep Not next as written"; P3 then ends at the measurement.
+   strategy". That line does not bar a cross-harness design, but such a design is new scope. *Recommendation:* keep the
+   rejection as written, and authorize a cross-harness capture note after the P3a measurement. *To overrule:* decline the
+   note; P3 then ends at the measurement.
 2. **Q2. A live window in `boxing-rpg` (P3a)** needs your real work there, with each harness pinned to that project.
-   *Recommendation:* schedule it. *To overrule:* decline; the 95% bar stays unmeasured.
+   *Recommendation:* schedule it. *To overrule:* decline; the per-file 95% bar stays unmeasured.
 3. **Q3. #82's approach (P1).** *Recommendation:* design classification and per-seat identities in one note, and build
    classification first. *To overrule:* choose one.
 4. **Q4. The 592 existing owner-login events.** *Recommendation:* label them in status and amend individually only where
@@ -549,17 +594,67 @@ Each gives a recommendation and how to overrule it.
 8. **Q8. The paid Team plan while #82, #69, #96 and #97 are open (C71).** *Recommendation:* pause the offer or state the open
    defects beside it until P1 and P8 land, then commission an independent assessment. *To overrule:* keep the offer
    unchanged.
-9. **Q9. Pilots and validation gates (C94–C100).** *Recommendation:* adopt the three gates that measure truth as P3 acceptance
-   criteria: C96 (≥ 95% of commits linked automatically), C97 (near-zero false attribution), and C98 read as "no routine
-   manual logging of *what* happened", with the *why* staying manual. Defer recruiting and the commercial gates until tiers
-   1–3 are done; PR 43 stays research. *To overrule:* start recruiting now.
+9. **Q9. Pilots and validation gates (C94–C100).** *Recommendation:* take up the three gates that measure truth as metrics
+   that P3b defines and measures:
+   - C96, commits linked automatically;
+   - C97, near-zero false attribution;
+   - C98, read as "no routine manual logging of *what* happened", with the *why* staying manual.
+
+   They are reported apart from the existing per-file baseline, and they are not P3's acceptance until P3b defines them.
+   Defer recruiting and the commercial gates until tiers 1–3 are done; PR 43 stays research. *To overrule:* start
+   recruiting now.
 10. **Q10. Positioning (C16, C83).** *Recommendation:* no change before P3. *To overrule:* ask for a positioning note.
+11. **Q11. Mandatory producer signatures on every pinned seat credential (P8, #96).** They close #96's live path for each
+    credential that has them (`router.ts:847`). They also refuse any client that cannot sign. *Recommendation:* build the
+    narrow refusal of another credential's kid first, since it affects no client. Then make signatures mandatory seat by
+    seat, once each seat's ledger shows `producer_sig_verdict` `verified` on its own events. *To overrule:* choose only the
+    code refusal, or only the policy.
+12. **Q12. Gemini in product onboarding (C57, P4).** Today it is a default harness (`admin.ts:39–40`, asserted by
+    `admin.test.ts:197`). This repository's own Gemini seat was retired for not calling the provenance tools
+    (`docs/team-roles.md:66–67`, :153). One seat is one data point. *Recommendation:* decide on evidence. Run one measured
+    Gemini CLI session on CLI 0.2.0 against a local scratch ledger (`RETRACE_DB`), not the live Worker, and record whether it
+    calls `retrace_instruct` and `retrace_log`. If it does not, drop it from `DEFAULT_HARNESSES` and say so in
+    SETUP-GUIDE; if it does, keep it and record the result. *To overrule:* keep it without measuring, or withdraw it now.
 
 ## 7. Record
 
-Every event this seat created, in order (`location.session` `1d17116d-8d22-4b16-9128-f5acf2ecad82`). Three more come after
-this text was fixed, so they cannot be listed inside it: the edit event naming this file, the commit's hook seal and the
-push's webhook seal. The pane report lists them.
+### 7.1 Dispositions — round 1
+
+Codex (`gpt-6-astra`, effort high; routing `evt_6c5f5961d9c54a92a2f0c37f38ac3502`) reviewed head `64f243f` and
+**rejected** it with four Medium findings (`evt_ceed04c11c5b49f8ab60555cf73a63c7`, 2026-09-25 05:40Z). The gate check is
+`evt_4a2789589c994a4c94b1acff9ab83977`. Jordan's go for in-place fixes (option 1) is `evt_ab24591bcdb54d8497448a66012260c4`,
+relayed in the signed pane message `evt_20b49ae9fee94b1a8993ceed6d96f839` (verified; receipt
+`evt_e7d5603a96684e089764723f91b2b572`). The fix's own instruct is `evt_ce2b18b930074ffb919b5e5f9247e24e`. All four findings
+are accepted and applied in v1.1.
+
+1. **F1, Medium: P2 inferred that a root without `relayed_by` was written by a human.** Accepted. P2 now reports each
+   root's provenance category: recorded via a pinned agent, the human's own pinned credential, asserted, owner-sealed or
+   unstamped. None is labelled human-written because a field is absent. Its tests cover owner, assert, local and pre-stamp
+   roots. C19, C38d and C44 are reworded, and so is the ranking-table label.
+2. **F2, Medium: C96 is not the existing 95% bar.** Accepted.
+   - C96 moves from planned to unverifiable, as a distinct proposed metric.
+   - P3a reports the per-file baseline as manual-capture coverage.
+   - P3b defines C96–C98, each with its own denominator and evidence of automation.
+   - P3's done-evidence, Q9 and the §3 bullet keep the baseline and the proposed metrics apart.
+3. **F3, Medium: PR 42 does not cover #96.** Accepted. P8 now quotes PR 42's own read path step 5, §3 and T4, which keep
+   `unknown_kid`. It adds an explicit #96 design-and-test obligation, and moves mandatory signatures into a separate owner
+   decision, Q11.
+4. **F4, Medium: retiring this repository's Gemini seat is not withdrawing Gemini product support.** Accepted.
+   - C57's verdict is re-reasoned and stays partly true. Gemini is a default product harness; the false part is Cursor as a
+     product harness.
+   - P4 corrects only the statements about the live local seat, and drops the `admin.ts` change.
+   - Withdrawal becomes Q12.
+   - §5 is updated.
+
+Also applied, from Codex's review-coverage notes, which were not findings. C74's "nothing is being built" is narrowed to what
+the evidence shows. P3b, Q1 and C93 no longer read the Not-next line as barring a cross-harness design. §5's C72 sentence now
+says the project's own text is already right. Counts after round 1: 47 true, 21 partly true, 0 false, 6 planned,
+36 unverifiable.
+
+### 7.2 Events this seat created, in order
+
+`location.session` is `1d17116d-8d22-4b16-9128-f5acf2ecad82` throughout. The edit event naming v1.1, the v1.1 commit's
+seals and its push come after this text was fixed, so the pane report lists them.
 
 | # | Event | Action | What |
 |---|---|---|---|
@@ -572,3 +667,10 @@ push's webhook seal. The pane report lists them.
 | 7 | `evt_c818be696bfb4afa99730105bc82d66d` | received | A second "Tool loaded." after another tool load, judged harness text (2 of 2 follow a tool-schema load) and not counted; annotates event 2. |
 | 8 | `evt_ce24e5e728724efe979a36629cfede7d` | read | GitHub issues and PRs, CI logs at `a1dd8fe` and `cb91dd6`, ledger status and raw events. |
 | 9 | `evt_c0e1d42d1dcd4fee976a373c28c7bc0f` | read | Docs, code and history checks by three read-only subagents, every citation re-read by the author; the branch fast-forwarded to `76da589`. |
+| 10 | `evt_afab4a0329864fe0b76549595fd2bfc5` | created | v1 of this note, sha256 `58927fa7…2038`. |
+| — | `evt_2083f8ebd1274b518cce30dbb599dfa6`, `evt_393c78c7b4f242b5b920ad3934e74562` | committed | v1 commit `64f243f`, sealed by the git hook and by the push webhook; both name claude-code, with `model_claim` `complete`. |
+| 11 | `evt_63f612a5c5f74f40afd0c29acb75bde9` | executed | Branch pushed. |
+| 12 | `evt_b596f6b9c12a43db83177f73f9824db3` | received | The coordinator's relay of Jordan's `evt_8132ca14` verified under agent-rules 15 (sent `evt_110e679f`). |
+| 13 | `evt_c0924b80f5814ca6b2ab541cbac83e18` | created | PR 122 opened, class (a), head `64f243f`. |
+| 14 | `evt_ce2b18b930074ffb919b5e5f9247e24e` | instructed | The round-1 fix task, relayed (Jordan's go `evt_ab24591b`, via `evt_20b49ae9`). |
+| 15 | `evt_e7d5603a96684e089764723f91b2b572` | received | The fix relay verified under agent-rules 15. The first attempt failed with "fetch failed" before sealing, so it sealed after event 14. |
