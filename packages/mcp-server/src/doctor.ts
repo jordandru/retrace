@@ -14,8 +14,9 @@ type Level = "pass" | "warn" | "fail";
 export type Finding = { level: Level; label: string; detail: string };
 export type DoctorArgs = { command: "doctor" | "status"; gate: boolean; json: boolean; local: boolean; repo?: string; statusProject?: string };
 type RepoConfig = ReconcileCfg & { credential?: string };
-export type RoutingModel = { supports_effort: boolean; levels: string[]; aliases?: string[] };
+export type RoutingModel = { supports_effort: boolean; levels: string[]; aliases?: string[]; display_patterns?: string[] };
 export type RoutingModelRegistry = Record<string, RoutingModel>;
+export type ResolvedRoutingModel = { id: string; capability: RoutingModel; captured_level?: string };
 
 const git = (repo: string, args: string[]) => execFileSync("git", ["-C", repo, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 const result = (level: Level, label: string, detail: string): Finding => ({ level, label, detail });
@@ -308,7 +309,7 @@ export type ReviewEffortScope = {
 };
 
 /** Advisory R2/R3 checks: routing is intent; the review event remains the truth about what ran. */
-export function reviewEffortFindings(events: Event[], models: RoutingModelRegistry, scope?: ReviewEffortScope): Finding[] {
+export function reviewEffortFindings(events: Event[], models: RoutingModelRegistry, scope?: ReviewEffortScope, opts?: { gate?: boolean }): Finding[] {
   const byId = new Map(events.map((event) => [event.id, event]));
   const adoptionSeq = events
     .filter((event) => event.method?.tool === "routing")
@@ -320,18 +321,38 @@ export function reviewEffortFindings(events: Event[], models: RoutingModelRegist
   const findings: Finding[] = incompleteHistory ? [incompleteHistory] : [];
   const unrouted: Event[] = [];
   const missingModels: Event[] = [];
+  const missingModelsNone: Event[] = [];
+  const missingModelsSelfReport: Event[] = [];
+  const missingModelsLegacy: Event[] = [];
+  const missingModelsRegisteredNoSource: Event[] = [];
   const missingEfforts: Event[] = [];
   let reviewCount = 0;
   for (const review of events.filter((event) => event.seq > adoptionSeq && isReviewEvent(event))) {
     reviewCount++;
     const params = paramsOf(review);
-    const effort = typeof params.reasoning_effort === "string" ? params.reasoning_effort : undefined;
+    const reportedEffort = typeof params.reasoning_effort === "string" ? params.reasoning_effort : undefined;
     const routingId = typeof params.routing_event_id === "string" ? params.routing_event_id : undefined;
     const model = review.actor.model;
+    const source = review.actor.model_source;
     const registeredModel = model ? resolveRoutingModel(models, model) : undefined;
     const capability = registeredModel?.capability;
+    const capturedLevel = registeredModel?.captured_level;
+    const effort = reportedEffort ?? capturedLevel;
+    const effortFromDisplay = !reportedEffort && !!capturedLevel;
 
-    if (!model || !capability) missingModels.push(review);
+    if (source === "none" || !model) {
+      if (source === "none") missingModelsNone.push(review);
+      else missingModelsLegacy.push(review);
+    } else if (source === "self-report") {
+      if (capability) missingModelsSelfReport.push(review);
+      else missingModels.push(review);
+    } else if (source === undefined) {
+      if (capability) missingModelsRegisteredNoSource.push(review);
+      else missingModelsLegacy.push(review);
+    } else if (!capability) {
+      missingModels.push(review);
+    }
+
     if (capability?.supports_effort && !effort) {
       missingEfforts.push(review);
     }
@@ -366,13 +387,15 @@ export function reviewEffortFindings(events: Event[], models: RoutingModelRegist
     if (routedAgent && routedAgent !== review.actor.id) {
       findings.push(result("warn", "review agent mismatch", `${review.id}: routed ${routedAgent} · ran ${review.actor.id} (${routingId})`));
     }
-    const routedModelId = routedModel ? resolveRoutingModel(models, routedModel)?.id ?? routedModel : undefined;
+    const routedResolved = resolveRoutingModel(models, routedModel);
+    const routedModelId = routedResolved?.id ?? routedModel;
     const reviewModelId = registeredModel?.id ?? model;
     if (routedModelId && reviewModelId && routedModelId !== reviewModelId) {
       findings.push(result("warn", "review model mismatch", `${review.id}: routed ${routedModel} · ran ${model} (${routingId})`));
     }
     if (effort && routedEffort && effort !== routedEffort) {
-      findings.push(result("warn", "review effort mismatch", `${review.id}: routed ${routedEffort} · ran ${effort} (${routingId})`));
+      const fromDisplay = effortFromDisplay ? " (effort from display string)" : "";
+      findings.push(result("warn", "review effort mismatch", `${review.id}: routed ${routedEffort} · ran ${effort}${fromDisplay} (${routingId})`));
     }
   }
   const summary = (reviews: Event[], label: string, detail: string): Finding | undefined => {
@@ -388,19 +411,149 @@ export function reviewEffortFindings(events: Event[], models: RoutingModelRegist
   };
   return [
     summary(unrouted, "review routing", "cite no routing_event_id"),
+    summary(missingModelsNone, "review model", "no model; source none"),
+    summary(missingModelsSelfReport, "review model", "model is the reviewer's own word"),
+    summary(missingModelsRegisteredNoSource, "review model", "report a registered actor.model with no model_source (no source recorded)"),
+    summary(missingModelsLegacy, "review model", "do not report an actor.model listed in the routing model registry (unknown models have no inferred fallback) (no source recorded)"),
     summary(missingModels, "review model", "do not report an actor.model listed in the routing model registry (unknown models have no inferred fallback)"),
     summary(missingEfforts, "review reasoning effort", "use an effort-capable model but do not self-report method.params.reasoning_effort"),
     ...findings,
   ].filter((finding): finding is Finding => finding !== undefined);
 }
 
-/** Model ids are exact, case-sensitive keys or aliases. */
-export function resolveRoutingModel(models: RoutingModelRegistry, model: string): { id: string; capability: RoutingModel } | undefined {
+function commitSealTargets(event: Event): string[] {
+  if (typeof paramsOf(event).model_claim !== "string") return [];
+  return event.artifacts
+    .filter((artifact) => artifact.role === "generated" && (artifact.kind === "commit" || artifact.id.startsWith("commit:")))
+    .map((artifact) => artifact.id);
+}
+
+/** A4: trailer-less agent commits, from that commit's own seals only. Contribution status is untouched. */
+export function modelClaimAbsentFinding(events: Event[]): Finding | undefined {
+  const byCommit = new Map<string, Event[]>();
+  for (const event of events) {
+    for (const id of commitSealTargets(event)) {
+      const group = byCommit.get(id);
+      if (group) group.push(event);
+      else byCommit.set(id, [event]);
+    }
+  }
+  const evidenceKind = (seals: Event[]): "a" | "b" | undefined => {
+    if (seals.some((seal) => seal.actor.type === "agent")) return "a";
+    if (seals.some((seal) => seal.location?.surface === "agent")) return "b";
+    return undefined;
+  };
+  const population = [...byCommit.values()].map((seals) => ({
+    seals,
+    absent: seals.filter((seal) => paramsOf(seal).model_claim === "absent"),
+    kind: evidenceKind(seals),
+  }));
+  const counted = population.length;
+  const defects = population.filter((row) => row.absent.length && row.kind);
+  const withoutAgent = population.filter((row) => row.absent.length && !row.kind);
+  const n = defects.length;
+  const k = withoutAgent.length;
+  if (n === 0 && k === 0) return undefined;
+  const kClause = `${k} ${n > 0 ? "more " : ""}${k === 1 ? "has" : "have"} model_claim absent and no agent evidence on ${k === 1 ? "its seals" : "their seals"} — not counted as defects`;
+  if (n === 0) {
+    return result("pass", "model claim absent", `0 of ${counted} commits in the inspected window have model_claim absent with agent evidence; ${kClause}`);
+  }
+  const oldest = defects.flatMap((row) => row.absent).reduce((a, b) => (a.seq < b.seq ? a : b));
+  const actorN = defects.filter((row) => row.kind === "a").length;
+  const surfaceN = defects.filter((row) => row.kind === "b").length;
+  const limit = surfaceN > 0 ? ", which non-agent commits can also have, such as a human's IDE-button commit" : "";
+  let detail = `${n} of ${counted} commits in the inspected window have model_claim absent with agent evidence on their seals (${actorN} agent actor · ${surfaceN} no controlling terminal at commit time${limit}) (producer defect after adoption where the evidence is right; contribution status unchanged) (oldest ${oldest.id})`;
+  if (k > 0) detail += `; ${kClause}`;
+  return result("warn", "model claim absent", detail);
+}
+
+const unsignedHistorySuffix = " (unsigned history; --gate uses the verified ledger)";
+
+/** Non-gate advisory: review checks need a registry; the A4 absent-claim listing does not. */
+export async function advisoryUnsignedFindings(
+  store: Pick<EventStore, "history">,
+  project: string,
+  routingModels: RoutingModelRegistry | undefined,
+): Promise<Finding[]> {
+  const unsigned = (finding: Finding): Finding => ({ ...finding, detail: `${finding.detail}${unsignedHistorySuffix}` });
+  try {
+    if (routingModels) {
+      const loaded = await loadReviewEffortEvents(store, project);
+      const findings = reviewEffortFindings(loaded.events, routingModels, loaded.scope).map(unsigned);
+      const absent = modelClaimAbsentFinding(loaded.events);
+      if (absent) findings.push(unsigned(absent));
+      return findings;
+    }
+    const recent = await store.history({ project, limit: REVIEW_EFFORT_RECENT_LIMIT });
+    const absent = modelClaimAbsentFinding(recent.events);
+    return absent ? [unsigned(absent)] : [];
+  } catch (error: any) {
+    const unchecked = routingModels
+      ? "advisory review history and model-claim listing not checked"
+      : "advisory model-claim listing not checked";
+    return [result("warn", routingModels ? "review routing" : "model claim absent", `${error?.message ?? error}; ${unchecked}`)];
+  }
+}
+
+/** Model ids are exact, case-sensitive keys, then aliases, then display_patterns. */
+export function resolveRoutingModel(models: RoutingModelRegistry, model: string): ResolvedRoutingModel | undefined {
   if (Object.prototype.hasOwnProperty.call(models, model)) return { id: model, capability: models[model] };
   for (const [id, capability] of Object.entries(models)) {
     if (capability.aliases?.includes(model)) return { id, capability };
   }
+  for (const [id, capability] of Object.entries(models)) {
+    for (const source of capability.display_patterns ?? []) {
+      const match = new RegExp(source).exec(model);
+      if (!match) continue;
+      const captured_level = match[1];
+      return captured_level ? { id, capability, captured_level } : { id, capability };
+    }
+  }
   return undefined;
+}
+
+/** Count capturing groups in a JavaScript regular-expression source. Character classes and non-capturing / lookaround groups are ignored. */
+export function countCapturingGroups(source: string): number {
+  let count = 0;
+  let escaped = false;
+  let inClass = false;
+  for (let i = 0; i < source.length; i++) {
+    const ch = source[i];
+    if (escaped) { escaped = false; continue; }
+    if (ch === "\\") { escaped = true; continue; }
+    if (inClass) { if (ch === "]") inClass = false; continue; }
+    if (ch === "[") { inClass = true; continue; }
+    if (ch !== "(") continue;
+    const rest = source.slice(i);
+    if (rest.startsWith("(?:") || rest.startsWith("(?=") || rest.startsWith("(?!") || rest.startsWith("(?<=") || rest.startsWith("(?<!")) continue;
+    count++;
+  }
+  return count;
+}
+
+function loadDisplayPatterns(path: string, model: string, row: Record<string, unknown>): string[] {
+  const patterns: string[] = [];
+  if (row.display_pattern !== undefined) {
+    if (typeof row.display_pattern !== "string") throw new Error(`${path}: ${model}.display_pattern must be a string`);
+    patterns.push(row.display_pattern);
+  }
+  if (row.display_patterns !== undefined) {
+    if (!Array.isArray(row.display_patterns) || row.display_patterns.some((pattern) => typeof pattern !== "string")) {
+      throw new Error(`${path}: ${model}.display_patterns must be a string[]`);
+    }
+    patterns.push(...row.display_patterns as string[]);
+  }
+  for (const source of patterns) {
+    try { new RegExp(source); }
+    catch (error: any) {
+      throw new Error(`${path}: ${model} display pattern ${JSON.stringify(source)} failed to compile: ${error?.message ?? error}`);
+    }
+    const groups = countCapturingGroups(source);
+    if (groups > 1) {
+      throw new Error(`${path}: ${model} display pattern ${JSON.stringify(source)} has ${groups} capturing groups; at most one is allowed`);
+    }
+  }
+  return patterns;
 }
 
 /** Newest-first window for advisory review checks. Must stay well under Worker CPU limits. */
@@ -489,6 +642,8 @@ export function loadRoutingModels(repo: string): RoutingModelRegistry | undefine
       }
       aliases.set(alias, model);
     }
+    const patterns = loadDisplayPatterns(path, model, row);
+    if (patterns.length) (value as RoutingModel).display_patterns = patterns;
   }
   return parsed as RoutingModelRegistry;
 }
@@ -806,20 +961,18 @@ async function main() {
           const remote = new RemoteStore(url, auth.token);
           const { findings: authFindings, verified } = await gateRemoteAuthorization(commit, remote, project, undefined, url, { project });
           findings.push(...authFindings);
-          if (routingModels) findings.push(...reviewEffortFindings(verified.events, routingModels));
+          if (routingModels) findings.push(...reviewEffortFindings(verified.events, routingModels, undefined, { gate: true }));
+          const absent = modelClaimAbsentFinding(verified.events);
+          if (absent) findings.push(absent);
           try {
             findings.push(await remoteCaptureCoverage(repo, project, remote, cfg, args, undefined, url, verified));
           } catch (e: any) { findings.push(result("fail", "capture coverage", e.message)); }
         } catch (e: any) { findings.push(result("fail", "HEAD delivery", e.message)); }
       } else {
-        if (routingModels) {
-          try {
-            const loaded = await loadReviewEffortEvents(new RemoteStore(url, auth.token), project);
-            const reviewFindings = reviewEffortFindings(loaded.events, routingModels, loaded.scope);
-            findings.push(...reviewFindings.map((finding) => ({ ...finding, detail: `${finding.detail} (unsigned history; --gate uses the verified ledger)` })));
-          } catch (e: any) {
-            findings.push(result("warn", "review routing", `${e.message}; advisory review history not checked`));
-          }
+        try {
+          findings.push(...await advisoryUnsignedFindings(new RemoteStore(url, auth.token), project, routingModels));
+        } catch (e: any) {
+          findings.push(result("warn", "review routing", `${e.message}; advisory review history and model-claim listing not checked`));
         }
         try {
           const action = headEvent.action === "merged" ? "merged" : "committed";

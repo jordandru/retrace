@@ -125,6 +125,12 @@ test("review effort R2/R3: registry has the specified capability shape and skill
   }
   assert.deepEqual(models["gpt-6"]?.aliases, ["gpt-6-astra"]);
   assert.deepEqual(models["claude-opus-4-8"]?.aliases, ["claude-opus-4.8"]);
+  assert.deepEqual(models["claude-opus-5-5"], {
+    supports_effort: true,
+    levels: ["low", "medium", "high", "xhigh", "max"],
+    aliases: [],
+  });
+  assert.ok(models["claude-opus-5-5"]?.levels.includes("max"));
   assert.deepEqual(models["grok-4.6"]?.aliases, ["Cursor Grok 4.6", "Grok 4.6"]);
   assert.deepEqual(models["gpt-5.6-sol"]?.aliases, ["GPT-5.6 Sol"]);
   const skill = read("SKILL.md").toString("utf8");

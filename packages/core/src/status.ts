@@ -1,5 +1,5 @@
 import { collectAttributionAmendments, effectiveActor, isAttributionAmendment, type AttributionOptions } from "./attribution.js";
-import { Event } from "./schema.js";
+import { Event, ModelSource } from "./schema.js";
 import { VerifyResult } from "./chain.js";
 import { EventStore, verifyProject } from "./store.js";
 import { collectProvenanceAmendments, collectRejectedAmendments } from "./amendment.js";
@@ -10,6 +10,28 @@ import { causalRootState, type RootState } from "./causality.js";
 import { projectIssuanceStatus, type IssuanceCredential, type ProjectIssuanceStatus } from "./credential-status.js";
 import { canonicalGithubRepo, routeGithubDelivery } from "./policy.js";
 export { causalRootState } from "./causality.js";
+
+/** Empty-string `model` is absent, matching the schema pairing rule. */
+function actorModelPresent(model: string | undefined): boolean {
+  return model !== undefined && model !== "";
+}
+
+export const NO_SOURCE_RECORDED = "no source recorded" as const;
+export type ModelSourceBucket = ModelSource | typeof NO_SOURCE_RECORDED;
+const MODEL_SOURCE_ORDER: ModelSourceBucket[] = [
+  "harness-runtime",
+  "harness-config",
+  "harness-display",
+  "credential-pinned",
+  "operator-stated",
+  "self-report",
+  "none",
+  NO_SOURCE_RECORDED,
+];
+
+function emptySourceCounts(): Record<ModelSourceBucket, number> {
+  return Object.fromEntries(MODEL_SOURCE_ORDER.map((key) => [key, 0])) as Record<ModelSourceBucket, number>;
+}
 
 export type StatusActor = { type: Event["actor"]["type"]; id: string; events: number; last_seen: string; models: string[]; amended_from?: {type: Event["actor"]["type"]; id: string}[] };
 export type StatusIntegration = { system: string; events: number; last_seen: string };
@@ -26,6 +48,14 @@ export type ProjectStatus = {
     artifact_refs_without_role: number;
     agent_events: number;
     agent_events_without_model: number;
+    /** Count of agent events per `actor.model_source`; legacy events with no field sit under "no source recorded". */
+    agent_events_by_model_source: Record<ModelSourceBucket, number>;
+    /**
+     * Split of `agent_events_without_model`. An event with no model and a source other than `none`
+     * cannot exist under the schema's refine; if one is found in old data, count it under
+     * `no_source_recorded`.
+     */
+    agent_events_without_model_by_cause: { source_none: number; no_source_recorded: number };
     instructions: number;
     instructions_without_followup: number;
     commits: number;
@@ -100,6 +130,17 @@ export async function buildProjectStatus(
   const rooted = count("rooted");
   const sealedBy = { pinned: 0, assert: 0, webhook: 0, owner: 0, unauthenticated: 0, unstamped: 0 };
   for (const e of events) sealedBy[sealedByKind(e.method?.params?.[SEALED_BY_PARAM])]++;
+  const agentEvents = events.filter((e) => e.actor.type === "agent");
+  const agent_events_by_model_source = emptySourceCounts();
+  const agent_events_without_model_by_cause = { source_none: 0, no_source_recorded: 0 };
+  for (const e of agentEvents) {
+    const source = e.actor.model_source;
+    agent_events_by_model_source[source === undefined ? NO_SOURCE_RECORDED : source]++;
+    if (!actorModelPresent(e.actor.model)) {
+      if (source === "none") agent_events_without_model_by_cause.source_none++;
+      else agent_events_without_model_by_cause.no_source_recorded++;
+    }
+  }
   return {
     project,
     generated_at: now.toISOString(),
@@ -109,8 +150,10 @@ export async function buildProjectStatus(
       artifact_refs: artifactRefs.length,
       artifact_refs_without_role: artifactRefs.filter(({ event, artifact, index }) => artifact.role === undefined && !amendedRoles.has(`${event.id}:${index}`)).length,
       amended_artifact_refs: amendedRoles.size,
-      agent_events: events.filter((e) => e.actor.type === "agent").length,
-      agent_events_without_model: events.filter((e) => e.actor.type === "agent" && !e.actor.model).length,
+      agent_events: agentEvents.length,
+      agent_events_without_model: agentEvents.filter((e) => !actorModelPresent(e.actor.model)).length,
+      agent_events_by_model_source,
+      agent_events_without_model_by_cause,
       instructions: instructions.length,
       instructions_without_followup: instructions.filter((e) => !caused.has(e.id)).length,
       commits: commits.length,
@@ -219,9 +262,14 @@ export function projectStatusForModel(status: ProjectStatus): ProjectStatus {
 
 export function renderProjectStatus(s: ProjectStatus): string {
   const health = s.integrity.ok ? "VERIFIED" : "BROKEN";
+  const byCause = s.capture.agent_events_without_model_by_cause;
+  const sourceParts = MODEL_SOURCE_ORDER
+    .filter((key) => (s.capture.agent_events_by_model_source[key] ?? 0) > 0)
+    .map((key) => `${key} ${s.capture.agent_events_by_model_source[key]}`);
   return `${markUntrustedText(s.project)} — ${health}\n` +
     `${s.events.total} events · ${s.causality.coverage_pct}% causal coverage · ${s.capture.unlinked_commits}/${s.capture.commits} unlinked commits · ${s.capture.unverified_links} unverified links · ${s.capture.legacy_client} legacy-client seals\n` +
-    `${s.capture.agent_events_without_model}/${s.capture.agent_events} agent events missing model · ${s.capture.instructions_without_followup}/${s.capture.instructions} instructions without follow-up · ${s.capture.artifact_refs_without_role}/${s.capture.artifact_refs} artifact refs missing role\n` +
+    `${s.capture.agent_events_without_model}/${s.capture.agent_events} agent events missing model (${byCause.source_none} declared none · ${byCause.no_source_recorded} no source recorded) · ${s.capture.instructions_without_followup}/${s.capture.instructions} instructions without follow-up · ${s.capture.artifact_refs_without_role}/${s.capture.artifact_refs} artifact refs missing role\n` +
+    (sourceParts.length ? `model sources: ${sourceParts.join(" · ")}\n` : "") +
     `append-only amendments: ${s.capture.amended_unlinked_commits} commits attested · ${s.capture.amended_artifact_refs} artifact roles supplied · ${s.capture.ineffective_amendments} rejected links\n` +
     `sealed by: ${s.capture.sealed_by.pinned} pinned · ${s.capture.sealed_by.assert} assert · ${s.capture.sealed_by.webhook} webhook · ${s.capture.sealed_by.owner} owner-asserted · ${s.capture.sealed_by.unauthenticated} unauthenticated · ${s.capture.sealed_by.unstamped} unstamped; ${s.capture.agent_events_not_pinned}/${s.capture.agent_events} agent events not pinned\n` +
     (s.capture.attribution_unavailable ? `attribution evaluation unavailable: ${s.capture.attribution_unavailable} (${s.capture.attribution_attempts ?? 0} attempts)\n` : `attribution amendments: ${s.capture.attribution_amendments ?? 0} effective · ${s.capture.superseded_attribution_amendments ?? 0} superseded · ${s.capture.partially_amended_events ?? 0} partially amended events\n`) +
