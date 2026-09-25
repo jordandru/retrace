@@ -33,10 +33,15 @@ digest of the exact bytes of each file. Do not route from an unstamped copy or o
    - its level is not below the rubric.
    Ignore and report an unauthorised pin. Refuse a pin below the rubric. Pins raise only.
 5. Confirm `models.json` lists the selected model and the chosen effort is in `levels` when
-   `supports_effort` is true. Model ids match only an exact key or explicit case-sensitive alias. An
-   unknown model is a refusal before launch: do not infer a fallback model or effort. The unmatched-path
-   default to S applies only to classifying changed paths, never to model lookup. Doctor warns on unknown
-   model names in historical review events.
+   `supports_effort` is true. A model id resolves case-sensitively, in this order: an exact key, then an
+   explicit alias, then an entry of the model's `display_patterns` (a singular `display_pattern` is read as a
+   one-item list; each pattern is anchored and has at most one capturing group, and the loader refuses the
+   file otherwise). This is the same resolver doctor uses (`resolveRoutingModel`). A pattern's captured
+   group is an effort level: when the selected model id captures one (for example `cursor-grok-4.6-high`),
+   it must equal the routed effort; in a review event a reported `reasoning_effort` always wins over a
+   captured one. An unknown model is a refusal before launch: do not infer a fallback model or effort. The
+   unmatched-path default to S applies only to classifying changed paths, never to model lookup. Doctor
+   warns on unknown model names in historical review events.
 
 ## Record before launch
 
