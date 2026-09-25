@@ -454,15 +454,16 @@ export function modelClaimAbsentFinding(events: Event[]): Finding | undefined {
   const n = defects.length;
   const k = withoutAgent.length;
   if (n === 0 && k === 0) return undefined;
-  const humanNote = `${k} ${n > 0 ? "more carry" : "carry"} no model claim and no agent evidence (human-authored, or an agent commit whose hook seal is missing) — not counted as defects`;
+  const kClause = `${k} ${n > 0 ? "more " : ""}${k === 1 ? "has" : "have"} model_claim absent and no agent evidence on ${k === 1 ? "its seals" : "their seals"} — not counted as defects`;
   if (n === 0) {
-    return result("pass", "model claim absent", `0 of ${counted} commits in the inspected window have model_claim absent with agent evidence; ${humanNote}`);
+    return result("pass", "model claim absent", `0 of ${counted} commits in the inspected window have model_claim absent with agent evidence; ${kClause}`);
   }
   const oldest = defects.flatMap((row) => row.absent).reduce((a, b) => (a.seq < b.seq ? a : b));
   const actorN = defects.filter((row) => row.kind === "a").length;
   const surfaceN = defects.filter((row) => row.kind === "b").length;
-  let detail = `${n} of ${counted} commits in the inspected window have model_claim absent with agent evidence (${actorN} agent actor · ${surfaceN} no controlling terminal at commit time; that surface also covers a human's IDE-button commit) (producer defect after adoption where the evidence is right; contribution status unchanged) (oldest ${oldest.id})`;
-  if (k > 0) detail += `; ${humanNote}`;
+  const limit = surfaceN > 0 ? ", which non-agent commits can also have, such as a human's IDE-button commit" : "";
+  let detail = `${n} of ${counted} commits in the inspected window have model_claim absent with agent evidence on their seals (${actorN} agent actor · ${surfaceN} no controlling terminal at commit time${limit}) (producer defect after adoption where the evidence is right; contribution status unchanged) (oldest ${oldest.id})`;
+  if (k > 0) detail += `; ${kClause}`;
   return result("warn", "model claim absent", detail);
 }
 

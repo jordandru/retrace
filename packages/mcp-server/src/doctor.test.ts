@@ -398,8 +398,9 @@ test("doctor: model claim absent is a producer defect only with agent evidence, 
   assert.equal(humanOnly?.label, "model claim absent");
   assert.equal(humanOnly?.level, "pass");
   assert.match(humanOnly!.detail, /0 of 1 commits in the inspected window have model_claim absent with agent evidence/);
-  assert.match(humanOnly!.detail, /1 carry no model claim and no agent evidence/);
+  assert.match(humanOnly!.detail, /1 has model_claim absent and no agent evidence on its seals — not counted as defects/);
   assert.doesNotMatch(humanOnly!.detail, /producer defect/);
+  assert.doesNotMatch(humanOnly!.detail, /human-authored|hook seal is missing|agent commit/);
 
   const agentRead = commitEvt({
     id: "evt_agent_read", seq: 2, action: "read", actor: { type: "agent", id: "codex" },
@@ -412,7 +413,7 @@ test("doctor: model claim absent is a producer defect only with agent evidence, 
   const readDoesNotAccuse = modelClaimAbsentFinding([humanAbsent, agentRead, agentReview]);
   assert.equal(readDoesNotAccuse?.level, "pass");
   assert.match(readDoesNotAccuse!.detail, /0 of 1 commits/);
-  assert.match(readDoesNotAccuse!.detail, /1 carry no model claim and no agent evidence/);
+  assert.match(readDoesNotAccuse!.detail, /1 has model_claim absent and no agent evidence on its seals/);
   assert.doesNotMatch(readDoesNotAccuse!.detail, /producer defect/);
 
   const generatedNoClaim = commitEvt({
@@ -435,10 +436,9 @@ test("doctor: model claim absent is a producer defect only with agent evidence, 
   const mixed = modelClaimAbsentFinding([hook, webhook]);
   assert.equal(mixed?.level, "warn");
   assert.match(mixed!.detail, /1 of 1 commits in the inspected window have model_claim absent with agent evidence/);
-  assert.match(mixed!.detail, /0 agent actor · 1 no controlling terminal at commit time/);
-  assert.match(mixed!.detail, /IDE-button commit/);
+  assert.match(mixed!.detail, /0 agent actor · 1 no controlling terminal at commit time, which non-agent commits can also have, such as a human's IDE-button commit/);
   assert.match(mixed!.detail, /oldest evt_hook_agent_surface/);
-  assert.doesNotMatch(mixed!.detail, /more carry/);
+  assert.doesNotMatch(mixed!.detail, /more /);
 
   const agentActor = commitEvt({
     id: "evt_agent_actor", seq: 20, actor: { type: "agent", id: "cursor-agent" },
@@ -448,6 +448,7 @@ test("doctor: model claim absent is a producer defect only with agent evidence, 
   assert.equal(agentOnly?.level, "warn");
   assert.match(agentOnly!.detail, /1 of 1 commits/);
   assert.match(agentOnly!.detail, /1 agent actor · 0 no controlling terminal at commit time/);
+  assert.doesNotMatch(agentOnly!.detail, /IDE-button commit/);
   assert.match(agentOnly!.detail, /oldest evt_agent_actor/);
   assert.match(agentOnly!.detail, /producer defect after adoption where the evidence is right/);
 
@@ -473,6 +474,7 @@ test("doctor: model claim absent is a producer defect only with agent evidence, 
   assert.equal(once?.level, "warn");
   assert.match(once!.detail, /1 of 1 commits in the inspected window have model_claim absent with agent evidence/);
   assert.match(once!.detail, /1 agent actor · 0 no controlling terminal at commit time/);
+  assert.doesNotMatch(once!.detail, /IDE-button commit/);
   assert.doesNotMatch(once!.detail, /2 of |4 of /);
 
   const complete = commitEvt({
@@ -480,6 +482,23 @@ test("doctor: model claim absent is a producer defect only with agent evidence, 
     method: { tool: "git", params: { model_claim: "complete" } },
   });
   assert.equal(modelClaimAbsentFinding([complete, fourProducers[2]!, fourProducers[3]!]), undefined);
+});
+
+test("doctor: a system-bot absent seal is K and the finding states only evidence", () => {
+  const bot = commitEvt({
+    id: "evt_bot_absent", seq: 1,
+    actor: { type: "system", id: "323890924+retrace-checkpoint[bot]@users.noreply.github.com" },
+    artifacts: commitArt("3e2bf255ce72"),
+    method: { tool: "github", params: { model_claim: "absent", sealed_by: "webhook:github" }, automated: true },
+  });
+  const finding = modelClaimAbsentFinding([bot]);
+  assert.equal(finding?.label, "model claim absent");
+  assert.equal(finding?.level, "pass");
+  assert.match(finding!.detail, /0 of 1 commits in the inspected window have model_claim absent with agent evidence/);
+  assert.match(finding!.detail, /1 has model_claim absent and no agent evidence on its seals — not counted as defects/);
+  assert.doesNotMatch(finding!.detail, /human-authored/);
+  assert.doesNotMatch(finding!.detail, /hook seal is missing/);
+  assert.doesNotMatch(finding!.detail, /agent commit/);
 });
 
 test("doctor: without a routing registry, the absent-claim listing still inspects the recent window", async () => {
