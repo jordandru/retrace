@@ -12,8 +12,11 @@ test("packed CLI resolves PRODUCER_SIG_FORMAT_V2 and parseTrailerPolicy from the
   const coreVersion = (JSON.parse(readFileSync(join(repoRoot, "packages/core/package.json"), "utf8")) as { version: string }).version;
   const cliVersion = (JSON.parse(readFileSync(join(repoRoot, "packages/mcp-server/package.json"), "utf8")) as { version: string }).version;
   const tmp = mkdtempSync(join(tmpdir(), "retrace-pack-cli-"));
-  execFileSync("npm", ["pack", "--pack-destination", tmp], { cwd: join(repoRoot, "packages/core"), encoding: "utf8" });
-  execFileSync("npm", ["pack", "--pack-destination", tmp], { cwd: join(repoRoot, "packages/mcp-server"), encoding: "utf8" });
+  // --ignore-scripts: both packages run `npm run build` on prepack, which rewrites dist while the other test files in
+  // this suite are still importing it (the hook end-to-end test loaded a half-written attribution.js in CI run
+  // 36059452538 on PR 121; issue #108 has the same shape). dist is built by the step before `npm test`; pack it as is.
+  execFileSync("npm", ["pack", "--ignore-scripts", "--pack-destination", tmp], { cwd: join(repoRoot, "packages/core"), encoding: "utf8" });
+  execFileSync("npm", ["pack", "--ignore-scripts", "--pack-destination", tmp], { cwd: join(repoRoot, "packages/mcp-server"), encoding: "utf8" });
   const tarballs = readdirSync(tmp).filter((name) => name.endsWith(".tgz"));
   const coreTgz = tarballs.find((name) => name.includes(`core-${coreVersion}`));
   const cliTgz = tarballs.find((name) => name.includes(`cli-${cliVersion}`));
