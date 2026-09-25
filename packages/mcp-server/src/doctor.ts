@@ -421,31 +421,36 @@ export function reviewEffortFindings(events: Event[], models: RoutingModelRegist
   ].filter((finding): finding is Finding => finding !== undefined);
 }
 
-function commitArtifactId(event: Event): string | undefined {
-  return event.artifacts.find((artifact) => artifact.kind === "commit" || artifact.id.startsWith("commit:"))?.id;
+function commitSealTargets(event: Event): string[] {
+  if (typeof paramsOf(event).model_claim !== "string") return [];
+  return event.artifacts
+    .filter((artifact) => artifact.role === "generated" && (artifact.kind === "commit" || artifact.id.startsWith("commit:")))
+    .map((artifact) => artifact.id);
 }
 
-/** Advisory listing of agent commits whose producers omitted both model trailers after adoption (A4). Contribution status is untouched. */
+/** A4: trailer-less agent commits, from that commit's own seals only. Contribution status is untouched. */
 export function modelClaimAbsentFinding(events: Event[]): Finding | undefined {
   const byCommit = new Map<string, Event[]>();
   for (const event of events) {
-    const id = commitArtifactId(event);
-    if (!id) continue;
-    const group = byCommit.get(id);
-    if (group) group.push(event);
-    else byCommit.set(id, [event]);
+    for (const id of commitSealTargets(event)) {
+      const group = byCommit.get(id);
+      if (group) group.push(event);
+      else byCommit.set(id, [event]);
+    }
   }
-  const population: { absent: Event[]; agent: boolean }[] = [];
-  for (const group of byCommit.values()) {
-    if (!group.some((event) => typeof paramsOf(event).model_claim === "string")) continue;
-    population.push({
-      absent: group.filter((event) => paramsOf(event).model_claim === "absent"),
-      agent: group.some(sealedLooksAgent),
-    });
-  }
+  const evidenceKind = (seals: Event[]): "a" | "b" | undefined => {
+    if (seals.some((seal) => seal.actor.type === "agent")) return "a";
+    if (seals.some((seal) => seal.location?.surface === "agent")) return "b";
+    return undefined;
+  };
+  const population = [...byCommit.values()].map((seals) => ({
+    seals,
+    absent: seals.filter((seal) => paramsOf(seal).model_claim === "absent"),
+    kind: evidenceKind(seals),
+  }));
   const counted = population.length;
-  const defects = population.filter((row) => row.absent.length && row.agent);
-  const withoutAgent = population.filter((row) => row.absent.length && !row.agent);
+  const defects = population.filter((row) => row.absent.length && row.kind);
+  const withoutAgent = population.filter((row) => row.absent.length && !row.kind);
   const n = defects.length;
   const k = withoutAgent.length;
   if (n === 0 && k === 0) return undefined;
@@ -454,7 +459,9 @@ export function modelClaimAbsentFinding(events: Event[]): Finding | undefined {
     return result("pass", "model claim absent", `0 of ${counted} commits in the inspected window have model_claim absent with agent evidence; ${humanNote}`);
   }
   const oldest = defects.flatMap((row) => row.absent).reduce((a, b) => (a.seq < b.seq ? a : b));
-  let detail = `${n} of ${counted} commits in the inspected window have model_claim absent with agent evidence (producer defect after adoption; contribution status unchanged) (oldest ${oldest.id})`;
+  const actorN = defects.filter((row) => row.kind === "a").length;
+  const surfaceN = defects.filter((row) => row.kind === "b").length;
+  let detail = `${n} of ${counted} commits in the inspected window have model_claim absent with agent evidence (${actorN} agent actor · ${surfaceN} no controlling terminal at commit time; that surface also covers a human's IDE-button commit) (producer defect after adoption where the evidence is right; contribution status unchanged) (oldest ${oldest.id})`;
   if (k > 0) detail += `; ${humanNote}`;
   return result("warn", "model claim absent", detail);
 }

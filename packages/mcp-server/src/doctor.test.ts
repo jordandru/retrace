@@ -389,6 +389,7 @@ test("doctor: model claim absent lists only commits whose model_claim is absent"
 });
 
 test("doctor: model claim absent is a producer defect only with agent evidence, counted once per sha", () => {
+  const usedArt = (sha: string) => [{ id: `commit:jordandru/retrace@${sha}`, kind: "commit" as const, role: "used" as const }];
   const humanAbsent = commitEvt({
     id: "evt_human_absent", seq: 1, actor: { type: "human", id: "jordan@example.com" },
     artifacts: commitArt("human"), method: { tool: "git", params: { model_claim: "absent" } },
@@ -399,6 +400,28 @@ test("doctor: model claim absent is a producer defect only with agent evidence, 
   assert.match(humanOnly!.detail, /0 of 1 commits in the inspected window have model_claim absent with agent evidence/);
   assert.match(humanOnly!.detail, /1 carry no model claim and no agent evidence/);
   assert.doesNotMatch(humanOnly!.detail, /producer defect/);
+
+  const agentRead = commitEvt({
+    id: "evt_agent_read", seq: 2, action: "read", actor: { type: "agent", id: "codex" },
+    artifacts: usedArt("human"), location: { surface: "agent" },
+  });
+  const agentReview = commitEvt({
+    id: "evt_agent_review", seq: 3, action: "approved", actor: { type: "agent", id: "codex" },
+    artifacts: usedArt("human"), tags: ["review"], method: { tool: "review", params: {} },
+  });
+  const readDoesNotAccuse = modelClaimAbsentFinding([humanAbsent, agentRead, agentReview]);
+  assert.equal(readDoesNotAccuse?.level, "pass");
+  assert.match(readDoesNotAccuse!.detail, /0 of 1 commits/);
+  assert.match(readDoesNotAccuse!.detail, /1 carry no model claim and no agent evidence/);
+  assert.doesNotMatch(readDoesNotAccuse!.detail, /producer defect/);
+
+  const generatedNoClaim = commitEvt({
+    id: "evt_generated_no_claim", seq: 4, actor: { type: "agent", id: "cursor-agent" },
+    artifacts: commitArt("human"), location: { surface: "agent" }, method: { tool: "github" },
+  });
+  const notASeal = modelClaimAbsentFinding([humanAbsent, generatedNoClaim]);
+  assert.equal(notASeal?.level, "pass");
+  assert.match(notASeal!.detail, /0 of 1 commits/);
 
   const hook = commitEvt({
     id: "evt_hook_agent_surface", seq: 10, actor: { type: "human", id: "jordan@example.com" },
@@ -412,6 +435,8 @@ test("doctor: model claim absent is a producer defect only with agent evidence, 
   const mixed = modelClaimAbsentFinding([hook, webhook]);
   assert.equal(mixed?.level, "warn");
   assert.match(mixed!.detail, /1 of 1 commits in the inspected window have model_claim absent with agent evidence/);
+  assert.match(mixed!.detail, /0 agent actor · 1 no controlling terminal at commit time/);
+  assert.match(mixed!.detail, /IDE-button commit/);
   assert.match(mixed!.detail, /oldest evt_hook_agent_surface/);
   assert.doesNotMatch(mixed!.detail, /more carry/);
 
@@ -422,7 +447,9 @@ test("doctor: model claim absent is a producer defect only with agent evidence, 
   const agentOnly = modelClaimAbsentFinding([agentActor]);
   assert.equal(agentOnly?.level, "warn");
   assert.match(agentOnly!.detail, /1 of 1 commits/);
+  assert.match(agentOnly!.detail, /1 agent actor · 0 no controlling terminal at commit time/);
   assert.match(agentOnly!.detail, /oldest evt_agent_actor/);
+  assert.match(agentOnly!.detail, /producer defect after adoption where the evidence is right/);
 
   const fourProducers = [
     commitEvt({
@@ -445,6 +472,7 @@ test("doctor: model claim absent is a producer defect only with agent evidence, 
   const once = modelClaimAbsentFinding(fourProducers);
   assert.equal(once?.level, "warn");
   assert.match(once!.detail, /1 of 1 commits in the inspected window have model_claim absent with agent evidence/);
+  assert.match(once!.detail, /1 agent actor · 0 no controlling terminal at commit time/);
   assert.doesNotMatch(once!.detail, /2 of |4 of /);
 
   const complete = commitEvt({
