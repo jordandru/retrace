@@ -530,7 +530,8 @@ claude-code last; PRs 125 and 126 author claude-code).
     legacy model passed the source warning; F2 the absent listing was skipped without a routing registry; F3 the routing skill's text
     rejected the new patterns. Jordan: F1–F2 in place, F3 to its own class (a) PR, and a `claude-opus-5-5` registry row
     (`evt_b145eabbf8a6462e89446fab17853476`). Round 2 (`14d4f11`, medium): approved `evt_28d7db6aea8e4003ae83306effb000c4` with two
-    Lows (PR-body wording), applied as text.
+    Lows — a test fixture that used an alias where the PR body said pattern, and a stale effort in the PR's test plan —
+    both disposed of as PR-body text.
 22. **PR 123, claude-code last seat (`14d4f11`): rejected `evt_bd76fc0eb25548b491c08a77dadeaafb`.** M1 human commits were listed as
     producer defects (the producers record `absent` for every trailer-less commit); M2 two new `/status` values rendered raw into the
     viewer's `innerHTML`, reachable from a crafted `?api=` link on the Worker's own origin where ledger tokens persist, no CSP
