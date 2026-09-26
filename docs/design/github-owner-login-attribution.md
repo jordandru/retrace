@@ -141,8 +141,11 @@ open, `edited` for a body edit or a push, `merged` for a merge — with the pull
   "merge_commit_sha": "<full sha the merge will land>" }
 ```
 
-`kind`, `repo` and `login` are required; exactly the content field(s) the kind needs are required (`comment`, `review`,
-`pr_edit`: `body_sha256`; `pr_open`: `body_sha256` and `head_sha`; `push`: `head_sha`; `merge`: `merge_commit_sha`).
+`kind`, `repo` and `login` are required; `pr` is required for every kind except `pr_open`, where the number does not
+exist before the call (found the first time the coordinator declared this note's own pull request: the artifact is then
+the branch, `git:<owner/repo>#<branch>`, and the match is on `repo`, `head_sha` and `body_sha256`); exactly the content
+field(s) the kind needs are required (`comment`, `review`, `pr_edit`: `body_sha256`; `pr_open`: `body_sha256` and
+`head_sha`; `push`: `head_sha`; `merge`: `merge_commit_sha`).
 The seat knows every one of these before the call: it wrote the body file, it has the sha it is about to push, the merger
 has the merge commit before `git push`. After the call the seat may log an **outcome record** (`executed`,
 `github_action.result: { review_id | comment_id | delivery }`); outcome records never enter the sealed decision (they
@@ -158,7 +161,8 @@ A declaration `E` resolves webhook event `G` iff all hold:
 - `E.actor.type` = `agent`; `E.action_detail` ≠ `amended`; `E` is not the target of an effective attribution amendment at
   the read head;
 - `E.github_action.repo` = the canonical repository of `G`, `E.github_action.login` = `G.github_payload.login`,
-  `E.github_action.kind` matches `G`'s action (`pull_request` `edited` ↔ `pr_edit`, `synchronize` ↔ `push`, and so on);
+  `E.github_action.kind` matches `G`'s action (`pull_request` `edited` ↔ `pr_edit`, `synchronize` ↔ `push`, and so on),
+  and `E.github_action.pr` = `G`'s pull-request number for every kind but `pr_open`;
 - the content field(s) the kind requires are **equal** to `G.github_payload`'s (`body_sha256`, `head_sha`,
   `merge_commit_sha`);
 - `E.seq` ≤ `U`, the read head at classification, and `E.timestamp` lies in `[G.timestamp − 30 min, G.timestamp]`, where
@@ -367,6 +371,7 @@ recommendation: correct now); this note does not edit it, and the landing footer
 |---|---|
 | Q1–Q4 presented | `evt_e5ce6a0ed09e40bc8cd39b57b8801ecf` |
 | Jordan: accept all four, draft the P1 note | `evt_603025a3932a4193a23f16b49b742f96` |
+| This note's own pull request declared under §3.2 before `gh pr create` (first live sample; found the `pr_open` gap) | the declaration and outcome events are cited in the pull request's first coordinator comment or its body |
 | Probe over the export slice (numbers in §1.2–§1.4) | script `~/.retrace/handoff-2026-09-26/probe-owner-login.py` (sha256 `0cf23d48630ac967…`), results on this file's edit event |
 
 ## Appendix A — proposed agent-ops 19 (lands with step 1)
