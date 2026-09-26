@@ -1,6 +1,9 @@
 # GitHub owner-login attribution — design note v1 (evaluation plan P1; issues #82, #69)
 
-**Status:** DRAFT v1.3, 2026-09-26 (v1.3 05:4xZ / 23:4x MDT 2026-09-25: Codex round-3 findings `evt_c906656c7cd344cb9c52f43d74dffecc`
+**Status:** DRAFT v1.4, 2026-09-26 (v1.4 06:3xZ / 00:3x MDT: the final text touch on Jordan's go `evt_1e00d0a0b1804e68b3b66af34d6db2e2` —
+Codex round-4 R4-L1, NOOA round-4 N4-M1/N4-M2/N4-L3, and the Grok seat's (cursor-agent) first-pass findings R1-M1/R1-L1/R1-L2
+(`evt_238adda495d04d6c8307bb4d39c760d6`); Codex `evt_34361117eb5d4745835616bf5442615c` and NOOA `evt_b3ad9f6c0d1b4ba6a2c13e3717baccff`
+approved v1.3. v1.3 05:4xZ / 23:4x MDT 2026-09-25: Codex round-3 findings `evt_c906656c7cd344cb9c52f43d74dffecc`
 — R3-F1 allocation committed atomically with the seal, no pre-seal reservation; R3-L1 three v1.1 leftovers — applied in place on
 Jordan's go `evt_3cf2f506b8e948ca9bd66b6fdb0b87f8`; NOOA round 3 approved `evt_22fff7f3bdcc4817b204750a121a4a3d`. v1.2 05:1xZ / 23:1x MDT 2026-09-25: Codex round-2 findings `evt_2a358258d9c54624a49c0fa769e09e98`
 — R2-F2 ingress cutoff, R2-F3 consumption read, R2-L1 T14 split — applied in place on Jordan's go `evt_eaab62d8b9e842f29d04f17bd21881bc`;
@@ -60,7 +63,8 @@ seen 03:02:01Z (Jordan's own `gh pr merge 129`, reported in his signed `evt_2efc
 evaluation plan counted 592 on 2026-09-24; issue #82 counted 344 on 2026-09-20. It grows with every agent `gh` call.
 
 Probe over the project export (`GET /projects/retrace/export`, bundle generated 2026-09-24T18:07:55Z, seq 0–7697, 7,698
-events; script in the coordinator's scratchpad, results logged with this note's edit event):
+events — the Worker served a cached bundle two days older than the status above, so the probe covers 576 of the 650 events;
+the other 74 are later than seq 7697; script in the coordinator's scratchpad, results logged with this note's edit event):
 
 | human `github:jordandru` events in that slice | 576 |
 |---|---:|
@@ -102,8 +106,10 @@ probe is the reason.
 `method.params.body_sha256`, 23 a `github_review_id`, 4 `comment_copy_posted`. Example pair on PR 118 (2026-09-24): the
 coordinator's `sent` `evt_b3827f2b…` (`pr: 118`, `body_sha256: 141777f2…`, `posted_by_seat: claude-code`,
 `github_identity: "jordandru (owner, shared by every seat)"`) before the call, and `executed` `evt_42fed194…` (`review_id:
-5302879598`, `submitted_at`) after it. The declaration this note defines (§3.2) is that practice made a schema, so the
-Worker can match it.
+5302879598`, `submitted_at`) after it. The practice used flat, differently named fields (`pr`, `body_sha256`, `review_id`;
+on PR 130 itself `state: "COMMENT"` and `commit_id`); the declaration this note defines (§3.2) is what that practice
+becomes once it has one schema the Worker can match, and §3.3 says how the older spellings are read (the Grok seat's
+round-1 finding R1-M1: under strict field equality none of PR 130's own eight review declarations would have matched).
 
 ## 2. Principles
 
@@ -194,7 +200,12 @@ A declaration `E` resolves webhook event `G` iff all hold:
   `E.github_action.kind` matches `G`'s action (`pull_request` `edited` ↔ `pr_edit`, `synchronize` ↔ `push`, and so on),
   and `E.github_action.pr` = `G`'s pull-request number for every kind but `pr_open`, where the branch artifact
   `git:<R>#<branch>` must equal `G.github_payload.branch` instead;
-- every content field the kind requires (§3.2) is **equal** to `G.github_payload`'s (`body_sha256`, `title_sha256`,
+- **field normalisation before comparison** (Grok seat round 1, R1-M1): in a declaration, `state` is read as
+  `review_state` and `commit_id` as `head_sha`; `review_state` values are case-folded and aliased — `COMMENT`, `COMMENTED`
+  → `commented`; `APPROVE`, `APPROVED` → `approved`; `REQUEST_CHANGES`, `CHANGES_REQUESTED` → `changes_requested` — so the
+  eight review declarations PR 130 already carries (`state: "COMMENT"`, `commit_id`) match GitHub's lower-cased
+  `review.state` `commented`; any other spelling is not normalised and does not match;
+- every content field the kind requires (§3.2) is **equal**, after that normalisation, to `G.github_payload`'s (`body_sha256`, `title_sha256`,
   `review_state`, `head_sha`, `merge_commit_sha` as the kind demands);
 - `E` has not been consumed by an earlier decision (§3.2) — a fact the classifier learns from the consumption table,
   not from the declaration (§3.5; Codex round 2, R2-F3);
@@ -229,7 +240,7 @@ measurement recorded here as a dated correction.
 
 ### 3.5 Read contract
 
-Two bounded reads per webhook event, then one insert, then the seal.
+Two bounded reads per webhook event, then one atomic event-plus-consumption write (item 3).
 
 1. **Candidates.** Pinned events in `(U − N, U]` referencing **any of** `pr:<R>#<n>`, `git:<R>#<branch>`
    (`github_payload.branch`) and `commit:<R>@<head_sha12>` through the existing `event_artifact_index`
@@ -261,7 +272,17 @@ Two bounded reads per webhook event, then one insert, then the seal.
    decision exactly, and the table adds no trusted state the export cannot show. Idempotent redelivery: GitHub redelivers
    with the same `X-GitHub-Delivery`; the existing idempotency key returns the sealed event and no second write is
    attempted. Build note: the pending-delivery drain routes only `push` today (`router.ts`, `drainPending…`); the step-1
-   build makes it event-kind-aware so a deferred non-push delivery is classified by this path.
+   build makes it event-kind-aware so a deferred non-push delivery is classified by this path. **What the atomic write
+   rests on, and what it does not:** Cloudflare documents `D1Database.batch()` as a transaction that rolls back the
+   sequence when a statement fails, and both stores already write an event together with its artifact-index rows inside
+   that boundary (`apps/worker/src/d1-store.ts`, `packages/mcp-server/src/sqlite-store.ts`); the consumption insert joins
+   the same write (Codex round 4; NOOA round 4, N4-M1). An uncertain response after the write began is **not** proof of
+   rollback — both statements may have committed — so the path never releases a row or treats a response deadline as a
+   cancellation; it resolves the outcome by the idempotent lookup of the delivery, exactly as the existing append does.
+   **Bound on reclassification** (NOOA round 4, N4-M2): after a primary-key failure the classifier re-reads once; the
+   winner's decision is a strictly later `seq` on the same primary database, so the re-read sees the consumption. If the
+   second write also fails, the delivery seals `unresolved` / `no_declaration` with reason `allocation_failed` — one
+   re-read, never a loop.
 
 Budget 300 ms
 and 2,000 rows (a pull request's index rows over 30 minutes are two orders of magnitude fewer than a commit's file
@@ -281,6 +302,7 @@ which rule produced the account actor (NOOA round 1, N1).
 | `|Seats(G)| > 1` | `conflicting` | `multiple_declarers` | the account: `{ type: system, id: github:<login>, display_name: "<login> (GitHub account, shared)" }` |
 | `Decl(G) = ∅`, some pinned event names the PR in the window | `unresolved` | `proximity_only` | the account |
 | `Decl(G) = ∅`, none does | `unresolved` | `no_declaration` | the account |
+| the atomic write failed on the consumption key twice (one re-read; §3.5 item 3) | `unresolved` | `allocation_failed` | the account |
 | evidence read failed / over budget | `unavailable` | `store_error` / `budget` / `deadline` | the account |
 
 There is no policy switch for `unresolved`: the account is always true, so there is nothing to `record` or `withhold`.
@@ -432,6 +454,12 @@ recommendation: correct now); this note does not edit it, and the landing footer
 - **T2.** The same event's decision is recomputed byte-identically from an export bundle (`read_head_seq`, payload hashes).
 - **T3 (measurement).** One real comment, one review, one PR body edit and one PR open posted through `gh` with a
   declaration; each webhook `body_sha256` equals the seat's; any mismatch is recorded here with the normalisation fix.
+  **Measured so far on PR 130 itself (nine declared writes: one `pr_open`, eight reviews):** every declared `body_sha256`
+  equals the sha256 of the body GitHub stores after §3.4 normalisation — nine of nine; one review (`evt_1d10e43e…`) was
+  attached by GitHub to a commit other than the declared one because a push landed two seconds before the post, which
+  T3's body check alone would pass and the §3.2 review key would not; the eight review declarations used `state` /
+  `commit_id`, the spellings §3.3 now normalises (R1-M1). `comment` and `pr_edit` remain unmeasured (the Grok seat's
+  round-1 finding R1-L1).
 - **T4.** Two seats declare the same body hash → `conflicting`, the account is written, both declarations listed.
 - **T5.** A declaration sealed `owner` (relayed through the owner token) or with verdict `none` is not eligible →
   `unresolved`; the decision lists it under `proximity_hints`, not `declarations`.
@@ -468,7 +496,8 @@ recommendation: correct now); this note does not edit it, and the landing footer
   `unresolved`; the decision of the first lists the declaration under `consumed`, and the consumption table holds one
   row for it. Sequential and concurrent variants: two deliveries classified in parallel both choose the declaration;
   exactly one atomic write succeeds and is `declared_by_seat`; the other fails the write, reclassifies at the new head,
-  sees the consumption, and seals `unresolved`. A delivery that fails after classification and before the write leaves
+  sees the consumption, and seals `unresolved`; a contrived third contender whose second write also fails seals
+  `unresolved` / `allocation_failed` and never loops. A delivery that fails after classification and before the write leaves
   no row and no event; its redelivery classifies afresh. Replaying the export in `seq` order reproduces both decisions
   and the table.
 - **T18 (R2-F2).** A declaration sealed after the delivery's `ingress_at` but before the webhook seals → `unresolved`;
@@ -504,13 +533,15 @@ not yield distinct identities. The questions stay listed for NOOA and the Grok s
 | Q1–Q4 presented | `evt_e5ce6a0ed09e40bc8cd39b57b8801ecf` |
 | Jordan: accept all four, draft the P1 note | `evt_603025a3932a4193a23f16b49b742f96` |
 | This note's own pull request declared under §3.2 before `gh pr create` (first live sample; found the `pr_open` gap) | the declaration and outcome events are cited in the pull request's first coordinator comment or its body |
+| Round 4 routing: Codex `evt_c47d00d6556048b797404bc01d4073ec`, NOOA `evt_9cceb4db63514a179e2e96b7881a3310`; Grok seat (cursor-agent, Jordan's reassignment `evt_cd9d5b806e574250bfa6069f14fd280f`) first pass `evt_01c2d719d55e41358097bf016efdfa93` | verdicts Codex `evt_34361117eb5d4745835616bf5442615c` (approved, 1 L), NOOA `evt_b3ad9f6c0d1b4ba6a2c13e3717baccff` (approved; 2 items labelled Medium, 2 L), cursor-agent `evt_238adda495d04d6c8307bb4d39c760d6` (rejected, 1 M 2 L) |
+| Jordan: final text touch, then re-check to all three | `evt_1e00d0a0b1804e68b3b66af34d6db2e2` |
 | Round 3 routing: Codex `evt_def09a367c464cfbae4267282d38a43c`, NOOA `evt_3e96c4ce48994c37a9babdff09dc3158` | verdicts Codex `evt_c906656c7cd344cb9c52f43d74dffecc` (rejected, 1 M 1 L), NOOA `evt_22fff7f3bdcc4817b204750a121a4a3d` (approved, no findings) |
 | Jordan: v1.3 in place, then round 4 | `evt_3cf2f506b8e948ca9bd66b6fdb0b87f8` |
 | Round 2 routing: Codex `evt_a43ebb9311d44b67ae93ba6be56d6dd5`, NOOA `evt_1d15d1c2040b440da63f5f5c40dbcce0` | verdicts Codex `evt_2a358258d9c54624a49c0fa769e09e98` (rejected, 2 M 1 L), NOOA `evt_ca197d293b1d40f1905cc00dafc64be3` (approved, no findings) |
 | Jordan: v1.2 in place, then round 3 | `evt_eaab62d8b9e842f29d04f17bd21881bc` |
 | Round 1 routing: Codex `evt_a3d7385b94bd435fa4a00b63cb7f1643`, NOOA `evt_0efbeca427544acfbc3385c0c0fae754` | verdicts Codex `evt_cc16a99f33ab467895ddc5831adc6043` (rejected, 3 M), NOOA `evt_45521b66918f4938919b26768995bf80` (rejected, 3 M 2 L) |
 | Jordan: wait for NOOA, then fix both in place | `evt_4be7266d49b64e1e94c8d4da4a0ff875` |
-| Live samples (T3): PR open declared `evt_df2d386c…` / outcome `evt_0efdea31…` / webhook `evt_2f60cfc7…` / measurement `evt_01d82280…`; Codex copy posted as review 5324545359, declared `evt_c6d7ddc6…`, outcome `evt_5212a25c…` (body hash matched on read-back) | two kinds measured, both matched |
+| Live samples (T3): PR open declared `evt_df2d386c…` / outcome `evt_0efdea31…` / webhook `evt_2f60cfc7…` / measurement `evt_01d82280…`; eight review copies posted (5324545359, 5324576986, 5324633884, 5324642069, 5324722585, 5324731435, 5324806453, 5324807066), each declared first, each body hash matched on read-back; one commit mismatch on `evt_1d10e43e…` (push/post race) | nine body matches of nine; one commit mismatch; `comment` and `pr_edit` unmeasured (R1-L1) |
 | Probe over the export slice (numbers in §1.2–§1.4) | script `~/.retrace/handoff-2026-09-26/probe-owner-login.py` (sha256 `0cf23d48630ac967…`), results on this file's edit event |
 
 ## 14. Review disposition
@@ -563,6 +594,25 @@ closed: R2-F2 (capture point after signature verification and before the pending
 can carry the value), R2-L1, and the read and allocation halves of R2-F3. Gate checks `evt_3999f2ae4ae34287998dbff7b7e56cee`
 (NOOA) and `evt_344115e8ad4b4614aee620af1038c70f` (Codex); Jordan's go for v1.3 and round 4 `evt_3cf2f506b8e948ca9bd66b6fdb0b87f8`.
 
+**Round 4 (head `184dd6ae`) and the Grok seat's first pass.** Codex (medium) APPROVED, `evt_34361117…`, one Low: R4-L1 the
+§3.5 overview still said "one insert, then the seal" → reworded. Codex confirmed R3-F1 closed (D1 `batch` is a documented
+transaction; both stores already batch the event with its index rows; an uncertain response is resolved by idempotent
+lookup) and R3-L1 closed. NOOA APPROVED, `evt_b3ad9f6c…`, its Findings carrying two items labelled Medium and two Low on an
+approval (labels kept as written; team-roles rule 8): N4-M1 D1 batch atomicity not visible in its packet → §3.5 item 3
+now cites the documented rollback, the existing batch boundaries and the uncertain-response rule; N4-M2 no bound on
+reclassification → one re-read, then `unresolved` / `allocation_failed` (§4 row, T17); N4-L3 576 vs 650 unexplained →
+§1.2 parenthetical; N4-L4 "[specific]" read as a placeholder → **declined**: it is agent-ops' own tag. The Grok seat
+(cursor-agent, `Cursor Grok 4.6` high, Jordan's reassignment) REJECTED, `evt_238adda4…`, one Medium and two Low: R1-M1 the
+coordinator's eight live review declarations carry `state: "COMMENT"` / `commit_id`, not `review_state: commented` /
+`head_sha`, so §3.3 as written would match none of the note's own samples → §3.3 field normalisation, §1.4 reworded, T16
+unchanged in meaning; R1-L1 T3/§13 under-reported the samples → nine body matches, one commit mismatch, two kinds
+unmeasured, now stated; R1-L2 appendix A omitted the sequencing lesson → sentence added. The Grok seat confirmed: the probe
+reproduces; live status 662 = 650 + PR 130's twelve webhook seals; T14a's lookup finds the real declaration by branch or
+commit and the predicate rightly refuses it; the 2,000-row budget is realistic (busiest window 56 rows); every citation
+and event id lands. Gate checks `evt_c6cfcea520b441e4902260be7f92f926` (Codex), `evt_69411ebc9168421395d0ab2a79749c90`
+(NOOA), `evt_1cd43cb3c583455fbb71f38558a37fb2` (Grok seat). This version is the touch Jordan ordered in
+`evt_1e00d0a0b1804e68b3b66af34d6db2e2`; a re-check round for all three seats follows under agent-rules 11.
+
 ## Appendix A — proposed agent-ops 19 (lands with step 1)
 
 > 19. **Declare every `gh` write before you run it.** `gh` authenticates as the repository owner for every seat (agent-rules
@@ -574,7 +624,9 @@ can carry the value), R2-L1, and the read and allocation halves of R2-F3. Gate c
 > whitespace and trailing newlines removed), the full sha you will push, or the merge commit you will land. Then run the
 > command; afterwards you may log the outcome (`executed`, `github_action.result` with the review or comment id). A `gh`
 > write with no declaration seals as the GitHub account with `status: unresolved`, and that is the record of the
-> omission. Never declare content you did not write and will not post yourself.
+> omission. Never declare content you did not write and will not post yourself. **Never push to the pull request between
+> a review declaration and its post**: GitHub attaches the review to the head at post time, and a declaration for the
+> earlier commit no longer matches (measured on PR 130, `evt_1d10e43e…`); declare after the push, or re-declare.
 > → unnecessary when [specific] (agent-ops' standing form: every environment rule names the product change that retires
 > it; the rule binds until that change is measured, not before): every seat runs `gh` under its own GitHub App identity listed in the project policy's
 > `github.identities` (step 5), and the owner's login is no longer in `github.shared_logins` (step 6).
