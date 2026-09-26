@@ -1,6 +1,8 @@
 # GitHub owner-login attribution — design note v1 (evaluation plan P1; issues #82, #69)
 
-**Status:** DRAFT v1.2, 2026-09-26 (v1.2 05:1xZ / 23:1x MDT 2026-09-25: Codex round-2 findings `evt_2a358258d9c54624a49c0fa769e09e98`
+**Status:** DRAFT v1.3, 2026-09-26 (v1.3 05:4xZ / 23:4x MDT 2026-09-25: Codex round-3 findings `evt_c906656c7cd344cb9c52f43d74dffecc`
+— R3-F1 allocation committed atomically with the seal, no pre-seal reservation; R3-L1 three v1.1 leftovers — applied in place on
+Jordan's go `evt_3cf2f506b8e948ca9bd66b6fdb0b87f8`; NOOA round 3 approved `evt_22fff7f3bdcc4817b204750a121a4a3d`. v1.2 05:1xZ / 23:1x MDT 2026-09-25: Codex round-2 findings `evt_2a358258d9c54624a49c0fa769e09e98`
 — R2-F2 ingress cutoff, R2-F3 consumption read, R2-L1 T14 split — applied in place on Jordan's go `evt_eaab62d8b9e842f29d04f17bd21881bc`;
 NOOA round 2 approved `evt_ca197d293b1d40f1905cc00dafc64be3`. v1 03:5xZ / 21:5x MDT 2026-09-25; v1.1 04:3xZ / 22:3x MDT, round-1 findings of Codex
 `evt_cc16a99f33ab467895ddc5831adc6043` — F1 lookup, F2 caller time, F3 body-only keys — and NOOA
@@ -242,15 +244,24 @@ Two bounded reads per webhook event, then one insert, then the seal.
    read can never see consumption (Codex round 2, R2-F3); the table is the classifier's memory of it, the way
    trailer-consistency §3.2's classification-context row is the memory of a commit's window. A candidate with a row is
    consumed and drops out of `Decl(G)`.
-3. **Allocation and atomicity.** When more than one unconsumed candidate from the **same** seat is eligible, the one
-   with the lowest `seq` is chosen (earliest sealed; deterministic from an export). Before the seal, the classifier
-   inserts the chosen declaration's row **insert-if-absent**, keyed by the delivery; a second delivery racing for the
-   same declaration loses the insert, re-reads, and classifies without it (`unresolved` / `no_declaration` when nothing
-   else is eligible). An append retry of the same delivery (`router.ts`, the UNIQUE retry loop) finds its own row by
-   `consumed_by_delivery` and reuses it, so a retried seal never consumes twice and never rerolls the decision. A
-   delivery that ends `unavailable` inserts nothing. Offline re-derivation (T2) replays the table from the sealed
-   decisions' `consumed` lists in `seq` order, so the table is reconstructible from an export and adds no trusted state
-   of its own.
+3. **Allocation, committed with the seal.** When more than one unconsumed candidate from the **same** seat is eligible,
+   the one with the lowest `seq` is chosen (earliest sealed; deterministic from an export). **There is no reservation
+   before the seal** (Codex round 3, R3-F1: a pre-seal row is unsealed mutable state — a stalled or failed delivery would
+   hold a declaration that no sealed decision claims, and a competing delivery that read that row and sealed
+   `unresolved` could not be reproduced from the export). Instead the consumption row and the consuming event are written
+   in **one atomic store write** — a D1 `batch` on the Worker, a transaction in SQLite: `INSERT` the event, `INSERT` the
+   row `(project, declaration_event_id)` under its primary key. If the row already exists the whole write fails and
+   nothing is sealed; the classifier then **re-runs classification at the new read head** — which now contains the
+   winner's sealed decision, so the second read (§3.5 item 2) sees the consumption — and seals what that read supports
+   (`unresolved` / `no_declaration` when nothing else is eligible). This is a reclassification, not an append retry: the
+   existing UNIQUE retry loop in `router.ts` re-appends the same input, which would re-assert a stale decision, so the
+   owner-login path retries from the read, not from the append. A delivery that ends `unavailable`, times out, or fails
+   before the write leaves no row. **Replay contract:** the table holds a row iff a sealed decision lists that declaration
+   under `consumed`, so an offline re-derivation (T2) that replays sealed decisions in `seq` order reproduces every
+   decision exactly, and the table adds no trusted state the export cannot show. Idempotent redelivery: GitHub redelivers
+   with the same `X-GitHub-Delivery`; the existing idempotency key returns the sealed event and no second write is
+   attempted. Build note: the pending-delivery drain routes only `push` today (`router.ts`, `drainPending…`); the step-1
+   build makes it event-kind-aware so a deferred non-push delivery is classified by this path.
 
 Budget 300 ms
 and 2,000 rows (a pull request's index rows over 30 minutes are two orders of magnitude fewer than a commit's file
@@ -289,7 +300,7 @@ the way `claim_decision` is, `router.ts:817–823`):
     "declarations": [ { "id": "evt_…", "seq": 7401, "actor": { "type": "agent", "id": "claude-code" }, "sealed_by": "pinned:claude-code MCP (pinned) (signing)", "producer_sig_verdict": "verified" } ],
     "proximity_hints": 3,
     "context": { "read_head_seq": 7410, "read_head_hash": "…", "policy_digest": "…" },
-    "window": { "from": "2026-09-24T09:33:57Z", "to": "2026-09-24T10:03:57Z", "basis": "received_at" },
+    "window": { "from": "2026-09-24T09:33:57Z", "to": "2026-09-24T10:03:57Z", "basis": "ingress_at" },
     "received": { "webhook": "2026-09-24T10:03:57.412Z", "declaration": "2026-09-24T10:02:41.090Z" },
     "consumed": ["evt_…"],
     "ingress_at": "2026-09-24T10:03:57.101Z",
@@ -322,7 +333,8 @@ is opt-in per project, which is what a stranger's install needs.
 ## 6. Build order
 
 1. **Ingestion hashes and the classifier** (core `github.ts`, `router.ts` webhook path, a small `owner-login.ts`;
-   `store.ts` gains no new table — the artifact index suffices; policy schema gains `github`). Code, class C/S under the
+   `store.ts` gains the `owner_login_consumption` table and the atomic event-plus-row write of §3.5; the artifact index
+   serves the candidate read; policy schema gains `github`). Code, class C/S under the
    routing rules (`router.ts` is a security surface); builder cursor-agent, review Codex → claude-code. Deploy is
    Jordan's go.
 2. **Status, doctor, `why`** (§7). Same PR or the next.
@@ -445,17 +457,20 @@ recommendation: correct now); this note does not edit it, and the landing footer
 - **T14b (F1, classification).** The same payload against a compliant `pr_open` declaration (branch, `head_sha`,
   `body_sha256`, `title_sha256`) → `declared_by_seat` (claude-code) through the lookup, never by handing the declaration
   to the predicate.
-- **T15 (F2).** A declaration whose caller `timestamp` is earlier than the action but whose `received_at` is later than the
-  webhook's → `unresolved`; the same declaration received one second before the webhook → `declared_by_seat`; an outcome
-  record (`github_action.result`) received before the webhook → not a declaration, `unresolved`; a declaration and an
-  action in the same GitHub second → `declared_by_seat`.
+- **T15 (F2).** A declaration whose caller `timestamp` is earlier than the action but whose seal time (`received_at`) is
+  later than the delivery's `ingress_at` → `unresolved`; the same declaration sealed one second before `ingress_at` →
+  `declared_by_seat`; an outcome record (`github_action.result`) sealed before `ingress_at` → not a declaration,
+  `unresolved`; a declaration and an action in the same GitHub second → `declared_by_seat`.
 - **T16 (F3).** After a declared and matched `pr_edit` (body and title), a title-only edit within the window with the same
   body → `unresolved` / `no_declaration`, never `declared_by_seat`; a `review` declaration with `review_state: commented` does
   not match an `approved` review of the same body, nor a comment on a different `commit_id`.
 - **T17 (F3).** Two identical comments posted after one declaration → the first `declared_by_seat`, the second
   `unresolved`; the decision of the first lists the declaration under `consumed`, and the consumption table holds one
-  row for it. Sequential and concurrent variants: two deliveries classified in parallel race on the insert; exactly one
-  is `declared_by_seat`. An append retry of the first delivery reuses its row and produces a byte-identical decision.
+  row for it. Sequential and concurrent variants: two deliveries classified in parallel both choose the declaration;
+  exactly one atomic write succeeds and is `declared_by_seat`; the other fails the write, reclassifies at the new head,
+  sees the consumption, and seals `unresolved`. A delivery that fails after classification and before the write leaves
+  no row and no event; its redelivery classifies afresh. Replaying the export in `seq` order reproduces both decisions
+  and the table.
 - **T18 (R2-F2).** A declaration sealed after the delivery's `ingress_at` but before the webhook seals → `unresolved`;
   the same declaration sealed one second before `ingress_at` → `declared_by_seat`; a delivery drained from the pending
   queue carries its original `ingress_at`, and a declaration sealed between arrival and drain → `unresolved`.
@@ -489,6 +504,8 @@ not yield distinct identities. The questions stay listed for NOOA and the Grok s
 | Q1–Q4 presented | `evt_e5ce6a0ed09e40bc8cd39b57b8801ecf` |
 | Jordan: accept all four, draft the P1 note | `evt_603025a3932a4193a23f16b49b742f96` |
 | This note's own pull request declared under §3.2 before `gh pr create` (first live sample; found the `pr_open` gap) | the declaration and outcome events are cited in the pull request's first coordinator comment or its body |
+| Round 3 routing: Codex `evt_def09a367c464cfbae4267282d38a43c`, NOOA `evt_3e96c4ce48994c37a9babdff09dc3158` | verdicts Codex `evt_c906656c7cd344cb9c52f43d74dffecc` (rejected, 1 M 1 L), NOOA `evt_22fff7f3bdcc4817b204750a121a4a3d` (approved, no findings) |
+| Jordan: v1.3 in place, then round 4 | `evt_3cf2f506b8e948ca9bd66b6fdb0b87f8` |
 | Round 2 routing: Codex `evt_a43ebb9311d44b67ae93ba6be56d6dd5`, NOOA `evt_1d15d1c2040b440da63f5f5c40dbcce0` | verdicts Codex `evt_2a358258d9c54624a49c0fa769e09e98` (rejected, 2 M 1 L), NOOA `evt_ca197d293b1d40f1905cc00dafc64be3` (approved, no findings) |
 | Jordan: v1.2 in place, then round 3 | `evt_eaab62d8b9e842f29d04f17bd21881bc` |
 | Round 1 routing: Codex `evt_a3d7385b94bd435fa4a00b63cb7f1643`, NOOA `evt_0efbeca427544acfbc3385c0c0fae754` | verdicts Codex `evt_cc16a99f33ab467895ddc5831adc6043` (rejected, 3 M), NOOA `evt_45521b66918f4938919b26768995bf80` (rejected, 3 M 2 L) |
@@ -532,6 +549,19 @@ T14b (a compliant declaration classifies). Codex confirmed closed: F1, F2's call
 N1–N5 dispositions, the `other`-action cases, and the race handling (no relaxation of the commit key). Gate checks
 `evt_84ae7ea12d234720a7b698be52b4cd8a` (NOOA) and `evt_750549417fd44edabc9c88c91be44559` (Codex); Jordan's go for v1.2
 and round 3 `evt_eaab62d8b9e842f29d04f17bd21881bc`.
+
+**Round 3 (head `7a6336f6`).** NOOA APPROVED, `evt_22fff7f3…`, no findings: R2-F2, R2-F3 and R2-L1 resolved as the
+dispositions say, N1–N3 undisturbed. Codex (medium) REJECTED, `evt_c906656c…`, one Medium and one Low: R3-F1 (R2-F3
+re-raised) the v1.2 pre-seal reservation was unsealed mutable state — a stalled delivery A holding declaration E while B
+reads the row and seals `unresolved` leaves B's decision irreproducible from the export, and a failed append leaves a
+row with no seal (shown on the append primitive with an expired deadline) → §3.5 item 3 rewritten: no reservation; the
+consumption row and the consuming event are one atomic store write; a primary-key failure re-runs classification at the
+new head rather than retrying the append; the replay contract is exact (row iff a sealed decision lists it); the
+push-only drain is named as a build item; T17 rewritten. R3-L1 (Low) §6 step 1 said `store.ts` gains no table, the §4
+example's window basis said `received_at`, T15 spoke of the webhook's receipt → all three synchronised. Codex confirmed
+closed: R2-F2 (capture point after signature verification and before the pending/policy reads; `PendingDelivery.received_at`
+can carry the value), R2-L1, and the read and allocation halves of R2-F3. Gate checks `evt_3999f2ae4ae34287998dbff7b7e56cee`
+(NOOA) and `evt_344115e8ad4b4614aee620af1038c70f` (Codex); Jordan's go for v1.3 and round 4 `evt_3cf2f506b8e948ca9bd66b6fdb0b87f8`.
 
 ## Appendix A — proposed agent-ops 19 (lands with step 1)
 
