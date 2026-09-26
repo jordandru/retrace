@@ -239,16 +239,17 @@ writes, and a commit with no trailer at all is not uniformly `unresolved` today 
 agent evidence is `no_agent_evidence`, `classify.ts` ~line 745).
 `Co-Authored-By`-derived models get `model_source: "harness-config"` only when the harness wrote the line
 itself (VS Code, Copilot); a hand-written co-author line is `operator-stated`.
-*As built (v1.7; the `model claim absent` listing, PR 123): the producers record `model_claim: absent` on **every** commit with
-neither trailer — a human's hand merge and the checkpoint bot's commits included (`commit-actor.ts` applies the completeness table to
-every resolved actor). "A producer defect after adoption" holds for an agent commit, so `doctor` reads the claim and the agent
+*As built (v1.7; the `model claim absent` listing, PR 123): the producers record `model_claim: absent` on **every** commit that
+yields no model from any source and carries no `Retrace-Model-Source` — a human's hand merge and the checkpoint bot's commits included
+(`commit-actor.ts` applies the completeness table to every resolved actor). A model taken from an agent `Co-Authored-By` line is not
+absent: it is `source-missing` (Decision B below). "A producer defect after adoption" holds for an agent commit, so `doctor` reads the claim and the agent
 evidence only from the commit's own **seals** — events that record a string `model_claim` and name the commit through a `commit:`
 artifact with role `generated` (today the hook and the webhook's push handler); reads, reviews, CI runs and GitHub's PR-merge event
 never count. Evidence is (a) an agent actor on a seal or (b) `location.surface: agent` on the hook's seal, which means the committing
 git process had **no controlling terminal** (`ttySurface`, `git-hook.ts:241`) — true of agent sessions and also of a human's
 IDE-button commit, which the finding says in words. Absent commits without that evidence are reported as a count "not counted as
-defects", stating only the evidence (the one live case is a `retrace-checkpoint[bot]` system commit, `evt_262efc88`). Counting is per
-distinct commit. (PR 123 claude-code last seat M1, L1; Codex rounds 3–4, M1 and M3.)*
+defects", stating only the evidence (the one live case is a `retrace-checkpoint[bot]` system commit, `evt_262efc88`). The listing counts
+distinct commits (`status` counts agent events — a different figure). (PR 123 claude-code last seat M1, L1; Codex rounds 3–4, M1 and M3.)*
 
 *Decision B (v1.6; same proposal and go as Decision A; built in PR 118): the sentence above is withdrawn as a resolver
 rule. A `Co-Authored-By`-derived model carries **no** `model_source` and completeness `source-missing`, unless a
@@ -393,7 +394,8 @@ is omitted only when no usable source exists, not merely when the runtime expose
    and the seal-based absent listing (§4.3, §4.4 as built); README and landing sentence. Tests at the merged tip 361 / 238 / 36.
    Worker `ce4b496b` deployed 21:20Z: `check-deploy` current, `/status` returns the split, `/ui` byte-identical to the merged viewer.
    Landing footer entry PR 125 (`cf2ee7b`), Pages `d57c3fa6`. The routing skill's step 5 now reads the registry the same way
-   (PR 126, `29d4bc8`). Not built: a per-actor split; `status` counting absent claims.*
+   (PR 126, `29d4bc8`). Not built: a per-actor split; §4.3's "counted by `status`" for
+   absent claims (the listing is `doctor`'s only).*
 5. Witness (§4.5), after the orchflows note's §9 answer or a by-hand read of `history inspect` output.
 
 ## 8. Dispositions
@@ -538,7 +540,8 @@ claude-code last; PRs 125 and 126 author claude-code).
     rule (`fe5559a`). Round 4 rejected `evt_88f05080486a4dd891f1f28df45c2369`: M3, the uncounted line asserted "human-authored, or an
     agent commit whose hook seal is missing" for what was a system bot's commit; fixed by evidence-only text (`6fff398`). Round 5
     approved `evt_b3447f5100da4009bf48f58212ce89b2`, no findings; claude-code re-check approved `evt_e5dcdcbe4bb84eb99ca2302d23e1708b`.
-    Four of the five rejections traced to the coordinator's briefs, recorded in the gate checks.
+    PR 123 was rejected four times (Codex rounds 1, 3 and 4, and the claude-code last seat); each gate check
+    traces a finding in that rejection to the coordinator's briefs.
 24. **PR 125** (the landing footer entry the Pages deploy was held for, `evt_d69d3fedc2ba4d8cbb3ebbe8417152f9`): class (b), cursor-agent
     approved `evt_54b868c90a46483194b72d4d98753fcc`, no findings; merged `cf2ee7b`.
 25. **PR 126** (F3): Codex round 1 rejected `evt_0c253a1d8e1f4cd7b630b73370ed65ae`, F1 Medium — the new text said the loader refuses
