@@ -1,6 +1,8 @@
 # GitHub owner-login attribution — design note v1 (evaluation plan P1; issues #82, #69)
 
-**Status:** DRAFT v1.1, 2026-09-26 (v1 03:5xZ / 21:5x MDT 2026-09-25; v1.1 04:3xZ / 22:3x MDT, round-1 findings of Codex
+**Status:** DRAFT v1.2, 2026-09-26 (v1.2 05:1xZ / 23:1x MDT 2026-09-25: Codex round-2 findings `evt_2a358258d9c54624a49c0fa769e09e98`
+— R2-F2 ingress cutoff, R2-F3 consumption read, R2-L1 T14 split — applied in place on Jordan's go `evt_eaab62d8b9e842f29d04f17bd21881bc`;
+NOOA round 2 approved `evt_ca197d293b1d40f1905cc00dafc64be3`. v1 03:5xZ / 21:5x MDT 2026-09-25; v1.1 04:3xZ / 22:3x MDT, round-1 findings of Codex
 `evt_cc16a99f33ab467895ddc5831adc6043` — F1 lookup, F2 caller time, F3 body-only keys — and NOOA
 `evt_45521b66918f4938919b26768995bf80` — N1 D1 framing, N2 `declared_by_seat`, N3 §1.3, N4 owner-action marks; N5
 declined, see §14 — applied in place on Jordan's decision `evt_4be7266d49b64e1e94c8d4da4a0ff875`). Author claude-code (coordinator, `claude-fable-5-1`,
@@ -138,6 +140,7 @@ on a pull request, `mapGithubWebhook` adds `method.params.github_payload`:
 | `merge_commit_sha` | `pull_request.merge_commit_sha` | merged |
 | `review_id`, `comment_id` | `review.id`, `comment.id` | review, comment |
 | `delivery` | `X-GitHub-Delivery` | all |
+| `ingress_at` | the Worker's clock at HTTP arrival of the delivery, read **before** any store read (the first statement of the `POST /hooks/github` handler after signature verification), carried unchanged through the pending queue, a deferred drain and every append retry | all |
 
 Today the event keeps only a 300-character `intent` (`trim(body)`), so a body hash cannot be recomputed from the ledger
 afterwards; recording it at ingestion is what makes the decision reproducible offline from an export (T2).
@@ -191,20 +194,27 @@ A declaration `E` resolves webhook event `G` iff all hold:
   `git:<R>#<branch>` must equal `G.github_payload.branch` instead;
 - every content field the kind requires (§3.2) is **equal** to `G.github_payload`'s (`body_sha256`, `title_sha256`,
   `review_state`, `head_sha`, `merge_commit_sha` as the kind demands);
-- `E` has not been consumed by an earlier decision (§3.2);
-- **server time, not caller time** (Codex round 1, F2): `E.seq` ≤ `U`, the read head at classification, and
-  `E.received_at` — the Worker's hash-covered receipt time — is **not later than** `G.received_at`, the Worker's receipt of
-  the webhook delivery, and not earlier than `G.received_at − 30 min`. The caller-supplied `E.timestamp` is never
+- `E` has not been consumed by an earlier decision (§3.2) — a fact the classifier learns from the consumption table,
+  not from the declaration (§3.5; Codex round 2, R2-F3);
+- **server time, not caller time** (Codex round 1, F2; the cutoff corrected in round 2, R2-F2): `E.seq` ≤ `U`, the read
+  head at classification, and `E.received_at` — the Worker's hash-covered seal time of the declaration, the only server
+  time a declaration has — is **not later than `G.github_payload.ingress_at`**, the Worker's clock at HTTP arrival of the
+  delivery (§3.1), and not earlier than `ingress_at − 30 min`. `G.received_at`, the webhook seal's own receipt time, is
+  **not** the cutoff: `chain.ts` sets it inside `sealEvent`, after the router's policy and routing reads, so it does not
+  exist when classification needs it, and a declaration sealed after the delivery arrived but before the webhook sealed
+  would pass a comparison against it (Codex round 2, R2-F2, shown on the sealing primitive). `ingress_at` is captured
+  before any read and travels with the delivery through the pending queue and every retry, so the same cutoff applies
+  whether the delivery is classified synchronously or drained later. The caller-supplied `E.timestamp` is never
   compared: a seat that sees an action land can log a declaration with any earlier timestamp it likes, but it cannot make
-  the Worker receive that declaration before the Worker received the webhook. GitHub's payload times (`updated_at`,
-  `submitted_at`, `created_at`, `merged_at`) are recorded in `github_payload` for the reader and have one-second
-  precision; they play no part in eligibility, so a declaration received in the same second as the action is not
-  rejected. The 30-minute lower bound is a guard against a stale declaration for an action retried much later, not the
-  evidence; the content match is. **Residual timing gap, stated:** a delivery GitHub retries or the Worker defers
-  (§5.3 of trailer-consistency, the pending queue) is received later than the action happened, and a declaration logged
-  in that gap, after the action but before the Worker's receipt, is eligible. The decision record carries both receipt
-  times so a reader can see the gap; closing it needs GitHub's delivery time to be trusted, which an HMAC does not
-  give, or per-seat identities (§6 step 5).
+  the Worker seal that declaration before the delivery arrived. GitHub's payload times (`updated_at`, `submitted_at`,
+  `created_at`, `merged_at`) are recorded in `github_payload` for the reader and have one-second precision; they play no
+  part in eligibility, so a declaration sealed in the same second as the action is not rejected. The 30-minute lower
+  bound is a guard against a stale declaration for an action retried much later, not the evidence; the content match is.
+  **Residual timing gap, stated:** the action happens at GitHub before the delivery reaches the Worker — normally within
+  seconds, longer when GitHub retries a delivery — and a declaration sealed in that interval, after the action but before
+  `ingress_at`, is eligible. The decision record carries `ingress_at`, the declaration's seal time and GitHub's payload
+  time so a reader can see the interval; the payload time is GitHub's claim under an HMAC, not a trusted clock, so the gap
+  is narrowed by `ingress_at`, never closed by it; per-seat identities (§6 step 5) close it.
 
 `Decl(G)` = the set of eligible declarations; `Seats(G)` = their distinct `actor.id`s.
 
@@ -217,13 +227,32 @@ measurement recorded here as a dated correction.
 
 ### 3.5 Read contract
 
-One bounded query per webhook event: pinned events in `(U − N, U]` referencing **any of** `pr:<R>#<n>`,
-`git:<R>#<branch>` (`github_payload.branch`) and `commit:<R>@<head_sha12>` through the existing `event_artifact_index`
-(`eventsReferencingArtifacts`, PR 27; it takes several keys in one statement), then filtered in memory on
-`github_action`. The branch and commit keys exist because a `pr_open` declaration cannot name a PR number (§3.2); the
-first live sample, `evt_df2d386c…`, carries only the branch, the commit and a body-file artifact, and Codex showed
-(round 1, F1) that the PR-keyed query alone returns nothing for it. The build tests the live sample **through this
-lookup**, not by handing the declaration to the predicate (T14). Budget 300 ms
+Two bounded reads per webhook event, then one insert, then the seal.
+
+1. **Candidates.** Pinned events in `(U − N, U]` referencing **any of** `pr:<R>#<n>`, `git:<R>#<branch>`
+   (`github_payload.branch`) and `commit:<R>@<head_sha12>` through the existing `event_artifact_index`
+   (`eventsReferencingArtifacts`, PR 27; it takes several keys in one statement), then filtered in memory on
+   `github_action` and the §3.3 predicate. The branch and commit keys exist because a `pr_open` declaration cannot name a
+   PR number (§3.2); the first live sample, `evt_df2d386c…`, carries only the branch, the commit and a body-file
+   artifact, and Codex showed (round 1, F1) that the PR-keyed query alone returns nothing for it. The build tests the
+   live sample **through this lookup** (T14a).
+2. **Consumption.** A new table `owner_login_consumption(project, declaration_event_id PRIMARY KEY, consumed_by_delivery,
+   consumed_by_event_id, consumed_at)`, read for the candidates' ids. The consuming webhook seal is `sealed_by
+   webhook:github` and carries `owner_login_decision`, not a declaration's `github_action`, so the pinned-only candidate
+   read can never see consumption (Codex round 2, R2-F3); the table is the classifier's memory of it, the way
+   trailer-consistency §3.2's classification-context row is the memory of a commit's window. A candidate with a row is
+   consumed and drops out of `Decl(G)`.
+3. **Allocation and atomicity.** When more than one unconsumed candidate from the **same** seat is eligible, the one
+   with the lowest `seq` is chosen (earliest sealed; deterministic from an export). Before the seal, the classifier
+   inserts the chosen declaration's row **insert-if-absent**, keyed by the delivery; a second delivery racing for the
+   same declaration loses the insert, re-reads, and classifies without it (`unresolved` / `no_declaration` when nothing
+   else is eligible). An append retry of the same delivery (`router.ts`, the UNIQUE retry loop) finds its own row by
+   `consumed_by_delivery` and reuses it, so a retried seal never consumes twice and never rerolls the decision. A
+   delivery that ends `unavailable` inserts nothing. Offline re-derivation (T2) replays the table from the sealed
+   decisions' `consumed` lists in `seq` order, so the table is reconstructible from an export and adds no trusted state
+   of its own.
+
+Budget 300 ms
 and 2,000 rows (a pull request's index rows over 30 minutes are two orders of magnitude fewer than a commit's file
 witnesses); over budget or any store error → `unavailable` (§4). The classifier records `read_head_seq` and
 `read_head_hash` so the decision is reproducible from an export.
@@ -263,6 +292,7 @@ the way `claim_decision` is, `router.ts:817–823`):
     "window": { "from": "2026-09-24T09:33:57Z", "to": "2026-09-24T10:03:57Z", "basis": "received_at" },
     "received": { "webhook": "2026-09-24T10:03:57.412Z", "declaration": "2026-09-24T10:02:41.090Z" },
     "consumed": ["evt_…"],
+    "ingress_at": "2026-09-24T10:03:57.101Z",
     "classification_ms": 41 } }
 ```
 
@@ -407,9 +437,14 @@ recommendation: correct now); this note does not edit it, and the landing footer
   an unlisted `[bot]` login keeps today's `system`/`agent` heuristic.
 - **T13.** A merge webhook whose `merge_commit_sha` matches the merger's `merged` declaration → `declared_by_seat`
   (claude-code); the same merge with no declaration → `unresolved`.
-- **T14 (F1).** The real PR 130 opening: declaration `evt_df2d386c…` (branch, commit and body-file artifacts, no PR
-  artifact) and the real webhook `created` payload; classification runs through the §3.5 lookup by branch and head sha,
-  not by handing the declaration to the predicate, and yields `declared_by_seat` (claude-code).
+- **T14a (F1, lookup).** The real PR 130 opening: declaration `evt_df2d386c…` (branch, commit and body-file artifacts,
+  no PR artifact) and the real webhook `created` payload; the §3.5 candidate read by branch and head sha returns that
+  event. It is then **refused by the predicate**, because the real declaration predates v1.1 and carries no
+  `title_sha256` (Codex round 2, R2-L1): the expected classification of the real event is `unresolved` /
+  `proximity_only`, and the test asserts exactly that.
+- **T14b (F1, classification).** The same payload against a compliant `pr_open` declaration (branch, `head_sha`,
+  `body_sha256`, `title_sha256`) → `declared_by_seat` (claude-code) through the lookup, never by handing the declaration
+  to the predicate.
 - **T15 (F2).** A declaration whose caller `timestamp` is earlier than the action but whose `received_at` is later than the
   webhook's → `unresolved`; the same declaration received one second before the webhook → `declared_by_seat`; an outcome
   record (`github_action.result`) received before the webhook → not a declaration, `unresolved`; a declaration and an
@@ -418,7 +453,14 @@ recommendation: correct now); this note does not edit it, and the landing footer
   body → `unresolved` / `no_declaration`, never `declared_by_seat`; a `review` declaration with `review_state: commented` does
   not match an `approved` review of the same body, nor a comment on a different `commit_id`.
 - **T17 (F3).** Two identical comments posted after one declaration → the first `declared_by_seat`, the second
-  `unresolved`; the decision of the first lists the declaration under `consumed`.
+  `unresolved`; the decision of the first lists the declaration under `consumed`, and the consumption table holds one
+  row for it. Sequential and concurrent variants: two deliveries classified in parallel race on the insert; exactly one
+  is `declared_by_seat`. An append retry of the first delivery reuses its row and produces a byte-identical decision.
+- **T18 (R2-F2).** A declaration sealed after the delivery's `ingress_at` but before the webhook seals → `unresolved`;
+  the same declaration sealed one second before `ingress_at` → `declared_by_seat`; a delivery drained from the pending
+  queue carries its original `ingress_at`, and a declaration sealed between arrival and drain → `unresolved`.
+- **T19 (R2-F3).** Two same-seat eligible declarations for one comment → the lower `seq` is consumed; the decision names
+  it; the other stays available for the next identical operation.
 
 ## 12. Open questions for the gate
 
@@ -447,6 +489,8 @@ not yield distinct identities. The questions stay listed for NOOA and the Grok s
 | Q1–Q4 presented | `evt_e5ce6a0ed09e40bc8cd39b57b8801ecf` |
 | Jordan: accept all four, draft the P1 note | `evt_603025a3932a4193a23f16b49b742f96` |
 | This note's own pull request declared under §3.2 before `gh pr create` (first live sample; found the `pr_open` gap) | the declaration and outcome events are cited in the pull request's first coordinator comment or its body |
+| Round 2 routing: Codex `evt_a43ebb9311d44b67ae93ba6be56d6dd5`, NOOA `evt_1d15d1c2040b440da63f5f5c40dbcce0` | verdicts Codex `evt_2a358258d9c54624a49c0fa769e09e98` (rejected, 2 M 1 L), NOOA `evt_ca197d293b1d40f1905cc00dafc64be3` (approved, no findings) |
+| Jordan: v1.2 in place, then round 3 | `evt_eaab62d8b9e842f29d04f17bd21881bc` |
 | Round 1 routing: Codex `evt_a3d7385b94bd435fa4a00b63cb7f1643`, NOOA `evt_0efbeca427544acfbc3385c0c0fae754` | verdicts Codex `evt_cc16a99f33ab467895ddc5831adc6043` (rejected, 3 M), NOOA `evt_45521b66918f4938919b26768995bf80` (rejected, 3 M 2 L) |
 | Jordan: wait for NOOA, then fix both in place | `evt_4be7266d49b64e1e94c8d4da4a0ff875` |
 | Live samples (T3): PR open declared `evt_df2d386c…` / outcome `evt_0efdea31…` / webhook `evt_2f60cfc7…` / measurement `evt_01d82280…`; Codex copy posted as review 5324545359, declared `evt_c6d7ddc6…`, outcome `evt_5212a25c…` (body hash matched on read-back) | two kinds measured, both matched |
@@ -473,6 +517,21 @@ is agent-ops' standing form for every environment rule (its preamble), which NOO
 so; one clause naming the convention added. Both stop rules were met (three Mediums each); Jordan decided
 `evt_4be7266d…`: fix both in place as v1.1. Coordinator gate checks `evt_c33340b299c74191b62d25cfd41be434` (Codex) and
 `evt_30b04532658b434484314a3da78663d5` (NOOA).
+
+**Round 2 (head `e518caef`).** NOOA (`nemotron-3-ultra`) APPROVED, `evt_ca197d29…`, no findings: N1–N3 resolved
+everywhere they appeared, N4 applied, N5 rightly declined, F1–F3 consistent with N1–N3. Codex (`gpt-6-astra`, medium)
+REJECTED, `evt_2a358258…`, two Medium and one Low: R2-F2 (F2 re-raised) the v1.1 cutoff `G.received_at` is the webhook
+seal's time, set inside `sealEvent` after the router's reads, so it does not exist at classification and a declaration
+sealed in the gap passes → §3.1 records `ingress_at` at HTTP arrival, carried through queue and retry; §3.3 compares the
+declaration's seal time against it and restates the residual gap; T18. R2-F3 (F3 re-raised) consumption lived only in
+webhook-sealed decisions the pinned-only read never sees → §3.5 adds the `owner_login_consumption` table, a second
+bounded read, earliest-`seq` allocation for same-seat duplicates, insert-if-absent before the seal, retry reuse, and
+offline reconstruction from the sealed `consumed` lists; T17 extended, T19. R2-L1 (Low) T14 expected the real, pre-v1.1
+declaration (no `title_sha256`) to classify → split into T14a (lookup finds it, predicate refuses it, `unresolved`) and
+T14b (a compliant declaration classifies). Codex confirmed closed: F1, F2's caller-time and outcome parts, F3's keys,
+N1–N5 dispositions, the `other`-action cases, and the race handling (no relaxation of the commit key). Gate checks
+`evt_84ae7ea12d234720a7b698be52b4cd8a` (NOOA) and `evt_750549417fd44edabc9c88c91be44559` (Codex); Jordan's go for v1.2
+and round 3 `evt_eaab62d8b9e842f29d04f17bd21881bc`.
 
 ## Appendix A — proposed agent-ops 19 (lands with step 1)
 
