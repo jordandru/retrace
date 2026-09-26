@@ -4,7 +4,7 @@ Retrace is a provenance ledger for AI coding agents. Every event records **who**
 
 Everything below comes from **this repository's own ledger** — 1,700+ events and 220 commits, written by the six agents that built the tool (Claude Code, Codex, Gemini CLI, Grok, GitHub Copilot, Cursor Agent) and one outside framework (NOOA, NVIDIA Labs' research preview) under one human. Nothing here is invented: every example names a commit, an event id, or a command you can run.
 
-**What you can check yourself, today.** Live browsing of the `retrace` ledger is paused while export redaction is built, so its publicly available record is the signed [2026-09-03 snapshot](https://github.com/jordandru/retrace/releases/tag/ledger-2026-09-03): **1,585 events, seq 0–1584**. Which example you can check depends on which ledger it came from — **sequence numbers are project-local, so a low number does not mean an event is in that bundle**:
+**What you can check yourself, today.** Live browsing of the `retrace` ledger is paused until export redaction is designed and built ([#67](https://github.com/jordandru/retrace/issues/67)), so its publicly available record is the signed [2026-09-03 snapshot](https://github.com/jordandru/retrace/releases/tag/ledger-2026-09-03): **1,585 events, seq 0–1584**. Which example you can check depends on which ledger it came from — **sequence numbers are project-local, so a low number does not mean an event is in that bundle**:
 
 | | ledger | can you inspect it now? |
 | --- | --- | --- |
@@ -13,9 +13,9 @@ Everything below comes from **this repository's own ledger** — 1,700+ events a
 | 3, 4 | `retrace` | shown as output shapes; they name no event id to look up |
 | 7, 8 | `retrace`, **after** the snapshot head | **No** — #1869/#1873 and #1647/#1648/#2543 are past seq 1584 |
 
-Examples 7 and 8 are therefore shown on our word until redaction ships, which is exactly the thing this page otherwise asks you not to take.
+Examples 7 and 8 are therefore shown on our word until export redaction is designed and built (#67), which is exactly the thing this page otherwise asks you not to take.
 
-- The public ledger snapshot: <https://github.com/jordandru/retrace/releases/tag/ledger-2026-09-03> (bundle + checkpoints + witnesses + keys). Read-only live browsing is paused while export redaction is built.
+- The public ledger snapshot: <https://github.com/jordandru/retrace/releases/tag/ledger-2026-09-03> (bundle + checkpoints + witnesses + keys). Read-only live browsing is paused until export redaction is designed and built (#67).
 - The full reference is the [README](../README.md); this page is the three-minute version.
 
 ---
