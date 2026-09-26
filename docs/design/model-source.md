@@ -1,6 +1,6 @@
 # Model claims: source, omission, verification — design note v1 (agent-rules 4, v2)
 
-**Status:** DRAFT v1.6, 2026-09-24 (v1 2026-09-20; v1.1, v1.2, v1.3 2026-09-23; v1.3 merged `6c208d9`; v1.4 merged `4c6443d`), author claude-code (coordinator, `claude-fable-5-1`), on Jordan's instruction
+**Status:** DRAFT v1.7, 2026-09-26 (v1 2026-09-20; v1.1, v1.2, v1.3 2026-09-23; v1.3 merged `6c208d9`; v1.4 merged `4c6443d`; v1.6 merged `cb91dd6`), author claude-code (coordinator, `claude-fable-5-1`), on Jordan's instruction
 `evt_3f1973b9b8234267aeea0d238af89483`, from his rule audit `evt_376a8fc8ba4b48c3a38624f38b4335cf` ("true
 provenance means making a true claim and avoiding omission") and the coordinator's decision
 `evt_e7a318017ace472ab641e6940f7d5607`. **Class (a)** under agent-rules 12: it rewrites rule 4 and the
@@ -23,6 +23,13 @@ cursor-agent, class S; Codex rounds 1–3, claude-code last) merged as `1bbb5a7`
 before the build (proposal `evt_a11a4e3f…`, go `evt_835a645d3f924ebeb383670945063259`) are recorded in §4.3 as dated corrections
 (Decisions A and B); §4.1's known limit is closed; §4.6 records the adoption; §7 step 3 records what was built; §8 round 7 lists
 the dispositions; §8 round 8 records this pull request's own gate. v1.5 merged `38c58b0`.
+**v1.7 (round 9, author claude-code on `claude-opus-5-5`): §7 step 4 is built, merged and deployed.** PR 123 (builder cursor-agent,
+class S; Codex rounds 1–5 and two claude-code last-seat reviews) merged as `3c85e37` 2026-09-25 21:12Z
+(`evt_2038999674ea4eefa7fe66078b2562ec`); Worker version `ce4b496b` 21:20Z (`evt_192f943fe4a64d08a1a3da7e1dbe26a7`). Its landing-page
+sentence needed a footer entry first — PR 125, `cf2ee7b` — and went live as Pages `d57c3fa6` (`evt_7abd96da683b4d7693297cfa663b2411`).
+Codex's round-1 F3 (the routing skill's registry-reading text) was split into PR 126 by Jordan's decision
+(`evt_b145eabbf8a6462e89446fab17853476`), merged `29d4bc8` 2026-09-26 00:20Z. v1.7 appends what was built where it differs from the
+design (§4.3, §4.4, §7 step 4) and the dispositions (§8 round 9); no earlier text is changed. Step 5 is not built.
 Corrections before merge are made in place (Jordan, `evt_9dc98206`); after merge, appended (agent-rules 10).
 
 ## 1. The problem
@@ -232,6 +239,17 @@ writes, and a commit with no trailer at all is not uniformly `unresolved` today 
 agent evidence is `no_agent_evidence`, `classify.ts` ~line 745).
 `Co-Authored-By`-derived models get `model_source: "harness-config"` only when the harness wrote the line
 itself (VS Code, Copilot); a hand-written co-author line is `operator-stated`.
+*As built (v1.7; the `model claim absent` listing, PR 123): the producers record `model_claim: absent` on **every** commit with
+neither trailer — a human's hand merge and the checkpoint bot's commits included (`commit-actor.ts` applies the completeness table to
+every resolved actor). "A producer defect after adoption" holds for an agent commit, so `doctor` reads the claim and the agent
+evidence only from the commit's own **seals** — events that record a string `model_claim` and name the commit through a `commit:`
+artifact with role `generated` (today the hook and the webhook's push handler); reads, reviews, CI runs and GitHub's PR-merge event
+never count. Evidence is (a) an agent actor on a seal or (b) `location.surface: agent` on the hook's seal, which means the committing
+git process had **no controlling terminal** (`ttySurface`, `git-hook.ts:241`) — true of agent sessions and also of a human's
+IDE-button commit, which the finding says in words. Absent commits without that evidence are reported as a count "not counted as
+defects", stating only the evidence (the one live case is a `retrace-checkpoint[bot]` system commit, `evt_262efc88`). Counting is per
+distinct commit. (PR 123 claude-code last seat M1, L1; Codex rounds 3–4, M1 and M3.)*
+
 *Decision B (v1.6; same proposal and go as Decision A; built in PR 118): the sentence above is withdrawn as a resolver
 rule. A `Co-Authored-By`-derived model carries **no** `model_source` and completeness `source-missing`, unless a
 `Retrace-Model-Source` trailer is present, in which case the trailer rule applies. Reason: the commit message alone cannot
@@ -249,6 +267,17 @@ consumer's question (§4.4) for a harness that states it.*
   review whose model source is `none` or `self-report` counts as no model, which is what R1/R3 already need.
 - Landing page and README: the count of agent events without a model becomes a sentence with its cause split, not
   a footnote.
+
+*As built (v1.7; step 4, PR 123 `3c85e37`, where it differs from the lines above):*
+- *`status` counts `agent_events_by_model_source` over the whole project, not per actor — the build brief asked for the project-wide
+  split, and A5 is met by it; a per-actor split is not built. `agent_events_without_model_by_cause` partitions the old count exactly
+  (`source_none` + `no_source_recorded`), an empty-string model counting as absent. Live after the deploy: 557 of 5,223 agent events
+  without a model — 2 declared `none`, 555 with no source recorded (`evt_192f943f`).*
+- *`doctor`'s `review model` finding: `none` and `self-report` as specified; a registered model with **no** `model_source` field
+  (legacy) warns in its own bucket, distinct from an unregistered model (Codex PR 123 round 1, F1). Under `--gate` the same findings
+  apply as warnings; the `opts.gate` parameter the build added is not read, so "counts as no model" means the same advisory warning,
+  not a gate failure.*
+- *§4.3's "counted by `status`" for `model_claim: absent` is not built; the listing is `doctor`'s only (next item).*
 
 ### 4.5 Verification (v2)
 
@@ -357,6 +386,14 @@ is omitted only when no usable source exists, not merely when the runtime expose
 4. Consumers: status split, doctor source-aware `review model` and a listing of `model_claim: absent` commits as
    producer defects (§4.3), `models.json` `display_pattern` (a class-S path under the routing skill), landing/README
    sentence.
+   *Built (v1.7). PR 123, builder cursor-agent from the coordinator's brief (sha256 `14ec2042…`), merged `3c85e37`
+   (2026-09-25 21:12Z): `status.ts` per-source split and cause split (and the embedded viewer, every server value escaped);
+   `models.json` `display_patterns` (list; a singular `display_pattern` folded in) on `grok-4.6`, and a `claude-opus-5-5` row with
+   levels to `max`; `resolveRoutingModel` exact key → alias → pattern with a captured level; `doctor`'s source-aware review model
+   and the seal-based absent listing (§4.3, §4.4 as built); README and landing sentence. Tests at the merged tip 361 / 238 / 36.
+   Worker `ce4b496b` deployed 21:20Z: `check-deploy` current, `/status` returns the split, `/ui` byte-identical to the merged viewer.
+   Landing footer entry PR 125 (`cf2ee7b`), Pages `d57c3fa6`. The routing skill's step 5 now reads the registry the same way
+   (PR 126, `29d4bc8`). Not built: a per-actor split; `status` counting absent claims.*
 5. Witness (§4.5), after the orchflows note's §9 answer or a by-hand read of `history inspect` output.
 
 ## 8. Dispositions
@@ -483,3 +520,28 @@ the author does not review).
     effort `high`), the earlier "not exposed" statements were
     corrected by an appended event (`evt_75c70d32ffe84cd3a5d74cc3bea8e4ba`), and `AGENTS.md` records the source and
     its discovery instead of the omission rule the first draft carried.
+
+Round 9, v1.7, the step-4 build and its two follow-ups (PR 123 builder cursor-agent on Jordan's go; class S code gate: Codex first,
+claude-code last; PRs 125 and 126 author claude-code).
+
+21. **PR 123, Codex round 1 (`ef41439`, high): rejected `evt_931793a819394ee9a6f822f392bea5ca`, three Medium.** F1 a registered
+    legacy model passed the source warning; F2 the absent listing was skipped without a routing registry; F3 the routing skill's text
+    rejected the new patterns. Jordan: F1–F2 in place, F3 to its own class (a) PR, and a `claude-opus-5-5` registry row
+    (`evt_b145eabbf8a6462e89446fab17853476`). Round 2 (`14d4f11`, medium): approved `evt_28d7db6aea8e4003ae83306effb000c4` with two
+    Lows (PR-body wording), applied as text.
+22. **PR 123, claude-code last seat (`14d4f11`): rejected `evt_bd76fc0eb25548b491c08a77dadeaafb`.** M1 human commits were listed as
+    producer defects (the producers record `absent` for every trailer-less commit); M2 two new `/status` values rendered raw into the
+    viewer's `innerHTML`, reachable from a crafted `?api=` link on the Worker's own origin where ledger tokens persist, no CSP
+    (shown by rendering the template, not executed in a browser; never deployed); L1 events counted as commits. Fixed in `500a4e8`.
+23. **PR 123, Codex rounds 3–5.** Round 3 (`500a4e8`) rejected `evt_d608b7c9a6d44a33a02247752bf68cd5`: M1 re-raised — the round-3
+    brief took agent evidence from "any event" naming the commit, so an agent's read made a human commit a defect; fixed by the seal
+    rule (`fe5559a`). Round 4 rejected `evt_88f05080486a4dd891f1f28df45c2369`: M3, the uncounted line asserted "human-authored, or an
+    agent commit whose hook seal is missing" for what was a system bot's commit; fixed by evidence-only text (`6fff398`). Round 5
+    approved `evt_b3447f5100da4009bf48f58212ce89b2`, no findings; claude-code re-check approved `evt_e5dcdcbe4bb84eb99ca2302d23e1708b`.
+    Four of the five rejections traced to the coordinator's briefs, recorded in the gate checks.
+24. **PR 125** (the landing footer entry the Pages deploy was held for, `evt_d69d3fedc2ba4d8cbb3ebbe8417152f9`): class (b), cursor-agent
+    approved `evt_54b868c90a46483194b72d4d98753fcc`, no findings; merged `cf2ee7b`.
+25. **PR 126** (F3): Codex round 1 rejected `evt_0c253a1d8e1f4cd7b630b73370ed65ae`, F1 Medium — the new text said the loader refuses
+    unanchored patterns; it checks compilation and group count only. Text fixed (`c3b5170`); Codex approved
+    `evt_04b23bba64f04de2961fbadb41291fd7`, NOOA approved `evt_82423948840e47fca39e2677a0d9aff8`, cursor-agent (Grok seat) approved
+    `evt_3adc2ae9726f4f65b7a0def7b9d82974`; merged `29d4bc8`.
