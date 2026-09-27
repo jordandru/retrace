@@ -1,6 +1,8 @@
 # Owner-login step 1 — builder brief (classifier, ingestion hashes, consumers, agent-ops 19)
 
-**Status:** v1, 2026-09-27 (18:5xZ / 12:5x MDT). Author claude-code (coordinator, `claude-fable-5-1`, model source
+**Status:** v1.1, 2026-09-27 (v1.1 21:3xZ / 15:3x MDT: NOOA round-1 Medium N1 `evt_b373209785314ca4a0a1fffc65b219a0` — §0 and §1.4
+overclaimed byte-identity for unclassified seals while `github_payload` is added — applied in place on Jordan's go
+`evt_7778c91baa3e4ea6879e52025a3acecb`; v1 18:5xZ / 12:5x MDT). Author claude-code (coordinator, `claude-fable-5-1`, model source
 harness-runtime), on Jordan's signed go `evt_dc485a8af6ef47758bb9f439c62dce95` (hand-off 15 item 2). **Not built.**
 Builds `docs/design/github-owner-login-attribution.md` **v1.4** (merged `b54b47d8`, PR #130) §6 steps 1–3 and §7; the
 note's text wins over this brief wherever they differ — file the discrepancy on the pull request and stop. Builder:
@@ -41,7 +43,8 @@ the builder confirms or refutes against the contract's target rules and writes t
 code in this PR either way).
 
 **Adoption is a policy write, not a deploy.** A project whose current policy is `/1`, or `/2` with an empty
-`github.shared_logins`, classifies nothing and seals byte-identical to today (T8). The switch for `retrace` is Jordan
+`github.shared_logins`, classifies nothing: the sealed `actor` is what today's adapter writes and no `owner_login_decision` is
+attached, while `github_payload` (§1.1) is added to every relevant seal regardless of policy (T8). The switch for `retrace` is Jordan
 setting a `/2` policy with `shared_logins: ["jordandru"]` — an owner action under rule 14, after deploy, on its own go.
 
 ## 1. Inputs, in the order the code should be built
@@ -126,8 +129,10 @@ export async function classifyOwnerLogin(args: {
 ```
 
 - **Applicability**: `github_payload.login` (case-folded) ∈ `policy.body.github.shared_logins` (case-folded). Otherwise
-  `not_applicable` and the input is untouched — T8's regression guard is byte identity of the sealed event for a `/1`
-  policy, an empty list, or an unlisted login (`identities` handling below is the one exception and is tested apart).
+  `not_applicable`: the `actor` is left as the adapter wrote it and no `owner_login_decision` is attached, while
+  `github_payload` is still present — T8's regression guard is byte identity of the `actor` and the absence of the
+  decision param, not of the whole event, for a `/1` policy, an empty list, or an unlisted login (`identities` handling
+  below is the one exception and is tested apart).
 - **Identities** (N§6 step 5, T12): before the shared check, if `github_payload.login` ∈ `policy.body.github.identities`,
   the actor is `{ type: "agent", id: identities[login] }` with `owner_login_decision.status: "identity_mapped"`, no
   declaration read. Built now so step 5 is a policy write; the field is empty until then.
@@ -339,6 +344,7 @@ put `pr:jordandru/retrace#<n>` on every verdict.
 |---|---|
 | Jordan: go, draft the P1 step-1 build brief | `evt_dc485a8af6ef47758bb9f439c62dce95` |
 | Session 22 resume (hand-off 15) | `evt_1565646190fe4d7d96414d116c098375` |
-| This brief written (edit event) | recorded on this file's edit event, cited in the pull request body |
+| This brief written (edit event) | `evt_8e6340f1cea54f3494bdb2483fac979e`; PR #133 opened `evt_d4e1a1458a8c4aabacc8025ea2a3728b` |
+| Round 1: routing NOOA `evt_9a878724bd7c409f994195db2e5ffcbf`; verdict rejected, 1 Medium (N1) `evt_b373209785314ca4a0a1fffc65b219a0`; gate check `evt_3d4e15bb290142a2bf3a95f2fd4c589d`; copy review 5331907214 | Jordan: apply N1 in place as v1.1, then round 2 `evt_7778c91baa3e4ea6879e52025a3acecb` |
 | Note v1.4 merged | PR #130, `b54b47d8`, merge record `evt_01f8c7d8…` |
 | Real `pr_open` declaration / webhook seal / outcome used by T14 | `evt_df2d386cc03b4a06a435906aa582de9e` / `evt_2f60cfc75d604371bffb0b3be81a1ab9` / `evt_0efdea31057b4ef8aa1cede2c6ab9c5a` |
