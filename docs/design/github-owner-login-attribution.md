@@ -1,6 +1,8 @@
 # GitHub owner-login attribution — design note v1 (evaluation plan P1; issues #82, #69)
 
-**Status:** DRAFT v1.4, 2026-09-26 (v1.4 06:3xZ / 00:3x MDT: the final text touch on Jordan's go `evt_1e00d0a0b1804e68b3b66af34d6db2e2` —
+**Status:** v1.4.1, 2026-09-28 (v1.4.1 20:0xZ / 14:0x MDT: two dated in-place corrections from Codex's round-1 review of the step-1 build
+brief, PR #133, `evt_1e9f4144fb0042bf8bcb432d736554a2`, applied on Jordan's go `evt_5d5309168b6244c4aa1c20dbbab46e12` — §3.5 item 2, the consumption read is
+bounded by the read head (F4); §4, `received.webhook` is sealed null (F5). No number, decision or test changed; rule 10.) DRAFT v1.4, 2026-09-26 (v1.4 06:3xZ / 00:3x MDT: the final text touch on Jordan's go `evt_1e00d0a0b1804e68b3b66af34d6db2e2` —
 Codex round-4 R4-L1, NOOA round-4 N4-M1/N4-M2/N4-L3, and the Grok seat's (cursor-agent) first-pass findings R1-M1/R1-L1/R1-L2
 (`evt_238adda495d04d6c8307bb4d39c760d6`); Codex `evt_34361117eb5d4745835616bf5442615c` and NOOA `evt_b3ad9f6c0d1b4ba6a2c13e3717baccff`
 approved v1.3. v1.3 05:4xZ / 23:4x MDT 2026-09-25: Codex round-3 findings `evt_c906656c7cd344cb9c52f43d74dffecc`
@@ -254,7 +256,12 @@ Two bounded reads per webhook event, then one atomic event-plus-consumption writ
    webhook:github` and carries `owner_login_decision`, not a declaration's `github_action`, so the pinned-only candidate
    read can never see consumption (Codex round 2, R2-F3); the table is the classifier's memory of it, the way
    trailer-consistency §3.2's classification-context row is the memory of a commit's window. A candidate with a row is
-   consumed and drops out of `Decl(G)`.
+   consumed and drops out of `Decl(G)`. *Correction, 2026-09-28 (Codex, PR 133 round 1, F4, `evt_1e9f4144fb0042bf8bcb432d736554a2`; applied on
+   Jordan's go `evt_5d5309168b6244c4aa1c20dbbab46e12`): the read is bounded by the read head — a row counts only when the `seq` of its
+   consuming event is ≤ U, so the table records `consumed_by_seq` beside `consumed_by_event_id`. Without the bound, a delivery that
+   captured U and read the table after a competing delivery sealed a consumption at U+1 would seal `unresolved` with `read_head_seq: U`,
+   and a replay at U under item 3's contract would derive `declared_by_seat` instead. With the bound the stale reader attempts
+   allocation, loses the atomic insert, and reclassifies (item 3). The replay contract is unchanged.*
 3. **Allocation, committed with the seal.** When more than one unconsumed candidate from the **same** seat is eligible,
    the one with the lowest `seq` is chosen (earliest sealed; deterministic from an export). **There is no reservation
    before the seal** (Codex round 3, R3-F1: a pre-seal row is unsealed mutable state — a stalled or failed delivery would
@@ -328,6 +335,11 @@ the way `claim_decision` is, `router.ts:817–823`):
     "ingress_at": "2026-09-24T10:03:57.101Z",
     "classification_ms": 41 } }
 ```
+
+*Correction, 2026-09-28 (Codex, PR 133 round 1, F5, `evt_1e9f4144fb0042bf8bcb432d736554a2`; applied on Jordan's go `evt_5d5309168b6244c4aa1c20dbbab46e12`):
+`received.webhook` is sealed as `null`, not as the value the example shows — the seal time is assigned inside `sealEvent` (`chain.ts`)
+after the record is hashed, so it cannot be inside the record; the event's own `received_at` is that time, and the recompute tool (§7)
+reports it beside the record. `received.declaration` stays as shown.*
 
 `sealed_by` stays `webhook:github` and the producer verdict `none`: the Worker did not fix this actor from a credential,
 it derived it from a declaration, and the decision record says so. A `declared_by_seat` event is therefore **not** a witness
@@ -542,6 +554,7 @@ not yield distinct identities. The questions stay listed for NOOA and the Grok s
 | Round 1 routing: Codex `evt_a3d7385b94bd435fa4a00b63cb7f1643`, NOOA `evt_0efbeca427544acfbc3385c0c0fae754` | verdicts Codex `evt_cc16a99f33ab467895ddc5831adc6043` (rejected, 3 M), NOOA `evt_45521b66918f4938919b26768995bf80` (rejected, 3 M 2 L) |
 | Jordan: wait for NOOA, then fix both in place | `evt_4be7266d49b64e1e94c8d4da4a0ff875` |
 | Live samples (T3): PR open declared `evt_df2d386c…` / outcome `evt_0efdea31…` / webhook `evt_2f60cfc7…` / measurement `evt_01d82280…`; eight review copies posted (5324545359, 5324576986, 5324633884, 5324642069, 5324722585, 5324731435, 5324806453, 5324807066), each declared first, each body hash matched on read-back; one commit mismatch on `evt_1d10e43e…` (push/post race) | nine body matches of nine; one commit mismatch; `comment` and `pr_edit` unmeasured (R1-L1) |
+| Step-1 brief, Codex round 1: F4 (§3.5 item 2) and F5 (§4) corrections to this note | `evt_1e9f4144fb0042bf8bcb432d736554a2`; go `evt_5d5309168b6244c4aa1c20dbbab46e12`; PR #133 |
 | Probe over the export slice (numbers in §1.2–§1.4) | script `~/.retrace/handoff-2026-09-26/probe-owner-login.py` (sha256 `0cf23d48630ac967…`), results on this file's edit event |
 
 ## 14. Review disposition

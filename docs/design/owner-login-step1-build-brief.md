@@ -1,6 +1,6 @@
 # Owner-login step 1 — builder brief (classifier, ingestion hashes, consumers, agent-ops 19)
 
-**Status:** v1.1, 2026-09-27 (v1.1 21:3xZ / 15:3x MDT: NOOA round-1 Medium N1 `evt_b373209785314ca4a0a1fffc65b219a0` — §0 and §1.4
+**Status:** v1.2, 2026-09-28 (v1.2 20:0xZ / 14:0x MDT: Codex round-1 REJECTED `evt_1e9f4144fb0042bf8bcb432d736554a2` — seven Medium F1–F7, zero High, zero Low — applied in place on Jordan's go `evt_5d5309168b6244c4aa1c20dbbab46e12`: F1 supported-profile handling across activation, selection and export verification; F2 `[bot]` App identities validate, case-only duplicates rejected; F3 the amendment fallback removed, the bounded evaluator named; F4 the consumption read bounded by the read head, with a dated correction to the note's §3.5 in this PR; F5 `received.webhook` sealed null, replay compares the sealed record, a dated correction to the note's §4; F6 status totals compare raw logins and state legacy coverage; F7 `after_seq: -1` and a sequence-zero fixture; plus Codex's clarifications applied — stripping under a signature, doctor's policy data path, pending retention for non-push timeouts, legacy outcome binding, payload fields listed as extensions, T14a labelling, T17 barrier placement. v1.1 21:3xZ / 15:3x MDT: NOOA round-1 Medium N1 `evt_b373209785314ca4a0a1fffc65b219a0` — §0 and §1.4
 overclaimed byte-identity for unclassified seals while `github_payload` is added — applied in place on Jordan's go
 `evt_7778c91baa3e4ea6879e52025a3acecb`; v1 18:5xZ / 12:5x MDT). Author claude-code (coordinator, `claude-fable-5-1`, model source
 harness-runtime), on Jordan's signed go `evt_dc485a8af6ef47758bb9f439c62dce95` (hand-off 15 item 2). **Not built.**
@@ -25,7 +25,8 @@ Build, in one pull request:
 2. **The owner-login classifier** (N§3.3–§3.5, §4): for a login the project policy marks shared, resolve the actor from
    pinned declarations matched on content, seal the decision beside the actor as `method.params.owner_login_decision`,
    and consume the matched declaration in **the same atomic store write** as the event.
-3. **Policy fields** `github.shared_logins` and `github.identities` (N§5), as a new policy profile `/2` (§1.3 below).
+3. **Policy fields** `github.shared_logins` and `github.identities` (N§5), as a new policy profile `/2` (§1.3 below), with
+   explicit supported-profile handling wherever the code checks the single `/1` constant today (F1).
 4. **Consumers** (N§7): status `capture.owner_login_events`, doctor `--gate` and `sealedLooksAgent`, `why` rendering,
    `retrace-export owner-login --recompute`.
 5. **agent-ops 19** — the note's appendix A, verbatim, appended to `docs/agent-ops.md` after rule 18 and before
@@ -52,7 +53,10 @@ setting a `/2` policy with `shared_logins: ["jordandru"]` — an owner action un
 ### 1.1 `github_payload` (core `github.ts`)
 
 `mapGithubWebhook` (`packages/core/src/github.ts:59–136`) is a pure mapping and stays pure. It gains, for the three
-event kinds, `method.params.github_payload` with exactly the N§3.1 fields, taken from the payload:
+event kinds, `method.params.github_payload` with the N§3.1 fields **plus the extensions this brief adds** — `login_source`, `body_null`,
+`head_repo`, `payload_time`, and hashes, title and head on `reopened`; an `issue_comment` payload carries no branch, so N§3.1's table is
+corrected here and a comment matches by PR number — taken from the payload (Codex round 1: these are listed as extensions and
+clarifications, never as "exactly" the note's fields):
 
 | field | `pull_request` | `pull_request_review` (`submitted`) | `issue_comment` (`created`, on a PR) |
 |---|---|---|---|
@@ -93,6 +97,10 @@ this PR.
   outcome bookkeeping keyed by `idempotency_key` instead of `sha` (`outcomes` is a JSON map already; key non-push entries
   by `idem:<idempotency_key>`). A queued non-push delivery today produces zero inputs and the row fails forever
   (`shas.length > 0` is false → `allSealed` false → `failed++`); this PR fixes that and tests it (T18, third clause).
+- **Pending retention for non-push timeouts** (Codex round 1): today's non-push handler inserts no pending row on entry, and its 202
+  timeout branch alone is not a queue. In the owner-login path an `AppendDeadlineExceededError` inserts the pending row (`gh_event`,
+  `received_at: ingressAt`, the raw payload) before the 202 is returned, so the drain classifies the delivery later with its original
+  `ingress_at`; a redelivery or drain keeps the stored receipt. T18 covers the drained case.
 
 ### 1.3 Policy profile `/2` (core `policy.ts`, P§2)
 
@@ -106,15 +114,27 @@ github: { shared_logins: [ "<login>", … ],            // sorted unique by UTF-
 ```
 
 - `validatePolicyBody` (`policy.ts:371`) accepts `profile` `/1` (unchanged, `github` absent) or `/2` (`github` required,
-  shape above, `GITHUB_KEYS = {shared_logins, identities}` with unknown keys → 400; logins are GitHub login syntax
-  `^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$`, compared case-insensitively at classification — GitHub logins are
-  case-insensitive — but stored as sent; identity values are non-empty strings). `BODY_KEYS` becomes per-profile.
+  shape above, `GITHUB_KEYS = {shared_logins, identities}` with unknown keys → 400; logins are GitHub account logins
+  `^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$` **or GitHub App identities `<slug>[bot]`**
+  (`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?\[bot\]$`) — N§5's own example `retrace-claude-code[bot]` and N§6 step 5's
+  `<slug>[bot]` must validate (F2); compared case-insensitively at classification — GitHub logins are case-insensitive — but stored as
+  sent; **two entries of `shared_logins`, or two keys of `identities`, that are equal case-insensitively → 400** (F2: JCS's byte-distinct
+  keys do not resolve that); identity values are non-empty seat actor ids). `BODY_KEYS` becomes per-profile.
 - `canonicalPolicyV1` is unchanged and serves `/2` too (same JCS rules; the profile string differs, so no `/1` digest can
   collide with a `/2` digest). Golden vectors `packages/core/src/fixtures/policy-v2/*.json`: at least three complete
-  body+envelope inputs (empty `github`; one shared login; a login plus an identity) with canonical bytes and digests.
+  body+envelope inputs (empty `github`; one shared login; a login plus the identity `retrace-claude-code[bot]` → `claude-code`) with
+  canonical bytes and digests, and one rejected vector with case-only duplicates.
 - `PolicyBody` type: `github?: { shared_logins: string[]; identities: Record<string, string> }` present iff `/2`.
-- Selection, activation, routes, `bundle.policies`, `policy_routes` are untouched: a `/2` document is a version like any
-  other. The classifier reads `github` from the **current** policy at ingestion (`store.getPolicy(project, { current:
+- **Supported-profile handling (F1).** The code checks the single constant `POLICY_PROFILE` (`/1`) in more places than the validator:
+  activation evaluation `policy.ts:503` (a document whose profile differs is `policy_corrupt`), activation construction `:643` (stamps
+  the constant into `policy_profile`), the stamp comparison `:514`, offline selection `:1045` (`policy_unsupported_profile`) and export
+  verification `export.ts:264`. Codex's probe of a well-formed `/2` document returned `incomplete/policy_corrupt` from
+  `evaluateActivation` and `policy_unsupported_profile` from `verifyExportBundle`. So: keep `POLICY_PROFILE` = `/1` as the bootstrap
+  profile, add `SUPPORTED_POLICY_PROFILES` = {`/1`, `/2`}, and make every one of those checks accept a supported profile and stamp the
+  document's own profile; **never** change the constant to `/2` (that breaks `/1` history and the `/1` bootstrap). Routes,
+  `bundle.policies` and `policy_routes` are otherwise untouched: a `/2` document is a version like any other. Tests: a `/1` → `/2`
+  activation, selection of the historical `/1` documents after it, `verifyExportBundle` over the mixed history, and doctor against it.
+  The event-hash algorithm does not change; the policy checks do. The classifier reads `github` from the **current** policy at ingestion (`store.getPolicy(project, { current:
   true })`, which the handler already calls and collapses to the boolean `hasDoc` — keep the document that read returns
   instead of adding a second read) and records its digest as `context.policy_digest`. Bootstrap (P§8) still writes `/1`; the `/2` document for `retrace` is Jordan's write.
 
@@ -143,18 +163,25 @@ export async function classifyOwnerLogin(args: {
 - **Candidates read** (N§3.5 item 1): one `store.eventsReferencingArtifacts` call (`store.ts:146`, query shape
   `store.ts:190–203`) with `artifact_keys` = `pr:<R>#<n>` (when `n` is known), `git:<R>#<branch>` (when `branch` is
   known) and `commit:<R>@<head_sha12>` (when `head_sha` is known); `after_seq` = the `seq` of the newest event with
-  `received_at < ingress_at − 30 min` is not cheaply known, so use `after_seq: 0` with `through_seq: readHead.seq`,
+  `received_at < ingress_at − 30 min` is not cheaply known, so use **`after_seq: -1`** (the bound is exclusive, `store.ts:195–197`,
+  `:259`; `0` would drop a declaration at sequence zero, a real event — F7; the existing index tests use `-1` for all history) with
+  `through_seq: readHead.seq`,
   `row_cap: 2000`, `deadline`; then filter in memory on `received_at ∈ [ingress_at − 30 min, ingress_at]` and the
   N§3.3 predicate. If the row cap or deadline trips → `unavailable`/`budget` or `deadline` (N§4). Measure the busiest
-  real window in the test fixture (the Grok seat found 56 rows for PR 130; assert the fixture stays under 2,000).
+  real window in the test fixture (the Grok seat found 56 rows for PR 130; assert the fixture stays under 2,000). The row cap counts
+  matching index rows over the artifact's whole life, before the time filter, so a many-old-rows fixture (2,001 rows older than the
+  window, one inside it) must seal `unavailable`/`budget` — an accepted availability trade-off, not a capacity proof (§6 item 4) — and
+  a sequence-zero fixture (declaration at seq 0, policy activation at seq 1, the webhook next) must classify `declared_by_seat` (F7).
 - **Predicate** (N§3.3), applied in memory, each clause a named function with its own unit test: project; `sealed_by`
   starts with `pinned:` **and** `producer_sig_verdict === "verified"`; `actor.type === "agent"`; `action_detail !==
-  "amended"` and not the target of an effective attribution amendment at `readHead` (reuse the amendment view the
-  attribution module exposes; if that read is not bounded, state it and fall back to excluding only `action_detail
-  === "amended"` with the gap named in the PR); `github_action` present and **without** `result`; `repo`, `login`
+  "amended"` and not the target of an effective attribution amendment at `readHead` — evaluated with the **bounded** evaluator that
+  exists, `evaluateAmendmentsAtU` (`classify.ts:576–648`: bounded candidates through `store.amendmentEventsUpTo`, `store.ts:135`,
+  point-read dependencies, capture context, fails closed), under the owner-login deadline and an explicit aggregate row budget of 2,000
+  (its own cap is 20,000); `collectAttributionAmendments` alone is not the store-loading helper. **There is no fallback** (F3): when that
+  read is unavailable, over budget or past the deadline the decision is `unavailable`, never a classification that ignores amendments; `github_action` present and **without** `result`; `repo`, `login`
   (case-folded), `kind`, and `pr` (or the branch artifact for `pr_open`) equal; normalisation `state`→`review_state`,
   `commit_id`→`head_sha`, review-state aliases exactly as N§3.3 lists them and no others; the kind's content fields
-  equal after normalisation; not consumed (§1.5); `received_at ≤ ingress_at` and `≥ ingress_at − 30 min`; `seq ≤
+  equal after normalisation; not consumed **as of `U`** (§1.5, F4); `received_at ≤ ingress_at` and `≥ ingress_at − 30 min`; `seq ≤
   readHead.seq`. `E.timestamp` is never read.
 - **Decision** (N§4 table): `declared_by_seat` (one seat; when the same seat has several eligible declarations, choose
   the lowest `seq`, N§3.5 item 3) → `actor: { type: "agent", id: <seat>, on_behalf_of: <declaration's on_behalf_of> }`,
@@ -163,11 +190,16 @@ export async function classifyOwnerLogin(args: {
   account actor: `{ type: "system", id: "github:<login as sent>", display_name: "<login> (GitHub account, shared)" }`.
   The record is exactly the N§4 JSON (`policy: "owner-login/1"`, `observer`, `login`, `shared: true`, `payload`,
   `decision`, `context { read_head_seq, read_head_hash, policy_digest }`, `window { from, to, basis: "ingress_at" }`,
-  `received { webhook: null at classification — set by the recompute tool from the sealed received_at; declaration }`,
+  `received { webhook: null — sealed as null, because the seal time is assigned inside sealEvent (chain.ts:74–93) after the record is
+  hashed; the event's own received_at is that time and the recompute tool reports it beside the record, never inside it (F5; N§4's
+  example showed it filled — corrected in the note by this PR); declaration }`,
   `consumed`, `ingress_at`, `classification_ms`). Attach with a sibling of `attachClaimDecision` (`classify.ts:1144`).
 - **Stripping** (N§4, T9): `POST /events` deletes `params[OWNER_LOGIN_DECISION_PARAM]` next to `CLAIM_DECISION_PARAM`
   (`router.ts`, the block commented "/2 and unsigned: strip so a client cannot plant stamps") for every producer-sig
-  format including `/1` — unlike `claim_decision`, no client ever legitimately submits this param.
+  format including `/1` — unlike `claim_decision`, no client ever legitimately submits this param. A **signed** body that carries it
+  becomes invalid once it is stripped before `producerSigCheck`: under `require_signature` the expected result is 401, not a sealed
+  stripped event — T9 states that expectation — and the key is **not** added to either frozen signature format's exclusion list
+  (`producer-sig.ts:74–87`), which would change historical signature semantics (Codex round 1).
 - **Budget**: `OWNER_LOGIN_DEADLINE_MS = 300` (beside `CLASSIFY_DEADLINE_MS = 500`, `classify.ts:40`), always inside the
   delivery's remaining `WEBHOOK_DELIVERY_DEADLINE_MS` (`router.ts:70`, 2,000 ms): `deadline = min(now + 300,
   deliveryDeadline)`.
@@ -179,7 +211,7 @@ export async function classifyOwnerLogin(args: {
 ### 1.5 Atomic event-plus-consumption write (core `store.ts`, `apps/worker/src/d1-store.ts`, `packages/mcp-server/src/sqlite-store.ts`)
 
 - New table, every store: `owner_login_consumption(project TEXT NOT NULL, declaration_event_id TEXT NOT NULL,
-  consumed_by_delivery TEXT, consumed_by_event_id TEXT NOT NULL, consumed_at TEXT NOT NULL, PRIMARY KEY (project,
+  consumed_by_delivery TEXT, consumed_by_event_id TEXT NOT NULL, consumed_by_seq INTEGER NOT NULL, consumed_at TEXT NOT NULL, PRIMARY KEY (project,
   declaration_event_id))` — in `SCHEMA_SQL` (`store.ts:479`), `apps/worker/schema.sql`, the memory store (a `Map`
   keyed `project\u0000declaration_event_id`), and the D1/SQLite `tables` lists used by `deleteProject`
   (`d1-store.ts:45`, `sqlite-store.ts:73`) so a project delete removes its rows.
@@ -187,8 +219,15 @@ export async function classifyOwnerLogin(args: {
   consumed_by_delivery?: string }> })`: D1 appends one `INSERT INTO owner_login_consumption … VALUES` statement per row to
   the **same** `db.batch()` as `insertStatements(e)` (`d1-store.ts:33–35`); SQLite runs them inside the same `BEGIN … COMMIT`
   as `insertRows(e)` (`sqlite-store.ts:59–68`); the memory store checks the map and writes event and rows in one
-  synchronous step. `consumed_by_event_id = e.id`, `consumed_at = e.received_at`. `appendEvent` (`store.ts:812`) passes
-  `opts.extras` through to `insert`.
+  synchronous step. `consumed_by_event_id = e.id`, `consumed_by_seq = e.seq`, `consumed_at = e.received_at`. `appendEvent`
+  (`store.ts:812`) passes `opts.extras` through to `insert`.
+- **Consumption is read at the recorded head (F4).** A candidate's row counts only when `consumed_by_seq ≤ readHead.seq` (`U`):
+  `EventStore.ownerLoginConsumptionUpTo(project, declaration_ids, throughSeq, { deadline, row_cap })` is the bounded read on every store,
+  and it is the read §1.4's "not consumed as of `U`" clause uses. The counterexample the bound closes: A captures `U`; B seals E's
+  consumption at `U+1`; A's read of the current table would see E consumed and seal `unresolved` with `read_head_seq: U`, which a replay
+  at `U` cannot reproduce. With the bound, A does not see it, attempts allocation, loses the atomic insert on the primary key, and takes
+  the reclassification path already specified. The note's N§3.5 item 2 gains a dated correction to this effect in this PR; the replay
+  contract (a row iff a sealed decision lists it) is unchanged.
 - **Primary-key failure** surfaces as a `UNIQUE constraint failed: owner_login_consumption…` error. The handler's existing
   retry loop treats any `/UNIQUE/i` as a seq collision and re-appends the same input up to four times; that would
   re-assert a stale decision (N§3.5 item 3). So: the owner-login append path catches an error whose message names
@@ -204,20 +243,31 @@ export async function classifyOwnerLogin(args: {
 - **Status** (`packages/core/src/status.ts`, `capture` block `:43–70`, `buildProjectStatus :84`, `renderProjectStatus :263`):
   `capture.owner_login_events: { total, sealed_as_human, by_status: { declared_by_seat, conflicting, unresolved,
   unavailable, identity_mapped }, read_time_labels: { declared_by_seat, conflicting, unresolved }, computed_at_seq }`
-  exactly as N§7. `total` = webhook-sealed events whose `github_payload.login` or (pre-adoption) `actor.id` is
-  `github:<shared login>` for a login in the current policy's `shared_logins`; `sealed_as_human` = those with
+  exactly as N§7. `total` = webhook-produced events (`sealed_by webhook:github`, plus the unstamped pre-2026-08-30 events whose method
+  identifies the GitHub adapter — N§1.2 counts four) for a login in the current policy's `shared_logins`, matched as `github_payload.login`
+  equal to the raw login case-insensitively when the payload exists, otherwise (pre-hash seals) `actor.id === "github:<login>"` in its
+  prefixed form; an old seal whose actor id is a payload e-mail records no login and is counted under `legacy_unknown_login`, never
+  attributed to a login it did not record (F6); `identity_mapped` counts logins in `identities`, a stated separate scope; `sealed_as_human` = those with
   `actor.type === "human"` (650 on 09-26 03:43Z; the number the build reports is the number). `read_time_labels`
   applies §1.4's predicate to `sealed_as_human` events using declarations **and** outcome records (`github_action.result`
-  with a matching `review_id`/`comment_id`/`pr`, N§3.2 last sentence, N§8) — label only, no consumption. Text line as
+  with a matching `review_id`/`comment_id`/`pr`, N§3.2 last sentence, N§8) — label only, no consumption. Binding rule for historical
+  seals (Codex round 1): the old adapter kept no `review_id`/`comment_id` in params but does keep the location URL and, usually, a
+  delivery-based idempotency key, so an outcome binds only when its `review_id`/`comment_id` appears in the historical event's location
+  URL or idempotency key; a PR number alone never binds. A pre-hash event has no `ingress_at` or content hashes, so this is a separate
+  read-time evidence path, not the ingestion predicate re-run. Text line as
   N§7 with the word "read-time:" and "(computed at read, not sealed)". `docs/reference.md` documents the field where
   `agent_events_not_pinned` is documented (`:263`).
 - **Doctor** (`packages/mcp-server/src/doctor.ts`): `sealedLooksAgent` (`:226`) returns true for a webhook event whose
   `owner_login_decision.status` is `declared_by_seat` or `identity_mapped`; a new finding `owner-login` fails under
   `--gate` (warn otherwise) when an event with `github_payload.login ∈ shared_logins` sealed **after** the `/2` policy's
-  activation `seq` carries `actor.type: "human"` (a producer defect, the shape of `model_claim: absent`). Doctor reads the
-  policy through the existing status/export it already fetches; no new Worker route.
-- **`why` / timeline** (`packages/core/src/explain.ts`, `describeRecordedActor :103`): a `system` actor with an
-  `owner_login_decision` renders "GitHub account <login> (shared login) — who acted: unresolved (<reason>)" /
+  activation `seq` carries `actor.type: "human"` (a producer defect, the shape of `model_claim: absent`). Doctor reads the current policy document through the `/projects/:p/policy` route it already fetches
+  (`doctor.ts:941`); status exposes only mode, digest and version (`status.ts:80`), and the export's policy documents are discarded by
+  `fetchVerifiedRemoteEvents` today — either keep the verified documents beside the verified events for the gate, or use the policy
+  route; no new Worker route. The adoption point for a login is the **first** activation of a `/2` document that lists it in
+  `shared_logins`, not the newest activation. The gate and every consumer read the status at its canonical nesting,
+  `owner_login_decision.decision.status`.
+- **`why` / timeline** (`packages/core/src/explain.ts`, `describeRecordedActor :103`): an actor carrying an `owner_login_decision`
+  (`system` for the account, `agent` for `declared_by_seat` and `identity_mapped`) renders by `decision.status`: "GitHub account <login> (shared login) — who acted: unresolved (<reason>)" /
   "… — declared by <seat> (evt_<id12>), not identity-verified" / "… — conflicting: <seats>"; an `identity_mapped` actor
   renders as the seat with "(GitHub App identity)"; a `declared_by_seat` actor is **never** rendered as an established
   actor (NOOA N2). `eventForModel` (`:68`) gains `owner_login_display` with the same string, marked untrusted like the
@@ -225,7 +275,9 @@ export async function classifyOwnerLogin(args: {
 - **Recompute** (`packages/mcp-server/src/export-cli.ts`): `retrace-export owner-login --recompute --bundle <export.json>
   [--policy <digest>]` replays every webhook seal in `seq` order against the bundle's events and `bundle.policies`,
   recomputes N§4 with the **sealed** `ingress_at`, `read_head_seq` and `policy_digest` from each decision record, and
-  prints per event `match` / `mismatch <field>`; exit 1 on any mismatch. `verifyExportBundle` is unchanged (the
+  prints per event `match` / `mismatch <field>`; exit 1 on any mismatch. Observed fields — `classification_ms`, `received.declaration`,
+  `received.webhook` (sealed null) — are **preserved from the sealed record and reported as preserved**, never presented as recomputed
+  evidence (F5); the event's `received_at` is printed beside the record as an annotation. `verifyExportBundle` is unchanged (the
   decision is inside the hashed event).
 
 ### 1.7 agent-ops 19 and the note's dated correction (`docs/agent-ops.md`, `docs/design/github-owner-login-attribution.md`)
@@ -235,34 +287,36 @@ export async function classifyOwnerLogin(args: {
 - In the note: §11 T3's "Measured so far on PR 130 itself" and §13's "Live samples (T3)" rows gain "(measured
   2026-09-26; snapshot — later samples are recorded on the step-1 pull request)" and no number changes; add one row to
   §13: "Step-1 build brief | `docs/design/owner-login-step1-build-brief.md`, `evt_dc485a8a…`". The note's **Status** line
-  gains "v1.4.1 — R5-L1 dated (step-1 PR)". Nothing else in the note changes; a needed change is a discrepancy report.
+  gains "v1.4.2 — R5-L1 dated (step-1 PR)" (v1.4.1 is this brief's own PR #133: the dated corrections to §3.5 item 2 (F4) and §4 (F5),
+  §8 below). Nothing else in the note changes; a needed change is a discrepancy report.
 
 ## 2. Tests — every N§11 test lands, each named in a `test(...)` title with its id
 
 | id | where | what the assertion is |
 |---|---|---|
 | T1 | `router.test.ts` (memory store, `/2` policy) | comment webhook + one eligible pinned declaration → `actor` = seat, `status declared_by_seat`, declaration listed, `consumed` = [id], consumption row present |
-| T2 | `export-cli.test.ts` | `owner-login --recompute` over an export of T1/T4/T17's store reproduces every decision byte-identically and the table |
+| T2 | `export-cli.test.ts` | `owner-login --recompute` over an export of T1/T4/T17's store reproduces every decision byte-identically (the sealed record; observed fields preserved and reported as such, F5) and the table |
 | T3 | **live, after deploy** (§5) | one real comment, review, PR body edit and PR open through `gh` with declarations; each webhook `body_sha256` equals the seat's; result recorded on the note as a dated correction if normalisation changes |
 | T4 | `owner-login.test.ts` | two seats, same body hash → `conflicting`, account actor, both listed |
 | T5 | `owner-login.test.ts` | declaration `sealed_by: owner` / verdict `none` → ineligible; listed under `proximity_hints`, `unresolved` |
 | T6 | `owner-login.test.ts` | right PR and time, different `body_sha256` → `unresolved`/`proximity_only` |
 | T7 | `owner-login.test.ts` | declaration at `ingress_at − 30 min − 1 s` → `unresolved`; at `− 30 min` → `declared_by_seat` |
 | T8 | `router.test.ts` | `/1` policy, `/2` with empty list, and an unlisted login: sealed event bytes identical to a pre-change fixture (store the fixture JSON; `github_payload` is **present** in all three — T8's identity is of `actor` and the absence of `owner_login_decision`; state this in the test) |
-| T9 | `router.test.ts`, `owner-login.test.ts` | store error / row cap / deadline → `unavailable` with the named reason, account actor; a `POST /events` body carrying `owner_login_decision` has it stripped under every producer-sig format |
-| T10 | `status.test.ts` | `sealed_as_human` unchanged by labels; a historical human event flips to read-time `declared_by_seat` when an outcome record with its `review_id` exists |
+| T9 | `router.test.ts`, `owner-login.test.ts` | store error / row cap / deadline → `unavailable` with the named reason, account actor; a `POST /events` body carrying `owner_login_decision` has it stripped under every producer-sig format; a **signed** body carrying it under `require_signature` → 401 (the stripped body no longer matches its signature) |
+| T10 | `status.test.ts` | `sealed_as_human` unchanged by labels; a historical human event flips to read-time `declared_by_seat` when an outcome record whose `review_id` appears in the event's location URL or idempotency key exists (a PR number alone does not flip it); `total` counts pre-hash, unstamped and declared-agent events, and an e-mail-id seal lands in `legacy_unknown_login` (F6) |
 | T11 | `doctor.test.ts` | `--gate` fails on a post-activation shared-login `human` seal; passes on `declared_by_seat` and `unresolved` |
 | T12 | `owner-login.test.ts` | login in `identities` → mapped seat, `identity_mapped`, no declaration read (assert the store's index read was not called); an unlisted `[bot]` login keeps today's heuristic |
 | T13 | `router.test.ts` | merge webhook with `merge_commit_sha` matching a `merged` declaration → `declared_by_seat`; without → `unresolved` |
-| T14a | `owner-login.test.ts` + fixtures | the real declaration `evt_df2d386cc03b4a06a435906aa582de9e` (fetch raw with the seat token; fixture JSON committed) and a synthesised `pull_request.opened` payload for PR 130 (body = `~/.retrace/handoff-2026-09-26/pr-p1/body.md`, whose normalised sha256 must equal `fa882683fb429ed12986762d08cb4511d19c2d830d986fdbed5c5e994e4d720d`; title `docs(design): GitHub owner-login attribution v1 — P1 note (#82, #69), class (a)`; `head.ref jordandru/claude-owner-login-p1`; `head.sha 57299cf20f83cff20dc27da2d08596e24274ec2b`; sender `jordandru`): the candidate read by branch and commit key returns the declaration; the predicate refuses it (no `title_sha256`); classification is `unresolved`/`proximity_only` |
+| T14a | `owner-login.test.ts` + fixtures | the real declaration `evt_df2d386cc03b4a06a435906aa582de9e` (fetch raw with the seat token; fixture JSON committed) and a synthesised `pull_request.opened` payload for PR 130 (body = `~/.retrace/handoff-2026-09-26/pr-p1/body.md`, whose normalised sha256 must equal `fa882683fb429ed12986762d08cb4511d19c2d830d986fdbed5c5e994e4d720d`; title `docs(design): GitHub owner-login attribution v1 — P1 note (#82, #69), class (a)`; `head.ref jordandru/claude-owner-login-p1`; `head.sha 57299cf20f83cff20dc27da2d08596e24274ec2b`; sender `jordandru`): the candidate read by branch and commit key returns the declaration; the predicate refuses it (no `title_sha256`); classification is `unresolved`/`proximity_only`. The payload is labelled **reconstructed** in the fixture, and its `ingress_at` is set so the real declaration is inside the window — the missing title is the only reason tested |
 | T14b | same fixture + a compliant declaration | → `declared_by_seat` (claude-code) through the lookup |
 | T15 | `owner-login.test.ts` | caller `timestamp` earlier than the action but `received_at > ingress_at` → `unresolved`; `received_at = ingress_at − 1 s` → `declared_by_seat`; an outcome record before `ingress_at` → not a declaration; declaration and action in the same second → `declared_by_seat` |
 | T16 | `owner-login.test.ts` | after a matched `pr_edit`, a title-only edit with the same body → `unresolved`/`no_declaration`; `review_state: commented` does not match an `approved` review; a different `commit_id` does not match |
-| T17 | `store.test.ts`, `sqlite-store.test.ts`, `d1-store.workerd.test.ts`, `router.test.ts` | two identical comments after one declaration → first `declared_by_seat`, second `unresolved`, one row; concurrent variant (two `Promise.all` deliveries against the memory store with an injected yield between read and write, and against SQLite): exactly one row, one `declared_by_seat`, the other reclassified to `unresolved`; a contrived third whose second write also fails → `allocation_failed`, no loop (assert the classifier ran twice, never three times); a failure injected between classification and `insert` leaves no row and no event; replay reproduces both |
+| T17 | `store.test.ts`, `sqlite-store.test.ts`, `d1-store.workerd.test.ts`, `router.test.ts` | two identical comments after one declaration → first `declared_by_seat`, second `unresolved`, one row; concurrent variant (two `Promise.all` deliveries against the memory store with an injected yield between read and write, and against SQLite): exactly one row, one `declared_by_seat`, the other reclassified to `unresolved`; a contrived third whose second write also fails → `allocation_failed`, no loop (assert the classifier ran twice, never three times); a failure injected between classification and `insert` leaves no row and no event; replay reproduces both; **F4 interleaving**, tested apart from the two-readers-then-write race: A captures `U`, B seals E's consumption at `U+1`, A's bounded read must not see it, A attempts allocation, fails the key, reclassifies. The asynchronous barrier sits outside the synchronous `insert` transaction (an await inside the memory store's allocation would break atomicity) |
 | T18 | `router.test.ts` | declaration sealed after `ingress_at` but before the webhook's own seal → `unresolved`; one second before → `declared_by_seat`; a delivery queued `pending_policy` with `gh_event: issue_comment`, drained after a `/2` policy lands, carries its original `received_at` as `ingress_at`, and a declaration sealed between arrival and drain → `unresolved`; the drain seals a non-push row (today it cannot) |
 | T19 | `owner-login.test.ts` | two same-seat eligible declarations → lowest `seq` consumed and named; the other stays available |
 | — | `github.test.ts` | every `github_payload` field of §1.1 for each event kind and action, including `body_null`, `login_source`, and that `push`/`workflow_run` outputs are byte-identical to before |
-| — | `policy.test.ts` | `/2` validation (unknown key → 400, unsorted logins → 400, bad login syntax → 400, empty `github` accepted), `/1` unchanged, golden vectors `/2` |
+| — | `policy.test.ts` | `/2` validation (unknown key → 400, unsorted logins → 400, bad login syntax → 400, `retrace-claude-code[bot]` accepted, case-only duplicate logins or identity keys → 400, empty `github` accepted), `/1` unchanged, golden vectors `/2`; a `/1` → `/2` activation, historical `/1` selection after it, `verifyExportBundle` over the mixed history and doctor against it (F1) |
+| — | `owner-login.test.ts`, `store.test.ts` | sequence-zero fixture → `declared_by_seat`; many-old-rows fixture (2,001 rows outside the window) → `unavailable`/`budget` (F7, §6 item 4); a corrected (amended) but otherwise eligible `pr_open` declaration → excluded; amendment read failure → `unavailable` (F3); `ownerLoginConsumptionUpTo` respects `throughSeq` on every store (F4) |
 | — | `explain.test.ts` | the three rendering strings; a `declared_by_seat` event never renders as a plain agent line |
 
 Baseline at `b54b47d8`: core 361, cli 238, worker 36 tests (hand-off 15). Every new test is additive; no existing
@@ -312,17 +366,27 @@ carry hashes, so the read-time label can be computed for them without an outcome
 
 1. **`/2` profile versus an optional key on `/1`** (§1.3). Position: `/2`; the frozen form says unknown keys are 400 and
    nothing is defaulted, so an optional key would either break `/1` digests or default into the hash. To overrule: name
-   how `/1` admits the key without changing existing digests.
+   how `/1` admits the key without changing existing digests. *Codex round 1: confirmed, subject to F1 (supported-profile handling
+   across activation, selection and export verification) and F2; the frozen schema, not digest preservation, is the reason an
+   optional key is out.*
 2. **`gh_event` on pending rows** (§1.2). Position: required for the event-kind-aware drain the note names as a build
-   item; NULL drains as push. To overrule: keep the drain push-only and state that queued non-push deliveries are dropped.
+   item; NULL drains as push. To overrule: keep the drain push-only and state that queued non-push deliveries are dropped. *Codex
+   round 1: confirmed (its probe: zero push inputs and one comment input for the same comment payload); NULL-as-push does not recover
+   pre-upgrade non-push rows — a stated migration limit.*
 3. **Consumption-key error detection by message text** (§1.5). Position: match `owner_login_consumption` in the error
    message on all three stores (SQLite and D1 both name the table in `UNIQUE constraint failed:`); a test per store
    asserts the message shape so a driver change fails loudly. To overrule: propose a pre-read that does not reintroduce
-   the reservation.
+   the reservation. *Codex round 1: confirmed and measured — Node SQLite: `UNIQUE constraint failed: owner_login_consumption.project,
+   owner_login_consumption.declaration_event_id`; Miniflare/workerd D1: the same text prefixed `D1_ERROR:` and suffixed
+   `SQLITE_CONSTRAINT (extended: SQLITE_CONSTRAINT_PRIMARYKEY)`; a batch with the event insert followed by the duplicate row left zero
+   event rows. Match a constraint failure that names the table, not any error that mentions it; a typed store error is an acceptable
+   alternative. These are local driver measurements, not a production-D1 measurement.*
 4. **The 30-minute lower bound applied in memory over an `after_seq: 0` read** (§1.4). Position: the index read is
    bounded by `row_cap` and `deadline`, and a PR's rows over its life are far under 2,000 (measured 56 in the busiest
    window); a `received_at`-bounded index read does not exist and adding one is out of scope. To overrule: specify the
-   index change.
+   index change. *Codex round 1: accepted as a lifetime budget, not a window capacity — the cap counts matching index rows before the
+   time filter, so the 56-row window measurement proves nothing about an artifact's lifetime; F7 fixed and the many-old-rows fixture
+   added (§1.4).*
 
 ## 7. Roles
 
@@ -346,5 +410,6 @@ put `pr:jordandru/retrace#<n>` on every verdict.
 | Session 22 resume (hand-off 15) | `evt_1565646190fe4d7d96414d116c098375` |
 | This brief written (edit event) | `evt_8e6340f1cea54f3494bdb2483fac979e`; PR #133 opened `evt_d4e1a1458a8c4aabacc8025ea2a3728b` |
 | Round 1: routing NOOA `evt_9a878724bd7c409f994195db2e5ffcbf`; verdict rejected, 1 Medium (N1) `evt_b373209785314ca4a0a1fffc65b219a0`; gate check `evt_3d4e15bb290142a2bf3a95f2fd4c589d`; copy review 5331907214 | Jordan: apply N1 in place as v1.1, then round 2 `evt_7778c91baa3e4ea6879e52025a3acecb` |
+| Round 1 (Codex): routing `evt_876a04064c4f4b24a975cab67b209bdc`; verdict rejected, 7 Medium F1–F7 `evt_1e9f4144fb0042bf8bcb432d736554a2`; gate check `evt_109a0378b92141de97aace463362ad45`; copy review 5343817023 | Jordan: apply F1–F7 in place as v1.2 with the note's F4/F5 corrections, then round 2 (Codex re-check, NOOA re-check, Grok seat first pass) `evt_5d5309168b6244c4aa1c20dbbab46e12` |
 | Note v1.4 merged | PR #130, `b54b47d8`, merge record `evt_01f8c7d8…` |
 | Real `pr_open` declaration / webhook seal / outcome used by T14 | `evt_df2d386cc03b4a06a435906aa582de9e` / `evt_2f60cfc75d604371bffb0b3be81a1ab9` / `evt_0efdea31057b4ef8aa1cede2c6ab9c5a` |
