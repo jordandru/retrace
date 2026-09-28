@@ -1,0 +1,58 @@
+[
+  {
+    "event": "push",
+    "payload": {
+      "repository": {
+        "full_name": "owner/repo"
+      },
+      "ref": "refs/heads/main",
+      "pusher": {
+        "name": "owner"
+      },
+      "commits": [
+        {
+          "id": "abcdef1234567890",
+          "message": "old push",
+          "timestamp": "2026-09-28T00:00:00Z",
+          "author": {
+            "name": "Author",
+            "email": "a@example.test"
+          },
+          "added": [
+            "a.ts"
+          ],
+          "parents": []
+        }
+      ]
+    },
+    "serialized": "[{\"project\":\"owner/repo\",\"actor\":{\"type\":\"human\",\"id\":\"a@example.test\",\"display_name\":\"Author\"},\"action\":\"committed\",\"artifacts\":[{\"id\":\"commit:owner/repo@abcdef123456\",\"kind\":\"commit\",\"label\":\"owner/repo@abcdef1\",\"role\":\"generated\"},{\"id\":\"repo:owner/repo#a.ts\",\"kind\":\"file\",\"label\":\"a.ts\",\"role\":\"generated\"}],\"timestamp\":\"2026-09-28T00:00:00Z\",\"location\":{\"system\":\"github\"},\"intent\":\"old push\",\"change\":{\"after_hash\":\"abcdef1234567890\",\"summary\":\"1 file (pushed to main)\"},\"method\":{\"tool\":\"git\",\"automated\":false,\"params\":{\"sha\":\"abcdef1234567890\",\"producer\":\"github-push\",\"ref\":\"refs/heads/main\",\"pusher\":\"owner\",\"raw_message\":\"old push\",\"author\":{\"name\":\"Author\",\"email\":\"a@example.test\"},\"parents\":[],\"parents_complete\":true,\"model_claim\":\"absent\"}},\"idempotency_key\":\"gh:push:owner/repo:abcdef1234567890\",\"tags\":[\"github\",\"push\"]}]"
+  },
+  {
+    "event": "workflow_run",
+    "payload": {
+      "repository": {
+        "full_name": "owner/repo"
+      },
+      "action": "completed",
+      "workflow_run": {
+        "id": 77,
+        "name": "CI",
+        "run_number": 12,
+        "run_attempt": 1,
+        "conclusion": "success",
+        "head_sha": "abcdef1234567890",
+        "head_branch": "main",
+        "event": "push",
+        "html_url": "https://example.test/run",
+        "run_started_at": "2026-09-28T00:00:00Z",
+        "updated_at": "2026-09-28T00:01:00Z",
+        "pull_requests": [
+          {
+            "number": 1
+          }
+        ]
+      }
+    },
+    "serialized": "[{\"project\":\"owner/repo\",\"actor\":{\"type\":\"system\",\"id\":\"github-actions\",\"display_name\":\"GitHub Actions · CI\"},\"action\":\"executed\",\"artifacts\":[{\"id\":\"run:owner/repo#77\",\"kind\":\"workflow_run\",\"label\":\"CI #12\",\"role\":\"generated\"},{\"id\":\"pr:owner/repo#1\",\"kind\":\"pr\",\"label\":\"PR #1\",\"role\":\"used\"},{\"id\":\"commit:owner/repo@abcdef123456\",\"kind\":\"commit\",\"label\":\"owner/repo@abcdef1\",\"role\":\"used\"}],\"timestamp\":\"2026-09-28T00:01:00Z\",\"duration_ms\":60000,\"location\":{\"system\":\"github\",\"url\":\"https://example.test/run\"},\"intent\":\"CI on main: success\",\"change\":{\"summary\":\"conclusion: success\",\"after_hash\":\"abcdef1234567890\"},\"method\":{\"tool\":\"github-actions\",\"automated\":true,\"params\":{\"event\":\"push\",\"conclusion\":\"success\",\"attempt\":1}},\"idempotency_key\":\"gh:owner/repo:run77:1\",\"tags\":[\"github\",\"ci\",\"success\"]}]"
+  }
+]

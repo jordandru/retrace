@@ -600,7 +600,7 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
           if (admit === "pending") return json({ ok: true, pending: (payload.commits ?? []).map((c: any) => c.id), reason: "breaker_open" }, 202);
           probe = admit === "probe";
         }
-        const inputs = mapGithubWebhook(ghEvent, payload, { project, includePush: opts.githubIncludePush, deliveryId: delivery && inputs_needs_unique(ghEvent) ? delivery : undefined });
+        const inputs = await mapGithubWebhook(ghEvent, payload, { project, includePush: opts.githubIncludePush, deliveryId: delivery && inputs_needs_unique(ghEvent) ? delivery : undefined });
         const results = [];
         const pendingShas: string[] = [];
         for (let inputIndex = 0; inputIndex < inputs.length; inputIndex++) {
@@ -1169,7 +1169,7 @@ export async function drainPendingGithubDeliveries(store: EventStore, opts: {
       failed++;
       continue;
     }
-    const inputs = mapGithubWebhook("push", payload, { project: row.project, includePush: true });
+    const inputs = await mapGithubWebhook("push", payload, { project: row.project, includePush: true });
     type Outcome = { status: "pending" | "sealed" | "budget_failed"; attempt_count: number; reason?: string };
     const rawOutcomes: Record<string, string | Outcome> = row.outcomes ? JSON.parse(row.outcomes) as Record<string, string | Outcome> : {};
     const outcomes: Record<string, Outcome> = Object.fromEntries(Object.entries(rawOutcomes).map(([sha, value]) => [
