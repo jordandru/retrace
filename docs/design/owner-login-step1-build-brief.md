@@ -1,11 +1,14 @@
 # Owner-login step 1 — builder brief (classifier, ingestion hashes, consumers, agent-ops 19)
 
-**Status:** v1.2, 2026-09-28 (v1.2 20:0xZ / 14:0x MDT: Codex round-1 REJECTED `evt_1e9f4144fb0042bf8bcb432d736554a2` — seven Medium F1–F7, zero High, zero Low — applied in place on Jordan's go `evt_5d5309168b6244c4aa1c20dbbab46e12`: F1 supported-profile handling across activation, selection and export verification; F2 `[bot]` App identities validate, case-only duplicates rejected; F3 the amendment fallback removed, the bounded evaluator named; F4 the consumption read bounded by the read head, with a dated correction to the note's §3.5 in this PR; F5 `received.webhook` sealed null, replay compares the sealed record, a dated correction to the note's §4; F6 status totals compare raw logins and state legacy coverage; F7 `after_seq: -1` and a sequence-zero fixture; plus Codex's clarifications applied — stripping under a signature, doctor's policy data path, pending retention for non-push timeouts, legacy outcome binding, payload fields listed as extensions, T14a labelling, T17 barrier placement. v1.1 21:3xZ / 15:3x MDT: NOOA round-1 Medium N1 `evt_b373209785314ca4a0a1fffc65b219a0` — §0 and §1.4
+**Status:** v1.2.1, 2026-09-28 (v1.2.1 22:1xZ / 16:1x MDT: round-2 Lows applied in place on Jordan's go `evt_d068f3696d004d3eb96ec61bd3e9cbf8` — Codex R2-L1 (§1.6's stale "`verifyExportBundle` is unchanged") and R2-L2 (the "after the record is hashed" explanation in §1.4 and in the note's §4 correction; `chain.ts:82–93` assigns `received_at` and then hashes — the classifier simply never has the receipt), `evt_0478dfd6bf2041b985b40bfff9ed7bda`; the Grok seat's L1 (§0's "note wins, file and stop" now excludes the extensions this brief lists as its own), `evt_5805a058023e4055b79009f8607ca2d3`. v1.2 20:0xZ / 14:0x MDT: Codex round-1 REJECTED `evt_1e9f4144fb0042bf8bcb432d736554a2` — seven Medium F1–F7, zero High, zero Low — applied in place on Jordan's go `evt_5d5309168b6244c4aa1c20dbbab46e12`: F1 supported-profile handling across activation, selection and export verification; F2 `[bot]` App identities validate, case-only duplicates rejected; F3 the amendment fallback removed, the bounded evaluator named; F4 the consumption read bounded by the read head, with a dated correction to the note's §3.5 in this PR; F5 `received.webhook` sealed null, replay compares the sealed record, a dated correction to the note's §4; F6 status totals compare raw logins and state legacy coverage; F7 `after_seq: -1` and a sequence-zero fixture; plus Codex's clarifications applied — stripping under a signature, doctor's policy data path, pending retention for non-push timeouts, legacy outcome binding, payload fields listed as extensions, T14a labelling, T17 barrier placement. v1.1 21:3xZ / 15:3x MDT: NOOA round-1 Medium N1 `evt_b373209785314ca4a0a1fffc65b219a0` — §0 and §1.4
 overclaimed byte-identity for unclassified seals while `github_payload` is added — applied in place on Jordan's go
 `evt_7778c91baa3e4ea6879e52025a3acecb`; v1 18:5xZ / 12:5x MDT). Author claude-code (coordinator, `claude-fable-5-1`, model source
 harness-runtime), on Jordan's signed go `evt_dc485a8af6ef47758bb9f439c62dce95` (hand-off 15 item 2). **Not built.**
 Builds `docs/design/github-owner-login-attribution.md` **v1.4** (merged `b54b47d8`, PR #130) §6 steps 1–3 and §7; the
-note's text wins over this brief wherever they differ — file the discrepancy on the pull request and stop. Builder:
+note's text wins over this brief wherever they differ, **except the extensions and clarifications this brief lists as its own** (§1.1's
+added payload fields and the missing branch on `issue_comment`, T8's actor/no-decision identity, the `/2` profile, the four §6 decisions):
+those go in the code pull request's body and the build continues. Any other difference: file the discrepancy on the pull request and
+stop (Grok seat, L1). Builder:
 **cursor-agent** in a fresh worktree (agent-ops 1, 4). Reviews: this brief is **class (a)** (it governs behaviour) and takes
 the design gate; the code pull request it specifies is **class S** under `.claude/skills/review-effort/routing-rules/1.json`
 (`router.ts`, `store.ts`, `policy*`, `schema.sql`, `schema.ts` are S paths; first pass `high`) **and class (a)**, because it
@@ -190,9 +193,10 @@ export async function classifyOwnerLogin(args: {
   account actor: `{ type: "system", id: "github:<login as sent>", display_name: "<login> (GitHub account, shared)" }`.
   The record is exactly the N§4 JSON (`policy: "owner-login/1"`, `observer`, `login`, `shared: true`, `payload`,
   `decision`, `context { read_head_seq, read_head_hash, policy_digest }`, `window { from, to, basis: "ingress_at" }`,
-  `received { webhook: null — sealed as null, because the seal time is assigned inside sealEvent (chain.ts:74–93) after the record is
-  hashed; the event's own received_at is that time and the recompute tool reports it beside the record, never inside it (F5; N§4's
-  example showed it filled — corrected in the note by this PR); declaration }`,
+  `received { webhook: null — sealed as null: the classifier builds the record before sealEvent (chain.ts:82–93) assigns received_at
+  and hashes it, and nothing populates the nested field with that receipt, so this design leaves it null; the event's own received_at
+  is that time and the recompute tool reports it beside the record, never inside it (F5, R2-L2; N§4's example showed it filled —
+  corrected in the note by this PR); declaration }`,
   `consumed`, `ingress_at`, `classification_ms`). Attach with a sibling of `attachClaimDecision` (`classify.ts:1144`).
 - **Stripping** (N§4, T9): `POST /events` deletes `params[OWNER_LOGIN_DECISION_PARAM]` next to `CLAIM_DECISION_PARAM`
   (`router.ts`, the block commented "/2 and unsigned: strip so a client cannot plant stamps") for every producer-sig
@@ -277,8 +281,8 @@ export async function classifyOwnerLogin(args: {
   recomputes N§4 with the **sealed** `ingress_at`, `read_head_seq` and `policy_digest` from each decision record, and
   prints per event `match` / `mismatch <field>`; exit 1 on any mismatch. Observed fields — `classification_ms`, `received.declaration`,
   `received.webhook` (sealed null) — are **preserved from the sealed record and reported as preserved**, never presented as recomputed
-  evidence (F5); the event's `received_at` is printed beside the record as an annotation. `verifyExportBundle` is unchanged (the
-  decision is inside the hashed event).
+  evidence (F5); the event's `received_at` is printed beside the record as an annotation. The event-hash algorithm is unchanged (the
+  decision is inside the hashed event); `verifyExportBundle`'s policy-profile check changes as §1.3 specifies (R2-L1).
 
 ### 1.7 agent-ops 19 and the note's dated correction (`docs/agent-ops.md`, `docs/design/github-owner-login-attribution.md`)
 
@@ -411,5 +415,6 @@ put `pr:jordandru/retrace#<n>` on every verdict.
 | This brief written (edit event) | `evt_8e6340f1cea54f3494bdb2483fac979e`; PR #133 opened `evt_d4e1a1458a8c4aabacc8025ea2a3728b` |
 | Round 1: routing NOOA `evt_9a878724bd7c409f994195db2e5ffcbf`; verdict rejected, 1 Medium (N1) `evt_b373209785314ca4a0a1fffc65b219a0`; gate check `evt_3d4e15bb290142a2bf3a95f2fd4c589d`; copy review 5331907214 | Jordan: apply N1 in place as v1.1, then round 2 `evt_7778c91baa3e4ea6879e52025a3acecb` |
 | Round 1 (Codex): routing `evt_876a04064c4f4b24a975cab67b209bdc`; verdict rejected, 7 Medium F1–F7 `evt_1e9f4144fb0042bf8bcb432d736554a2`; gate check `evt_109a0378b92141de97aace463362ad45`; copy review 5343817023 | Jordan: apply F1–F7 in place as v1.2 with the note's F4/F5 corrections, then round 2 (Codex re-check, NOOA re-check, Grok seat first pass) `evt_5d5309168b6244c4aa1c20dbbab46e12` |
+| Round 2 (head `25e4051`): routing Codex `evt_3d0f68ebd2554e358356fc8e0498141f`, NOOA `evt_81a5999632c945dfb12a27b9cb38ad07`, Grok seat `evt_900b56432a7740aba74fe32d4425d8b9`; verdicts Codex approved 2 Low `evt_0478dfd6bf2041b985b40bfff9ed7bda`, NOOA approved `evt_5e69c6d047f64460af928fa4fd9cc6e9`, Grok seat approved 1 Low `evt_5805a058023e4055b79009f8607ca2d3`; gate checks `evt_3e976ab3…`, `evt_a9314215…`, `evt_cfdb9eb6…`; copies 5344286719, 5344286465, 5344336999 | Jordan: option (a) — apply the three Lows in place as v1.2.1, then scoped re-checks `evt_d068f3696d004d3eb96ec61bd3e9cbf8` |
 | Note v1.4 merged | PR #130, `b54b47d8`, merge record `evt_01f8c7d8…` |
 | Real `pr_open` declaration / webhook seal / outcome used by T14 | `evt_df2d386cc03b4a06a435906aa582de9e` / `evt_2f60cfc75d604371bffb0b3be81a1ab9` / `evt_0efdea31057b4ef8aa1cede2c6ab9c5a` |

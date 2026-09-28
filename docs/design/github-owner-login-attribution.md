@@ -2,7 +2,7 @@
 
 **Status:** v1.4.1, 2026-09-28 (v1.4.1 20:0xZ / 14:0x MDT: two dated in-place corrections from Codex's round-1 review of the step-1 build
 brief, PR #133, `evt_1e9f4144fb0042bf8bcb432d736554a2`, applied on Jordan's go `evt_5d5309168b6244c4aa1c20dbbab46e12` — §3.5 item 2, the consumption read is
-bounded by the read head (F4); §4, `received.webhook` is sealed null (F5). No number, decision or test changed; rule 10.) DRAFT v1.4, 2026-09-26 (v1.4 06:3xZ / 00:3x MDT: the final text touch on Jordan's go `evt_1e00d0a0b1804e68b3b66af34d6db2e2` —
+bounded by the read head (F4); §4, `received.webhook` is sealed null (F5). No number, decision or test changed; rule 10; the §4 correction's wording fixed 22:1xZ on Codex R2-L2.) DRAFT v1.4, 2026-09-26 (v1.4 06:3xZ / 00:3x MDT: the final text touch on Jordan's go `evt_1e00d0a0b1804e68b3b66af34d6db2e2` —
 Codex round-4 R4-L1, NOOA round-4 N4-M1/N4-M2/N4-L3, and the Grok seat's (cursor-agent) first-pass findings R1-M1/R1-L1/R1-L2
 (`evt_238adda495d04d6c8307bb4d39c760d6`); Codex `evt_34361117eb5d4745835616bf5442615c` and NOOA `evt_b3ad9f6c0d1b4ba6a2c13e3717baccff`
 approved v1.3. v1.3 05:4xZ / 23:4x MDT 2026-09-25: Codex round-3 findings `evt_c906656c7cd344cb9c52f43d74dffecc`
@@ -337,9 +337,11 @@ the way `claim_decision` is, `router.ts:817–823`):
 ```
 
 *Correction, 2026-09-28 (Codex, PR 133 round 1, F5, `evt_1e9f4144fb0042bf8bcb432d736554a2`; applied on Jordan's go `evt_5d5309168b6244c4aa1c20dbbab46e12`):
-`received.webhook` is sealed as `null`, not as the value the example shows — the seal time is assigned inside `sealEvent` (`chain.ts`)
-after the record is hashed, so it cannot be inside the record; the event's own `received_at` is that time, and the recompute tool (§7)
-reports it beside the record. `received.declaration` stays as shown.*
+`received.webhook` is sealed as `null`, not as the value the example shows — the classifier builds the record before `sealEvent`
+(`chain.ts`) assigns `received_at` and hashes it, and nothing populates the nested field with that receipt, so the design leaves it null;
+the event's own `received_at` is that time, and the recompute tool (§7) reports it beside the record. `received.declaration` stays as
+shown. (Wording of this correction fixed 2026-09-28 on Codex's round-2 Low R2-L2, `evt_0478dfd6bf2041b985b40bfff9ed7bda`, on Jordan's
+go `evt_d068f3696d004d3eb96ec61bd3e9cbf8`; an earlier draft said the time was assigned after hashing.)*
 
 `sealed_by` stays `webhook:github` and the producer verdict `none`: the Worker did not fix this actor from a credential,
 it derived it from a declaration, and the decision record says so. A `declared_by_seat` event is therefore **not** a witness
