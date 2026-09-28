@@ -2,19 +2,21 @@
 
 **Class (b)** under agent-rules 12: a dated measurement. It changes no rule and implements nothing. Recommendations below are labelled as recommendations for Jordan and the coordinator to route later.
 
-**Provenance.** Grok seat (`GROK.md`), measurer. Jordan's signed instruction `evt_10f46239a3ce47088847f83020b0ef1f`. Coordinator routing `evt_6813fa8969854e83bae4dd0be8e0bc43`. Sent pointer `evt_741a0415a6ea4db1aafd3faf01e9889e` (verified, `evt_9c92ed5f9c5143bf8624247d0515e4dc`). This seat's instruct `evt_48eef6caeed745bc93e9c9518a9dac13`. Session `01a0e990-dc1c-70f2-9fce-4c6f61db2478`. Model displayed: `Grok 4.6 (high)` (`harness-display`); `method.params.reasoning_effort`: `high`. Worktree `jordandru/grok-bluf-security-assessment` at main `b54b47d8`. Brief `~/.retrace/ops-2026-09-28/brief-grok-engineer-feedback.md` sha256 `96455ef19cf6177c22fbcc089cad65167d3e501f0fc2435bc199fc238d0df533`.
+**v2, 2026-09-28 16:42 MDT / 22:42Z — corrections from Codex round 1** (`evt_99bf82bb25ca414aa940e2ece0835fcd`, COMMENT 5345375860; copy sha256 `7864f9d0984b1bdd7a79e93407d8fbb98e9d8acf9c4f682c05467d6de30fc1f8`). Applied in place on Jordan's go `evt_511861e335784a82b34c2d0f90417fe6`, routing `evt_4beb9bba8593461bb34db176684c241d`, this seat's instruct `evt_9328a087f3544b968cd0cba919414277`. Findings applied: R1-M1, R1-M2, R1-M3, R1-L1, R1-L2, R1-L3, R1-L4, R1-L5. Earlier v1 text stays visible where a claim changed (agent-rules 10).
+
+**Provenance.** Grok seat (`GROK.md`), measurer. Jordan's signed instruction `evt_10f46239a3ce47088847f83020b0ef1f`. Coordinator routing `evt_6813fa8969854e83bae4dd0be8e0bc43`. Sent pointer `evt_741a0415a6ea4db1aafd3faf01e9889e` (verified, `evt_9c92ed5f9c5143bf8624247d0515e4dc`). This seat's instruct `evt_48eef6caeed745bc93e9c9518a9dac13`. Session `01a0e990-dc1c-70f2-9fce-4c6f61db2478`. Model displayed: `Grok 4.6 (high)` (`harness-display`); `method.params.reasoning_effort`: `high`. Worktree `jordandru/grok-bluf-security-assessment` at main `b54b47d8`. Brief `~/.retrace/ops-2026-09-28/brief-grok-engineer-feedback.md` sha256 `96455ef19cf6177c22fbcc089cad65167d3e501f0fc2435bc199fc238d0df533`. v2 session `01a0ea2a-5ce4-7aa2-9a81-40c65b351cb2`; same displayed model and effort.
 
 Weekly budget: TUI `/usage` is not reachable from this agent tool loop; `grok usage 01a0e990-dc1c-70f2-9fce-4c6f61db2478` reported no recorded totals; remaining credits unobserved.
 
 A third line in the source thread ("How do you market it?") is out of scope.
 
-Times below are Mountain first (MDT, UTC−6), UTC alongside. `date -u` / `date` immediately before this file was written: **14:06:38 MDT / 20:06:38Z 2026-09-28**. Command times are the `date -u` taken next to that command.
+Times below are Mountain first (MDT, UTC−6), UTC alongside. `date -u` / `date` immediately before this file was written: **14:06:38 MDT / 20:06:38Z 2026-09-28**. v2 corrections written **16:42:57 MDT / 22:42:57Z 2026-09-28**. Command times are the `date -u` taken next to that command.
 
 ---
 
 ## A. Point 1 — is verification "super simple", BLUF-first?
 
-Question asked: does a verdict come first (one line: VERIFIED / NOT VALID, what that covers, what it does not cover, where to dig)? Surfaces run as a stranger would. First three lines of each command's stdout are quoted verbatim, including the Node SQLite experimental warning when it printed.
+Question asked: does a verdict come first (one line: VERIFIED / NOT VALID, what that covers, what it does not cover, where to dig)? Surfaces run as a stranger would. First three lines of each command's combined terminal output are quoted verbatim, including the Node SQLite experimental warning when it printed. Correction 2026-09-28 (Codex r1 **R1-L2**): those SQLite warning lines are stderr, not stdout. Separate captures print VALID/VERIFIED first on stdout and after the warnings in the terminal. The BLUF's "first" means the first verdict words, with that qualification. The command verdicts themselves match.
 
 ### A.1 `retrace-export verify` — live `GET /projects/retrace/export` with `--pubkey`
 
@@ -47,7 +49,9 @@ VALID — signature: valid (kid 51f6ac4c7ba7be66, trusted key from --pubkey http
 
 Fourth line named coverage as a full export (contiguous from #0, head is the issuer's claim). A later line named event **#5589**: `producer signature does not verify — signed fields altered, or the wrong key`. Exit 0, overall `VALID`.
 
-What the first verdict line covers: signature against the published key, content hashes, prev_hash links, omission (1585/7698 present, contiguous from #0). What it does not: the live head past #7697 (the bundle is a complete signed export of a stale claim); the 996 legacy-hash events whose `received_at` is not provably covered (`docs/reference.md:113`); the one INVALID producer signature still inside a VALID bundle; head-rewrite between checkpoints (`docs/reference.md:115`).
+Correction 2026-09-28 (Codex r1 **R1-M3**; this session GET `/events/evt_d04b7cc9dd054246a475386c622b4c4d`): #5589 records actor `openclaw`, `producer_sig_verdict` `unknown_kid`, `producer_sig.kid` `e0c4934645522e62` (NOOA's kid), `sealed_by` `pinned:retrace · openclaw for jordansboxing@gmail.com`. Codex's offline check (`evt_99bf82bb25ca414aa940e2ece0835fcd`): changing only `actor.id` to `nooa` makes `verifyProducerSig` pass; adjacent #5588 with the same ingestion stamp verifies unchanged. `producer-sig.ts:403–420` recomputes against bundle keys independently of the ingestion stamp. This is issue **#96**'s Worker identity rewrite (NOOA's signature sealed under the bearer-resolved actor), not a forged signature. The quoted INVALID line and the overall VALID stand.
+
+What the first verdict line covers: signature against the published key, content hashes, prev_hash links, omission (v1 wrote `1585/7698 present`; Correction 2026-09-28, Codex r1 **R1-L1**: this live bundle is **7698/7698** present, contiguous from #0; 1585 is the snapshot's `chain.total_events` in A.2). What it does not: the live head past #7697 (the bundle is a complete signed export of a stale claim); the 996 legacy-hash events whose `received_at` is not provably covered (`docs/reference.md:113`); the one INVALID producer signature still inside a VALID bundle (#5589 / #96, above); head-rewrite between checkpoints (`docs/reference.md:115`).
 
 ### A.2 Same command on the pre-verified snapshot (`ledger-2026-09-03`)
 
@@ -146,13 +150,21 @@ No VERIFIED / NOT VALID line. The tools are an allowlisted view without ids or h
 
 ### A.6 `retrace-export reconcile --limit 20`
 
-Published npm `@retrace-dev/cli@0.2.0` (`npm view` 14:04:44 MDT / 20:04:44Z) `retrace-export --help` first line:
+Observed invocation from this checkout (`npm view` 14:04:44 MDT / 20:04:44Z) `npx -y --package=@retrace-dev/cli@0.2.0 retrace-export --help` first line:
 
 ```
 retrace-export <keygen|export <project>|verify <bundle.json>|share <project>> [--artifact id] [--out f] [--report f.html] [--pubkey jwk|url] [--label s] [--days n]
 ```
 
-`npx -y --package=@retrace-dev/cli@0.2.0 retrace-export reconcile --limit 20` printed that usage line and did not run the check (exit 0). This laptop also has `/home/jordandrumiler/.nvm/versions/node/v22.23.2/bin/retrace-export` on PATH with the same old usage. Related: issues **#85–#89** (stranger-install rough edges, OPEN).
+`npx -y --package=@retrace-dev/cli@0.2.0 retrace-export reconcile --limit 20` printed that usage line and did not run the check (exit 0). This laptop also has `/home/jordandrumiler/.nvm/versions/node/v22.23.2/bin/retrace-export` on PATH with the same old usage. v1 read that as published 0.2.0 lacking `reconcile`. Related: issues **#85–#89** (stranger-install rough edges, OPEN).
+
+Correction 2026-09-28 (Codex r1 **R1-M1**; re-measured 16:40:49 MDT / 22:40:49Z). The same npx invocation from this checkout resolves `command -v retrace-export` to `/home/jordandrumiler/.nvm/versions/node/v22.23.2/bin/retrace-export`, the **global** `@retrace-dev/cli` **0.1.1** (symlink to `../lib/node_modules/@retrace-dev/cli/dist/export-cli.js`; `package.json` version 0.1.1). That is the binary whose help is quoted above. From a clean directory `/tmp/retrace-pr134-fix-r1`, the same `npx -y --package=@retrace-dev/cli@0.2.0 -c 'command -v retrace-export'` resolves to `/home/jordandrumiler/.npm/_npx/e938bbef1fba64a7/node_modules/.bin/retrace-export`; its `package.json` is `@retrace-dev/cli` **0.2.0**; its help first line is:
+
+```
+retrace-export <amend-attribution|render <bundle.json>|keygen|producer-keygen|export <project>|verify <bundle.json>|checkpoint <project>|witness <project>|reconcile|share <project>> [--artifact id] [--out f] [--report f.html] [--pubkey jwk|https-url] [--allow-self-attested] [--checkpoint f.jsonl] [--checkpoint-pubkey jwk|https-url] [--bundle f.json] [--label s] [--days n] [--actor id]
+```
+
+Running that published 0.2.0 binary from this worktree (`/home/jordandrumiler/.npm/_npx/e938bbef1fba64a7/node_modules/.bin/retrace-export reconcile --limit 20`, 16:41:22 MDT / 22:41:22Z): `20 commits, 20 sealed — 0 missing, 0 misattributed, 1 producer-disagreement, 13 unreachable-seal, 1 uncovered, 0 loose, 0 non-agent, 11 orphan paths, 3 pending → OK`. Published 0.2.0 ships `reconcile`. The v1 "stranger on npm 0.2.0 never sees this" was PATH shadowing of npx by the global 0.1.1 binary, not the published package.
 
 This checkout's dist (primary `packages/mcp-server/dist/export-cli.js`) first three lines (14:04:44–14:05:37 MDT / 20:04:44–20:05:37Z):
 
@@ -162,7 +174,7 @@ This checkout's dist (primary `packages/mcp-server/dist/export-cli.js`) first th
 reconcile jordandru/retrace: 20 commits, 20 sealed — 0 missing, 0 misattributed, 1 producer-disagreement, 13 unreachable-seal, 1 uncovered, 0 loose, 0 non-agent, 9 orphan paths, 2 pending → OK
 ```
 
-The summary line ends `→ OK` and already names counts. Footer: `signed cache through #7697; chain-verified tail #7698..#8945 verified against signed live head`. WARN rows follow (uncovered `docs/owner-protocol.md`, producer_disagreement on `a39cf918e070`, thirteen unreachable_seal). A stranger on npm 0.2.0 never sees this.
+The summary line ends `→ OK` and already names counts. Footer: `signed cache through #7697; chain-verified tail #7698..#8945 verified against signed live head`. WARN rows follow (uncovered `docs/owner-protocol.md`, producer_disagreement on `a39cf918e070`, thirteen unreachable_seal). The local dist's 9 orphan / 2 pending and published 0.2.0's 11 / 3 need not match: later ledger, different HEAD.
 
 ### A.7 Checkpoint / witness
 
@@ -173,7 +185,7 @@ Did not run `retrace-export witness <project>`: that submits to Rekor (an outwar
 | snapshot `ledger-2026-09-03` + its `checkpoints.jsonl` + `checkpoint-public.jwk` + `witnesses.jsonl` | #1337 @ 2026-09-02T05:21:31Z | `VALID` + `EXTENDS` to #1584 + Rekor index **2683576008** |
 | live stale export + worktree `.retrace/checkpoints.jsonl` + `.retrace/checkpoint-public.jwk` + `.retrace/witnesses.jsonl` | last git checkpoint **#4098** @ 2026-09-14T05:07:57.778Z | `VALID` + `EXTENDS` to #7697 + Rekor index **2830817671** @ 2026-09-14T12:49:34Z |
 
-Worktree `.retrace/checkpoints.jsonl` has 17 lines; last is seq 4098 / 2026-09-14. `gh pr list` for "checkpoint" (14:04:11 MDT / 20:04:11Z): ten OPEN PRs, newest **#124** "Checkpoint retrace head #7697" opened 2026-09-25T11:53:10Z, then #120 (#7677, 09-24), #106, #102, #100, #94, #81, #75, #70, #64. Daily git-anchor PRs are open and unmerged; they re-checkpoint the stale cache head #7697, which is issue **#132**.
+Worktree `.retrace/checkpoints.jsonl` has 17 lines; last is seq 4098 / 2026-09-14. `gh pr list` for "checkpoint" (14:04:11 MDT / 20:04:11Z): v1 wrote ten OPEN PRs, newest **#124** "Checkpoint retrace head #7697" opened 2026-09-25T11:53:10Z, then #120 (#7677, 09-24), #106, #102, #100, #94, #81, #75, #70, #64. Correction 2026-09-28 (Codex r1 **R1-L4**; re-listed 16:41:22 MDT / 22:41:22Z): there are **eleven** open checkpoint PRs, the listed ten plus **#52** "Checkpoint retrace head #4602" opened 2026-09-15T11:45:55Z, before this measurement. An unrestricted `gh pr list --search checkpoint --state open` also returns this measurement PR #134 and the unrelated credential-store PR #42. The stale/unmerged-anchor conclusion is unchanged. Daily git-anchor PRs are open and unmerged; they re-checkpoint the stale cache head #7697, which is issue **#132**.
 
 Issue #132 also says the Worker hourly D1 checkpoint cron was healthy through 2026-09-27 (this session did not query D1). The git-committed checkpoint file this worktree carries is 14 days behind live head.
 
@@ -199,7 +211,7 @@ Retrace is a provenance ledger for AI coding agents. Every event records **who**
 
 §6 (`docs/examples.md:104–109`) shows a `VALID` transcript claiming `coverage: complete — 4 of 4 events` for the public NOOA share. Issue **#88** (OPEN) records that the same command today yields 6 of 6 plus `context_missing`. The first screen of examples.md tells the reader the snapshot exists; it does not lead with a verdict.
 
-Landing CTA (`site/landing/index.html:108`) is `npx -p @retrace-dev/cli retrace doctor`, whose READY line is last (A.4). The prove-it transcript (`site/landing/index.html:156–162`) is labelled as a later 2,646-event export that is **not** the downloadable snapshot (`:154`).
+Landing CTA (v1 cited `site/landing/index.html:108`; Correction 2026-09-28, Codex r1 **R1-L3**: the command is at **`:107`**, `:108` is `</div>`) is `npx -p @retrace-dev/cli retrace doctor`, whose READY line is last (A.4). The prove-it transcript (`site/landing/index.html:156–162`) is labelled as a later 2,646-event export that is **not** the downloadable snapshot (`:154`).
 
 Related queued design, not this measurement: `docs/design/retrace-ai-digest.md` (read-only digest; not built). Public-claim sweep: issue **#74** (OPEN).
 
@@ -213,7 +225,7 @@ One-line BLUF contract per surface, for Jordan/coordinator to route:
 | `retrace status` / `retrace_status` | already `VERIFIED`/`BROKEN` first (`packages/core/src/status.ts:264`); add one clause for export-cache stale vs live head | `packages/core/src/status.ts`; MCP renderer |
 | `retrace doctor` / `--gate` | print `READY`/`NOT READY` as line 1, then findings (`packages/mcp-server/src/doctor.ts:1004`) | `packages/mcp-server/src/doctor.ts` |
 | `retrace_why` / `retrace_history` | one line `chain: rooted \| broken \| unverified-link` before the dump | MCP `why`/`history` renderer in `packages/mcp-server` |
-| `retrace-export reconcile` | keep `→ OK`/`NOT OK` on line 1 of the summary; ship that subcommand on npm (0.2.0 help lacks it) | `packages/mcp-server/src/export-cli.ts`; npm publish of current dist |
+| `retrace-export reconcile` | keep `→ OK`/`NOT OK` on line 1 of the summary. v1: "ship that subcommand on npm (0.2.0 help lacks it)". Correction 2026-09-28 (Codex r1 **R1-M1**): published `@retrace-dev/cli@0.2.0` already ships `reconcile` (A.6). Recommend documenting that `npx --package=@retrace-dev/cli@0.2.0` from a directory whose PATH contains an older global `retrace-export` (this laptop: 0.1.1) runs the global binary. | `packages/mcp-server/src/export-cli.ts`; stranger-install issues **#85–#89**; no new publish required for `reconcile` |
 | README / examples / landing first screen | one sentence: green `VALID` with `--pubkey` proves signature+hashes+links+omission of **that bundle's claimed head**; it does not prove the live head or a checkpoint | `README.md`, `docs/examples.md`, `site/landing/index.html` |
 
 Do not fold this into `docs/design/retrace-ai-digest.md`; that is a ranked digest of findings, a different product.
@@ -224,7 +236,7 @@ Do not fold this into `docs/design/retrace-ai-digest.md`; that is a ranked diges
 
 ### B.1 In place (file:line or event, and a live command where this session ran one)
 
-- **Ed25519 producer signatures, verified server-side.** `packages/core/src/producer-sig.ts:1–28` (server never holds the private key; verdict stamped). `packages/core/src/router.ts:842–849` `producerSigCheck` then `require_signature` 401. Live: snapshot verify `producer sigs: 0 verified · 0 INVALID · 1127 unsigned agent events`; live stale export `4271 verified · 1 INVALID · 1697 unsigned` (the INVALID is event #5589).
+- **Ed25519 producer signatures, verified server-side.** `packages/core/src/producer-sig.ts:1–28` (server never holds the private key; verdict stamped). `packages/core/src/router.ts:842–849` `producerSigCheck` then `require_signature` 401. Live: snapshot verify `producer sigs: 0 verified · 0 INVALID · 1127 unsigned agent events`; live stale export `4271 verified · 1 INVALID · 1697 unsigned` (the INVALID is event #5589). Correction 2026-09-28 (Codex r1 **R1-M3**, A.1): #5589 is `evt_d04b7cc9dd054246a475386c622b4c4d`, actor `openclaw`, ingestion stamp `unknown_kid`, NOOA's kid `e0c4934645522e62`; changing only `actor.id` to `nooa` verifies. Issue **#96**'s identity rewrite, not a forged signature. Adjacent #5588 with the same stamp verifies. Overall VALID stands.
 - **Pinned per-seat credentials and `sealed_by` stamps.** `packages/core/src/router.ts:291–300` `sealedBy` / `stampSealedBy` (server wins). MCP status this session: `sealed by: 5658 pinned · 426 assert · 1853 webhook · 57 owner-asserted · 0 unauthenticated · 947 unstamped; 1526/5636 agent events not pinned`.
 - **`hash_v: 2` and `received_at` in the hash.** `packages/core/src/chain.ts:42–57` (`HASH_VERSION = 2`; stripping the marker is tampering). Verify lines above count `996 legacy-hash events (received_at not provably covered)`.
 - **HMAC-verified GitHub webhook.** `packages/core/src/github.ts:28–37` `verifyGithubSignature` (HMAC-SHA256, constant-time compare). Status integrations: `github` 1893 events, last 2026-09-28T19:49:22Z.
@@ -243,30 +255,34 @@ Do not fold this into `docs/design/retrace-ai-digest.md`; that is a ranked diges
 - **#61 OPEN** — Drive adapter has no agent branch (`packages/core/src/gdrive.ts`); activity seals as the account owner. Status integrations: `google-drive` 12 events, last 2026-08-29T21:52:03.863Z.
 - **#132 OPEN** — export cache stale since 2026-09-24T18:07:55Z; daily checkpoint re-checkpoints head #7697; Rekor 409 misread. **Reproduced this session** (A.1, A.7): `x-retrace-export-cache: stale`, cached-head 7697, live-head 8940 at fetch; open PR #124 "Checkpoint retrace head #7697".
 - **#131 OPEN** — `events?since=` compares the raw `timestamp` string; push-webhook commit seals with offset-bearing times are missed (`packages/core/src/store.ts` / `d1-store.ts`). Not re-run here.
-- **Agent-ops 13** — credentials live in Worker secrets `RETRACE_CREDENTIALS` / `RETRACE_CREDENTIALS_EXTRA`; a **direction**, not a plan, until where they live, what the Worker holds at runtime, and who may mint are answered.
+- **Agent-ops 13** — credentials live in Worker secrets `RETRACE_CREDENTIALS` / `RETRACE_CREDENTIALS_EXTRA`. v1 called this a **direction**, not a plan, until where they live, what the Worker holds at runtime, and who may mint are answered. Correction 2026-09-28 (Codex r1 **R1-M2**): that store is an **unmerged design**, not an unanswered direction. PR **#42** is OPEN at `8979b0294f677a208165f97c764442bbbc38d98f` with the 561-line `docs/design/credential-store.md`. Evaluation-plan P8 (`docs/design/evaluation-response-plan-2026-09-24.md:491–493`) routes #42 through the class-(a) gate, then build, and says it answers agent-ops 13's three questions. None of it is built.
 - **Evaluation-response plan P8 and §6 Q11** (`docs/design/evaluation-response-plan-2026-09-24.md:488–515, :620–624`) — mandatory producer signatures on every pinned seat; Jordan's decision pending. Recommendation in that note: refuse another credential's kid first, then mandate signatures seat by seat.
 
-### B.3 What "super secure" would additionally require that is not on the plan
+### B.3 What "super secure" would additionally require
 
-Name them plainly. None of these are done, and this note does not promise them.
+Name them plainly. None of these are built, and this note does not promise them. Correction 2026-09-28 (Codex r1 **R1-M2**): v1's heading said "that is not on the plan" and treated every item as absent from the plan. Distinguish unmerged design / planned owner actions / pending recommendation / genuinely new. None being implemented does not make all of them absent from the plan.
 
-- An **independent external audit** (evaluation-response plan §6: commission after P1 and P8; not scheduled).
-- **Per-seat GitHub identities** (P1 note §6 step 5, `docs/design/github-owner-login-attribution.md:368–378`): one GitHub App per seat. Owner actions, one go each. Until then #82 stands.
-- A **credential store** (agent-ops 13): D1/KV vs Worker secret, hashed tokens at runtime, who may mint. Direction only.
-- A **key rotation cadence** (no merged policy names how often producer keys or Worker tokens rotate).
-- A **threat model document** (none in `docs/design/` under that name; the 2026-08-30 assessment fixes are listed in `docs/reference.md:261`, not a threat model).
+- An **independent external audit** — **pending recommendation.** Evaluation-plan §6 Q8 (`docs/design/evaluation-response-plan-2026-09-24.md:606–608`): pause the paid Team offer or state the open defects until P1 and P8 land, then commission an independent assessment. Not scheduled.
+- **Per-seat GitHub identities** — **planned owner actions**, not built. P1 note §6 step 5 (`docs/design/github-owner-login-attribution.md:368–378`): one GitHub App per seat. Owner actions, one go each. Until then #82 stands.
+- A **credential store** — **unmerged design**, not built. PR **#42** OPEN (`8979b029`, 561-line `docs/design/credential-store.md`). Evaluation-plan P8 `:491–493` routes it through review then build. Agent-ops 13's three questions are the questions that design answers.
+- A **key rotation cadence** — **genuinely new** (no merged policy names how often producer keys or Worker tokens rotate).
+- A **threat model document** — **genuinely new** (none in `docs/design/` under that name; the 2026-08-30 assessment fixes are listed in `docs/reference.md:261`, not a threat model).
 
 Docker-as-root (agent-ops 17) and terminal-boundary (agent-ops 16) are environment rules on this laptop, not product guarantees a stranger gets.
 
 ### B.4 BLUF for Jordan (≤ 120 words)
 
-A stranger gets VALID/VERIFIED first on `verify --pubkey` and `status`. Doctor prints READY last. Snapshot EXTENDS #1337 (Rekor 2683576008) with `--checkpoint-pubkey`; the landing one-liner omits that flag. Live export cache sits at #7697 (2026-09-24) while live is ~#8945 (#132). In place: Ed25519 producer sigs, pinned sealed_by, HMAC webhook, hash_v:2, loopback retrace-serve, Workers Paid (seq 1979). Open: #96, #97, #69, #82. Super-secure still needs an independent audit, per-seat GitHub Apps, a credential store, rotation cadence, and a threat model.
+**v2 (Codex r1):** A stranger gets VALID/VERIFIED first on `verify --pubkey` and `status` (stderr SQLite warnings print first). Doctor prints READY last. Snapshot EXTENDS #1337 (Rekor 2683576008) with `--checkpoint-pubkey`; landing CTA `site/landing/index.html:107` omits that flag. Live export cache sits at #7697 (2026-09-24) while live was ~#8945 (#132). In place: Ed25519 producer sigs, pinned sealed_by, HMAC webhook, hash_v:2, loopback retrace-serve, Workers Paid (seq 1979). The 1 INVALID is #5589 (`evt_d04b7cc9dd054246a475386c622b4c4d`): actor `openclaw`, `unknown_kid`, NOOA's kid; changing only `actor.id` to `nooa` verifies — #96's identity rewrite, not a forged signature; overall VALID. Open: #96, #97, #69, #82. Planned, none built: PR #42 credential store (unmerged), per-seat GitHub Apps (P1 §6 step 5), independent assessment (eval-plan §6 Q8). New: rotation cadence, threat model.
+
+**v1 (kept):** A stranger gets VALID/VERIFIED first on `verify --pubkey` and `status`. Doctor prints READY last. Snapshot EXTENDS #1337 (Rekor 2683576008) with `--checkpoint-pubkey`; the landing one-liner omits that flag. Live export cache sits at #7697 (2026-09-24) while live is ~#8945 (#132). In place: Ed25519 producer sigs, pinned sealed_by, HMAC webhook, hash_v:2, loopback retrace-serve, Workers Paid (seq 1979). Open: #96, #97, #69, #82. Super-secure still needs an independent audit, per-seat GitHub Apps, a credential store, rotation cadence, and a threat model.
 
 ---
 
 ## C. Record
 
 Instruct `evt_48eef6caeed745bc93e9c9518a9dac13`. Received `evt_9c92ed5f9c5143bf8624247d0515e4dc`. Measurement execute `evt_43c6c0825b984588b9e996f17c15b8ea`. Routing `evt_6813fa8969854e83bae4dd0be8e0bc43`.
+
+v2 instruct `evt_9328a087f3544b968cd0cba919414277`. v2 received `evt_eeb76ae0cf054febbeb099d6be7789a6`. v2 execute `evt_1d6fd6ca949e4e4b87e868abf3eb1736`. Routing `evt_4beb9bba8593461bb34db176684c241d`. Codex r1 `evt_99bf82bb25ca414aa940e2ece0835fcd`. Jordan go `evt_511861e335784a82b34c2d0f90417fe6`.
 
 | when (MDT / UTC) | what | quoted / sealed |
 |---|---|---|
@@ -281,9 +297,17 @@ Instruct `evt_48eef6caeed745bc93e9c9518a9dac13`. Received `evt_9c92ed5f9c5143bf8
 | 13:59:49–14:00:25 / 19:59:49–20:00:25Z | npx verify snapshot + live | both `VALID` (A.1, A.2) |
 | 14:02:07–14:03:40 / 20:02:07–20:03:40Z | verify `--checkpoint --witnesses` | snapshot EXTENDS #1337 Rekor 2683576008; live EXTENDS #4098 Rekor 2830817671 |
 | 14:02:59 / 20:02:59Z | CLI `retrace status` | `«retrace» — VERIFIED` / `retrace — VERIFIED`, 8943 events |
-| 14:04:11 / 20:04:11Z | `GET /api`; `gh pr list` checkpoint; `doctor --gate` retry | credentials 12; PR #124 OPEN head #7697; READY 15/137/0 |
-| 14:04:44–14:05:37 / 20:04:44–20:05:37Z | reconcile `--limit 20` | npm 0.2.0: old usage; local dist: `→ OK` |
+| 14:04:11 / 20:04:11Z | `GET /api`; `gh pr list` checkpoint | credentials 12; PR #124 OPEN head #7697. v1 also assigned the gate retry to this timestamp (Codex r1 **R1-L5**); A.4's 14:05:17 / 20:05:17Z is the retry. Split here. |
+| 14:04:44–14:05:37 / 20:04:44–20:05:37Z | reconcile `--limit 20` | v1: npm 0.2.0 old usage (PATH global 0.1.1); local dist: `→ OK` |
+| 14:05:17 / 20:05:17Z | `doctor --gate` retry | READY 15/137/0 (A.4; Codex r1 **R1-L5**) |
 | 14:07:25 / 20:07:25Z | `retrace_log` executed | `evt_43c6c0825b984588b9e996f17c15b8ea` seq 8952 |
 | 14:06:38 / 20:06:38Z | `date` before writing this file | this section's clock |
+| 16:39:54 / 22:39:54Z | v2 `retrace_log` received | `evt_eeb76ae0cf054febbeb099d6be7789a6` seq 9073 |
+| ~16:40 / ~22:40Z | v2 `retrace_instruct` | `evt_9328a087f3544b968cd0cba919414277` |
+| 16:40:49 / 22:40:49Z | **R1-M1** re-measure npx 0.2.0 from checkout vs `/tmp/retrace-pr134-fix-r1` | checkout → global 0.1.1 `/home/jordandrumiler/.nvm/versions/node/v22.23.2/bin/retrace-export`; clean dir → npx 0.2.0 `/home/jordandrumiler/.npm/_npx/e938bbef1fba64a7/node_modules/.bin/retrace-export`, help includes `reconcile` |
+| 16:41:22 / 22:41:22Z | **R1-M1** published 0.2.0 `reconcile --limit 20`; **R1-L4** `gh pr list`; **R1-M2** `gh pr view 42` | 20/20 sealed, 11 orphan, 3 pending `→ OK`; eleven checkpoint PRs including #52; PR 42 OPEN `8979b029`, 561-line `credential-store.md` |
+| 16:41 / 22:41Z | **R1-M3** GET `evt_d04b7cc9dd054246a475386c622b4c4d` | seq 5589, actor `openclaw`, `unknown_kid`, kid `e0c4934645522e62` |
+| 16:42 / 22:42Z | **R1-L1** coverage 7698/7698; **R1-L2** stderr vs stdout; **R1-L3** landing `:107`; **R1-L5** gate retry 14:05:17 | applied in this file |
+| 16:42:57 / 22:42:57Z | `sha256sum` of v1 file before v2 edit | `23f0f512d64b3fa083881728cb631cc87e3ce3853a46b6c18ff071d1be74b318` |
 
 Edit and commit-hook seal of this file are additional rows once they exist (rule 9: log the edit, then commit).
