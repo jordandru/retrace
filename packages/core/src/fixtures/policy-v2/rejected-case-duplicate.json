@@ -1,0 +1,43 @@
+{
+  "name": "rejected-case-duplicate",
+  "body": {
+    "profile": "retrace-project-policy/2",
+    "project": "demo",
+    "trusted_hook_stamps": [
+      "assert:git hook (assert)"
+    ],
+    "unresolved_claims": "record",
+    "repositories": [
+      {
+        "name": "acme/demo",
+        "aliases": [
+          "demo"
+        ]
+      }
+    ],
+    "github_repos": [
+      "acme/demo"
+    ],
+    "github": {
+      "shared_logins": [
+        "Jordan",
+        "jordan"
+      ],
+      "identities": {}
+    }
+  },
+  "envelope": {
+    "version": 1,
+    "created_at": "2026-09-10T03:45:00.000Z",
+    "set_by": {
+      "type": "human",
+      "id": "owner@example.com"
+    },
+    "supersedes": null,
+    "activation": {
+      "event_id": "evt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "seq": 0
+    }
+  },
+  "rejected": true
+}

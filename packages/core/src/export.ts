@@ -10,7 +10,7 @@ import { ProducerKey, countProducerSigs } from "./producer-sig.js";
 import { GENESIS_HASH } from "./schema.js";
 import { keyId, publicFromPrivate, signCanonical, verifyCanonical } from "./signing.js";
 import {
-  POLICY_PROFILE, PolicyDocument, PolicyError, PolicyVerifyFinding, canonicalPolicyV1, collectReferencedPolicies,
+  SUPPORTED_POLICY_PROFILES, PolicyDocument, PolicyError, PolicyVerifyFinding, canonicalPolicyV1, collectReferencedPolicies,
   documentMapKey, eventPolicyRef, parseJsonRejectDuplicateKeys, policyHashObject, validatePolicyBody, validatePolicyEnvelope,
   verifyPolicySelectionOffline,
 } from "./policy.js";
@@ -255,13 +255,13 @@ export async function verifyExportBundle(bundle: ExportBundle, trustedPublicKey?
           validatePolicyEnvelope(d.envelope);
         } catch (err: any) {
           policy_findings.push("policy_corrupt");
-          problems.push(`policy ${d.digest} failed /1 validation: ${err?.message ?? err}`);
+          problems.push(`policy ${d.digest} failed policy validation: ${err?.message ?? err}`);
         }
         if (d.body.project !== bundle.scope.project) {
           policy_findings.push("policy_project_mismatch");
           problems.push(`policy ${d.digest} project ${d.body.project} != bundle ${bundle.scope.project}`);
         }
-        if (d.body.profile !== POLICY_PROFILE) {
+        if (!SUPPORTED_POLICY_PROFILES.has(d.body.profile)) {
           policy_findings.push("policy_unsupported_profile");
           problems.push(`policy ${d.digest} unsupported profile`);
         }

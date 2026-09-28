@@ -308,3 +308,55 @@ test("F14: localConfigDrift compares aliases, not only repository names", () => 
   }, body);
   assert.equal(match.drifted, false);
 });
+
+test("§1.3 /2 golden vectors, App identities and case-insensitive uniqueness; /1 remains frozen", async () => {
+  const v2dir = join(dirname(fileURLToPath(import.meta.url)), "fixtures/policy-v2");
+  for (const filename of readdirSync(v2dir)) {
+    const vector = JSON.parse(readFileSync(join(v2dir, filename), "utf8"));
+    if (vector.rejected) { assert.throws(() => validatePolicyBody(vector.body), /unique case-insensitively/); continue; }
+    const body = validatePolicyBody(vector.body);
+    assert.equal(canonicalPolicyV1(policyHashObject(body, vector.envelope)), vector.canonical);
+    assert.equal(await policyDigestOf(body, vector.envelope), vector.digest);
+  }
+  const base = { profile: "retrace-project-policy/2", project: "p", trusted_hook_stamps: [], unresolved_claims: "record", repositories: [], github_repos: [] };
+  const good = { ...base, github: { shared_logins: [], identities: {} } };
+  assert.equal(validatePolicyBody(good).profile, "retrace-project-policy/2");
+  assert.throws(() => validatePolicyBody(base), /missing required field github/);
+  assert.throws(() => validatePolicyBody({ ...good, profile: POLICY_PROFILE }), /unknown field/);
+  for (const github of [
+    { shared_logins: ["z", "a"], identities: {} },
+    { shared_logins: ["bad_login"], identities: {} },
+    { shared_logins: ["-bad"], identities: {} },
+    { shared_logins: ["bad-"], identities: {} },
+    { shared_logins: ["a".repeat(40)], identities: {} },
+    { shared_logins: [], identities: { "Bot[bot]": "one", "bot[bot]": "two" } },
+    { shared_logins: [], identities: { "valid": "" } },
+    { shared_logins: [], identities: {}, extra: [] },
+    { shared_logins: [] },
+  ]) assert.throws(() => validatePolicyBody({ ...base, github }), e => (e as any).status === 400);
+  assert.equal(validatePolicyBody({ ...base, github: { shared_logins: ["A", "retrace-claude-code[bot]"], identities: { "retrace-claude-code[bot]": "claude-code" } } }).github!.identities["retrace-claude-code[bot]"], "claude-code");
+});
+
+test("§1.3 /1 → /2 activation stamps the document profile, retains historical selection and verifies mixed export", async () => {
+  const { MemoryEventStore, createHandler, buildExportBundle, verifyExportBundle, generateSigningKey } = await import("./index.js");
+  const store = new MemoryEventStore();
+  const handler = createHandler(store, { token: "owner-token", ownerPrincipal: { type: "human", id: "owner" } });
+  const base = { profile: POLICY_PROFILE, project: "p", trusted_hook_stamps: [], unresolved_claims: "record", repositories: [], github_repos: [] };
+  const put = async (body: unknown, previous: string) => {
+    const response = await handler(new Request("http://test/projects/p/policy", { method: "PUT", headers: { authorization: "Bearer owner-token", "content-type": "application/json", "if-match": previous }, body: JSON.stringify(body) }));
+    assert.equal(response.status, 201, await response.clone().text());
+    return await response.json() as PolicyDocument;
+  };
+  const first = await put(base, "none");
+  const second = await put({ ...base, profile: "retrace-project-policy/2", github: { shared_logins: ["jordandru"], identities: {} } }, first.digest);
+  assert.equal(store.events[1].method!.params!.policy_profile, "retrace-project-policy/2");
+  for (const [doc, head] of [[first, 0], [second, 1]] as const) {
+    const result = verifyPolicySelectionOffline({ project: "p", claimedDigest: doc.digest, readHeadSeq: head, events: store.events, policies: [first, second], coverageComplete: true });
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.equal(result.selected?.status, "selected");
+  }
+  const key = await generateSigningKey();
+  const bundle = await buildExportBundle(store, { project: "p" }, { signingKey: key.privateKey });
+  const verdict = await verifyExportBundle(bundle);
+  assert.deepEqual(verdict.policy_findings ?? [], []);
+});
