@@ -144,8 +144,8 @@ export class D1Store implements EventStore {
   async insertPendingDelivery(row: PendingDelivery) {
     try {
       await this.db.prepare(
-        "INSERT INTO pending_deliveries (delivery_id, project, raw_body, received_at, repo, routing_source, routing_digest, routing_state) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-      ).bind(row.delivery_id, row.project, row.raw_body, row.received_at, row.repo ?? null, row.routing_source ?? null, row.routing_digest ?? null, row.routing_state ?? null).run();
+        "INSERT INTO pending_deliveries (delivery_id, project, raw_body, received_at, repo, routing_source, routing_digest, routing_state, gh_event) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      ).bind(row.delivery_id, row.project, row.raw_body, row.received_at, row.repo ?? null, row.routing_source ?? null, row.routing_digest ?? null, row.routing_state ?? null, row.gh_event ?? null).run();
     } catch (e: unknown) {
       if (!/UNIQUE/i.test(String((e as Error)?.message))) throw e;
     }
@@ -153,7 +153,7 @@ export class D1Store implements EventStore {
 
   async getPendingDelivery(delivery_id: string): Promise<PendingDelivery | null> {
     return (await this.db.prepare(
-      `SELECT delivery_id, project, raw_body, received_at, repo, routing_source, routing_digest, routing_state,
+      `SELECT delivery_id, project, raw_body, received_at, gh_event, repo, routing_source, routing_digest, routing_state,
               lease_owner, lease_until, outcomes, attempt_count, state
        FROM pending_deliveries WHERE delivery_id = ?`,
     ).bind(delivery_id).first<PendingDelivery>()) ?? null;
@@ -161,7 +161,7 @@ export class D1Store implements EventStore {
 
   async listPendingDeliveriesOlderThan(received_at: string): Promise<PendingDelivery[]> {
     const { results } = await this.db.prepare(
-      `SELECT delivery_id, project, raw_body, received_at, repo, routing_source, routing_digest, routing_state,
+      `SELECT delivery_id, project, raw_body, received_at, gh_event, repo, routing_source, routing_digest, routing_state,
               lease_owner, lease_until, outcomes, attempt_count, state
        FROM pending_deliveries WHERE received_at < ? ORDER BY received_at ASC`,
     ).bind(received_at).all<PendingDelivery>();
@@ -361,7 +361,7 @@ export class D1Store implements EventStore {
 
   async listDrainablePendingDeliveries(nowIso: string, limit = 20) {
     const { results } = await this.db.prepare(
-      `SELECT delivery_id, project, raw_body, received_at, repo, routing_source, routing_digest, routing_state,
+      `SELECT delivery_id, project, raw_body, received_at, gh_event, repo, routing_source, routing_digest, routing_state,
               lease_owner, lease_until, outcomes, attempt_count, state
        FROM pending_deliveries
        WHERE IFNULL(routing_state, '') NOT IN ('unresolved', 'pending_policy')
@@ -381,7 +381,7 @@ export class D1Store implements EventStore {
          AND (lease_until IS NULL OR lease_until <= ?)`,
     ).bind(owner, untilIso, delivery_id, nowIso).run();
     const row = await this.db.prepare(
-      `SELECT delivery_id, project, raw_body, received_at, repo, routing_source, routing_digest, routing_state,
+      `SELECT delivery_id, project, raw_body, received_at, gh_event, repo, routing_source, routing_digest, routing_state,
               lease_owner, lease_until, outcomes, attempt_count, state
        FROM pending_deliveries WHERE delivery_id=? AND lease_owner=?`,
     ).bind(delivery_id, owner).first<PendingDelivery>();

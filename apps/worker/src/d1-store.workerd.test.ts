@@ -96,3 +96,17 @@ test("D1 in workerd: this harness enforces the five-term compound limit the roun
     await assert.rejects(db.prepare(union(6)).all(), /too many terms in compound SELECT/);
   });
 });
+
+test("T18 §1.2 D1 pending gh_event round-trip, redelivery receipt and NULL migration", async () => {
+  await withD1(async db => {
+    const store = new D1Store(db);
+    const row = { delivery_id: "comment", project: "p", gh_event: "issue_comment", raw_body: "{}", received_at: "2026-09-28T00:00:00Z" };
+    await store.insertPendingDelivery(row);
+    await store.insertPendingDelivery({ ...row, gh_event: "push", received_at: "later" });
+    await store.insertPendingDelivery({ ...row, delivery_id: "legacy", gh_event: null });
+    assert.equal((await store.getPendingDelivery("comment"))!.gh_event, "issue_comment");
+    assert.equal((await store.getPendingDelivery("comment"))!.received_at, row.received_at);
+    assert.equal((await store.getPendingDelivery("legacy"))!.gh_event, null);
+    assert.equal((await store.claimPendingDeliveryLease("comment", "owner", "2026-09-29T00:00:00Z", "2026-09-29T00:01:00Z"))!.gh_event, "issue_comment");
+  });
+});

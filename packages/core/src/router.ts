@@ -511,6 +511,7 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
         if (!opts.githubSecret) return json({ error: "github webhook not configured (set RETRACE_GITHUB_SECRET)" }, 404);
         const raw = await req.text();
         if (!(await verifyGithubSignature(opts.githubSecret, raw, req.headers.get("x-hub-signature-256")))) return json({ error: "bad signature" }, 401);
+        const ingressAt = new Date().toISOString();
         const ghEvent = req.headers.get("x-github-event") ?? "";
         const delivery = req.headers.get("x-github-delivery") ?? undefined;
         if (ghEvent === "ping") return json({ ok: true, pong: true });
@@ -539,7 +540,7 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
               delivery_id: delivery ?? `unresolved:${repo}:${Date.now()}`,
               project: "",
               raw_body: raw,
-              received_at: new Date().toISOString(),
+              received_at: ingressAt, gh_event: ghEvent,
               repo,
               routing_source: "unresolved",
               routing_state: "unresolved",
@@ -558,7 +559,7 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
                 delivery_id: delivery ?? `pending:${repo}:${Date.now()}`,
                 project,
                 raw_body: raw,
-                received_at: new Date().toISOString(),
+                received_at: ingressAt, gh_event: ghEvent,
                 repo,
                 routing_source: "env",
                 routing_digest: routing.digest,
@@ -584,7 +585,7 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
           try {
             await store.insertPendingDelivery({
               delivery_id: delivery ?? `push:${repo}:${Date.now()}`,
-              project, raw_body: raw, received_at: new Date().toISOString(),
+              project, raw_body: raw, received_at: ingressAt, gh_event: ghEvent,
               repo, routing_source: routing.source, routing_digest: routing.digest, routing_state: "received",
             });
           } catch {
@@ -600,7 +601,7 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
           if (admit === "pending") return json({ ok: true, pending: (payload.commits ?? []).map((c: any) => c.id), reason: "breaker_open" }, 202);
           probe = admit === "probe";
         }
-        const inputs = await mapGithubWebhook(ghEvent, payload, { project, includePush: opts.githubIncludePush, deliveryId: delivery && inputs_needs_unique(ghEvent) ? delivery : undefined });
+        const inputs = await mapGithubWebhook(ghEvent, payload, { project, includePush: opts.githubIncludePush, ingressAt, deliveryId: delivery && inputs_needs_unique(ghEvent) ? delivery : undefined });
         const results = [];
         const pendingShas: string[] = [];
         for (let inputIndex = 0; inputIndex < inputs.length; inputIndex++) {
@@ -1143,7 +1144,7 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
   };
 }
 
-/** Drain pending GitHub push deliveries. Breaker is not consulted (brief §7(b)); drain failures do not trip it (§7(a)). */
+/** Drain pending GitHub deliveries. Breaker is not consulted (brief §7(b)); drain failures do not trip it (§7(a)). */
 export async function drainPendingGithubDeliveries(store: EventStore, opts: {
   trailerPolicy: TrailerPolicy;
   now?: () => number;
@@ -1169,7 +1170,11 @@ export async function drainPendingGithubDeliveries(store: EventStore, opts: {
       failed++;
       continue;
     }
-    const inputs = await mapGithubWebhook("push", payload, { project: row.project, includePush: true });
+    const ghEvent = row.gh_event ?? "push";
+    const inputs = await mapGithubWebhook(ghEvent, payload, { project: row.project, includePush: true, deliveryId: row.delivery_id, ingressAt: row.received_at });
+    const outcomeKey = (input: EventInput) => ghEvent === "push"
+      ? String(input.method?.params?.sha ?? "")
+      : input.idempotency_key ? `idem:${input.idempotency_key}` : "";
     type Outcome = { status: "pending" | "sealed" | "budget_failed"; attempt_count: number; reason?: string };
     const rawOutcomes: Record<string, string | Outcome> = row.outcomes ? JSON.parse(row.outcomes) as Record<string, string | Outcome> : {};
     const outcomes: Record<string, Outcome> = Object.fromEntries(Object.entries(rawOutcomes).map(([sha, value]) => [
@@ -1181,9 +1186,19 @@ export async function drainPendingGithubDeliveries(store: EventStore, opts: {
     for (const input of inputs) {
       const parsed = EventInput.safeParse(input);
       if (!parsed.success) continue;
-      const sha = String(parsed.data.method?.params?.sha ?? "");
+      const sha = outcomeKey(parsed.data);
       if (!sha || outcomes[sha]?.status === "sealed" || outcomes[sha]?.status === "budget_failed") continue;
       if (parsed.data.idempotency_key && await store.byIdempotencyKey(row.project, parsed.data.idempotency_key)) {
+        outcomes[sha] = { status: "sealed", attempt_count: outcomes[sha]?.attempt_count ?? 0 };
+        continue;
+      }
+      if (ghEvent !== "push") {
+        const stamped = {
+          ...parsed.data,
+          method: { ...parsed.data.method, params: { ...parsed.data.method?.params,
+            [SEALED_BY_PARAM]: SEALED_BY_GITHUB_WEBHOOK, producer_sig_verdict: "none" } },
+        };
+        await appendEvent(store, stamped);
         outcomes[sha] = { status: "sealed", attempt_count: outcomes[sha]?.attempt_count ?? 0 };
         continue;
       }
@@ -1215,7 +1230,7 @@ export async function drainPendingGithubDeliveries(store: EventStore, opts: {
         outcomes[sha] = { status: "pending", attempt_count: outcomes[sha]?.attempt_count ?? 0, reason: classified.reason };
       }
     }
-    const shas = inputs.map((input) => String(input.method?.params?.sha ?? "")).filter(Boolean);
+    const shas = inputs.map(outcomeKey).filter(Boolean);
     const allSealed = shas.length > 0 && shas.every((sha) => outcomes[sha]?.status === "sealed");
     const terminal = shas.some((sha) => outcomes[sha]?.status === "budget_failed");
     const next = {

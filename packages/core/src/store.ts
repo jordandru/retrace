@@ -209,6 +209,8 @@ export type ArtifactIndexResult =
   | { ok: false; reason: "budget" | "deadline" | "store_error" };
 
 export interface PendingDelivery {
+  /** NULL identifies a pre-upgrade row, drained as push. */
+  gh_event: string | null;
   delivery_id: string;
   project: string;
   raw_body: string;
@@ -609,6 +611,11 @@ export const SCHEMA_PENDING_LEASE_COLUMNS_SQL = [
   "ALTER TABLE pending_deliveries ADD COLUMN outcomes TEXT",
   "ALTER TABLE pending_deliveries ADD COLUMN attempt_count INTEGER",
   "ALTER TABLE pending_deliveries ADD COLUMN state TEXT",
+];
+
+/** Preserve the original GitHub event kind through queued delivery retries. */
+export const SCHEMA_PENDING_EVENT_COLUMNS_SQL = [
+  "ALTER TABLE pending_deliveries ADD COLUMN gh_event TEXT",
 ];
 
 export function newShareId(): string {

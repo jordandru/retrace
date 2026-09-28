@@ -349,8 +349,8 @@ test("SqliteStore backfills event_artifact_index once from existing events", asy
 
 test("SqliteStore pending_deliveries insert, list-older-than, delete", async () => {
   const store = new SqliteStore(":memory:");
-  await store.insertPendingDelivery({ delivery_id: "d1", project: "retrace", raw_body: "a", received_at: "2026-09-01T00:00:00.000Z" });
-  await store.insertPendingDelivery({ delivery_id: "d2", project: "retrace", raw_body: "b", received_at: "2026-09-08T00:00:00.000Z" });
+  await store.insertPendingDelivery({ gh_event: "push", delivery_id: "d1", project: "retrace", raw_body: "a", received_at: "2026-09-01T00:00:00.000Z" });
+  await store.insertPendingDelivery({ gh_event: "push", delivery_id: "d2", project: "retrace", raw_body: "b", received_at: "2026-09-08T00:00:00.000Z" });
   const old = await store.listPendingDeliveriesOlderThan("2026-09-05T00:00:00.000Z");
   assert.deepEqual(old.map((r) => r.delivery_id), ["d1"]);
   assert.equal(await store.deletePendingDelivery("d1"), true);
@@ -468,7 +468,7 @@ test("F11 SQLite: two connections elect one lease owner; expiry reclaims and sta
   const path = join(mkdtempSync(join(tmpdir(), "retrace-lease-")), "ledger.db");
   const a = new SqliteStore(path);
   const b = new SqliteStore(path);
-  await a.insertPendingDelivery({
+  await a.insertPendingDelivery({ gh_event: "push",
     delivery_id: "delivery", project: "p", raw_body: "{}", received_at: "2026-09-10T12:00:00.000Z",
     repo: "acme/app", routing_state: "received",
   });
@@ -502,4 +502,25 @@ test("F14 SQLite: concurrent breaker outcomes from separate stores retry lost CA
   const row = await b.getBreaker("p");
   assert.equal(row?.failures, 3);
   assert.equal(row?.state, "open");
+});
+
+test("T18 §1.2 pending gh_event survives SQLite reopen; pre-upgrade NULL remains push-compatible", async () => {
+  const { mkdtempSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "retrace-pending-kind-"));
+  const path = join(dir, "store.sqlite");
+  let store = new SqliteStore(path);
+  try {
+    const row = { delivery_id: "comment", project: "p", gh_event: "issue_comment", raw_body: "{}", received_at: "2026-09-28T00:00:00Z" };
+    await store.insertPendingDelivery(row);
+    await store.insertPendingDelivery({ ...row, gh_event: "push", received_at: "later" });
+    await store.insertPendingDelivery({ ...row, delivery_id: "legacy", gh_event: null });
+    (store as any).db.close();
+    store = new SqliteStore(path);
+    assert.equal((await store.getPendingDelivery("comment"))!.gh_event, "issue_comment");
+    assert.equal((await store.getPendingDelivery("comment"))!.received_at, row.received_at);
+    assert.equal((await store.getPendingDelivery("legacy"))!.gh_event, null);
+    assert.equal((await store.claimPendingDeliveryLease("comment", "owner", "2026-09-29T00:00:00Z", "2026-09-29T00:01:00Z"))!.gh_event, "issue_comment");
+  } finally { (store as any).db.close(); rmSync(dir, { recursive: true, force: true }); }
 });

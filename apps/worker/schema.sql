@@ -176,3 +176,6 @@ ALTER TABLE pending_deliveries ADD COLUMN outcomes TEXT;
 ALTER TABLE pending_deliveries ADD COLUMN attempt_count INTEGER;
 ALTER TABLE pending_deliveries ADD COLUMN state TEXT;
 
+
+-- Owner-login: pre-upgrade NULL event kinds retain push-drain semantics.
+ALTER TABLE pending_deliveries ADD COLUMN gh_event TEXT;

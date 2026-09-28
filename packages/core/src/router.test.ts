@@ -1019,3 +1019,41 @@ test("credentials: CI assert reader with empty allowed_actors can GET gate route
   assert.match((await write.json()).error, /allowed_actors/);
   assert.equal(store.events.length, 1);
 });
+
+test("T18 §1.2 ingress is captured before store reads and kept with a queued non-push delivery", async () => {
+  const store = new MemStore();
+  const firstReads: string[] = [];
+  const original = store.getPendingDelivery.bind(store);
+  store.getPendingDelivery = async (id) => {
+    firstReads.push(new Date().toISOString());
+    await new Promise(resolve => setTimeout(resolve, 15));
+    return original(id);
+  };
+  const payload = { repository: { full_name: "owner/repo" }, action: "created", sender: { login: "owner" },
+    issue: { number: 1, pull_request: {} }, comment: { id: 5, body: "queued", created_at: "2026-09-28T00:00:00Z" } };
+  const body = JSON.stringify(payload);
+  const handler = createHandler(store, { githubSecret: "test-secret", trailerPolicy: "shadow", githubRepoProjects: { "owner/repo": "p" } });
+  const signature = await ghSigned("test-secret", body);
+  const send = () => handler(new Request("http://test/hooks/github", { method: "POST", body,
+    headers: { "x-github-event": "issue_comment", "x-github-delivery": "queued-comment", "x-hub-signature-256": signature } }));
+  assert.equal((await send()).status, 202);
+  const row = await original("queued-comment");
+  assert.equal(row!.gh_event, "issue_comment");
+  assert.equal(row!.routing_state, "pending_policy");
+  assert.ok(row!.received_at <= firstReads[0]);
+  const arrival = row!.received_at;
+  assert.equal((await send()).status, 202);
+  assert.equal((await original("queued-comment"))!.received_at, arrival);
+  // The policy landing makes the pending row drainable. Classification is covered in the /2 T18 fixture.
+  await store.updatePendingDelivery({ ...row!, routing_state: "received" });
+  const { drainPendingGithubDeliveries } = await import("./router.js");
+  const result = await drainPendingGithubDeliveries(store, { trailerPolicy: "shadow" });
+  assert.deepEqual(result, { drained: 1, failed: 0 });
+  const sealed = await store.byIdempotencyKey("p", "gh:queued-comment");
+  assert.ok(sealed);
+  assert.equal((sealed.method!.params!.github_payload as any).ingress_at, arrival);
+  assert.equal((sealed.method!.params!.github_payload as any).comment_id, 5);
+  assert.equal(sealed.method!.params!.sealed_by, "webhook:github");
+  assert.equal(sealed.method!.params!.producer_sig_verdict, "none");
+  assert.equal(await original("queued-comment"), null);
+});

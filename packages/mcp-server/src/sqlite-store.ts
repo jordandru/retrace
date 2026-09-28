@@ -2,7 +2,7 @@
 import { DatabaseSync } from "node:sqlite";
 import {
   ArtifactIndexQuery, ArtifactIndexResult, BACKFILL_ARTIFACT_INDEX_SQL, ChainHead, Event, EventStore, HeadMovedError,
-  HistoryQuery, HistoryPage, PendingDelivery, SCHEMA_PENDING_LEASE_COLUMNS_SQL, SCHEMA_PENDING_ROUTE_COLUMNS_SQL, SCHEMA_SQL, Share, artifactIndexRows, clampHistoryLimit,
+  HistoryQuery, HistoryPage, PendingDelivery, SCHEMA_PENDING_EVENT_COLUMNS_SQL, SCHEMA_PENDING_LEASE_COLUMNS_SQL, SCHEMA_PENDING_ROUTE_COLUMNS_SQL, SCHEMA_SQL, Share, artifactIndexRows, clampHistoryLimit,
   ArtifactIndexHit, runArtifactIndexStatements, historyPageFromNewestFirst, likeContains,
 } from "@retrace-dev/core";
 import type { BreakerRow, ClassificationContextRow, PolicyRouteRow, PolicySnapshot, PolicySnapshotBudget, PolicyWrite } from "@retrace-dev/core";
@@ -20,6 +20,11 @@ export class SqliteStore implements EventStore {
     }
     for (const sql of SCHEMA_PENDING_LEASE_COLUMNS_SQL) {
       try { this.db.exec(sql); } catch { /* column already present */ }
+    }
+    for (const sql of SCHEMA_PENDING_EVENT_COLUMNS_SQL) {
+      try { this.db.exec(sql); } catch (e) {
+        if (!/duplicate column name/i.test(String(e))) throw e;
+      }
     }
     this.backfillArtifactIndexOnce();
   }
@@ -171,8 +176,8 @@ export class SqliteStore implements EventStore {
   async insertPendingDelivery(row: PendingDelivery) {
     try {
       this.db.prepare(
-        "INSERT INTO pending_deliveries (delivery_id, project, raw_body, received_at, repo, routing_source, routing_digest, routing_state) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-      ).run(row.delivery_id, row.project, row.raw_body, row.received_at, row.repo ?? null, row.routing_source ?? null, row.routing_digest ?? null, row.routing_state ?? null);
+        "INSERT INTO pending_deliveries (delivery_id, project, raw_body, received_at, repo, routing_source, routing_digest, routing_state, gh_event) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      ).run(row.delivery_id, row.project, row.raw_body, row.received_at, row.repo ?? null, row.routing_source ?? null, row.routing_digest ?? null, row.routing_state ?? null, row.gh_event ?? null);
     } catch (e: unknown) {
       if (!/UNIQUE/i.test(String((e as Error)?.message))) throw e;
     }
@@ -180,7 +185,7 @@ export class SqliteStore implements EventStore {
 
   async getPendingDelivery(delivery_id: string): Promise<PendingDelivery | null> {
     return (this.db.prepare(
-      `SELECT delivery_id, project, raw_body, received_at, repo, routing_source, routing_digest, routing_state,
+      `SELECT delivery_id, project, raw_body, received_at, gh_event, repo, routing_source, routing_digest, routing_state,
               lease_owner, lease_until, outcomes, attempt_count, state
        FROM pending_deliveries WHERE delivery_id = ?`,
     ).get(delivery_id) as PendingDelivery | undefined) ?? null;
@@ -188,7 +193,7 @@ export class SqliteStore implements EventStore {
 
   async listPendingDeliveriesOlderThan(received_at: string): Promise<PendingDelivery[]> {
     return this.db.prepare(
-      `SELECT delivery_id, project, raw_body, received_at, repo, routing_source, routing_digest, routing_state,
+      `SELECT delivery_id, project, raw_body, received_at, gh_event, repo, routing_source, routing_digest, routing_state,
               lease_owner, lease_until, outcomes, attempt_count, state
        FROM pending_deliveries WHERE received_at < ? ORDER BY received_at ASC`,
     ).all(received_at) as unknown as PendingDelivery[];
@@ -358,7 +363,7 @@ export class SqliteStore implements EventStore {
 
   async listDrainablePendingDeliveries(nowIso: string, limit = 20) {
     return this.db.prepare(
-      `SELECT delivery_id, project, raw_body, received_at, repo, routing_source, routing_digest, routing_state,
+      `SELECT delivery_id, project, raw_body, received_at, gh_event, repo, routing_source, routing_digest, routing_state,
               lease_owner, lease_until, outcomes, attempt_count, state
        FROM pending_deliveries
        WHERE IFNULL(routing_state, '') NOT IN ('unresolved', 'pending_policy')
@@ -378,7 +383,7 @@ export class SqliteStore implements EventStore {
     ).run(owner, untilIso, delivery_id, nowIso).changes;
     if (changed < 1) return null;
     return (this.db.prepare(
-      `SELECT delivery_id, project, raw_body, received_at, repo, routing_source, routing_digest, routing_state,
+      `SELECT delivery_id, project, raw_body, received_at, gh_event, repo, routing_source, routing_digest, routing_state,
               lease_owner, lease_until, outcomes, attempt_count, state
        FROM pending_deliveries WHERE delivery_id=? AND lease_owner=?`,
     ).get(delivery_id, owner) as PendingDelivery | undefined) ?? null;
