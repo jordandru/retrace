@@ -479,3 +479,48 @@ test("T2 T17 owner-login replay reconstructs decisions/table and rejects absent 
     assert.match(run.stdout, /preserved observed fields/);
   }
 });
+
+test("T-A5 T-A6 observed timing, legacy seals, replay prefix and stderr progress", async () => {
+  const { MemoryEventStore, appendOwnerLoginEvent, ownerLoginRecord } = await import("@retrace-dev/core");
+  const { ownerLoginScenario } = await import("../../core/dist/owner-login-fixture.js");
+  const { recomputeOwnerLogin } = await import("./owner-login-replay.js");
+  const store = new MemoryEventStore(), f = await ownerLoginScenario(store);
+  const handler = createHandler(store, { token: "owner-token", ownerPrincipal: { type: "human", id: "owner" } });
+  const put = await handler(new Request(`http://test/projects/${f.project}/policy`, { method: "PUT",
+    headers: { authorization: "Bearer owner-token", "content-type": "application/json", "if-match": "none" }, body: JSON.stringify(f.policy.body) }));
+  assert.equal(put.status, 201, await put.text());
+  const policy = (await store.getPolicy(f.project, { current: true }))!;
+  for (let i = 0; i < 501; i++) await appendEvent(store, { project: f.project, actor: { type: "system", id: "fixture" }, action: "read", artifacts: [{ id: "fixture:unrelated", role: "used" }] });
+  const first = (await appendOwnerLoginEvent(store, f.input, policy, f.repo)).event;
+  // Historical seals lack timing; remove it before sealing so their chain remains valid.
+  const { classifyOwnerLogin } = await import("@retrace-dev/core");
+  const legacy = await classifyOwnerLogin({ store, input: { ...f.input, idempotency_key: "legacy" }, policy,
+    canonicalR: f.repo, readHead: (await store.head(f.project))!, deadline: Date.now() + 1000 });
+  if (legacy.kind !== "decision") throw new Error("fixture");
+  delete (ownerLoginRecord(legacy.input)!.decision as Partial<import("@retrace-dev/core").OwnerLoginRecord["decision"]>).timing;
+  await appendEvent(store, legacy.input);
+  const bundle = await buildExportBundle(store, { project: f.project });
+  const full = await recomputeOwnerLogin(bundle);
+  assert.equal(full.ok, true, JSON.stringify(full));
+  assert.equal(full.results.length, 2);
+  const prefix = await recomputeOwnerLogin(bundle, undefined, { limitSeq: first.seq });
+  assert.deepEqual(prefix.results, full.results.slice(0, 1));
+  assert.deepEqual(prefix.consumption, full.consumption);
+  assert.deepEqual(await recomputeOwnerLogin(bundle, undefined, { limitSeq: 0 }), { ok: true, results: [], consumption: [] });
+  const bad = structuredClone(bundle); bad.events.at(-1)!.intent = "tampered tail";
+  assert.equal((await recomputeOwnerLogin(bad, undefined, { limitSeq: first.seq })).ok, false);
+  const dir = mkdtempSync(join(tmpdir(), "owner-login-progress-"));
+  try {
+    const file = join(dir, "bundle.json"); writeFileSync(file, JSON.stringify(bundle));
+    const run = (args: string[]) => spawnSync(process.execPath, [bin, "owner-login", "--recompute", "--bundle", file, ...args], { encoding: "utf8", env: baseEnv });
+    const plain = run([]), bounded = run(["--limit-seq", String(bundle.events.at(-1)!.seq)]);
+    assert.equal(plain.status, 0, plain.stderr); assert.equal(bounded.status, 0, bounded.stderr);
+    assert.equal(bounded.stdout, plain.stdout);
+    for (const phase of ["bundle parsed", "bundle validated", "fixture loading: 500 events", "fixture loaded", "500 events scanned", "2 decisions replayed"])
+      assert.ok(bounded.stderr.includes(phase), bounded.stderr);
+    assert.match(bounded.stderr, /\(\d+ ms\)/);
+    assert.doesNotMatch(bounded.stdout, /bundle parsed|fixture loaded|events scanned/);
+    for (const invalid of ["-1", "1.5", "9007199254740992", "nope"])
+      assert.notEqual(run(["--limit-seq", invalid]).status, 0);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

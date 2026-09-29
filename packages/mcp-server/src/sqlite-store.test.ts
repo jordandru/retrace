@@ -548,3 +548,24 @@ test("T17 SQLite atomic allocation, concurrent readers, U bound and rollback", a
   assert.equal(await b.ownerLoginConsumptionRow(f.project, "unused"), null);
   assert.equal((await a.all(f.project)).length, 3);
 });
+
+for (const [operation, stage] of [["eventsReferencingArtifacts", "candidates"],
+  ["ownerLoginConsumptionUpTo", "consumption"], ["amendmentEventsUpTo", "amendments"]] as const) {
+  test(`T-A2 T-A3 SQLite stalled ${stage} reports elapsed time at deadline`, async () => {
+    const { ownerLoginScenario } = await import("../../core/dist/owner-login-fixture.js");
+    const { classifyOwnerLogin, ownerLoginRecord } = await import("@retrace-dev/core");
+    const store = new SqliteStore(":memory:");
+    try {
+      const f = await ownerLoginScenario(store), readHead = (await store.head(f.project))!;
+      store[operation] = async () => new Promise<never>(() => {});
+      const result = await classifyOwnerLogin({ store, input: f.input, policy: f.policy, canonicalR: f.repo,
+        readHead, deadline: Date.now() + 100 });
+      assert.equal(result.kind, "decision"); if (result.kind !== "decision") throw new Error("fixture");
+      const d = ownerLoginRecord(result.input)!.decision;
+      assert.equal(d.status, "unavailable"); assert.equal(d.reason, "deadline");
+      assert.equal(d.timing.stage_failed, stage);
+      assert.ok(d.timing[`${stage}_ms`]! >= d.timing.deadline_ms - 30, JSON.stringify(d.timing));
+      assert.equal(d.timing.budget_rows_remaining, stage === "candidates" ? 2000 : 1999);
+    } finally { (store as any).db.close(); }
+  });
+}
