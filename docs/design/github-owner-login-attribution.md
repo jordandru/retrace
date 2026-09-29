@@ -1,6 +1,6 @@
 # GitHub owner-login attribution — design note v1 (evaluation plan P1; issues #82, #69)
 
-**Status:** v1.4.3 — R5-L1 dated (step-1 PR), 2026-09-29. Previous status: v1.4.2, 2026-09-28 (v1.4.2 text fixed 00:1xZ 09-29 / 18:1x MDT 09-28 on PR 136 round 1 — Codex F1 `evt_3b0b2ab4e37a4f9cbda820ec81fdca49` (the consumer must be sealed before the `allocation_failed` seal: U < W.seq < L.seq) and the Grok seat's M1/L1 `evt_24ce6202bcad4964b572c8dcb25427c8` (the `allocation` path is `decision.allocation`; the item-3 replay sentence scoped), on Jordan's go `evt_c03c4f0fb826447096dbc4eec947dbb3`. v1.4.2 23:2xZ / 17:2x MDT: dated corrections to §3.5 item 3, §4, §7 and §11 T2/T17 — `allocation_failed` is an observed outcome reproduced by rule, not a derivation — from the Codex builder's stop on PR 135 (`evt_3f252c879c4745d89d4432bb61b7cb19`), gate check `evt_5e0e8ceefb8d4b5ea6b74b44f75194f1`, Jordan's decision A `evt_81f62f1f13234c9f953295c8718fdc14`. v1.4.1 20:0xZ / 14:0x MDT: two dated in-place corrections from Codex's round-1 review of the step-1 build
+**Status:** v1.4.4 — T3 measured live, dated corrections in §3.4 and §3.5 (budget), 16:02Z 2026-09-29; step 1 is **built** (PR 135, main `7fe60eb4`), **deployed** (Worker `c7f41377`, 2026-09-29 15:3xZ, Jordan's hand) and the `/2` policy for `retrace` is **active** (activation `evt_a53d981bc6c246e69b856d63e856523b`, seq 9422); the header's "Not built" below is the v1 text, kept under rule 10. Previous status: v1.4.3 — R5-L1 dated (step-1 PR), 2026-09-29. Previous status: v1.4.2, 2026-09-28 (v1.4.2 text fixed 00:1xZ 09-29 / 18:1x MDT 09-28 on PR 136 round 1 — Codex F1 `evt_3b0b2ab4e37a4f9cbda820ec81fdca49` (the consumer must be sealed before the `allocation_failed` seal: U < W.seq < L.seq) and the Grok seat's M1/L1 `evt_24ce6202bcad4964b572c8dcb25427c8` (the `allocation` path is `decision.allocation`; the item-3 replay sentence scoped), on Jordan's go `evt_c03c4f0fb826447096dbc4eec947dbb3`. v1.4.2 23:2xZ / 17:2x MDT: dated corrections to §3.5 item 3, §4, §7 and §11 T2/T17 — `allocation_failed` is an observed outcome reproduced by rule, not a derivation — from the Codex builder's stop on PR 135 (`evt_3f252c879c4745d89d4432bb61b7cb19`), gate check `evt_5e0e8ceefb8d4b5ea6b74b44f75194f1`, Jordan's decision A `evt_81f62f1f13234c9f953295c8718fdc14`. v1.4.1 20:0xZ / 14:0x MDT: two dated in-place corrections from Codex's round-1 review of the step-1 build
 brief, PR #133, `evt_1e9f4144fb0042bf8bcb432d736554a2`, applied on Jordan's go `evt_5d5309168b6244c4aa1c20dbbab46e12` — §3.5 item 2, the consumption read is
 bounded by the read head (F4); §4, `received.webhook` is sealed null (F5). No number, decision or test changed; rule 10; the §4 correction's wording fixed 22:1xZ on Codex R2-L2.) DRAFT v1.4, 2026-09-26 (v1.4 06:3xZ / 00:3x MDT: the final text touch on Jordan's go `evt_1e00d0a0b1804e68b3b66af34d6db2e2` —
 Codex round-4 R4-L1, NOOA round-4 N4-M1/N4-M2/N4-L3, and the Grok seat's (cursor-agent) first-pass findings R1-M1/R1-L1/R1-L2
@@ -240,6 +240,12 @@ GitHub stores what it received but may alter line endings and trailing whitespac
 build time against the webhook payload (T3); if GitHub alters anything else, the normalisation is extended and the
 measurement recorded here as a dated correction.
 
+*Measured, 16:02Z 2026-09-29 (T3, `docs/measurements/owner-login-t3-2026-09-29.md`; go `evt_fb2c56a11f4341b087586c5f2563d7c7`): one live post per
+kind — `pr_open`, `comment`, `review`, `pr_edit` — on pull request #137, each declared first. GitHub altered nothing: no `\r\n`
+introduced, trailing spaces and a literal tab preserved, no final newline appended; after this normalisation every `body_sha256` and
+`title_sha256` equalled the declaration's on the API read-back and in the seal's `github_payload`. **The normalisation is not extended.**
+`comment` and `pr_edit`, unmeasured on 2026-09-26 (R1-L1), are now measured. `push` and `merge` carry no body.*
+
 ### 3.5 Read contract
 
 Two bounded reads per webhook event, then one atomic event-plus-consumption write (item 3).
@@ -296,6 +302,20 @@ Budget 300 ms
 and 2,000 rows (a pull request's index rows over 30 minutes are two orders of magnitude fewer than a commit's file
 witnesses); over budget or any store error → `unavailable` (§4). The classifier records `read_head_seq` and
 `read_head_hash` so the decision is reproducible from an export.
+
+*Correction, 16:02Z 2026-09-29, text corrected 16:47Z 2026-09-29 on the round-1 findings of PR #137 (Codex `evt_ae2435e61ba2441989746ada805fc09c`, Grok seat
+`evt_6a8040b0249444209a853660125ae10e`, NOOA `evt_2008c8cb31fd43dba80cda555bc51a71`) (T3, `docs/measurements/owner-login-t3-2026-09-29.md` §3–§4): on the
+live Worker (`c7f41377`, D1 `retrace-db`, project `retrace` at ~9,430 events) **every classified delivery measured** — 5 of 5 at the record's
+head `a449f9a`, 10 of 10 by 16:42Z including the three round-1 review copies — ended `unavailable` / `deadline` with `classification_ms 300`:
+the reads inside the classifier's stopwatch did not complete within the 300 ms budget, so an eligible, hash-matching, pinned declaration
+sealed 21–89 s before ingress by the Worker's clock (declaration `received_at` → `ingress_at`; GitHub's `payload_time` → `ingress_at` was
+2.4–3.6 s) and inside the read head was not consumed, and each seal names the account, not the seat. Fail-closed as this section specifies.
+The miss recurred on every delivery over 53 minutes; the seals carry no cold/warm or per-stage observation, so whether a cold isolate
+contributed is not observed, and which read spent the budget is not identified (one `classification_ms`; the head and policy reads run
+before the stopwatch). The offline recompute (§7) over the 19.9 MB export was killed at 240 s and at 590.04 s without output. The budget and
+the read plan are therefore **unmeasured assumptions until a class S fix records per-stage timing and the D1 query plan**; none of the measured
+deliveries attributed a seat, and later deliveries are classified afresh and unmeasured. The 2026-09-15 shadow deadline (`classify.ts`
+`store.all` on the hot path) is the precedent.*
 
 ## 4. Decision table
 
@@ -553,6 +573,7 @@ not yield distinct identities. The questions stay listed for NOOA and the Grok s
 | What | Event |
 |---|---|
 | Q1–Q4 presented | `evt_e5ce6a0ed09e40bc8cd39b57b8801ecf` |
+| T3 live measurement (2026-09-29): go `evt_fb2c56a11f4341b087586c5f2563d7c7`; owner steps `evt_04c17e0c…` (migrate), `evt_dbab087f…` (deploy `c7f41377`), `evt_a2b74a85…` (policy `/2` v2, activation `evt_a53d981b…` seq 9422); samples on PR #137 — seals `evt_36db59b3…`, `evt_9d015f8e…`, `evt_1a8ea7d3…`, `evt_b0a3a88c…`, `evt_b6aa4ee0…` (five at the record's head; later seals in the record §3), all `unavailable`/`deadline` | `docs/measurements/owner-login-t3-2026-09-29.md`; corrections §3.4 (normalisation unchanged), §3.5 (budget); round-1 findings applied in place before merge (record §5) |
 | Jordan: accept all four, draft the P1 note | `evt_603025a3932a4193a23f16b49b742f96` |
 | This note's own pull request declared under §3.2 before `gh pr create` (first live sample; found the `pr_open` gap) | the declaration and outcome events are cited in the pull request's first coordinator comment or its body |
 | Round 4 routing: Codex `evt_c47d00d6556048b797404bc01d4073ec`, NOOA `evt_9cceb4db63514a179e2e96b7881a3310`; Grok seat (cursor-agent, Jordan's reassignment `evt_cd9d5b806e574250bfa6069f14fd280f`) first pass `evt_01c2d719d55e41358097bf016efdfa93` | verdicts Codex `evt_34361117eb5d4745835616bf5442615c` (approved, 1 L), NOOA `evt_b3ad9f6c0d1b4ba6a2c13e3717baccff` (approved; 2 items labelled Medium, 2 L), cursor-agent `evt_238adda495d04d6c8307bb4d39c760d6` (rejected, 1 M 2 L) |
