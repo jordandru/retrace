@@ -1075,3 +1075,113 @@ test("T9 owner_login_decision is stripped from unsigned and both signature forma
     assert.equal(res.status, 401, await res.text()); assert.equal(store.events.length, 0);
   }
 });
+
+test("T1 T17 router consumes one declaration for two identical comment deliveries", async () => {
+  const { ownerLoginScenario } = await import("./owner-login-fixture.js");
+  const { ownerLoginRecord } = await import("./owner-login.js");
+  const store = new MemStore(), f = await ownerLoginScenario(store); store.policies.push(f.policy);
+  store.routes.set(f.repo, { repo: f.repo, state: "active", project: f.project, digest: f.policy.digest, activation_seq: 1, set_at: f.ingress });
+  const handler = createHandler(store, { githubSecret: "secret", trailerPolicy: "shadow", githubRepoProjects: { [f.repo]: f.project } });
+  const body = JSON.stringify(f.payload), signature = await ghSigned("secret", body);
+  for (const id of ["one", "two"]) assert.equal((await handler(new Request("http://test/hooks/github", { method: "POST", body,
+    headers: { "x-github-event": "issue_comment", "x-github-delivery": id, "x-hub-signature-256": signature } }))).status, 201);
+  const first = (await store.byIdempotencyKey(f.project, "gh:one"))!, second = (await store.byIdempotencyKey(f.project, "gh:two"))!;
+  assert.equal(ownerLoginRecord(first)!.decision.status, "declared_by_seat");
+  assert.equal(first.actor.id, "codex"); assert.equal(first.method!.params!.sealed_by, "webhook:github");
+  assert.equal(ownerLoginRecord(second)!.decision.status, "unresolved");
+  assert.equal(store.ownerLoginConsumption.size, 1); assert.equal(store.pending.length, 0);
+});
+
+test("T17 second allocation loss reads winner once, seals observed failure and never classifies a third time", async () => {
+  const { ownerLoginScenario } = await import("./owner-login-fixture.js");
+  const { appendOwnerLoginEvent, ownerLoginRecord } = await import("./owner-login.js");
+  const store = new MemStore(), f = await ownerLoginScenario(store);
+  let reads = 0, pointReads = 0, writes = 0;
+  const read = store.eventsReferencingArtifacts.bind(store), insert = store.insert.bind(store);
+  store.eventsReferencingArtifacts = async (...args) => { reads++; return read(...args); };
+  store.ownerLoginConsumptionRow = async () => { pointReads++; return { project: f.project, declaration_event_id: f.declaration.id, consumed_by_event_id: "winner", consumed_by_seq: 1, consumed_at: f.ingress }; };
+  store.insert = async (e, extras) => {
+    if (extras?.owner_login_consumption?.length) { writes++; throw new Error("UNIQUE constraint failed: owner_login_consumption.project, owner_login_consumption.declaration_event_id"); }
+    return insert(e, extras);
+  };
+  const result = await appendOwnerLoginEvent(store, f.input, f.policy, f.repo, Date.now()+2000);
+  const record = ownerLoginRecord(result.event)!;
+  assert.equal(reads, 2); assert.equal(writes, 2); assert.equal(pointReads, 1);
+  assert.equal(record.decision.reason, "allocation_failed"); assert.deepEqual(record.decision.consumed, []);
+  assert.deepEqual(record.decision.allocation, { attempts: 2, read_head_seq: 0, consumed_by: "winner" });
+});
+
+test("T17 F4 consumption sealed at U+1 stays invisible at U; allocation loses then reclassifies", async () => {
+  const { ownerLoginScenario } = await import("./owner-login-fixture.js");
+  const { appendOwnerLoginEvent, ownerLoginRecord } = await import("./owner-login.js");
+  const store = new MemStore(), f = await ownerLoginScenario(store);
+  const read = store.ownerLoginConsumptionUpTo.bind(store); let injected = false, failedAllocation = 0;
+  store.ownerLoginConsumptionUpTo = async (project, ids, u, budget) => {
+    if (!injected) {
+      injected = true;
+      await appendOwnerLoginEvent(store, { ...f.input, idempotency_key: "winner" }, f.policy, f.repo, Date.now()+2000);
+      const rows = await read(project, ids, u, budget);
+      assert.deepEqual(rows, { ok: true, rows: [] }); return rows;
+    }
+    return read(project, ids, u, budget);
+  };
+  const insert = store.insert.bind(store);
+  store.insert = async (e, extras) => { try { return await insert(e, extras); } catch (error) { if (/owner_login_consumption/.test(String(error))) failedAllocation++; throw error; } };
+  const result = await appendOwnerLoginEvent(store, f.input, f.policy, f.repo, Date.now()+2000);
+  assert.equal(failedAllocation, 1); assert.equal(ownerLoginRecord(result.event)!.decision.status, "unresolved");
+  assert.equal(store.ownerLoginConsumption.size, 1);
+});
+
+test("T18 queued /2 comment keeps arrival ingress and rejects a declaration received before drain but after arrival", async () => {
+  const { ownerLoginScenario } = await import("./owner-login-fixture.js");
+  const { ownerLoginRecord } = await import("./owner-login.js");
+  const { drainPendingGithubDeliveries } = await import("./router.js");
+  const store = new MemStore(), f = await ownerLoginScenario(store);
+  store.policies.push(f.policy);
+  const arrival = new Date(Date.parse(f.declaration.received_at) - 1000).toISOString();
+  await store.insertPendingDelivery({ delivery_id: "queued", project: f.project, repo: f.repo, raw_body: JSON.stringify(f.payload), received_at: arrival,
+    gh_event: "issue_comment", routing_state: "received", routing_source: "env" });
+  assert.deepEqual(await drainPendingGithubDeliveries(store, { trailerPolicy: "shadow" }), { drained: 1, failed: 0 });
+  const e = (await store.byIdempotencyKey(f.project, "gh:queued"))!;
+  assert.equal(ownerLoginRecord(e)!.decision.ingress_at, arrival);
+  assert.equal(ownerLoginRecord(e)!.decision.status, "unresolved"); assert.equal(store.ownerLoginConsumption.size, 0);
+});
+
+test("T13 merge webhook content binds a merge declaration and otherwise remains unresolved", async () => {
+  const { ownerLoginScenario } = await import("./owner-login-fixture.js");
+  const { ownerLoginRecord } = await import("./owner-login.js");
+  for (const declared of [true, false]) {
+    const store = new MemStore(), f = await ownerLoginScenario(store); store.policies.push(f.policy);
+    if (declared) await appendEvent(store, { project: f.project, actor: { type: "agent", id: "codex" }, action: "sent", artifacts: [{ id: `pr:${f.repo}#1`, role: "used" }],
+      method: { params: { sealed_by: "pinned:codex", producer_sig_verdict: "verified", github_action: { kind: "merge", repo: f.repo, login: "owner", pr: 1, merge_commit_sha: "a".repeat(40) } } } });
+    store.routes.set(f.repo, { repo: f.repo, state: "active", project: f.project, digest: f.policy.digest, activation_seq: 1, set_at: f.ingress });
+    const handler = createHandler(store, { githubSecret: "secret", trailerPolicy: "shadow", githubRepoProjects: { [f.repo]: f.project } });
+    const body = JSON.stringify({ repository: { full_name: f.repo }, action: "closed", sender: { login: "owner" }, pull_request: { number: 1, merged: true, merge_commit_sha: "a".repeat(40), head: { sha: "b".repeat(40), ref: "feature" } } });
+    const response = await handler(new Request("http://test/hooks/github", { method: "POST", body,
+      headers: { "x-github-event": "pull_request", "x-github-delivery": "merge", "x-hub-signature-256": await ghSigned("secret", body) } }));
+    assert.equal(response.status, 201);
+    const record = ownerLoginRecord((await store.byIdempotencyKey(f.project, "gh:merge"))!)!;
+    assert.equal(record.decision.status, declared ? "declared_by_seat" : "unresolved");
+  }
+});
+
+test("T8 /1, empty /2 and unlisted login retain baseline actor and omit owner decision; payload stays present", async () => {
+  const { readFileSync } = await import("node:fs");
+  const fixture = JSON.parse(readFileSync(new URL("./fixtures/owner-login/legacy-comment-actor.json", import.meta.url), "utf8"));
+  const { ownerLoginScenario } = await import("./owner-login-fixture.js");
+  for (const variant of ["v1", "empty", "unlisted"]) {
+    const store = new MemStore(), f = await ownerLoginScenario(store);
+    const bodyPolicy = structuredClone(f.policy.body);
+    if (variant === "v1") { bodyPolicy.profile = "retrace-project-policy/1"; delete bodyPolicy.github; }
+    else bodyPolicy.github!.shared_logins = variant === "empty" ? [] : ["someone-else"];
+    store.policies.push({ ...f.policy, body: bodyPolicy });
+    store.routes.set(f.repo, { repo: f.repo, state: "active", project: f.project, digest: f.policy.digest, activation_seq: 1, set_at: f.ingress });
+    const handler = createHandler(store, { githubSecret: "secret", trailerPolicy: "shadow", githubRepoProjects: { [f.repo]: f.project } });
+    const body = JSON.stringify(f.payload);
+    assert.equal((await handler(new Request("http://test/hooks/github", { method: "POST", body,
+      headers: { "x-github-event": "issue_comment", "x-github-delivery": "baseline", "x-hub-signature-256": await ghSigned("secret", body) } }))).status, 201);
+    const e = (await store.byIdempotencyKey(f.project, "gh:baseline"))!;
+    assert.deepEqual(e.actor, fixture.actor);
+    assert.equal(e.method!.params!.owner_login_decision, undefined); assert.ok(e.method!.params!.github_payload);
+  }
+});

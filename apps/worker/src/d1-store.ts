@@ -1,4 +1,4 @@
-import { ArtifactIndexQuery, ArtifactIndexResult, ChainHead, Event, EventStore, HeadMovedError, HistoryQuery, HistoryPage, PendingDelivery, Share, artifactIndexRows, clampHistoryLimit, runArtifactIndexStatements, ArtifactIndexHit, historyPageFromNewestFirst, likeContains, policyDocumentFromRow, policySnapshotFromIndex, assertRouteWriteConsistent, RouteConflictError } from "@retrace-dev/core";
+import { InsertExtras, OwnerLoginConsumption, readOwnerLoginConsumption, ArtifactIndexQuery, ArtifactIndexResult, ChainHead, Event, EventStore, HeadMovedError, HistoryQuery, HistoryPage, PendingDelivery, Share, artifactIndexRows, clampHistoryLimit, runArtifactIndexStatements, ArtifactIndexHit, historyPageFromNewestFirst, likeContains, policyDocumentFromRow, policySnapshotFromIndex, assertRouteWriteConsistent, RouteConflictError } from "@retrace-dev/core";
 import type { BreakerRow, ClassificationContextRow, PolicyRouteRow, PolicySnapshot, PolicySnapshotBudget, PolicyWrite } from "@retrace-dev/core";
 
 export class D1Store implements EventStore {
@@ -30,8 +30,22 @@ export class D1Store implements EventStore {
     ];
   }
 
-  async insert(e: Event) {
-    await this.db.batch(this.insertStatements(e)); // batch is atomic in D1
+  async insert(e: Event, extras?: InsertExtras) {
+    await this.db.batch([
+      ...(extras?.owner_login_consumption ?? []).map(row => this.db.prepare(
+        "INSERT INTO owner_login_consumption (project, declaration_event_id, consumed_by_delivery, consumed_by_event_id, consumed_by_seq, consumed_at) VALUES (?, ?, ?, ?, ?, ?)"
+      ).bind(e.project, row.declaration_event_id, row.consumed_by_delivery ?? null, e.id, e.seq, e.received_at)),
+      ...this.insertStatements(e),
+    ]); // batch is atomic in D1
+  }
+
+  async ownerLoginConsumptionRow(project: string, id: string): Promise<OwnerLoginConsumption | null> {
+    return this.db.prepare("SELECT * FROM owner_login_consumption WHERE project = ? AND declaration_event_id = ?").bind(project, id).first<OwnerLoginConsumption>();
+  }
+  async ownerLoginConsumptionUpTo(project: string, ids: string[], throughSeq: number, budget: { deadline: number; row_cap: number }) {
+    return readOwnerLoginConsumption(ids, budget, async (batch, limit) => (await this.db.prepare(
+      `SELECT * FROM owner_login_consumption WHERE project = ? AND consumed_by_seq <= ? AND declaration_event_id IN (${batch.map(() => "?").join(",")}) LIMIT ?`
+    ).bind(project, throughSeq, ...batch, limit).all<OwnerLoginConsumption>()).results);
   }
 
   /** Deletes + the audit insert run in one D1 batch, which is atomic: if the audit's (project, seq) collides the
@@ -42,7 +56,7 @@ export class D1Store implements EventStore {
     if (audit.project === project) throw new Error("audit event must not live in the project being deleted");
     // Keep every project-owned row in this guarded transaction. In particular, leaving export_cache behind would
     // retain the deleted ledger bytes and could serve them as a stale bundle if the project name were recreated.
-    const tables = ["events", "event_artifacts", "event_artifact_index", "pending_deliveries", "shares", "checkpoints", "export_cache", "project_policies", "classification_contexts", "classification_path_lowers", "classification_breakers"];
+    const tables = ["owner_login_consumption", "events", "event_artifacts", "event_artifact_index", "pending_deliveries", "shares", "checkpoints", "export_cache", "project_policies", "classification_contexts", "classification_path_lowers", "classification_breakers"];
     const headMatches = {
       sql: "EXISTS (SELECT 1 FROM events WHERE project = ? AND seq = ? AND hash = ?) AND NOT EXISTS (SELECT 1 FROM events WHERE project = ? AND seq > ?)",
       params: [project, expectedHead.seq, expectedHead.hash, project, expectedHead.seq],

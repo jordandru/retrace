@@ -110,3 +110,24 @@ test("T18 §1.2 D1 pending gh_event round-trip, redelivery receipt and NULL migr
     assert.equal((await store.claimPendingDeliveryLease("comment", "owner", "2026-09-29T00:00:00Z", "2026-09-29T00:01:00Z"))!.gh_event, "issue_comment");
   });
 });
+
+test("T17 workerd consumption batch rolls back on either constraint and reads over 100 ids at U", async () => {
+  await withD1(async db => {
+    const { ownerLoginScenario } = await import("../../../packages/core/dist/owner-login-fixture.js");
+    const { appendOwnerLoginEvent, ownerLoginRecord } = await import("@retrace-dev/core");
+    const store = new D1Store(db), f = await ownerLoginScenario(store);
+    const first = await appendOwnerLoginEvent(store, f.input, f.policy, f.repo, Date.now()+5000);
+    const second = await appendOwnerLoginEvent(store, { ...f.input, idempotency_key: "second" }, f.policy, f.repo, Date.now()+5000);
+    assert.equal(ownerLoginRecord(first.event)!.decision.status, "declared_by_seat");
+    assert.equal(ownerLoginRecord(second.event)!.decision.status, "unresolved");
+    const ids = [...Array.from({ length: 200 }, (_, i) => `absent-${i}`), f.declaration.id];
+    assert.deepEqual(await store.ownerLoginConsumptionUpTo(f.project, ids, 0, { deadline: Date.now()+2000, row_cap: 2 }), { ok: true, rows: [] });
+    const rows = await store.ownerLoginConsumptionUpTo(f.project, ids, second.event.seq, { deadline: Date.now()+2000, row_cap: 2 });
+    assert.equal(rows.ok && rows.rows.length, 1);
+    await assert.rejects(store.insert({ ...first.event, id: "bad" }, { owner_login_consumption: [{ declaration_event_id: "unused" }] }), /UNIQUE/);
+    assert.equal(await store.ownerLoginConsumptionRow(f.project, "unused"), null);
+    await assert.rejects(store.insert({ ...first.event, id: "bad2", seq: 3 }, { owner_login_consumption: [{ declaration_event_id: f.declaration.id }] }), /owner_login_consumption/);
+    assert.equal(await store.get("bad2"), null);
+    assert.equal((await store.all(f.project)).length, 3);
+  });
+});

@@ -1,7 +1,7 @@
 /** Content-bound testimony for shared GitHub accounts (owner-login/1). */
 import { Actor, Event, EventInput, GENESIS_HASH } from "./schema.js";
 import { PolicyDocument, POLICY_PROFILE_V2 } from "./policy.js";
-import { ArtifactIndexQuery, ChainHead, EventStore, appendEvent, artifactIndexRows } from "./store.js";
+import { ArtifactIndexQuery, ChainHead, EventStore, appendEvent, appendReadWithinDeadline, artifactIndexRows } from "./store.js";
 import { evaluateAmendmentsAtU, OWNER_LOGIN_DEADLINE_MS } from "./classify.js";
 import { sameArtifact } from "./capture.js";
 
@@ -32,6 +32,7 @@ export interface OwnerLoginRecord {
     consumed: string[];
     ingress_at: string | null;
     classification_ms: number;
+    allocation?: { attempts: 2; read_head_seq: number; consumed_by: string | null };
   };
 }
 export type OwnerLoginResult = { kind: "not_applicable" } | { kind: "decision"; input: EventInput; consume: string[] };
@@ -98,9 +99,10 @@ export function ownerLoginAccount(login: string): Actor { return { type: "system
 export function attachOwnerLoginDecision(input: EventInput, record: OwnerLoginRecord): EventInput {
   return { ...input, actor: record.decision.actor_written, method: { ...input.method, params: { ...input.method?.params, [OWNER_LOGIN_DECISION_PARAM]: record } } };
 }
-export function ownerLoginAllocationFailed(input: EventInput): EventInput {
+export function ownerLoginAllocationFailed(input: EventInput, consumedBy: string | null): EventInput {
   const record = ownerLoginRecord(input)!;
   return attachOwnerLoginDecision(input, { ...record, decision: { ...record.decision, status: "unresolved", reason: "allocation_failed",
+    allocation: { attempts: 2, read_head_seq: record.decision.context.read_head_seq, consumed_by: consumedBy },
     actor_written: ownerLoginAccount(record.login), evidence_level: null, declarations: [], consumed: [], received: { webhook: null, declaration: null } } });
 }
 
@@ -220,22 +222,42 @@ export async function classifyOwnerLogin(args: OwnerLoginArgs): Promise<OwnerLog
   return finish();
 }
 
-/** Shared ingress/drain append path. A missing bounded store API fails classification closed. */
+/** Shared ingress/drain append path, with exactly one reclassification on allocation loss. */
 export async function appendOwnerLoginEvent(store: EventStore, input: EventInput, policy: PolicyDocument | null,
   canonicalR: string, deliveryDeadline: number, now: () => number = Date.now) {
-  const classified = policy ? await classifyOwnerLogin({ store, input, policy, canonicalR,
-    readHead: await store.head(input.project) ?? { seq: -1, hash: GENESIS_HASH },
-    deadline: Math.min(now() + OWNER_LOGIN_DEADLINE_MS, deliveryDeadline), now }) : { kind: "not_applicable" as const };
-  const toSeal = classified.kind === "decision" ? classified.input : input;
-  const extras = classified.kind === "decision" ? { owner_login_consumption: classified.consume.map(declaration_event_id => ({
-    declaration_event_id, ...(typeof input.method?.params?.github_payload === "object" && input.method.params.github_payload &&
-      typeof (input.method.params.github_payload as GithubPayload).delivery_id === "string" ?
-      { consumed_by_delivery: (input.method.params.github_payload as Record<string, string>).delivery_id } : {}) })) } : undefined;
-  for (let attempt = 0; ; attempt++) {
-    try { return await appendEvent(store, toSeal, { deadline: deliveryDeadline, now, extras }); }
+  const opts = { deadline: deliveryDeadline, now };
+  let failures = 0;
+  let classified = await classify();
+  let toSeal = classified.kind === "decision" ? classified.input : input;
+  let consume = classified.kind === "decision" ? classified.consume : [];
+  async function classify() {
+    return policy ? classifyOwnerLogin({ store, input, policy, canonicalR,
+      readHead: await appendReadWithinDeadline(() => store.head(input.project), opts) ?? { seq: -1, hash: GENESIS_HASH },
+      deadline: Math.min(now() + OWNER_LOGIN_DEADLINE_MS, deliveryDeadline), now }) : { kind: "not_applicable" as const };
+  }
+  for (let seqAttempt = 0; ; ) {
+    const payload = object(input.method?.params?.github_payload);
+    const extras = { owner_login_consumption: consume.map(declaration_event_id => ({ declaration_event_id,
+      ...(typeof payload?.delivery === "string" ? { consumed_by_delivery: payload.delivery } : {}) })) };
+    try { return await appendEvent(store, toSeal, { ...opts, extras }); }
     catch (e) {
-      // Consumption failures must never enter the sequence-collision loop.
-      if (/owner_login_consumption/i.test(String(e)) || !/UNIQUE/i.test(String(e)) || attempt >= 4) throw e;
+      // D1 may wrap SQLite's error. Name AND constraint type are required; arbitrary store failures never retry.
+      if (/UNIQUE constraint failed:.*owner_login_consumption/i.test(String(e)) && consume.length) {
+        failures++;
+        if (failures === 1) {
+          classified = await classify();
+          toSeal = classified.kind === "decision" ? classified.input : input;
+          consume = classified.kind === "decision" ? classified.consume : [];
+        } else {
+          const row = store.ownerLoginConsumptionRow
+            ? await appendReadWithinDeadline(() => store.ownerLoginConsumptionRow!(input.project, consume[0]), opts) : null;
+          toSeal = ownerLoginAllocationFailed(toSeal, row?.consumed_by_event_id ?? null);
+          consume = [];
+        }
+        seqAttempt = 0;
+        continue;
+      }
+      if (/owner_login_consumption/i.test(String(e)) || !/UNIQUE/i.test(String(e)) || seqAttempt++ >= 4) throw e;
     }
   }
 }

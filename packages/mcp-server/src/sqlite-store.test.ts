@@ -77,7 +77,7 @@ test("SqliteStore.deleteProject: deletes + audit insert commit together", async 
   await appendEvent(store, ev({ project: "keep" }));
   await store.createShare({ id: "sh_1", project: "junk", created_at: "2026-08-20T00:00:00Z" });
   const counts = await store.deleteProject("junk", await audit(store), (await store.head("junk"))!);
-  assert.deepEqual(counts, { events: 2, event_artifacts: 3, event_artifact_index: 3, pending_deliveries: 0, shares: 1, project_policies: 0, classification_contexts: 0, classification_path_lowers: 0, classification_breakers: 0 });
+  assert.deepEqual(counts, { events: 2, event_artifacts: 3, event_artifact_index: 3, pending_deliveries: 0, shares: 1, project_policies: 0, classification_contexts: 0, classification_path_lowers: 0, classification_breakers: 0, owner_login_consumption: 0 });
   assert.deepEqual(await store.projects(), ["keep", "ops"]);
   assert.equal((await store.all("ops")).length, 1);
   assert.equal((await verifyProject(store, "ops")).ok, true);
@@ -108,7 +108,7 @@ test("SqliteStore.deleteProject: a head that moved since the audit was sealed th
   assert.equal((await store.all("ops")).length, 0);
   // retry with the fresh head succeeds
   const counts = await store.deleteProject("junk", await audit(store), (await store.head("junk"))!);
-  assert.deepEqual(counts, { events: 2, event_artifacts: 2, event_artifact_index: 2, pending_deliveries: 0, shares: 1, project_policies: 0, classification_contexts: 0, classification_path_lowers: 0, classification_breakers: 0 });
+  assert.deepEqual(counts, { events: 2, event_artifacts: 2, event_artifact_index: 2, pending_deliveries: 0, shares: 1, project_policies: 0, classification_contexts: 0, classification_path_lowers: 0, classification_breakers: 0, owner_login_consumption: 0 });
   assert.equal((await store.all("ops")).length, 1);
 });
 
@@ -523,4 +523,28 @@ test("T18 §1.2 pending gh_event survives SQLite reopen; pre-upgrade NULL remain
     assert.equal((await store.getPendingDelivery("legacy"))!.gh_event, null);
     assert.equal((await store.claimPendingDeliveryLease("comment", "owner", "2026-09-29T00:00:00Z", "2026-09-29T00:01:00Z"))!.gh_event, "issue_comment");
   } finally { (store as any).db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("T17 SQLite atomic allocation, concurrent readers, U bound and rollback", async () => {
+  const { ownerLoginScenario } = await import("../../core/dist/owner-login-fixture.js");
+  const { appendOwnerLoginEvent, ownerLoginRecord } = await import("@retrace-dev/core");
+  const path = join(mkdtempSync(join(tmpdir(), "owner-login-")), "test.sqlite");
+  const a = new SqliteStore(path), b = new SqliteStore(path), f = await ownerLoginScenario(a);
+  let arrived = 0, release!: () => void;
+  const barrier = new Promise<void>(resolve => release = resolve);
+  for (const s of [a, b]) {
+    const insert = s.insert.bind(s);
+    s.insert = async (e, extras) => {
+      if (extras?.owner_login_consumption?.length && arrived++ < 2) { if (arrived === 2) release(); await barrier; }
+      return insert(e, extras);
+    };
+  }
+  const results = await Promise.all([a, b].map((s, i) => appendOwnerLoginEvent(s, { ...f.input, idempotency_key: `sqlite-${i}` }, f.policy, f.repo, Date.now()+5000)));
+  assert.deepEqual(results.map(r => ownerLoginRecord(r.event)!.decision.status).sort(), ["declared_by_seat", "unresolved"]);
+  const winner = results.find(r => ownerLoginRecord(r.event)!.decision.status === "declared_by_seat")!.event;
+  assert.equal((await b.ownerLoginConsumptionRow(f.project, f.declaration.id))!.consumed_by_event_id, winner.id);
+  assert.deepEqual(await a.ownerLoginConsumptionUpTo(f.project, [f.declaration.id], 0, { deadline: Date.now()+1000, row_cap: 2 }), { ok: true, rows: [] });
+  await assert.rejects(a.insert({ ...winner, id: "bad" }, { owner_login_consumption: [{ declaration_event_id: "unused" }] }), /UNIQUE/);
+  assert.equal(await b.ownerLoginConsumptionRow(f.project, "unused"), null);
+  assert.equal((await a.all(f.project)).length, 3);
 });

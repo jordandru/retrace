@@ -1,7 +1,7 @@
 /** Local SQLite store using Node's built-in node:sqlite (Node >= 22.13). No native deps. */
 import { DatabaseSync } from "node:sqlite";
 import {
-  ArtifactIndexQuery, ArtifactIndexResult, BACKFILL_ARTIFACT_INDEX_SQL, ChainHead, Event, EventStore, HeadMovedError,
+  InsertExtras, OwnerLoginConsumption, readOwnerLoginConsumption, ArtifactIndexQuery, ArtifactIndexResult, BACKFILL_ARTIFACT_INDEX_SQL, ChainHead, Event, EventStore, HeadMovedError,
   HistoryQuery, HistoryPage, PendingDelivery, SCHEMA_PENDING_EVENT_COLUMNS_SQL, SCHEMA_PENDING_LEASE_COLUMNS_SQL, SCHEMA_PENDING_ROUTE_COLUMNS_SQL, SCHEMA_SQL, Share, artifactIndexRows, clampHistoryLimit,
   ArtifactIndexHit, runArtifactIndexStatements, historyPageFromNewestFirst, likeContains,
 } from "@retrace-dev/core";
@@ -61,9 +61,12 @@ export class SqliteStore implements EventStore {
     for (const r of artifactIndexRows(e)) insIdx.run(r.project, r.artifact_key, r.seq, r.actor_type, r.actor_id, r.role, r.sealed_by);
   }
 
-  async insert(e: Event) {
+  async insert(e: Event, extras?: InsertExtras) {
     this.db.exec("BEGIN");
     try {
+      for (const row of extras?.owner_login_consumption ?? []) this.db.prepare(
+        "INSERT INTO owner_login_consumption (project, declaration_event_id, consumed_by_delivery, consumed_by_event_id, consumed_by_seq, consumed_at) VALUES (?, ?, ?, ?, ?, ?)"
+      ).run(e.project, row.declaration_event_id, row.consumed_by_delivery ?? null, e.id, e.seq, e.received_at);
       this.insertRows(e);
       this.db.exec("COMMIT");
     } catch (err) {
@@ -72,10 +75,19 @@ export class SqliteStore implements EventStore {
     }
   }
 
+  async ownerLoginConsumptionRow(project: string, id: string): Promise<OwnerLoginConsumption | null> {
+    return this.db.prepare("SELECT * FROM owner_login_consumption WHERE project = ? AND declaration_event_id = ?").get(project, id) as unknown as OwnerLoginConsumption ?? null;
+  }
+  async ownerLoginConsumptionUpTo(project: string, ids: string[], throughSeq: number, budget: { deadline: number; row_cap: number }) {
+    return readOwnerLoginConsumption(ids, budget, async (batch, limit) => this.db.prepare(
+      `SELECT * FROM owner_login_consumption WHERE project = ? AND consumed_by_seq <= ? AND declaration_event_id IN (${batch.map(() => "?").join(",")}) LIMIT ?`
+    ).all(project, throughSeq, ...batch, limit) as unknown as OwnerLoginConsumption[]);
+  }
+
   /** Deletes + audit insert in one transaction (B3); the local server's DELETE /projects/:p needs this. The head
    *  check runs inside the same transaction, so the audit can only ever commit against the head it describes. */
   async deleteProject(project: string, audit: Event, expectedHead: ChainHead) {
-    const tables = ["events", "event_artifacts", "event_artifact_index", "pending_deliveries", "shares", "project_policies", "classification_contexts", "classification_path_lowers", "classification_breakers"];
+    const tables = ["owner_login_consumption", "events", "event_artifacts", "event_artifact_index", "pending_deliveries", "shares", "project_policies", "classification_contexts", "classification_path_lowers", "classification_breakers"];
     this.db.exec("BEGIN");
     try {
       const head = this.headSync(project); // synchronous: the transaction never yields between check and deletes

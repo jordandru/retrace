@@ -179,3 +179,13 @@ ALTER TABLE pending_deliveries ADD COLUMN state TEXT;
 
 -- Owner-login: pre-upgrade NULL event kinds retain push-drain semantics.
 ALTER TABLE pending_deliveries ADD COLUMN gh_event TEXT;
+
+CREATE TABLE IF NOT EXISTS owner_login_consumption (
+  project TEXT NOT NULL,
+  declaration_event_id TEXT NOT NULL,
+  consumed_by_delivery TEXT,
+  consumed_by_event_id TEXT NOT NULL,
+  consumed_by_seq INTEGER NOT NULL,
+  consumed_at TEXT NOT NULL,
+  PRIMARY KEY (project, declaration_event_id)
+);
