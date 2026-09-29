@@ -1185,3 +1185,42 @@ test("T8 /1, empty /2 and unlisted login retain baseline actor and omit owner de
     assert.equal(e.method!.params!.owner_login_decision, undefined); assert.ok(e.method!.params!.github_payload);
   }
 });
+
+test("T17 T18 non-push insert timeout without a delivery header retains original queue receipt; late atomic success drains idempotently", async () => {
+  const { ownerLoginScenario } = await import("./owner-login-fixture.js");
+  const { drainPendingGithubDeliveries } = await import("./router.js");
+  const store = new MemStore(), f = await ownerLoginScenario(store); store.policies.push(f.policy);
+  store.routes.set(f.repo, { repo: f.repo, state: "active", project: f.project, digest: f.policy.digest, activation_seq: 1, set_at: f.ingress });
+  const insert = store.insert.bind(store); let release!: () => void;
+  const barrier = new Promise<void>(resolve => release = resolve);
+  store.insert = async (e, extras) => { await barrier; return insert(e, extras); };
+  const handler = createHandler(store, { githubSecret: "secret", trailerPolicy: "shadow" });
+  const body = JSON.stringify(f.payload);
+  const response = await handler(new Request("http://test/hooks/github", { method: "POST", body,
+    headers: { "x-github-event": "issue_comment", "x-hub-signature-256": await ghSigned("secret", body) } }));
+  assert.equal(response.status, 202);
+  const pending = store.pending[0]!;
+  assert.match(pending.delivery_id, /^body:issue_comment:/);
+  assert.equal(pending.gh_event, "issue_comment"); assert.equal(store.ownerLoginConsumption.size, 0);
+  release(); await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(store.ownerLoginConsumption.size, 1);
+  assert.deepEqual(await drainPendingGithubDeliveries(store, { trailerPolicy: "shadow" }), { drained: 1, failed: 0 });
+  assert.equal(store.events.filter(e => e.idempotency_key === `gh:${pending.delivery_id}`).length, 1);
+  assert.equal((store.events.at(-1)!.method!.params!.github_payload as any).ingress_at, pending.received_at);
+});
+
+test("T2 policy activation between routing and classify selects the policy at recorded U", async () => {
+  const { ownerLoginScenario } = await import("./owner-login-fixture.js");
+  const { appendOwnerLoginEvent, ownerLoginRecord } = await import("./owner-login.js");
+  const store = new MemStore(), f = await ownerLoginScenario(store);
+  const handler = createHandler(store, { token: "owner-token", ownerPrincipal: { type: "human", id: "owner" } });
+  const put = async (body: typeof f.policy.body, etag: string) => {
+    const response = await handler(new Request(`http://test/projects/${f.project}/policy`, { method: "PUT", headers: { authorization: "Bearer owner-token", "content-type": "application/json", "if-match": etag }, body: JSON.stringify(body) }));
+    assert.equal(response.status, 201, await response.text()); return (await store.getPolicy(f.project, { current: true }))!;
+  };
+  const old = await put({ ...f.policy.body, github: { shared_logins: [], identities: {} } }, "none");
+  const current = await put(f.policy.body, old.digest);
+  const result = await appendOwnerLoginEvent(store, f.input, old, f.repo, Date.now()+2000);
+  assert.equal(ownerLoginRecord(result.event)!.decision.context.policy_digest, current.digest);
+  assert.equal(ownerLoginRecord(result.event)!.decision.status, "declared_by_seat");
+});

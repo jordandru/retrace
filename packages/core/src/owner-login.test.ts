@@ -166,3 +166,43 @@ test("T9 aggregate row cap counts amendment rows after candidate reads", async (
   const record = await classify(store);
   assert.equal(record.decision.status, "unavailable"); assert.equal(record.decision.reason, "budget");
 });
+
+test("T16 full pr_edit allocation followed by a title-only edit has no reusable declaration", async () => {
+  const { appendOwnerLoginEvent } = await import("./owner-login.js");
+  const store = new MemoryEventStore();
+  const editIngress = new Date(Date.now()+1000).toISOString();
+  const payload = { repository: { full_name: repo }, action: "edited", sender: { login: "owner" }, pull_request: { number: 1, title: "first title", body: "same body", head: { ref: "branch", sha: "a".repeat(40) } } };
+  const first = (await mapGithubWebhook("pull_request", payload, { project: "p", ingressAt: editIngress, deliveryId: "edit1" }))[0];
+  const gp = first.method!.params!.github_payload as any;
+  const e = await declaration({ received_at: new Date().toISOString() }); (e.method!.params!.github_action as any) = { kind: "pr_edit", repo, login: "owner", pr: 1, body_sha256: gp.body_sha256, title_sha256: gp.title_sha256 };
+  store.events.push(e);
+  for (const input of [first]) input.method!.params!.sealed_by = "webhook:github";
+  assert.equal(ownerLoginRecord((await appendOwnerLoginEvent(store, first, policy, repo, Date.now()+1000)).event)!.decision.status, "declared_by_seat");
+  payload.pull_request.title = "second title";
+  const next = (await mapGithubWebhook("pull_request", payload, { project: "p", ingressAt: editIngress, deliveryId: "edit2" }))[0];
+  next.method!.params!.sealed_by = "webhook:github";
+  const record = ownerLoginRecord((await appendOwnerLoginEvent(store, next, policy, repo, Date.now()+1000)).event)!;
+  assert.equal(record.decision.status, "unresolved"); assert.equal(record.decision.reason, "no_declaration");
+});
+
+test("T12 unlisted GitHub bot retains the adapter heuristic without a decision", async () => {
+  const [input] = await mapGithubWebhook("issue_comment", { repository: { full_name: repo }, action: "created", sender: { login: "dependabot[bot]", type: "Bot" },
+    issue: { number: 1, pull_request: {} }, comment: { id: 2, body: "hello", created_at: ingress } }, { project: "p", ingressAt: ingress });
+  const result = await classifyOwnerLogin({ store: storeOf([]), input, policy, canonicalR: repo, readHead: { seq: -1, hash: GENESIS_HASH }, deadline: Date.now()+1000 });
+  assert.deepEqual(result, { kind: "not_applicable" }); assert.equal(input.actor.type, "system"); assert.equal(input.actor.id, "dependabot[bot]");
+});
+
+test("T17 failure before insert leaves no event/row and a redelivery can allocate; T19 next same-seat declaration stays available", async () => {
+  const { appendOwnerLoginEvent } = await import("./owner-login.js");
+  const store = new MemoryEventStore(); store.events = [await declaration(), await declaration({ id: "second", seq: 1 })];
+  const original = store.insert.bind(store);
+  store.insert = async () => { throw new Error("injected pre-write failure"); };
+  await assert.rejects(appendOwnerLoginEvent(store, await comment(), policy, repo, Date.now()+1000), /injected/);
+  assert.equal(store.events.length, 2); assert.equal(store.ownerLoginConsumption.size, 0);
+  store.insert = original;
+  const first = await appendOwnerLoginEvent(store, await comment(), policy, repo, Date.now()+1000);
+  assert.deepEqual(ownerLoginRecord(first.event)!.decision.consumed, ["declaration"]);
+  assert.equal(await store.ownerLoginConsumptionRow("p", "second"), null);
+  const next = await appendOwnerLoginEvent(store, { ...await comment(), idempotency_key: "next-delivery" }, policy, repo, Date.now()+1000);
+  assert.deepEqual(ownerLoginRecord(next.event)!.decision.consumed, ["second"]);
+});

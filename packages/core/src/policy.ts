@@ -1126,7 +1126,8 @@ export function eventPolicyRef(e: Event): { digest?: string; readHeadSeq?: numbe
   const fromTop = p.context && typeof p.context === "object" && !Array.isArray(p.context)
     ? (p.context as { policy_digest?: unknown; read_head_seq?: unknown })
     : undefined;
-  const ctx = fromCd ?? fromTop;
+  const od = p.owner_login_decision as { decision?: { context?: { policy_digest?: unknown; read_head_seq?: unknown } } } | undefined;
+  const ctx = fromCd ?? od?.decision?.context ?? fromTop;
   const digest = typeof ctx?.policy_digest === "string" ? ctx.policy_digest : undefined;
   const readHeadSeq = typeof ctx?.read_head_seq === "number" ? ctx.read_head_seq : undefined;
   return { digest, readHeadSeq };

@@ -313,3 +313,10 @@ test("adversarial (event #1227): the accused model re-pinned as another harness 
   assert.equal(clean.level, "info"); assert.equal(clean.acknowledged?.actor, "cursor-agent");
   assert.equal(run([...base, ack(10, jordan)]).level, "info", "the human owner's acknowledgement stands");
 });
+
+test("T13 owner-login account merge keeps webhook missing_commit downgrade without becoming a witness", () => {
+  const account = { type: "system" as const, id: "github:jordandru", display_name: "jordandru (GitHub account, shared)" };
+  const merge = ev(3, account, "merged", [`pr:${REPO}#7`, cid("e")], { method: { tool: "github", params: { head_sha: sha("b"), sealed_by: "webhook:github" } }, tags: ["github", "pr", "merge"] });
+  const report = reconcile([commit("b", ["x.ts"])], [merge], { repoName: REPO });
+  assert.deepEqual([report.commits[0].findings[0].kind, report.commits[0].findings[0].level], ["missing_commit", "warn"]);
+});

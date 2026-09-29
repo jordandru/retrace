@@ -1309,3 +1309,26 @@ test("gate dual witness never infers leniency from the ref layout: a detached, p
   assert.equal(parseArgs2(["doctor", "--gate", "--local"]).local, true);
   assert.equal(parseArgs2(["doctor", "--gate"]).local, false);
 });
+
+test("T11 owner-login gate uses first /2 adoption, passes declarations/unresolved and fails later human seals", async () => {
+  const { ownerLoginFinding, sealedLooksAgent } = await import("./doctor.js");
+  const { MemoryEventStore, createHandler, appendOwnerLoginEvent, appendEvent } = await import("@retrace-dev/core");
+  const { ownerLoginScenario } = await import("../../core/dist/owner-login-fixture.js");
+  const store = new MemoryEventStore(), f = await ownerLoginScenario(store);
+  const handler = createHandler(store, { token: "owner-token", ownerPrincipal: { type: "human", id: "owner" } });
+  const put = async (body: typeof f.policy.body, etag: string) => {
+    const res = await handler(new Request(`http://test/projects/${f.project}/policy`, { method: "PUT", headers: { authorization: "Bearer owner-token", "content-type": "application/json", "if-match": etag }, body: JSON.stringify(body) }));
+    assert.equal(res.status, 201, await res.text());
+    return (await store.getPolicy(f.project, { current: true }))!;
+  };
+  const policy = await put(f.policy.body, "none");
+  await appendOwnerLoginEvent(store, f.input, policy, f.repo, Date.now()+2000);
+  await appendOwnerLoginEvent(store, { ...f.input, idempotency_key: "second" }, policy, f.repo, Date.now()+2000);
+  assert.equal((await ownerLoginFinding(await store.all(f.project), store.policies, true)).level, "pass");
+  const bad = await appendEvent(store, { ...f.input, idempotency_key: "bad" });
+  const next = structuredClone(policy.body); next.github!.shared_logins.push("someone");
+  await put(next, policy.digest);
+  assert.equal((await ownerLoginFinding(await store.all(f.project), store.policies, true)).level, "fail");
+  assert.match((await ownerLoginFinding(await store.all(f.project), store.policies, false)).detail, new RegExp(bad.event.id));
+  for (const status of ["declared_by_seat", "identity_mapped"]) assert.equal(sealedLooksAgent({ actor: { type: "system" }, method: { params: { sealed_by: "webhook:github", owner_login_decision: { policy: "owner-login/1", decision: { status } } } } }), true);
+});

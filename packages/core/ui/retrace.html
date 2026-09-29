@@ -251,11 +251,22 @@
     if (v.startsWith("webhook:")) return "webhook";
     return "unstamped";
   };
+  const ownerLoginDisplay = (e) => {
+    const record = e.method?.params?.owner_login_decision;
+    if (record?.policy !== "owner-login/1" || !record.decision) return undefined;
+    const d = record.decision, base = `GitHub account ${record.login} (shared login)`;
+    if (d.status === "identity_mapped") return `${d.actor_written.id} (GitHub App identity)`;
+    if (d.status === "declared_by_seat") return `${base} — declared by ${d.actor_written.id} (${d.declarations.map(e => e.id.slice(0, 16)).join(", ")}), not identity-verified`;
+    if (d.status === "conflicting") return `${base} — conflicting: ${[...new Set(d.declarations.map(e => e.actor.id))].join(", ")}`;
+    return `${base} — who acted: ${d.status} (${d.reason ?? "no_declaration"})`;
+  };
   const provenanceBadges = (e) => {
     const raw = e.method?.params?.sealed_by;
     const kind = sealedByKind(raw);
     const tip = typeof raw === "string" && raw ? raw : "unstamped";
     let html = `<span class="stamp" title="${esc(tip)}">${esc(kind)}</span>`;
+    const ownerLogin = ownerLoginDisplay(e);
+    if (ownerLogin) html += `<span class="stamp">${esc(ownerLogin)}</span>`;
     const verdict = e.method?.params?.producer_sig_verdict;
     if (verdict == null || verdict === "") return html;
     const cls = verdict === "verified" ? " ok" : (verdict === "invalid" || verdict === "unknown_kid") ? " warn" : "";

@@ -39,7 +39,7 @@ import {
   OwnerPrincipal, PolicyError, RouteConflictError, canonicalGithubRepo, missingPolicyDisposition, parseOwnerPrincipal, planPolicyPut,
   routeGithubDelivery,
 } from "./policy.js";
-import { sealEvent } from "./chain.js";
+import { sealEvent, sha256Hex } from "./chain.js";
 import { buildExportBundle, verifyExportBundle } from "./export.js";
 import { ExportCacheStore } from "./export-cache.js";
 import {
@@ -514,7 +514,8 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
         if (!(await verifyGithubSignature(opts.githubSecret, raw, req.headers.get("x-hub-signature-256")))) return json({ error: "bad signature" }, 401);
         const ingressAt = new Date().toISOString();
         const ghEvent = req.headers.get("x-github-event") ?? "";
-        const delivery = req.headers.get("x-github-delivery") ?? undefined;
+        const delivery = req.headers.get("x-github-delivery") ?? (["pull_request", "pull_request_review", "issue_comment"].includes(ghEvent)
+          ? `body:${ghEvent}:${await sha256Hex(raw)}` : undefined);
         if (ghEvent === "ping") return json({ ok: true, pong: true });
         let payload: any;
         try { payload = JSON.parse(raw); } catch { return json({ error: "invalid json" }, 400); }
@@ -579,7 +580,7 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
               return json({ error: `github delivery already sealed in project "${p}"` }, 409);
           }
         }
-        const ownerLoginDelivery = ghEvent !== "push" && currentPolicy?.body.profile === "retrace-project-policy/2";
+        const ownerLoginDelivery = ["pull_request", "pull_request_review", "issue_comment"].includes(ghEvent);
         const retainedDelivery = delivery ?? `github:${repo}:${crypto.randomUUID()}`;
         const isShadowPush = mode === "shadow" && ghEvent === "push" && !!opts.githubIncludePush;
         const deliveryStarted = Date.now();

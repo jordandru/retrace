@@ -5,45 +5,10 @@ import { ArtifactIndexQuery, ChainHead, EventStore, appendEvent, appendReadWithi
 import { evaluateAmendmentsAtU, OWNER_LOGIN_DEADLINE_MS } from "./classify.js";
 import { sameArtifact } from "./capture.js";
 
-export const OWNER_LOGIN_DECISION_PARAM = "owner_login_decision";
-export const OWNER_LOGIN_ROW_CAP = 2_000;
-export const OWNER_LOGIN_WINDOW_MS = 30 * 60_000;
-export type OwnerLoginKind = "comment" | "review" | "pr_open" | "pr_edit" | "push" | "merge";
-export type OwnerLoginStatus = "declared_by_seat" | "conflicting" | "unresolved" | "unavailable" | "identity_mapped";
-export type OwnerLoginFailure = "store_error" | "budget" | "deadline";
-export type GithubPayload = Record<string, unknown> & { login?: string; ingress_at?: string };
-export interface OwnerLoginRecord {
-  policy: "owner-login/1";
-  observer: { producer: "github-webhook"; sealed_by: "webhook:github" };
-  login: string;
-  shared: boolean;
-  payload: GithubPayload;
-  decision: {
-    status: OwnerLoginStatus;
-    reason: string | null;
-    kind: OwnerLoginKind | null;
-    actor_written: Actor;
-    evidence_level: "declaration_only" | "identity_mapped" | null;
-    declarations: Array<{ id: string; seq: number; actor: Actor; sealed_by: string; producer_sig_verdict: "verified" }>;
-    proximity_hints: number;
-    context: { read_head_seq: number; read_head_hash: string; policy_digest: string };
-    window: { from: string | null; to: string | null; basis: "ingress_at" };
-    received: { webhook: null; declaration: string | null };
-    consumed: string[];
-    ingress_at: string | null;
-    classification_ms: number;
-    allocation?: { attempts: 2; read_head_seq: number; consumed_by: string | null };
-  };
-}
-export type OwnerLoginResult = { kind: "not_applicable" } | { kind: "decision"; input: EventInput; consume: string[] };
-export type OwnerLoginArgs = { store: EventStore; input: EventInput; policy: PolicyDocument; canonicalR: string;
-  readHead: ChainHead; deadline: number; now?: () => number };
-
+export * from "./owner-login-record.js";
+import { OWNER_LOGIN_DECISION_PARAM, OWNER_LOGIN_ROW_CAP, OWNER_LOGIN_WINDOW_MS, OwnerLoginKind, OwnerLoginFailure,
+  GithubPayload, OwnerLoginRecord, OwnerLoginArgs, OwnerLoginResult, ownerLoginRecord } from "./owner-login-record.js";
 const object = (value: unknown): Record<string, unknown> | undefined => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
-export function ownerLoginRecord(input: Pick<EventInput, "method">): OwnerLoginRecord | undefined {
-  const value = object(input.method?.params?.[OWNER_LOGIN_DECISION_PARAM]);
-  return value?.policy === "owner-login/1" && object(value.decision) ? value as unknown as OwnerLoginRecord : undefined;
-}
 export function ownerLoginKind(input: EventInput): OwnerLoginKind | null {
   if (input.method?.tool === "github-review") return "review";
   if (input.method?.tool === "github-comment") return "comment";
@@ -198,7 +163,8 @@ export async function classifyOwnerLogin(args: OwnerLoginArgs): Promise<OwnerLog
       coveredArtifactKeys: keys, deadline: args.deadline, now });
     if (!amended.ok) budget.fail(budget.failure ?? amended.reason);
     const amendments = new Set(amended.collection.effective.keys());
-    const available = eligibleTime.filter(e => declarationUnconsumed(e, consumed));
+    // Webhook observations are never declaration candidates or proximity testimony.
+    const available = eligibleTime.filter(e => e.method?.params?.sealed_by !== "webhook:github" && declarationUnconsumed(e, consumed));
     const eligible = available.filter(e => declarationPinned(e) && declarationAgent(e) && declarationUnamended(e, amendments) &&
       !!declarationAction(e) && declarationTarget(e, declarationAction(e)!, kind, args.canonicalR, pr, payload) && declarationContent(declarationAction(e)!, kind, payload))
       .sort((a, b) => a.seq - b.seq || a.id.localeCompare(b.id));
@@ -231,8 +197,11 @@ export async function appendOwnerLoginEvent(store: EventStore, input: EventInput
   let toSeal = classified.kind === "decision" ? classified.input : input;
   let consume = classified.kind === "decision" ? classified.consume : [];
   async function classify() {
-    return policy ? classifyOwnerLogin({ store, input, policy, canonicalR,
-      readHead: await appendReadWithinDeadline(() => store.head(input.project), opts) ?? { seq: -1, hash: GENESIS_HASH },
+    const readHead = await appendReadWithinDeadline(() => store.head(input.project), opts) ?? { seq: -1, hash: GENESIS_HASH };
+    // A policy may activate between routing and classification. Select through this U, never at a later head.
+    const selectedPolicy = store.getPolicyByActivationSeq
+      ? await appendReadWithinDeadline(() => store.getPolicyByActivationSeq!(input.project, readHead.seq), opts) ?? policy : policy;
+    return selectedPolicy ? classifyOwnerLogin({ store, input, policy: selectedPolicy, canonicalR, readHead,
       deadline: Math.min(now() + OWNER_LOGIN_DEADLINE_MS, deliveryDeadline), now }) : { kind: "not_applicable" as const };
   }
   for (let seqAttempt = 0; ; ) {
