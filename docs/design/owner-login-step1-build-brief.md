@@ -1,6 +1,6 @@
 # Owner-login step 1 — builder brief (classifier, ingestion hashes, consumers, agent-ops 19)
 
-**Status:** v1.2.2, 2026-09-28 (v1.2.2 23:2xZ / 17:2x MDT: `allocation_failed` made an observed outcome reproduced by rule — §1.5 point read and `allocation` block, §1.6 recompute rule, T2 scoped, T17 — after the Codex builder's stop on PR 135 (`evt_3f252c879c4745d89d4432bb61b7cb19`; the second write failure is not derivable at the sealed read head), gate check `evt_5e0e8ceefb8d4b5ea6b74b44f75194f1`, Jordan's decision A `evt_81f62f1f13234c9f953295c8718fdc14`; the note gains the matching correction as v1.4.2. v1.2.1 22:1xZ / 16:1x MDT: round-2 Lows applied in place on Jordan's go `evt_d068f3696d004d3eb96ec61bd3e9cbf8` — Codex R2-L1 (§1.6's stale "`verifyExportBundle` is unchanged") and R2-L2 (the "after the record is hashed" explanation in §1.4 and in the note's §4 correction; `chain.ts:82–93` assigns `received_at` and then hashes — the classifier simply never has the receipt), `evt_0478dfd6bf2041b985b40bfff9ed7bda`; the Grok seat's L1 (§0's "note wins, file and stop" now excludes the extensions this brief lists as its own), `evt_5805a058023e4055b79009f8607ca2d3`. v1.2 20:0xZ / 14:0x MDT: Codex round-1 REJECTED `evt_1e9f4144fb0042bf8bcb432d736554a2` — seven Medium F1–F7, zero High, zero Low — applied in place on Jordan's go `evt_5d5309168b6244c4aa1c20dbbab46e12`: F1 supported-profile handling across activation, selection and export verification; F2 `[bot]` App identities validate, case-only duplicates rejected; F3 the amendment fallback removed, the bounded evaluator named; F4 the consumption read bounded by the read head, with a dated correction to the note's §3.5 in this PR; F5 `received.webhook` sealed null, replay compares the sealed record, a dated correction to the note's §4; F6 status totals compare raw logins and state legacy coverage; F7 `after_seq: -1` and a sequence-zero fixture; plus Codex's clarifications applied — stripping under a signature, doctor's policy data path, pending retention for non-push timeouts, legacy outcome binding, payload fields listed as extensions, T14a labelling, T17 barrier placement. v1.1 21:3xZ / 15:3x MDT: NOOA round-1 Medium N1 `evt_b373209785314ca4a0a1fffc65b219a0` — §0 and §1.4
+**Status:** v1.2.3, 2026-09-29 (v1.2.3 00:1xZ / 18:1x MDT 09-28: PR 136 round-1 findings applied in place on Jordan's go `evt_c03c4f0fb826447096dbc4eec947dbb3` — Codex F1 `evt_3b0b2ab4e37a4f9cbda820ec81fdca49` (the by-rule consumer W must satisfy U < W.seq < L.seq, on the replay-selected declaration, id equality when `consumed_by` is non-null; T2 gains the after-L negative fixture); Grok seat `evt_24ce6202bcad4964b572c8dcb25427c8` M1 (the `allocation` path is `decision.allocation`), M2 (§1.7 retargets the builder's R5-L1 dating to note v1.4.3), L2 (§1.4 lists `allocation_failed` and `decision.allocation`); the note's L1 marker is in the note. v1.2.2 23:2xZ / 17:2x MDT: `allocation_failed` made an observed outcome reproduced by rule — §1.5 point read and `allocation` block, §1.6 recompute rule, T2 scoped, T17 — after the Codex builder's stop on PR 135 (`evt_3f252c879c4745d89d4432bb61b7cb19`; the second write failure is not derivable at the sealed read head), gate check `evt_5e0e8ceefb8d4b5ea6b74b44f75194f1`, Jordan's decision A `evt_81f62f1f13234c9f953295c8718fdc14`; the note gains the matching correction as v1.4.2. v1.2.1 22:1xZ / 16:1x MDT: round-2 Lows applied in place on Jordan's go `evt_d068f3696d004d3eb96ec61bd3e9cbf8` — Codex R2-L1 (§1.6's stale "`verifyExportBundle` is unchanged") and R2-L2 (the "after the record is hashed" explanation in §1.4 and in the note's §4 correction; `chain.ts:82–93` assigns `received_at` and then hashes — the classifier simply never has the receipt), `evt_0478dfd6bf2041b985b40bfff9ed7bda`; the Grok seat's L1 (§0's "note wins, file and stop" now excludes the extensions this brief lists as its own), `evt_5805a058023e4055b79009f8607ca2d3`. v1.2 20:0xZ / 14:0x MDT: Codex round-1 REJECTED `evt_1e9f4144fb0042bf8bcb432d736554a2` — seven Medium F1–F7, zero High, zero Low — applied in place on Jordan's go `evt_5d5309168b6244c4aa1c20dbbab46e12`: F1 supported-profile handling across activation, selection and export verification; F2 `[bot]` App identities validate, case-only duplicates rejected; F3 the amendment fallback removed, the bounded evaluator named; F4 the consumption read bounded by the read head, with a dated correction to the note's §3.5 in this PR; F5 `received.webhook` sealed null, replay compares the sealed record, a dated correction to the note's §4; F6 status totals compare raw logins and state legacy coverage; F7 `after_seq: -1` and a sequence-zero fixture; plus Codex's clarifications applied — stripping under a signature, doctor's policy data path, pending retention for non-push timeouts, legacy outcome binding, payload fields listed as extensions, T14a labelling, T17 barrier placement. v1.1 21:3xZ / 15:3x MDT: NOOA round-1 Medium N1 `evt_b373209785314ca4a0a1fffc65b219a0` — §0 and §1.4
 overclaimed byte-identity for unclassified seals while `github_payload` is added — applied in place on Jordan's go
 `evt_7778c91baa3e4ea6879e52025a3acecb`; v1 18:5xZ / 12:5x MDT). Author claude-code (coordinator, `claude-fable-5-1`, model source
 harness-runtime), on Jordan's signed go `evt_dc485a8af6ef47758bb9f439c62dce95` (hand-off 15 item 2). **Not built.**
@@ -189,7 +189,7 @@ export async function classifyOwnerLogin(args: {
 - **Decision** (N§4 table): `declared_by_seat` (one seat; when the same seat has several eligible declarations, choose
   the lowest `seq`, N§3.5 item 3) → `actor: { type: "agent", id: <seat>, on_behalf_of: <declaration's on_behalf_of> }`,
   `evidence_level: "declaration_only"`; `conflicting`/`multiple_declarers`; `unresolved`/`proximity_only` (some
-  candidate row named the PR, branch or commit but none passed the predicate) or `no_declaration`; `unavailable`. The
+  candidate row named the PR, branch or commit but none passed the predicate) or `no_declaration`; `unresolved`/`allocation_failed` (second consumption-write failure, §1.5); `unavailable`. The
   account actor: `{ type: "system", id: "github:<login as sent>", display_name: "<login> (GitHub account, shared)" }`.
   The record is exactly the N§4 JSON (`policy: "owner-login/1"`, `observer`, `login`, `shared: true`, `payload`,
   `decision`, `context { read_head_seq, read_head_hash, policy_digest }`, `window { from, to, basis: "ingress_at" }`,
@@ -197,7 +197,8 @@ export async function classifyOwnerLogin(args: {
   and hashes it, and nothing populates the nested field with that receipt, so this design leaves it null; the event's own received_at
   is that time and the recompute tool reports it beside the record, never inside it (F5, R2-L2; N§4's example showed it filled —
   corrected in the note by this PR); declaration }`,
-  `consumed`, `ingress_at`, `classification_ms`). Attach with a sibling of `attachClaimDecision` (`classify.ts:1144`).
+  `consumed`, `ingress_at`, `classification_ms`; on `allocation_failed` also `decision.allocation { attempts, read_head_seq, consumed_by }`,
+  §1.5 — Grok seat L2). Attach with a sibling of `attachClaimDecision` (`classify.ts:1144`).
 - **Stripping** (N§4, T9): `POST /events` deletes `params[OWNER_LOGIN_DECISION_PARAM]` next to `CLAIM_DECISION_PARAM`
   (`router.ts`, the block commented "/2 and unsigned: strip so a client cannot plant stamps") for every producer-sig
   format including `/1` — unlike `claim_decision`, no client ever legitimately submits this param. A **signed** body that carries it
@@ -239,8 +240,10 @@ export async function classifyOwnerLogin(args: {
   that read supports; a second such failure seals `unresolved`/`allocation_failed` (N§4 row; NOOA N4-M2) **as an observed
   outcome** (N§3.5 item 3 correction of 2026-09-28): before sealing, one point read of the consumption row by its primary key —
   `EventStore.ownerLoginConsumptionRow(project, declaration_event_id)`, unbounded by `U`, a single row, not a candidate read or a
-  reclassification — fills `owner_login_decision.allocation = { attempts: 2, read_head_seq: <the second read head>, consumed_by:
-  <that row's consumed_by_event_id, or null if the row is not yet visible> }`; `consumed` stays `[]`. Other UNIQUE
+  reclassification — fills `owner_login_decision.decision.allocation = { attempts: 2, read_head_seq: <the second read head>, consumed_by:
+  <that row's consumed_by_event_id, or null if the row is not yet visible> }` — inside `decision`, beside `consumed`, where
+  `classification_ms` sits; a sibling at `owner_login_decision.allocation` would be ignored by every consumer that reads `decision.*`
+  (the `claim_decision` precedent; Grok seat M1); `consumed` stays `[]`. Other UNIQUE
   errors keep today's loop. An `AppendDeadlineExceededError` keeps today's 202-pending path and **never** releases a row
   (N§3.5: an uncertain response is resolved by the idempotent lookup, not by cleanup).
 - **Replay contract** (T2, T17): a row exists iff a sealed decision lists that declaration under `consumed`. The recompute
@@ -288,8 +291,10 @@ export async function classifyOwnerLogin(args: {
   `received.webhook` (sealed null) — are **preserved from the sealed record and reported as preserved**, never presented as recomputed
   evidence (F5); the event's `received_at` is printed beside the record as an annotation. An `allocation_failed` decision is
   reproduced **by rule** (N§3.5 item 3 correction): the tool replays at the sealed `read_head_seq`, finds the declaration eligible and
-  unconsumed there, then checks that some sealed decision with `seq` greater than that head lists it under `consumed` (and, when
-  `allocation.consumed_by` is non-null, that it is that event) → `match (allocation, by rule)`; a derivation at that head would say
+  unconsumed there, then checks that some sealed decision W with `U < W.seq < L.seq` — L being the `allocation_failed` seal under
+  check — lists that same replay-selected declaration under `consumed` (and, when `allocation.consumed_by` is non-null, that W is that
+  event; Codex F1: a consumer sealed after L cannot have caused L's failure, so any-later-consumer would falsely corroborate) →
+  `match (allocation, by rule)`; a derivation at that head would say
   `declared_by_seat` and is not what is compared; anything else → `mismatch allocation`. The `allocation` block is preserved as observed.
   The event-hash algorithm is unchanged (the decision is inside the hashed event); `verifyExportBundle`'s policy-profile check changes
   as §1.3 specifies (R2-L1).
@@ -301,15 +306,15 @@ export async function classifyOwnerLogin(args: {
 - In the note: §11 T3's "Measured so far on PR 130 itself" and §13's "Live samples (T3)" rows gain "(measured
   2026-09-26; snapshot — later samples are recorded on the step-1 pull request)" and no number changes; add one row to
   §13: "Step-1 build brief | `docs/design/owner-login-step1-build-brief.md`, `evt_dc485a8a…`". The note's **Status** line
-  gains "v1.4.2 — R5-L1 dated (step-1 PR)" (v1.4.1 is this brief's own PR #133: the dated corrections to §3.5 item 2 (F4) and §4 (F5),
-  §8 below). Nothing else in the note changes; a needed change is a discrepancy report.
+  gains "v1.4.3 — R5-L1 dated (step-1 PR)" (v1.4.1 is PR #133's F4/F5 corrections; v1.4.2 is PR #136's `allocation_failed` correction —
+  do not restamp it; Grok seat M2). Nothing else in the note changes; a needed change is a discrepancy report.
 
 ## 2. Tests — every N§11 test lands, each named in a `test(...)` title with its id
 
 | id | where | what the assertion is |
 |---|---|---|
 | T1 | `router.test.ts` (memory store, `/2` policy) | comment webhook + one eligible pinned declaration → `actor` = seat, `status declared_by_seat`, declaration listed, `consumed` = [id], consumption row present |
-| T2 | `export-cli.test.ts` | `owner-login --recompute` over an export of T1/T4/T17's store reproduces every decision byte-identically (the sealed record; observed fields preserved and reported as such, F5) and the table — except T17's `allocation_failed` decision, which it reproduces by rule (`match (allocation, by rule)`) and whose `allocation` block it preserves; a bundle where no later decision consumed that declaration → `mismatch allocation`, exit 1 |
+| T2 | `export-cli.test.ts` | `owner-login --recompute` over an export of T1/T4/T17's store reproduces every decision byte-identically (the sealed record; observed fields preserved and reported as such, F5) and the table — except T17's `allocation_failed` decision, which it reproduces by rule (`match (allocation, by rule)`) and whose `allocation` block it preserves; a bundle where no later decision consumed that declaration → `mismatch allocation`, exit 1; a bundle whose only consumer of that declaration is sealed **after** L (with `consumed_by` null and with it non-null) → `mismatch allocation` (F1) |
 | T3 | **live, after deploy** (§5) | one real comment, review, PR body edit and PR open through `gh` with declarations; each webhook `body_sha256` equals the seat's; result recorded on the note as a dated correction if normalisation changes |
 | T4 | `owner-login.test.ts` | two seats, same body hash → `conflicting`, account actor, both listed |
 | T5 | `owner-login.test.ts` | declaration `sealed_by: owner` / verdict `none` → ineligible; listed under `proximity_hints`, `unresolved` |
@@ -427,5 +432,6 @@ put `pr:jordandru/retrace#<n>` on every verdict.
 | Round 1 (Codex): routing `evt_876a04064c4f4b24a975cab67b209bdc`; verdict rejected, 7 Medium F1–F7 `evt_1e9f4144fb0042bf8bcb432d736554a2`; gate check `evt_109a0378b92141de97aace463362ad45`; copy review 5343817023 | Jordan: apply F1–F7 in place as v1.2 with the note's F4/F5 corrections, then round 2 (Codex re-check, NOOA re-check, Grok seat first pass) `evt_5d5309168b6244c4aa1c20dbbab46e12` |
 | Round 2 (head `25e4051`): routing Codex `evt_3d0f68ebd2554e358356fc8e0498141f`, NOOA `evt_81a5999632c945dfb12a27b9cb38ad07`, Grok seat `evt_900b56432a7740aba74fe32d4425d8b9`; verdicts Codex approved 2 Low `evt_0478dfd6bf2041b985b40bfff9ed7bda`, NOOA approved `evt_5e69c6d047f64460af928fa4fd9cc6e9`, Grok seat approved 1 Low `evt_5805a058023e4055b79009f8607ca2d3`; gate checks `evt_3e976ab3…`, `evt_a9314215…`, `evt_cfdb9eb6…`; copies 5344286719, 5344286465, 5344336999 | Jordan: option (a) — apply the three Lows in place as v1.2.1, then scoped re-checks `evt_d068f3696d004d3eb96ec61bd3e9cbf8` |
 | Build (Codex, after cursor-agent and github-copilot capped): dispatch `evt_2f2dc822083d499182298a0d7443a900`; rows 1–3 pushed, draft PR #135 at `3f5e02a`, stopped on the `allocation_failed` discrepancy `evt_3f252c879c4745d89d4432bb61b7cb19`; gate check `evt_5e0e8ceefb8d4b5ea6b74b44f75194f1` | Jordan: option A `evt_81f62f1f13234c9f953295c8718fdc14` → v1.2.2 + note v1.4.2, re-check, then rows 4–7 resume |
+| PR 136 round 1 (head `5796a35`): NOOA approved `evt_8a8ea94f1b3946b980bb672a5e6cf2fd`; Codex rejected 1 Medium (F1) `evt_3b0b2ab4e37a4f9cbda820ec81fdca49`; Grok seat rejected 2 Medium 2 Low (M1, M2, L1, L2) `evt_24ce6202bcad4964b572c8dcb25427c8`; gate checks `evt_83c2e2f9…`, `evt_1e372792…`, `evt_e1351de4…`; copies 5346116685, 5346116787, 5346118166 | Jordan: apply all five in place `evt_c03c4f0fb826447096dbc4eec947dbb3` → v1.2.3 + note v1.4.2 fixed, re-check |
 | Note v1.4 merged | PR #130, `b54b47d8`, merge record `evt_01f8c7d8…` |
 | Real `pr_open` declaration / webhook seal / outcome used by T14 | `evt_df2d386cc03b4a06a435906aa582de9e` / `evt_2f60cfc75d604371bffb0b3be81a1ab9` / `evt_0efdea31057b4ef8aa1cede2c6ab9c5a` |
