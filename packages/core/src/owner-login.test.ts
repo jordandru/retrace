@@ -206,3 +206,141 @@ test("T17 failure before insert leaves no event/row and a redelivery can allocat
   const next = await appendOwnerLoginEvent(store, { ...await comment(), idempotency_key: "next-delivery" }, policy, repo, Date.now()+1000);
   assert.deepEqual(ownerLoginRecord(next.event)!.decision.consumed, ["second"]);
 });
+
+test("T-A1 T-A4 stage timings and pre-read timing distinguish direct and append callers", async () => {
+  const { appendOwnerLoginEvent } = await import("./owner-login.js");
+  const { ownerLoginScenario } = await import("./owner-login-fixture.js");
+  const store = new MemoryEventStore(), f = await ownerLoginScenario(store);
+  const clock = Date.now();
+  const result = await classifyOwnerLogin({ store, input: f.input, policy: f.policy, canonicalR: f.repo,
+    readHead: (await store.head(f.project))!, deadline: clock + 300, now: () => clock });
+  assert.equal(result.kind, "decision"); if (result.kind !== "decision") throw new Error("fixture");
+  const timing = ownerLoginRecord(result.input)!.decision.timing;
+  for (const key of ["candidates_ms", "consumption_ms", "amendments_ms", "filter_ms"] as const)
+    assert.ok(typeof timing[key] === "number" && timing[key]! >= 0, key);
+  assert.equal(timing.stage_failed, null); assert.equal(timing.deadline_ms, 300);
+  assert.equal(timing.pre_ms, null); assert.equal(timing.candidates_rows, 1);
+  assert.equal(timing.budget_rows_remaining, 1999);
+  let tick = clock;
+  const head = store.head.bind(store), policyAt = store.getPolicyByActivationSeq.bind(store);
+  store.head = async p => { tick += 7; return head(p); };
+  store.getPolicyByActivationSeq = async (...args) => { tick += 11; return policyAt(...args); };
+  const appended = await appendOwnerLoginEvent(store, f.input, f.policy, f.repo, clock + 100, () => tick);
+  const measured = ownerLoginRecord(appended.event)!.decision.timing;
+  assert.equal(measured.pre_ms, 18); assert.equal(measured.deadline_ms, 82);
+});
+
+for (const [operation, stage] of [["eventsReferencingArtifacts", "candidates"],
+  ["ownerLoginConsumptionUpTo", "consumption"], ["amendmentEventsUpTo", "amendments"]] as const) {
+  test(`T-A2 T-A3 memory stalled ${stage} reports elapsed time at deadline`, async () => {
+    const { ownerLoginScenario } = await import("./owner-login-fixture.js");
+    const store = new MemoryEventStore(), f = await ownerLoginScenario(store);
+    store[operation] = async () => new Promise<never>(() => {});
+    const readHead = (await store.head(f.project))!;
+    const result = await classifyOwnerLogin({ store, input: f.input, policy: f.policy, canonicalR: f.repo,
+      readHead, deadline: Date.now() + 100 });
+    assert.equal(result.kind, "decision"); if (result.kind !== "decision") throw new Error("fixture");
+    const d = ownerLoginRecord(result.input)!.decision;
+    assert.equal(d.status, "unavailable"); assert.equal(d.reason, "deadline");
+    assert.equal(d.timing.stage_failed, stage);
+    const earlierMs = stage === "candidates" ? 0 : d.timing.candidates_ms! + d.timing.filter_ms! +
+        (stage === "amendments" ? d.timing.consumption_ms! : 0);
+      assert.ok(d.timing[`${stage}_ms`]! >= d.timing.deadline_ms - earlierMs - 10, JSON.stringify(d.timing));
+    assert.equal(d.timing.budget_rows_remaining, stage === "candidates" ? 2000 : 1999);
+  });
+}
+
+test("T-A local webhook seals 201 with failed-stage timing on a candidate deadline", async () => {
+  const { createHandler } = await import("./router.js");
+  const { ownerLoginScenario } = await import("./owner-login-fixture.js");
+  const store = new MemoryEventStore(), f = await ownerLoginScenario(store);
+  const handler = createHandler(store, { token: "test-owner", ownerPrincipal: { type: "human", id: "owner" },
+    githubSecret: "test-secret", githubRepoProjects: { [f.repo]: f.project } });
+  const put = await handler(new Request(`http://test/projects/${f.project}/policy`, { method: "PUT",
+    headers: { authorization: "Bearer test-owner", "content-type": "application/json", "if-match": "none" }, body: JSON.stringify(f.policy.body) }));
+  assert.equal(put.status, 201, await put.text());
+  store.eventsReferencingArtifacts = async () => new Promise<never>(() => {});
+  const body = JSON.stringify(f.payload), encoder = new TextEncoder();
+  const key = await crypto.subtle.importKey("raw", encoder.encode("test-secret"), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const signature = Array.from(new Uint8Array(await crypto.subtle.sign("HMAC", key, encoder.encode(body))), b => b.toString(16).padStart(2, "0")).join("");
+  const response = await handler(new Request("http://test/hooks/github", { method: "POST", body,
+    headers: { "content-type": "application/json", "x-hub-signature-256": `sha256=${signature}`,
+      "x-github-event": "issue_comment", "x-github-delivery": "timing-deadline" } }));
+  assert.equal(response.status, 201, await response.text());
+  const d = ownerLoginRecord(store.events.at(-1)!)!.decision;
+  assert.equal(d.status, "unavailable"); assert.equal(d.reason, "deadline");
+  assert.equal(d.timing.stage_failed, "candidates");
+  assert.ok(d.timing.pre_ms !== null && d.timing.pre_ms >= 0);
+  assert.ok(d.timing.candidates_ms! >= d.timing.deadline_ms - 10);
+});
+
+
+test("T-A3 memory delayed candidates leave only the remaining budget for consumption", async () => {
+  const { ownerLoginScenario } = await import("./owner-login-fixture.js");
+  const store = new MemoryEventStore();
+  {
+    const f = await ownerLoginScenario(store), readHead = (await store.head(f.project))!;
+    const candidates = store.eventsReferencingArtifacts!.bind(store);
+    store.eventsReferencingArtifacts = async (...args) => {
+      await new Promise(resolve => setTimeout(resolve, 40));
+      return candidates(...args);
+    };
+    store.ownerLoginConsumptionUpTo = async () => new Promise<never>(() => {});
+    const result = await classifyOwnerLogin({ store, input: f.input, policy: f.policy, canonicalR: f.repo,
+      readHead, deadline: Date.now() + 100 });
+    assert.equal(result.kind, "decision"); if (result.kind !== "decision") throw new Error("fixture");
+    const d = ownerLoginRecord(result.input)!.decision;
+    assert.equal(d.status, "unavailable"); assert.equal(d.reason, "deadline");
+    assert.equal(d.timing.stage_failed, "consumption");
+    assert.ok(d.timing.candidates_ms! >= 30, JSON.stringify(d.timing));
+    assert.ok(d.timing.candidates_ms! + d.timing.consumption_ms! >= d.timing.deadline_ms - 10, JSON.stringify(d.timing));
+  }
+});
+
+test("T-A7 memory deadline during selection belongs to final_check", async () => {
+  const { ownerLoginScenario } = await import("./owner-login-fixture.js");
+  const store = new MemoryEventStore();
+  {
+    const f = await ownerLoginScenario(store), readHead = (await store.head(f.project))!;
+    const started = Date.now(); let tick = started, selectionReady = false;
+    const amendments = store.amendmentEventsUpTo!.bind(store);
+    store.amendmentEventsUpTo = async (...args) => {
+      const rows = await amendments(...args); selectionReady = true; return rows;
+    };
+    const payload = f.input.method!.params!.github_payload as Record<string, unknown>;
+    const bodyHash = payload.body_sha256;
+    // Content matching runs during selection, after every evidence read completed.
+    Object.defineProperty(payload, "body_sha256", { enumerable: true, get() { if (selectionReady) tick = started + 100; return bodyHash; } });
+    const result = await classifyOwnerLogin({ store, input: f.input, policy: f.policy, canonicalR: f.repo,
+      readHead, deadline: started + 100, now: () => tick });
+    assert.equal(result.kind, "decision"); if (result.kind !== "decision") throw new Error("fixture");
+    const d = ownerLoginRecord(result.input)!.decision;
+    assert.equal(d.status, "unavailable"); assert.equal(d.reason, "deadline");
+    assert.equal(d.timing.stage_failed, "final_check");
+    assert.equal(d.timing.filter_ms, 100);
+    for (const key of ["candidates_ms", "consumption_ms", "amendments_ms"] as const) assert.equal(d.timing[key], 0);
+    assert.equal(Object.hasOwn(d.timing, "final_check_ms"), false);
+    assert.deepEqual(d.consumed, []); assert.deepEqual(d.declarations, []);
+  }
+});
+
+for (const failure of ["ingress", "eventsReferencingArtifacts", "ownerLoginConsumptionUpTo"] as const) {
+  test(`T-A8 memory setup failure ${failure} records no candidate read`, async () => {
+    const { ownerLoginScenario } = await import("./owner-login-fixture.js");
+    const store = new MemoryEventStore();
+    {
+      const f = await ownerLoginScenario(store), readHead = (await store.head(f.project))!;
+      if (failure === "ingress") (f.input.method!.params!.github_payload as Record<string, unknown>).ingress_at = "invalid";
+      else Object.defineProperty(store, failure, { value: undefined });
+      if (failure !== "eventsReferencingArtifacts") store.eventsReferencingArtifacts = async () => { assert.fail("setup must fail before a read"); };
+      const result = await classifyOwnerLogin({ store, input: f.input, policy: f.policy, canonicalR: f.repo,
+        readHead, deadline: Date.now() + 100 });
+      assert.equal(result.kind, "decision"); if (result.kind !== "decision") throw new Error("fixture");
+      const d = ownerLoginRecord(result.input)!.decision;
+      assert.equal(d.status, "unavailable"); assert.equal(d.reason, "store_error");
+      assert.equal(d.timing.stage_failed, "setup"); assert.equal(d.timing.candidates_rows, null);
+      for (const key of ["candidates_ms", "consumption_ms", "amendments_ms", "filter_ms"] as const) assert.equal(d.timing[key], null);
+      assert.equal(Object.hasOwn(d.timing, "setup_ms"), false);
+    }
+  });
+}

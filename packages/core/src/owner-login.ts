@@ -131,7 +131,9 @@ export async function classifyOwnerLogin(args: OwnerLoginArgs): Promise<OwnerLog
       actor_written: ownerLoginAccount(login), evidence_level: null, declarations: [], proximity_hints: 0,
       context: { read_head_seq: args.readHead.seq, read_head_hash: args.readHead.hash, policy_digest: args.policy.digest },
       window: { from: Number.isFinite(ingress) ? new Date(ingress - OWNER_LOGIN_WINDOW_MS).toISOString() : null, to: payload.ingress_at ?? null, basis: "ingress_at" },
-      received: { webhook: null, declaration: null }, consumed: [], ingress_at: payload.ingress_at ?? null, classification_ms: 0 } };
+      received: { webhook: null, declaration: null }, consumed: [], ingress_at: payload.ingress_at ?? null, classification_ms: 0,
+      timing: { pre_ms: args.preMs ?? null, candidates_ms: null, consumption_ms: null, amendments_ms: null, filter_ms: null,
+        stage_failed: null, candidates_rows: null, budget_rows_remaining: null, deadline_ms: args.deadline - started } } };
   const finish = (): OwnerLoginResult => {
     record.decision.classification_ms = Math.max(0, now() - started);
     return { kind: "decision", input: attachOwnerLoginDecision(args.input, record), consume: record.decision.consumed };
@@ -142,6 +144,18 @@ export async function classifyOwnerLogin(args: OwnerLoginArgs): Promise<OwnerLog
   }
   if (!kind) return finish();
   const budget: EvidenceBudget = new EvidenceBudget(args.deadline, now);
+  const timing = record.decision.timing;
+  type Stage = NonNullable<typeof timing.stage_failed>;
+  type TimedStage = Exclude<Stage, "setup" | "final_check">;
+  let stage: Stage = "setup";
+  let openStage: { name: TimedStage; started: number } | undefined;
+  const endStage = () => {
+    if (!openStage) return;
+    const key = `${openStage.name}_ms` as const;
+    timing[key] = (timing[key] ?? 0) + Math.max(0, now() - openStage.started);
+    openStage = undefined;
+  };
+  const beginStage = (next: TimedStage) => { stage = next; openStage = { name: next, started: now() }; };
   try {
     if (!Number.isFinite(ingress)) budget.fail("store_error");
     const store = budget.wrap(args.store);
@@ -150,18 +164,28 @@ export async function classifyOwnerLogin(args: OwnerLoginArgs): Promise<OwnerLog
     const keys = [ ...(pr !== undefined ? [`pr:${args.canonicalR}#${pr}`] : []),
       ...(typeof payload.branch === "string" ? [`git:${args.canonicalR}#${payload.branch}`] : []),
       ...(typeof payload.head_sha === "string" ? [`commit:${args.canonicalR}@${payload.head_sha.slice(0, 12)}`] : []) ];
+    beginStage("candidates");
     const candidates = await store.eventsReferencingArtifacts!({ project: args.input.project, artifact_keys: keys, after_seq: -1,
       through_seq: args.readHead.seq, row_cap: budget.remaining, deadline: args.deadline }, now);
     if (!candidates.ok) budget.fail(candidates.reason);
+    timing.candidates_rows = candidates.events.length;
+    endStage();
+    beginStage("filter");
     const eligibleTime = candidates.events.filter(e => declarationProject(e, args.input) && declarationWindow(e, ingress, args.readHead.seq));
+    endStage();
+    beginStage("consumption");
     const rows = await budget.read(() => store.ownerLoginConsumptionUpTo!(args.input.project, eligibleTime.map(e => e.id), args.readHead.seq, { deadline: args.deadline, row_cap: budget.remaining }));
     if (!rows.ok) budget.fail(rows.reason);
     budget.take(rows.rows.length);
     const consumed = new Set(rows.rows.map(row => row.declaration_event_id));
+    endStage();
+    beginStage("amendments");
     const amended = await evaluateAmendmentsAtU({ store, project: args.input.project, U: args.readHead.seq, headHash: args.readHead.hash,
       policy: args.policy.body, policyDigest: args.policy.digest, canonicalRepo: args.canonicalR, captureEvents: candidates.events,
       coveredArtifactKeys: keys, deadline: args.deadline, now });
     if (!amended.ok) budget.fail(budget.failure ?? amended.reason);
+    endStage();
+    beginStage("filter");
     const amendments = new Set(amended.collection.effective.keys());
     // Webhook observations are never declaration candidates or proximity testimony.
     const available = eligibleTime.filter(e => e.method?.params?.sealed_by !== "webhook:github" && declarationUnconsumed(e, consumed));
@@ -180,11 +204,16 @@ export async function classifyOwnerLogin(args: OwnerLoginArgs): Promise<OwnerLog
         consumed: [e.id], received: { webhook: null, declaration: e.received_at ?? null } });
     } else if (seats.size > 1) Object.assign(record.decision, { status: "conflicting", reason: "multiple_declarers" });
     else record.decision.reason = available.length ? "proximity_only" : "no_declaration";
+    endStage();
+    stage = "final_check";
     budget.check();
   } catch {
+    endStage();
+    timing.stage_failed = stage;
     Object.assign(record.decision, { status: "unavailable", reason: budget.failure ?? "store_error", actor_written: ownerLoginAccount(login),
       evidence_level: null, declarations: [], consumed: [], received: { webhook: null, declaration: null } });
   }
+  timing.budget_rows_remaining = budget.remaining;
   return finish();
 }
 
@@ -197,11 +226,13 @@ export async function appendOwnerLoginEvent(store: EventStore, input: EventInput
   let toSeal = classified.kind === "decision" ? classified.input : input;
   let consume = classified.kind === "decision" ? classified.consume : [];
   async function classify() {
+    const preStarted = now();
     const readHead = await appendReadWithinDeadline(() => store.head(input.project), opts) ?? { seq: -1, hash: GENESIS_HASH };
     // A policy may activate between routing and classification. Select through this U, never at a later head.
     const selectedPolicy = store.getPolicyByActivationSeq
       ? await appendReadWithinDeadline(() => store.getPolicyByActivationSeq!(input.project, readHead.seq), opts) ?? policy : policy;
-    return selectedPolicy ? classifyOwnerLogin({ store, input, policy: selectedPolicy, canonicalR, readHead,
+    const preMs = Math.max(0, now() - preStarted);
+    return selectedPolicy ? classifyOwnerLogin({ store, input, policy: selectedPolicy, canonicalR, readHead, preMs,
       deadline: Math.min(now() + OWNER_LOGIN_DEADLINE_MS, deliveryDeadline ?? Infinity), now }) : { kind: "not_applicable" as const };
   }
   for (let seqAttempt = 0; ; ) {

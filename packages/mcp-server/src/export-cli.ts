@@ -61,8 +61,16 @@ async function main() {
   const { flags, pos } = parseArgs(process.argv.slice(2));
   const cmd = pos[0];
   if (cmd === "owner-login") {
-    if (!flags.recompute || typeof flags.bundle !== "string") throw new Error("usage: retrace-export owner-login --recompute --bundle <export.json> [--policy <digest>]");
-    const replay = await recomputeOwnerLogin(parseExportBundle(readFileSync(flags.bundle, "utf8")), typeof flags.policy === "string" ? flags.policy : undefined);
+    if (!flags.recompute || typeof flags.bundle !== "string") throw new Error("usage: retrace-export owner-login --recompute --bundle <export.json> [--policy <digest>] [--limit-seq <n>]");
+    const started = Date.now();
+    const progress = (message: string) => console.error(`owner-login: ${message} (${Date.now() - started} ms)`);
+    const limitFlag = flags["limit-seq"];
+    if (limitFlag !== undefined && (typeof limitFlag !== "string" || !/^\d+$/.test(limitFlag) || !Number.isSafeInteger(Number(limitFlag))))
+      throw new Error("--limit-seq must be a non-negative safe integer");
+    const bundle = parseExportBundle(readFileSync(flags.bundle, "utf8"));
+    progress(`bundle parsed: ${bundle.events.length} events`);
+    const replay = await recomputeOwnerLogin(bundle, typeof flags.policy === "string" ? flags.policy : undefined,
+      { limitSeq: limitFlag === undefined ? undefined : Number(limitFlag), progress });
     console.log("owner-login consistency replay (does not establish issuer identity)");
     for (const row of replay.results) console.log(`${row.id}: ${row.result}${row.replay_unavailable ? `; replay produced unavailable (${row.replay_unavailable}); this reason came from the replay's own evidence reads, not a preserved sealed outcome` : ""}; event received_at ${row.received_at}; preserved observed fields: ${row.preserved.join(", ") || "none"}`);
     console.log(`consumption rebuilt: ${replay.consumption.length} rows`);

@@ -29,12 +29,26 @@ export interface OwnerLoginRecord {
     consumed: string[];
     ingress_at: string | null;
     classification_ms: number;
+    timing: {
+      pre_ms: number | null;
+      candidates_ms: number | null;
+      consumption_ms: number | null;
+      amendments_ms: number | null;
+      /** Eligibility filtering after the candidate read plus selection after amendment evaluation. */
+      filter_ms: number | null;
+      /** "filter" names either pass; "setup" precedes timed stages; "final_check" is the final budget check.
+       * Setup and final_check have no corresponding duration field. */
+      stage_failed: "setup" | "candidates" | "consumption" | "amendments" | "filter" | "final_check" | null;
+      candidates_rows: number | null;
+      budget_rows_remaining: number | null;
+      deadline_ms: number;
+    };
     allocation?: { attempts: 2; read_head_seq: number; consumed_by: string | null };
   };
 }
 export type OwnerLoginResult = { kind: "not_applicable" } | { kind: "decision"; input: EventInput; consume: string[] };
 export type OwnerLoginArgs = { store: EventStore; input: EventInput; policy: PolicyDocument; canonicalR: string;
-  readHead: ChainHead; deadline: number; now?: () => number };
+  readHead: ChainHead; deadline: number; preMs?: number; now?: () => number };
 
 const object = (value: unknown): Record<string, unknown> | undefined => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
 export function ownerLoginRecord(input: Pick<EventInput, "method">): OwnerLoginRecord | undefined {
