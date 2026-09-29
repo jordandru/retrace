@@ -45,7 +45,7 @@ export interface OwnerLoginRecord {
 }
 export type OwnerLoginResult = { kind: "not_applicable" } | { kind: "decision"; input: EventInput; consume: string[] };
 export type OwnerLoginArgs = { store: EventStore; input: EventInput; policy: PolicyDocument; canonicalR: string;
-  readHead: ChainHead; deadline: number; now?: () => number };
+  readHead: ChainHead; deadline: number; preMs?: number; now?: () => number };
 
 const object = (value: unknown): Record<string, unknown> | undefined => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
 export function ownerLoginRecord(input: Pick<EventInput, "method">): OwnerLoginRecord | undefined {
