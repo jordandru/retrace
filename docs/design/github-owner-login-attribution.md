@@ -1,6 +1,6 @@
 # GitHub owner-login attribution — design note v1 (evaluation plan P1; issues #82, #69)
 
-**Status:** v1.4.1, 2026-09-28 (v1.4.1 20:0xZ / 14:0x MDT: two dated in-place corrections from Codex's round-1 review of the step-1 build
+**Status:** v1.4.2, 2026-09-28 (v1.4.2 text fixed 00:1xZ 09-29 / 18:1x MDT 09-28 on PR 136 round 1 — Codex F1 `evt_3b0b2ab4e37a4f9cbda820ec81fdca49` (the consumer must be sealed before the `allocation_failed` seal: U < W.seq < L.seq) and the Grok seat's M1/L1 `evt_24ce6202bcad4964b572c8dcb25427c8` (the `allocation` path is `decision.allocation`; the item-3 replay sentence scoped), on Jordan's go `evt_c03c4f0fb826447096dbc4eec947dbb3`. v1.4.2 23:2xZ / 17:2x MDT: dated corrections to §3.5 item 3, §4, §7 and §11 T2/T17 — `allocation_failed` is an observed outcome reproduced by rule, not a derivation — from the Codex builder's stop on PR 135 (`evt_3f252c879c4745d89d4432bb61b7cb19`), gate check `evt_5e0e8ceefb8d4b5ea6b74b44f75194f1`, Jordan's decision A `evt_81f62f1f13234c9f953295c8718fdc14`. v1.4.1 20:0xZ / 14:0x MDT: two dated in-place corrections from Codex's round-1 review of the step-1 build
 brief, PR #133, `evt_1e9f4144fb0042bf8bcb432d736554a2`, applied on Jordan's go `evt_5d5309168b6244c4aa1c20dbbab46e12` — §3.5 item 2, the consumption read is
 bounded by the read head (F4); §4, `received.webhook` is sealed null (F5). No number, decision or test changed; rule 10; the §4 correction's wording fixed 22:1xZ on Codex R2-L2.) DRAFT v1.4, 2026-09-26 (v1.4 06:3xZ / 00:3x MDT: the final text touch on Jordan's go `evt_1e00d0a0b1804e68b3b66af34d6db2e2` —
 Codex round-4 R4-L1, NOOA round-4 N4-M1/N4-M2/N4-L3, and the Grok seat's (cursor-agent) first-pass findings R1-M1/R1-L1/R1-L2
@@ -276,7 +276,8 @@ Two bounded reads per webhook event, then one atomic event-plus-consumption writ
    owner-login path retries from the read, not from the append. A delivery that ends `unavailable`, times out, or fails
    before the write leaves no row. **Replay contract:** the table holds a row iff a sealed decision lists that declaration
    under `consumed`, so an offline re-derivation (T2) that replays sealed decisions in `seq` order reproduces every
-   decision exactly, and the table adds no trusted state the export cannot show. Idempotent redelivery: GitHub redelivers
+   decision exactly *(scoped 2026-09-28: every status except `allocation_failed`, which the correction below reproduces by rule; Grok
+   seat L1)*, and the table adds no trusted state the export cannot show. Idempotent redelivery: GitHub redelivers
    with the same `X-GitHub-Delivery`; the existing idempotency key returns the sealed event and no second write is
    attempted. Build note: the pending-delivery drain routes only `push` today (`router.ts`, `drainPending…`); the step-1
    build makes it event-kind-aware so a deferred non-push delivery is classified by this path. **What the atomic write
@@ -289,7 +290,7 @@ Two bounded reads per webhook event, then one atomic event-plus-consumption writ
    **Bound on reclassification** (NOOA round 4, N4-M2): after a primary-key failure the classifier re-reads once; the
    winner's decision is a strictly later `seq` on the same primary database, so the re-read sees the consumption. If the
    second write also fails, the delivery seals `unresolved` / `no_declaration` with reason `allocation_failed` — one
-   re-read, never a loop.
+   re-read, never a loop. *Correction, 2026-09-28 (the Codex builder's stop on PR 135, `evt_3f252c879c4745d89d4432bb61b7cb19`; coordinator gate check `evt_5e0e8ceefb8d4b5ea6b74b44f75194f1`; Jordan's decision A, `evt_81f62f1f13234c9f953295c8718fdc14`): this seal is an **observed outcome**, not a derivation from the read head. At the second read head U the declaration was still eligible and unconsumed; the failure shows that a competitor consumed it after U, so an exact replay at U would derive `declared_by_seat` (the builder's probe reproduced this). The decision record therefore carries `allocation: { attempts: 2, read_head_seq: U, consumed_by: <the consuming event id when one post-failure point read of the consumption row by its primary key shows it, else null> }` — a single-row point read, not a third candidate read or reclassification, so N4-M2's one-re-read bound stands — and the recompute tool (§7) reproduces an `allocation_failed` decision **by rule**, not by derivation: it is reproduced iff replay at U finds the declaration eligible and some sealed decision W with U < W.seq < L.seq — L being the `allocation_failed` seal under check — lists that same replay-selected declaration under `consumed` (and, when `allocation.consumed_by` is non-null, W is that event); otherwise it reports `mismatch allocation`. The upper bound matters: a consumer sealed after L cannot have caused L's failure, so a rule that accepted any later consumer would falsely corroborate an impossible order (Codex, PR 136 round 1, F1, `evt_3b0b2ab4e37a4f9cbda820ec81fdca49`). T2's byte-identical requirement applies to every other status; for `allocation_failed` the derived fields (`status`, `reason`, `consumed: []`) are checked by that rule and the `allocation` block is preserved as observed, the way `received.webhook` and `classification_ms` are. The replay contract of this item (a row iff a sealed decision lists the declaration under `consumed`) is unchanged: the losing delivery lists nothing. `unavailable` already has this shape — sealed without derivation, verified later.*
 
 Budget 300 ms
 and 2,000 rows (a pull request's index rows over 30 minutes are two orders of magnitude fewer than a commit's file
@@ -309,7 +310,7 @@ which rule produced the account actor (NOOA round 1, N1).
 | `|Seats(G)| > 1` | `conflicting` | `multiple_declarers` | the account: `{ type: system, id: github:<login>, display_name: "<login> (GitHub account, shared)" }` |
 | `Decl(G) = ∅`, some pinned event names the PR in the window | `unresolved` | `proximity_only` | the account |
 | `Decl(G) = ∅`, none does | `unresolved` | `no_declaration` | the account |
-| the atomic write failed on the consumption key twice (one re-read; §3.5 item 3) | `unresolved` | `allocation_failed` | the account |
+| the atomic write failed on the consumption key twice (one re-read; §3.5 item 3) | `unresolved` | `allocation_failed` (an observed outcome; the record carries `allocation`, §3.5 item 3 correction of 2026-09-28) | the account |
 | evidence read failed / over budget | `unavailable` | `store_error` / `budget` / `deadline` | the account |
 
 There is no policy switch for `unresolved`: the account is always true, so there is nothing to `record` or `withhold`.
@@ -335,6 +336,10 @@ the way `claim_decision` is, `router.ts:817–823`):
     "ingress_at": "2026-09-24T10:03:57.101Z",
     "classification_ms": 41 } }
 ```
+
+*Addition, 2026-09-28 (same correction as §3.5 item 3): an `allocation_failed` record carries one more field inside `decision`, beside `consumed: []` — the path is
+`owner_login_decision.decision.allocation`, where `classification_ms` and `consumed` sit (Grok seat, PR 136 round 1, M1, `evt_24ce6202bcad4964b572c8dcb25427c8`) —
+`"allocation": { "attempts": 2, "read_head_seq": <U>, "consumed_by": "<evt_…>" | null }` — present only on that status.*
 
 *Correction, 2026-09-28 (Codex, PR 133 round 1, F5, `evt_1e9f4144fb0042bf8bcb432d736554a2`; applied on Jordan's go `evt_5d5309168b6244c4aa1c20dbbab46e12`):
 `received.webhook` is sealed as `null`, not as the value the example shows — the classifier builds the record before `sealEvent`
@@ -412,7 +417,9 @@ Order 1 → 2 → 3 land together or in sequence; 5 waits on nothing in 1–4 bu
   declaration, never as an established actor (NOOA round 1, N2); never as a person's name when the status is not
   `declared_by_seat` or `identity_mapped`.
 - **Export and verify.** The decision is inside the hashed event; `verifyExportBundle` needs no change. An offline
-  re-derivation tool (`retrace-export owner-login --recompute`) recomputes §4 from the bundle for T2.
+  re-derivation tool (`retrace-export owner-login --recompute`) recomputes §4 from the bundle for T2. *Correction, 2026-09-28
+  (§3.5 item 3): an `allocation_failed` decision is reproduced by rule — the declaration eligible at the sealed read head and consumed
+  by a sealed decision W with U < W.seq < L.seq, L being that seal (F1) — and reported as `match (allocation, by rule)`, never as a byte-for-byte derivation.*
 - **Trailer classifier and reconcile.** Unchanged: webhook seals are not witnesses (trailer-consistency §3.3) and this note
   does not make them so.
 
@@ -465,7 +472,7 @@ recommendation: correct now); this note does not edit it, and the landing footer
 - **T1.** A comment webhook from a shared login with one eligible declaration (pinned, verified, matching `body_sha256`,
   inside the window) seals `actor` = the seat, `status declared_by_seat`, the declaration listed. Closes the plan's first
   "done when".
-- **T2.** The same event's decision is recomputed byte-identically from an export bundle (`read_head_seq`, payload hashes).
+- **T2.** The same event's decision is recomputed byte-identically from an export bundle (`read_head_seq`, payload hashes). *Scoped 2026-09-28 (§3.5 item 3 correction): every status except `allocation_failed`, which is reproduced by rule and whose `allocation` block is preserved as observed.*
 - **T3 (measurement).** One real comment, one review, one PR body edit and one PR open posted through `gh` with a
   declaration; each webhook `body_sha256` equals the seat's; any mismatch is recorded here with the normalisation fix.
   **Measured so far on PR 130 itself (nine declared writes: one `pr_open`, eight reviews):** every declared `body_sha256`
@@ -511,7 +518,8 @@ recommendation: correct now); this note does not edit it, and the landing footer
   row for it. Sequential and concurrent variants: two deliveries classified in parallel both choose the declaration;
   exactly one atomic write succeeds and is `declared_by_seat`; the other fails the write, reclassifies at the new head,
   sees the consumption, and seals `unresolved`; a contrived third contender whose second write also fails seals
-  `unresolved` / `allocation_failed` and never loops. A delivery that fails after classification and before the write leaves
+  `unresolved` / `allocation_failed` and never loops, its record naming the winner under `allocation.consumed_by` (2026-09-28
+  correction) and the recompute reproducing it by rule. A delivery that fails after classification and before the write leaves
   no row and no event; its redelivery classifies afresh. Replaying the export in `seq` order reproduces both decisions
   and the table.
 - **T18 (R2-F2).** A declaration sealed after the delivery's `ingress_at` but before the webhook seals → `unresolved`;
@@ -556,6 +564,7 @@ not yield distinct identities. The questions stay listed for NOOA and the Grok s
 | Round 1 routing: Codex `evt_a3d7385b94bd435fa4a00b63cb7f1643`, NOOA `evt_0efbeca427544acfbc3385c0c0fae754` | verdicts Codex `evt_cc16a99f33ab467895ddc5831adc6043` (rejected, 3 M), NOOA `evt_45521b66918f4938919b26768995bf80` (rejected, 3 M 2 L) |
 | Jordan: wait for NOOA, then fix both in place | `evt_4be7266d49b64e1e94c8d4da4a0ff875` |
 | Live samples (T3): PR open declared `evt_df2d386c…` / outcome `evt_0efdea31…` / webhook `evt_2f60cfc7…` / measurement `evt_01d82280…`; eight review copies posted (5324545359, 5324576986, 5324633884, 5324642069, 5324722585, 5324731435, 5324806453, 5324807066), each declared first, each body hash matched on read-back; one commit mismatch on `evt_1d10e43e…` (push/post race) | nine body matches of nine; one commit mismatch; `comment` and `pr_edit` unmeasured (R1-L1) |
+| Step-1 build stop (PR 135): `allocation_failed` correction to §3.5 item 3, §4, §7, §11 | `evt_3f252c879c4745d89d4432bb61b7cb19`; gate check `evt_5e0e8ceefb8d4b5ea6b74b44f75194f1`; decision A `evt_81f62f1f13234c9f953295c8718fdc14` |
 | Step-1 brief, Codex round 1: F4 (§3.5 item 2) and F5 (§4) corrections to this note | `evt_1e9f4144fb0042bf8bcb432d736554a2`; go `evt_5d5309168b6244c4aa1c20dbbab46e12`; PR #133 |
 | Probe over the export slice (numbers in §1.2–§1.4) | script `~/.retrace/handoff-2026-09-26/probe-owner-login.py` (sha256 `0cf23d48630ac967…`), results on this file's edit event |
 
