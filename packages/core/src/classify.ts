@@ -38,6 +38,7 @@ import {
 
 export const CLASSIFIER_PROFILE = "trailer-consistency/1";
 export const CLASSIFY_DEADLINE_MS = 500;
+export const OWNER_LOGIN_DEADLINE_MS = 300;
 export const CLASSIFY_ROW_CAP = ARTIFACT_INDEX_DEFAULT_ROW_CAP;
 export const BREAKER_CONSECUTIVE_FAILURES = 3;
 export const BREAKER_WINDOW_MS = 5 * 60 * 1000;

@@ -25,3 +25,5 @@ export * from "./attribution.js";
 export * from "./attribution-context.js";
 
 export { generatesArtifact, artifactKey, artifactLookup, escapeGlobLiteral } from "./capture.js";
+
+export * from "./owner-login.js";

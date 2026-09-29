@@ -1057,3 +1057,21 @@ test("T18 §1.2 ingress is captured before store reads and kept with a queued no
   assert.equal(sealed.method!.params!.producer_sig_verdict, "none");
   assert.equal(await original("queued-comment"), null);
 });
+
+test("T9 owner_login_decision is stripped from unsigned and both signature formats; signed require_signature rejects", async () => {
+  const { PRODUCER_SIG_FORMAT, PRODUCER_SIG_FORMAT_V2 } = await import("./producer-sig.js");
+  const key = await generateSigningKey();
+  const actor = { type: "agent" as const, id: "codex" };
+  const forged = { policy: "owner-login/1", decision: { status: "identity_mapped" } };
+  const input = ev({ actor, method: { params: { owner_login_decision: forged } }, timestamp: "2026-09-28T00:00:00Z", idempotency_key: "forged-owner" });
+  const unsignedStore = new MemStore();
+  assert.equal((await post(createHandler(unsignedStore, { token: "tok" }), "/events", input, "tok")).status, 201);
+  assert.equal(unsignedStore.events[0].method?.params?.owner_login_decision, undefined);
+  for (const format of [PRODUCER_SIG_FORMAT, PRODUCER_SIG_FORMAT_V2] as const) {
+    const store = new MemStore();
+    const cred = { token: "signed-owner-login-token", actor, trust: "pinned" as const, public_key: key.publicKey, require_signature: true };
+    const signed = await signProducer(input, key.privateKey, { format });
+    const res = await post(createHandler(store, { token: "tok", credentials: [cred] }), "/events", signed, cred.token);
+    assert.equal(res.status, 401, await res.text()); assert.equal(store.events.length, 0);
+  }
+});

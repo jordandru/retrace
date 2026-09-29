@@ -1,0 +1,77 @@
+{
+  "project": "retrace",
+  "actor": {
+    "type": "agent",
+    "id": "claude-code",
+    "model": "claude-fable-5-1",
+    "on_behalf_of": "jordansboxing@gmail.com",
+    "model_source": "harness-runtime"
+  },
+  "action": "created",
+  "action_detail": "declaration: gh pr create (github-owner-login-attribution.md \u00a73.2, kind pr_open)",
+  "artifacts": [
+    {
+      "id": "git:jordandru/retrace#jordandru/claude-owner-login-p1",
+      "kind": "branch",
+      "label": "branch jordandru/claude-owner-login-p1 @ 57299cf",
+      "role": "used"
+    },
+    {
+      "id": "commit:jordandru/retrace@57299cf20f83",
+      "kind": "commit",
+      "role": "used"
+    },
+    {
+      "id": "file:~/.retrace/handoff-2026-09-26/pr-p1/body.md",
+      "kind": "file",
+      "label": "PR body",
+      "role": "used"
+    }
+  ],
+  "timestamp": "2026-09-26T04:00:05.724Z",
+  "location": {
+    "path": "/home/jordandrumiler/provenance/retrace",
+    "environment": "local",
+    "device": "JordansLaptop",
+    "system": "claude-code",
+    "session": "b369910c-19d6-4a40-b17a-420295cede23",
+    "ide": "orca",
+    "workspace": "28cabffc-aee5-4ca2-9e2b-13328a5faac8::\\\\wsl.localhost\\Ubuntu\\home\\jordandrumiler\\provenance\\retrace"
+  },
+  "intent": "Declaration before the gh write, under the draft note's own \u00a73.2 (first live sample; appendix A / proposed agent-ops 19): claude-code is about to run `gh pr create` as the GitHub account jordandru (shared owner login) for branch jordandru/claude-owner-login-p1 at head 57299cf20f83cff20dc27da2d08596e24274ec2b, base main a39cf91, class (a). Body file ~/.retrace/handoff-2026-09-26/pr-p1/body.md, normalised sha256 (UTF-8, CRLF\u2192LF, trailing whitespace and trailing newlines removed) fa882683fb429ed12986762d08cb4511d19c2d830d986fdbed5c5e994e4d720d, 3,100 B. The PR number does not exist yet; the outcome record will name it. The webhook's `created` event for this PR will still seal as human/github:jordandru today \u2014 that is the defect the note addresses; this declaration is the evidence a built classifier would match.",
+  "caused_by": "evt_603025a3932a4193a23f16b49b742f96",
+  "method": {
+    "tool": "gh",
+    "params": {
+      "github_action": {
+        "kind": "pr_open",
+        "repo": "jordandru/retrace",
+        "login": "jordandru",
+        "body_sha256": "fa882683fb429ed12986762d08cb4511d19c2d830d986fdbed5c5e994e4d720d",
+        "head_sha": "57299cf20f83cff20dc27da2d08596e24274ec2b",
+        "base": "main"
+      },
+      "pr_class": "a",
+      "github_identity": "jordandru (owner, shared by every seat)",
+      "posted_by_seat": "claude-code",
+      "sealed_by": "pinned:claude-code MCP (pinned) (signing)",
+      "producer_sig_verdict": "verified"
+    }
+  },
+  "idempotency_key": "s21-p1-pr-open-decl-57299cf",
+  "tags": [
+    "github",
+    "declaration",
+    "p1"
+  ],
+  "producer_sig": {
+    "kid": "07d88438e49610ea",
+    "sig": "In5WTKXCFTRWNyWyGdDErawE2FQvLLFoaBRuBZWb4aj59rg7tfaiZ7khZnoGaPKZKYWxzMR7xVEjRPj2cVKoDQ"
+  },
+  "id": "evt_df2d386cc03b4a06a435906aa582de9e",
+  "seq": 8529,
+  "prev_hash": "9eb84c2d967a7e79ead1b6f2e047d7769c4819d6add26a7745b25b3bc5815dd9",
+  "hash": "ef3eb80c91f1d47e57b105fe91bf2128584d42230f39b24f3a8ef5f979124b8f",
+  "received_at": "2026-09-26T04:00:05.492Z",
+  "hash_v": 2
+}

@@ -118,13 +118,27 @@ export interface Share {
   created_by?: string;
 }
 
+export interface OwnerLoginConsumption {
+  project: string;
+  declaration_event_id: string;
+  consumed_by_delivery?: string | null;
+  consumed_by_event_id: string;
+  consumed_by_seq: number;
+  consumed_at: string;
+}
+export type OwnerLoginConsumptionResult = { ok: true; rows: OwnerLoginConsumption[] } | { ok: false; reason: "budget" | "deadline" | "store_error" };
+
+export interface InsertExtras {
+  owner_login_consumption?: Array<{ declaration_event_id: string; consumed_by_delivery?: string }>;
+}
+
 export interface EventStore {
   head(project: string): Promise<ChainHead | null>;
   createShare(share: Share): Promise<void>;
   getShare(id: string): Promise<Share | null>;
   /** Owner-only share revoke (audit 2026-08-30). Optional — stores without it 501 DELETE /s/:id. */
   deleteShare?(id: string): Promise<boolean>;
-  insert(e: Event): Promise<void>;
+  insert(e: Event, extras?: InsertExtras): Promise<void>;
   byIdempotencyKey(project: string, key: string): Promise<Event | null>;
   get(id: string): Promise<Event | null>;
   /** Bounded point-read batch. Missing ids are omitted; callers decide whether absence is fatal. */
@@ -144,6 +158,7 @@ export interface EventStore {
   deleteProject?(project: string, audit: Event, expectedHead: ChainHead): Promise<Record<string, number>>;
   /** Bounded artifact-index read (§3.5). Over budget / deadline / store error is a typed result, never a throw. */
   eventsReferencingArtifacts?(q: ArtifactIndexQuery, now?: () => number): Promise<ArtifactIndexResult>;
+  ownerLoginConsumptionUpTo?(project: string, declaration_ids: string[], throughSeq: number, budget: { deadline: number; row_cap: number }): Promise<OwnerLoginConsumptionResult>;
   insertPendingDelivery?(row: PendingDelivery): Promise<void>;
   getPendingDelivery?(delivery_id: string): Promise<PendingDelivery | null>;
   listPendingDeliveriesOlderThan?(received_at: string): Promise<PendingDelivery[]>;
@@ -750,6 +765,7 @@ export class AppendInsertInFlightError extends AppendDeadlineExceededError {
 }
 
 export interface AppendEventOptions {
+  extras?: InsertExtras;
   /** Absolute wall-clock deadline. Store reads are raced individually so a timed-out append cannot later seal. */
   deadline?: number;
   now?: () => number;
@@ -783,14 +799,14 @@ const APPEND_INSERT_DEADLINE_EXPIRED = Symbol("append insert deadline expired");
 
 async function appendInsertWithinDeadline(store: EventStore, event: Event, opts: AppendEventOptions): Promise<void> {
   if (opts.deadline === undefined) {
-    await store.insert(event);
+    await store.insert(event, opts.extras);
     return;
   }
   assertAppendDeadline(opts);
   const remaining = opts.deadline - (opts.now ?? Date.now)();
   // This promise always fulfills, so a late insert rejection is observed even after the response deadline wins.
   const completion: Promise<AppendInsertOutcome> = Promise.resolve()
-    .then(() => store.insert(event))
+    .then(() => store.insert(event, opts.extras))
     .then<AppendInsertOutcome, AppendInsertOutcome>(
       () => ({ inserted: true }),
       (error: unknown) => ({ inserted: false, error }),

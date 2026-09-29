@@ -54,6 +54,7 @@ import {
 import { renderReportHtml } from "./report.js";
 import { collectAttributionAmendments } from "./attribution.js";
 import { buildLineage, renderLineageDot, renderLineageMermaid } from "./lineage.js";
+import { appendOwnerLoginEvent, OWNER_LOGIN_DECISION_PARAM } from "./owner-login.js";
 import { mapGithubWebhook, verifyGithubSignature } from "./github.js";
 import { mapDriveActivities, DrivePayload } from "./gdrive.js";
 import { buildProjectStatus } from "./status.js";
@@ -549,7 +550,8 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
           return json({ ok: true, pending: true, routing: "unresolved", repo, reason: routing.reason }, 202);
         }
         const project = routing.project;
-        const hasDoc = !!(store.getPolicy && await store.getPolicy(project, { current: true }));
+        const currentPolicy = store.getPolicy ? await store.getPolicy(project, { current: true }) : null;
+        const hasDoc = !!currentPolicy;
         const mode = parseTrailerPolicy(opts.trailerPolicy);
         if (routing.source === "env" && !hasDoc) {
           const disp = missingPolicyDisposition(mode, false);
@@ -577,20 +579,24 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
               return json({ error: `github delivery already sealed in project "${p}"` }, 409);
           }
         }
+        const ownerLoginDelivery = ghEvent !== "push" && currentPolicy?.body.profile === "retrace-project-policy/2";
+        const retainedDelivery = delivery ?? `github:${repo}:${crypto.randomUUID()}`;
         const isShadowPush = mode === "shadow" && ghEvent === "push" && !!opts.githubIncludePush;
         const deliveryStarted = Date.now();
         const deliveryDeadline = deliveryStarted + WEBHOOK_DELIVERY_DEADLINE_MS;
         let probe = false;
-        if (isShadowPush && store.insertPendingDelivery) {
+        if ((isShadowPush || ownerLoginDelivery) && store.insertPendingDelivery) {
           try {
             await store.insertPendingDelivery({
-              delivery_id: delivery ?? `push:${repo}:${Date.now()}`,
+              delivery_id: retainedDelivery,
               project, raw_body: raw, received_at: ingressAt, gh_event: ghEvent,
               repo, routing_source: routing.source, routing_digest: routing.digest, routing_state: "received",
             });
           } catch {
             return json({ error: "pending insert failed" }, 500);
           }
+        }
+        if (isShadowPush) {
           const probeOwner = `${delivery ?? `probe:${repo}`}:${crypto.randomUUID()}`;
           const admit = await withinDeliveryDeadline(
             webhookBreakerAdmission(store, project, Date.now(), probeOwner),
@@ -690,27 +696,21 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
             continue;
           }
           const stamped = stampSealedBy(parsed.data, SEALED_BY_GITHUB_WEBHOOK);
-          for (let attempt = 0; ; attempt++) {
-            try {
-              const r = await appendEvent(store, stamped, isShadowPush ? { deadline: deliveryDeadline } : {});
-              results.push({ id: r.event.id, seq: r.event.seq, deduped: r.deduped });
-              break;
-            }
-            catch (e: any) {
-              if (e instanceof AppendDeadlineExceededError || e?.name === "AppendDeadlineExceededError")
-                return json({ ok: true, pending: remainingShas(), reason: "deadline" }, 202);
-              const client = writeClientError(e);
-              if (client) return json({ error: client }, 400);
-              if (!/UNIQUE/i.test(String(e?.message)) || attempt >= 4) throw e;
-            }
+          try {
+            const r = await appendOwnerLoginEvent(store, stamped, currentPolicy, repo, deliveryDeadline);
+            results.push({ id: r.event.id, seq: r.event.seq, deduped: r.deduped });
+          } catch (e: any) {
+            if (e instanceof AppendDeadlineExceededError || e?.name === "AppendDeadlineExceededError")
+              return json({ ok: true, pending: [], reason: "deadline" }, 202);
+            const client = writeClientError(e);
+            if (client) return json({ error: client }, 400);
+            throw e;
           }
         }
-        if (isShadowPush) {
-          if (delivery && store.deletePendingDelivery) {
-            const deleted = await withinDeliveryDeadline(store.deletePendingDelivery(delivery), deliveryDeadline);
-            if (deleted === DELIVERY_DEADLINE_EXPIRED)
-              return json({ ok: true, pending: [], reason: "deadline" }, 202);
-          }
+        if ((isShadowPush || ownerLoginDelivery) && store.deletePendingDelivery) {
+          const deleted = await withinDeliveryDeadline(store.deletePendingDelivery(retainedDelivery), deliveryDeadline);
+          if (deleted === DELIVERY_DEADLINE_EXPIRED)
+            return json({ ok: true, pending: [], reason: "deadline" }, 202);
         }
         return json({ ok: true, event: ghEvent, project, logged: results }, 201);
       }
@@ -815,6 +815,7 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
         const resolved = resolveActor(principal, parsed.data.actor, parsed.data.action);
         if ("error" in resolved) return json(resolved, 403);
         const params = { ...parsed.data.method?.params };
+        delete params[OWNER_LOGIN_DECISION_PARAM];
         delete params.relayed_by;
         delete params[SEALED_BY_PARAM];
         delete params[PRODUCER_SIG_VERDICT_PARAM];
@@ -1198,7 +1199,14 @@ export async function drainPendingGithubDeliveries(store: EventStore, opts: {
           method: { ...parsed.data.method, params: { ...parsed.data.method?.params,
             [SEALED_BY_PARAM]: SEALED_BY_GITHUB_WEBHOOK, producer_sig_verdict: "none" } },
         };
-        await appendEvent(store, stamped);
+        try {
+          const policy = store.getPolicy ? await store.getPolicy(row.project, { current: true }) : null;
+          await appendOwnerLoginEvent(store, stamped, policy, row.repo ?? "", now() + WEBHOOK_DELIVERY_DEADLINE_MS, now);
+        } catch (e) {
+          if (!(e instanceof AppendDeadlineExceededError)) throw e;
+          outcomes[sha] = { status: "pending", attempt_count: outcomes[sha]?.attempt_count ?? 0, reason: "deadline" };
+          continue;
+        }
         outcomes[sha] = { status: "sealed", attempt_count: outcomes[sha]?.attempt_count ?? 0 };
         continue;
       }
