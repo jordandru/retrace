@@ -444,6 +444,8 @@ test("T2 T17 owner-login replay reconstructs decisions/table and rejects absent 
     const policy = (await store.getPolicy(f.project, { current: true }))!;
     const selected = await classifyOwnerLogin({ store, input: f.input, policy, canonicalR: f.repo, readHead: (await store.head(f.project))!, deadline: Date.now()+1000 });
     assert.equal(selected.kind, "decision"); if (selected.kind !== "decision") throw new Error("fixture");
+    // Timing is observed: deliberately unlike any timing the replay will measure.
+    ownerLoginRecord(selected.input)!.decision.timing.candidates_ms = 987654;
     let winner: import("@retrace-dev/core").Event | undefined;
     if (mode === "before") winner = (await appendOwnerLoginEvent(store, { ...f.input, idempotency_key: "winner" }, policy, f.repo, Date.now()+2000)).event;
     const failed = { ...ownerLoginAllocationFailed(selected.input, winner?.id ?? null), idempotency_key: "loser" };
@@ -468,7 +470,7 @@ test("T2 T17 owner-login replay reconstructs decisions/table and rejects absent 
     if (mode === "before") {
       assert.ok(replay.results.some(r => r.result === "match (allocation, by rule)"));
       assert.deepEqual(replay.consumption, [...store.ownerLoginConsumption.values()]);
-      assert.ok(replay.results.every(r => r.preserved.includes("classification_ms")));
+      assert.ok(replay.results.every(r => r.preserved.includes("classification_ms") && r.preserved.includes("timing")));
     } else assert.ok(replay.results.some(r => r.result === "mismatch allocation"), JSON.stringify(replay));
     const file = join(dir, `${mode}.json`); writeFileSync(file, JSON.stringify(bundle));
     const run = spawnSync(process.execPath, [bin, "owner-login", "--recompute", "--bundle", file], { encoding: "utf8", env: baseEnv });

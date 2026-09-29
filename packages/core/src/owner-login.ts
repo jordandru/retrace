@@ -131,7 +131,9 @@ export async function classifyOwnerLogin(args: OwnerLoginArgs): Promise<OwnerLog
       actor_written: ownerLoginAccount(login), evidence_level: null, declarations: [], proximity_hints: 0,
       context: { read_head_seq: args.readHead.seq, read_head_hash: args.readHead.hash, policy_digest: args.policy.digest },
       window: { from: Number.isFinite(ingress) ? new Date(ingress - OWNER_LOGIN_WINDOW_MS).toISOString() : null, to: payload.ingress_at ?? null, basis: "ingress_at" },
-      received: { webhook: null, declaration: null }, consumed: [], ingress_at: payload.ingress_at ?? null, classification_ms: 0 } };
+      received: { webhook: null, declaration: null }, consumed: [], ingress_at: payload.ingress_at ?? null, classification_ms: 0,
+      timing: { pre_ms: null, candidates_ms: null, consumption_ms: null, amendments_ms: null, filter_ms: null,
+        stage_failed: null, candidates_rows: null, budget_rows_remaining: null, deadline_ms: args.deadline - started } } };
   const finish = (): OwnerLoginResult => {
     record.decision.classification_ms = Math.max(0, now() - started);
     return { kind: "decision", input: attachOwnerLoginDecision(args.input, record), consume: record.decision.consumed };

@@ -29,6 +29,17 @@ export interface OwnerLoginRecord {
     consumed: string[];
     ingress_at: string | null;
     classification_ms: number;
+    timing: {
+      pre_ms: number | null;
+      candidates_ms: number | null;
+      consumption_ms: number | null;
+      amendments_ms: number | null;
+      filter_ms: number | null;
+      stage_failed: "candidates" | "consumption" | "amendments" | "filter" | null;
+      candidates_rows: number | null;
+      budget_rows_remaining: number | null;
+      deadline_ms: number;
+    };
     allocation?: { attempts: 2; read_head_seq: number; consumed_by: string | null };
   };
 }

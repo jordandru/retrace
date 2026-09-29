@@ -65,7 +65,7 @@ export async function recomputeOwnerLogin(bundle: ExportBundle, policyOverride?:
     let replay = ownerLoginRecord(result.input)!;
     const replay_unavailable = replay.decision.status === "unavailable" ? replay.decision.reason ?? "unknown" : undefined;
     if (!sealed) { mismatch(e, "missing decision", [], replay_unavailable); continue; }
-    const preserved = ["classification_ms", "received.declaration", "received.webhook"];
+    const preserved = ["classification_ms", "timing", "received.declaration", "received.webhook"];
     let allocation = false;
     if (sealed.decision.reason === "allocation_failed") {
       preserved.push("allocation");
@@ -81,6 +81,9 @@ export async function recomputeOwnerLogin(bundle: ExportBundle, policyOverride?:
     }
     // These are observations, not independent replay evidence.
     replay.decision.classification_ms = sealed.decision.classification_ms;
+    // Older seals predate timing; preserve their absence as well as measured values.
+    if (sealed.decision.timing) replay.decision.timing = structuredClone(sealed.decision.timing);
+    else delete (replay.decision as Partial<OwnerLoginRecord["decision"]>).timing;
     replay.decision.received = structuredClone(sealed.decision.received);
     const diff = different(replay, sealed);
     if (diff) mismatch(e, diff, preserved, replay_unavailable);
