@@ -564,8 +564,84 @@ for (const [operation, stage] of [["eventsReferencingArtifacts", "candidates"],
       const d = ownerLoginRecord(result.input)!.decision;
       assert.equal(d.status, "unavailable"); assert.equal(d.reason, "deadline");
       assert.equal(d.timing.stage_failed, stage);
-      assert.ok(d.timing[`${stage}_ms`]! >= d.timing.deadline_ms - 30, JSON.stringify(d.timing));
+      const earlierMs = stage === "candidates" ? 0 : d.timing.candidates_ms! + d.timing.filter_ms! +
+        (stage === "amendments" ? d.timing.consumption_ms! : 0);
+      assert.ok(d.timing[`${stage}_ms`]! >= d.timing.deadline_ms - earlierMs - 10, JSON.stringify(d.timing));
       assert.equal(d.timing.budget_rows_remaining, stage === "candidates" ? 2000 : 1999);
+    } finally { (store as any).db.close(); }
+  });
+}
+
+
+test("T-A3 SQLite delayed candidates leave only the remaining budget for consumption", async () => {
+  const { ownerLoginScenario } = await import("../../core/dist/owner-login-fixture.js");
+    const { classifyOwnerLogin, ownerLoginRecord } = await import("@retrace-dev/core");
+  const store = new SqliteStore(":memory:");
+  try {
+    const f = await ownerLoginScenario(store), readHead = (await store.head(f.project))!;
+    const candidates = store.eventsReferencingArtifacts!.bind(store);
+    store.eventsReferencingArtifacts = async (...args) => {
+      await new Promise(resolve => setTimeout(resolve, 40));
+      return candidates(...args);
+    };
+    store.ownerLoginConsumptionUpTo = async () => new Promise<never>(() => {});
+    const result = await classifyOwnerLogin({ store, input: f.input, policy: f.policy, canonicalR: f.repo,
+      readHead, deadline: Date.now() + 100 });
+    assert.equal(result.kind, "decision"); if (result.kind !== "decision") throw new Error("fixture");
+    const d = ownerLoginRecord(result.input)!.decision;
+    assert.equal(d.status, "unavailable"); assert.equal(d.reason, "deadline");
+    assert.equal(d.timing.stage_failed, "consumption");
+    assert.ok(d.timing.candidates_ms! >= 30, JSON.stringify(d.timing));
+    assert.ok(d.timing.candidates_ms! + d.timing.consumption_ms! >= d.timing.deadline_ms - 10, JSON.stringify(d.timing));
+  } finally { (store as any).db.close(); }
+});
+
+test("T-A7 SQLite deadline during selection belongs to final_check", async () => {
+  const { ownerLoginScenario } = await import("../../core/dist/owner-login-fixture.js");
+    const { classifyOwnerLogin, ownerLoginRecord } = await import("@retrace-dev/core");
+  const store = new SqliteStore(":memory:");
+  try {
+    const f = await ownerLoginScenario(store), readHead = (await store.head(f.project))!;
+    const started = Date.now(); let tick = started, selectionReady = false;
+    const amendments = store.amendmentEventsUpTo!.bind(store);
+    store.amendmentEventsUpTo = async (...args) => {
+      const rows = await amendments(...args); selectionReady = true; return rows;
+    };
+    const payload = f.input.method!.params!.github_payload as Record<string, unknown>;
+    const bodyHash = payload.body_sha256;
+    // Content matching runs during selection, after every evidence read completed.
+    Object.defineProperty(payload, "body_sha256", { enumerable: true, get() { if (selectionReady) tick = started + 100; return bodyHash; } });
+    const result = await classifyOwnerLogin({ store, input: f.input, policy: f.policy, canonicalR: f.repo,
+      readHead, deadline: started + 100, now: () => tick });
+    assert.equal(result.kind, "decision"); if (result.kind !== "decision") throw new Error("fixture");
+    const d = ownerLoginRecord(result.input)!.decision;
+    assert.equal(d.status, "unavailable"); assert.equal(d.reason, "deadline");
+    assert.equal(d.timing.stage_failed, "final_check");
+    assert.equal(d.timing.filter_ms, 100);
+    for (const key of ["candidates_ms", "consumption_ms", "amendments_ms"] as const) assert.equal(d.timing[key], 0);
+    assert.equal(Object.hasOwn(d.timing, "final_check_ms"), false);
+    assert.deepEqual(d.consumed, []); assert.deepEqual(d.declarations, []);
+  } finally { (store as any).db.close(); }
+});
+
+for (const failure of ["ingress", "eventsReferencingArtifacts", "ownerLoginConsumptionUpTo"] as const) {
+  test(`T-A8 SQLite setup failure ${failure} records no candidate read`, async () => {
+    const { ownerLoginScenario } = await import("../../core/dist/owner-login-fixture.js");
+    const { classifyOwnerLogin, ownerLoginRecord } = await import("@retrace-dev/core");
+    const store = new SqliteStore(":memory:");
+    try {
+      const f = await ownerLoginScenario(store), readHead = (await store.head(f.project))!;
+      if (failure === "ingress") (f.input.method!.params!.github_payload as Record<string, unknown>).ingress_at = "invalid";
+      else Object.defineProperty(store, failure, { value: undefined });
+      if (failure !== "eventsReferencingArtifacts") store.eventsReferencingArtifacts = async () => { assert.fail("setup must fail before a read"); };
+      const result = await classifyOwnerLogin({ store, input: f.input, policy: f.policy, canonicalR: f.repo,
+        readHead, deadline: Date.now() + 100 });
+      assert.equal(result.kind, "decision"); if (result.kind !== "decision") throw new Error("fixture");
+      const d = ownerLoginRecord(result.input)!.decision;
+      assert.equal(d.status, "unavailable"); assert.equal(d.reason, "store_error");
+      assert.equal(d.timing.stage_failed, "setup"); assert.equal(d.timing.candidates_rows, null);
+      for (const key of ["candidates_ms", "consumption_ms", "amendments_ms", "filter_ms"] as const) assert.equal(d.timing[key], null);
+      assert.equal(Object.hasOwn(d.timing, "setup_ms"), false);
     } finally { (store as any).db.close(); }
   });
 }

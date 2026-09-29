@@ -34,8 +34,11 @@ export interface OwnerLoginRecord {
       candidates_ms: number | null;
       consumption_ms: number | null;
       amendments_ms: number | null;
+      /** Eligibility filtering after the candidate read plus selection after amendment evaluation. */
       filter_ms: number | null;
-      stage_failed: "candidates" | "consumption" | "amendments" | "filter" | null;
+      /** "filter" names either pass; "setup" precedes timed stages; "final_check" is the final budget check.
+       * Setup and final_check have no corresponding duration field. */
+      stage_failed: "setup" | "candidates" | "consumption" | "amendments" | "filter" | "final_check" | null;
       candidates_rows: number | null;
       budget_rows_remaining: number | null;
       deadline_ms: number;

@@ -146,12 +146,16 @@ export async function classifyOwnerLogin(args: OwnerLoginArgs): Promise<OwnerLog
   const budget: EvidenceBudget = new EvidenceBudget(args.deadline, now);
   const timing = record.decision.timing;
   type Stage = NonNullable<typeof timing.stage_failed>;
-  let stage: Stage = "candidates", stageStarted = now();
+  type TimedStage = Exclude<Stage, "setup" | "final_check">;
+  let stage: Stage = "setup";
+  let openStage: { name: TimedStage; started: number } | undefined;
   const endStage = () => {
-    const key = `${stage}_ms` as const;
-    timing[key] = (timing[key] ?? 0) + Math.max(0, now() - stageStarted);
+    if (!openStage) return;
+    const key = `${openStage.name}_ms` as const;
+    timing[key] = (timing[key] ?? 0) + Math.max(0, now() - openStage.started);
+    openStage = undefined;
   };
-  const beginStage = (next: Stage) => { stage = next; stageStarted = now(); };
+  const beginStage = (next: TimedStage) => { stage = next; openStage = { name: next, started: now() }; };
   try {
     if (!Number.isFinite(ingress)) budget.fail("store_error");
     const store = budget.wrap(args.store);
@@ -200,8 +204,9 @@ export async function classifyOwnerLogin(args: OwnerLoginArgs): Promise<OwnerLog
         consumed: [e.id], received: { webhook: null, declaration: e.received_at ?? null } });
     } else if (seats.size > 1) Object.assign(record.decision, { status: "conflicting", reason: "multiple_declarers" });
     else record.decision.reason = available.length ? "proximity_only" : "no_declaration";
-    budget.check();
     endStage();
+    stage = "final_check";
+    budget.check();
   } catch {
     endStage();
     timing.stage_failed = stage;
