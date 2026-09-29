@@ -17,23 +17,34 @@ function different(a: unknown, b: unknown, path = "record"): string | undefined 
   }
   return undefined;
 }
-export async function recomputeOwnerLogin(bundle: ExportBundle, policyOverride?: string): Promise<OwnerLoginReplay> {
-  const events = [...bundle.events].sort((a, b) => a.seq - b.seq), store = new MemoryEventStore();
+export interface OwnerLoginReplayOptions {
+  limitSeq?: number;
+  progress?: (message: string) => void;
+}
+export async function recomputeOwnerLogin(bundle: ExportBundle, policyOverride?: string, options: OwnerLoginReplayOptions = {}): Promise<OwnerLoginReplay> {
+  if (options.limitSeq !== undefined && (!Number.isSafeInteger(options.limitSeq) || options.limitSeq < 0))
+    throw new Error("limitSeq must be a non-negative safe integer");
+  const allEvents = [...bundle.events].sort((a, b) => a.seq - b.seq), store = new MemoryEventStore();
+  const limitSeq = options.limitSeq;
+  const events = limitSeq === undefined ? allEvents : allEvents.filter(e => e.seq <= limitSeq);
   store.events = events;
   const out: OwnerLoginReplay = { ok: true, results: [], consumption: [] };
   const mismatch = (e: Event, field: string, preserved: string[] = [], replay_unavailable?: string) => {
     out.ok = false; out.results.push({ id: e.id, result: `mismatch ${field}`, received_at: e.received_at, preserved,
       ...(replay_unavailable ? { replay_unavailable } : {}) });
   };
-  const chain = await verifyChain(events);
-  if (!chain.ok || bundle.scope.artifact_id || bundle.scope.actor_id || bundle.scope.since || bundle.scope.until || bundle.chain.total_events !== events.length) {
+  const chain = await verifyChain(allEvents);
+  if (!chain.ok || bundle.scope.artifact_id || bundle.scope.actor_id || bundle.scope.since || bundle.scope.until || bundle.chain.total_events !== allEvents.length) {
     out.ok = false; out.results.push({ id: "bundle", result: "mismatch incomplete or invalid chain", received_at: "", preserved: [] }); return out;
   }
   for (const doc of bundle.policies ?? []) if (await policyDigestOf(doc.body, doc.envelope) !== doc.digest) {
     out.ok = false; out.results.push({ id: "bundle", result: "mismatch policy digest", received_at: "", preserved: [] }); return out;
   }
+  options.progress?.("bundle validated");
   // Rebuild once in seq order; reads remain bounded by each sealed U, never the current table head.
+  let loaded = 0;
   for (const e of events) {
+    if (++loaded % 500 === 0) options.progress?.(`fixture loading: ${loaded} events`);
     const record = ownerLoginRecord(e);
     if (!record || e.method?.params?.sealed_by !== "webhook:github") continue;
     for (const id of record.decision.consumed) {
@@ -45,7 +56,11 @@ export async function recomputeOwnerLogin(bundle: ExportBundle, policyOverride?:
       store.ownerLoginConsumption.set(key, row); out.consumption.push(row);
     }
   }
+  options.progress?.(`fixture loaded: ${events.length} events`);
+  let scanned = 0, decisions = 0;
   for (const e of events) {
+    if (scanned > 0 && scanned % 500 === 0) options.progress?.(`${scanned} events scanned; ${decisions} decisions replayed`);
+    scanned++;
     if (!githubWebhookProduced(e)) continue;
     const sealed = ownerLoginRecord(e);
     const u = sealed?.decision.context.read_head_seq ?? e.seq - 1;
@@ -62,6 +77,7 @@ export async function recomputeOwnerLogin(bundle: ExportBundle, policyOverride?:
     const pr = e.artifacts.map(a => /^pr:(.+)#\d+$/.exec(a.id)?.[1]).find(Boolean);
     const result = await classifyOwnerLogin({ store, input, policy, canonicalR: pr ?? "", readHead: head, deadline: Date.now()+60_000 });
     if (result.kind === "not_applicable") { if (sealed) mismatch(e, "applicability"); continue; }
+    decisions++;
     let replay = ownerLoginRecord(result.input)!;
     const replay_unavailable = replay.decision.status === "unavailable" ? replay.decision.reason ?? "unknown" : undefined;
     if (!sealed) { mismatch(e, "missing decision", [], replay_unavailable); continue; }
@@ -91,5 +107,6 @@ export async function recomputeOwnerLogin(bundle: ExportBundle, policyOverride?:
     else out.results.push({ id: e.id, result: allocation ? "match (allocation, by rule)" : "match", received_at: e.received_at, preserved,
       ...(replay_unavailable ? { replay_unavailable } : {}) });
   }
+  options.progress?.(`${decisions} decisions replayed; ${scanned} events scanned`);
   return out;
 }
