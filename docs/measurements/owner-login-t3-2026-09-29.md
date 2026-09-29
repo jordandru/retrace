@@ -1,6 +1,6 @@
 # Owner-login step 1 — T3 live measurement, 2026-09-29
 
-**Status:** v1.1, 16:0xZ 2026-09-29 — samples 1–5 measured and recorded (v1 at 16:02Z carried samples 1–4; sample 5 was the push of that commit). v0 skeleton opened the pull request at 15:46Z. Author claude-code (coordinator, T3 declarant per `docs/design/owner-login-step1-build-brief.md` §7). Class (b) on
+**Status:** v1.2, 16:47Z 2026-09-29 — round-1 findings applied in place (Codex R1-M1/M2/M3 `evt_ae2435e61ba2441989746ada805fc09c`, Grok seat M1/L1/L2 `evt_6a8040b0249444209a853660125ae10e`, NOOA M1 `evt_2008c8cb31fd43dba80cda555bc51a71`; Jordan's go in §5): the declaration-to-ingress interval corrected (21–89 s, not 2–5 s), sample timing corrected, the cold-start and future-behaviour sentences scoped to what the seals show, `head` removed from the reads inside the classifier's stopwatch, counts made consistent, later deliveries added to §3. v1.1 16:07Z carried samples 1–5; v1 16:02Z samples 1–4. v0 skeleton opened the pull request at 15:46Z. Author claude-code (coordinator, T3 declarant per `docs/design/owner-login-step1-build-brief.md` §7). Class (b) on
 its own; travels with the note's dated correction, so the pull request is class (a). Go: `evt_fb2c56a11f4341b087586c5f2563d7c7`.
 
 ## 1. What is measured
@@ -44,6 +44,21 @@ All five writes were made by claude-code through the shared GitHub login `jordan
 | 4 | `pr_edit` | `evt_d2981e639f1745c2be1171e0dc36f324` (9439) | body edited 15:55:27Z (REST `PATCH`; the first `gh pr edit` failed client-side on a deprecated GraphQL field and changed nothing, `evt_93313878207c4052b049c171c9631b03`) | `evt_b0a3a88cfa154aa9bcf6875159be0d24` (9441) | `body_sha256 4fa4e68c…` = = ; `title_sha256 acfb8593…` = = (title unchanged, both required by §3.2) | `system` `github:jordandru` | `unavailable` / `deadline`, 300 ms, `read_head_seq 9440`, nothing consumed |
 | 5 | `push` (`pull_request` `synchronize`) | `evt_19bcba47b6df466da1a44a8d5c702a72` (9447) | push `cf64068..130d951`, 16:06:05Z (hook seal `evt_5af8024e…` 9446, replayed after a Worker fetch failure; push webhook `evt_266e34c2…` 9448) | `evt_b6aa4ee027d14db3b22e67ec5f5fbd39` (9449) | `head_sha 130d951…` = = ; `login` = | `system` `github:jordandru` | `unavailable` / `deadline`, 300 ms, `read_head_seq 9448`, nothing consumed |
 
+**Later classified deliveries on this pull request** (same login, same policy; every one `system` `github:jordandru`, `unavailable` /
+`deadline`, `classification_ms 300`, `consumed []`): sample 6, the push of `a449f9a` (declaration `evt_23c3db87ba424fcfb4c184c1e30cbeea` 9455 →
+synchronize seal `evt_93a8fcf0c2434ef0a807caa8d5b76d6a` 9457); sample 7, the coordinator's summary comment 5894054632 (declaration
+`evt_c7b56332e91e42dbb974766f5d121ec4` 9460 → seal `evt_65db1fc072b54d58ba155d6c7610b2cc` 9461); and the three round-1 verdict copies posted
+as declared COMMENT reviews — Codex 5355627713 (seal `evt_25be1afe…` 9493), Grok seat 5355634617 (`evt_630f9aeb…` 9495), NOOA 5355653171
+(`evt_ac8d9a0f…` 9499). Ten classified deliveries between 15:49:05Z and 16:42:1xZ; ten deadlines. The push that lands this text is the eleventh
+and is recorded in the ledger under the same declaration shape.
+
+**Timing of the declarations, by the Worker's clock** (declaration `received_at` → delivery `ingress_at`; corrected on round 1, Codex R1-M1 and
+Grok M1 — the v1.1 text said "2–5 s", which is GitHub's `payload_time` → `ingress_at`, a different interval): samples 1–7: 41.1, 25.8, 25.1,
+88.9, 23.7, 31.4, 21.2 s. `payload_time` → `ingress_at`: 3.6, 2.8, 2.4, 2.6, 2.5, 2.4, 2.5 s. Every declaration is inside the 30-minute
+window and inside the read head. Samples 1–4 ran two minutes apart over six minutes (15:49–15:55Z); samples 1–5 span 17 min 3 s with a
+10 min 39 s gap before sample 5; sample 1's ingress was 11 min 13 s after the deploy receipt `evt_dbab087f…` (15:37:52Z) and 4 min 11 s
+after Jordan's T3 go.
+
 Outcome events (agent-ops 19, `github_action.result`): 1 `evt_593e679bd1c74c32ac611cb6e44aa796`, 2 `evt_a704c46a7fbd4f94997a91e9e84c4e14`,
 3 `evt_cef4963420d0462497004576fec8d360`, 4 `evt_7c4a26c2073e422c88859a6581595803`, 5 the outcome event that follows `evt_19bcba47…` in the ledger (its id is in the pull request's final coordinator comment).
 
@@ -62,31 +77,37 @@ declaration's, on the read-back and in the seal's `github_payload`. Nothing to e
 
 ## 4. Result
 
-1. **The defect P1 names is closed for these kinds.** None of the four writes sealed as `human:jordandru`. Each sealed as the GitHub
+1. **The defect P1 names is closed for these kinds.** None of the classified deliveries on this pull request sealed as `human:jordandru` (five at v1.1; ten by 16:42Z, §3). Each sealed as the GitHub
    account `system github:jordandru` with the hash-covered `github_payload` (login, body/title hashes, head, branch, `ingress_at`,
    delivery) and a decision record — the account floor of N§4, which never seals `human`.
-2. **T3-F1 — the classifier does not finish within its budget on the live D1.** In 5 of 5 deliveries (samples 1–4 and the `synchronize` of sample 5) the decision is `unavailable` /
-   `deadline` with `classification_ms 300` = `OWNER_LOGIN_DEADLINE_MS`, so an eligible, hash-matching, pinned declaration sealed 2–5
-   seconds earlier (inside the read head every time) was **not consumed**, and the seal names no seat. Samples were 2 minutes apart
-   over 7 minutes, the first 5 minutes after the deploy; this is not a cold start. The decision record does not say which of the
-   reads (`head`, `eventsReferencingArtifacts` on the PR/branch/commit keys, `ownerLoginConsumptionUpTo`, `evaluateAmendmentsAtU`)
-   spent the budget — the record has one `classification_ms`, no per-stage timing. The failure is fail-closed (N§4 row "evidence
-   read failed / over budget") and correct as specified; it means step 1 records evidence but attributes nothing live until the
-   budget is met. Same family as the 2026-09-15 shadow deadline (`classify.ts` `store.all` on the hot path; memory
-   `retrace-shadow-deadline-store-all`), where the amendment evaluation was the cause; unmeasured here.
-3. **T3-F2 — the offline recompute did not finish in 4 minutes on the live export** (`retrace-export owner-login --recompute
-   --bundle <19.9 MB export of 9,442 events>`; a second run with a 10-minute budget is recorded in the ledger). N§8's remedy for an
+2. **T3-F1 — the classifier does not finish within its budget on the live D1.** In every classified delivery measured (5 of 5 at v1.1;
+   10 of 10 by 16:42Z, §3) the decision is `unavailable` / `deadline` with `classification_ms 300` = `OWNER_LOGIN_DEADLINE_MS`, so an
+   eligible, hash-matching, pinned declaration — sealed 21–89 s before ingress by the Worker's clock, inside the read head every time — was
+   **not consumed**, and the seal names no seat. The miss recurred on every delivery over 53 minutes (15:49–16:42Z), at spacings from two
+   minutes to eleven; the seals carry no cold/warm or per-stage observation, so **whether a cold isolate contributed is not observed**
+   (Codex R1-M2), and the failing read is not identified: the decision record has one `classification_ms`, no per-stage timing. Inside the
+   classifier's stopwatch (`owner-login.ts` `classifyOwnerLogin`, started at entry) are the candidate lookup (`eventsReferencingArtifacts`
+   on the PR/branch/commit keys), the consumption lookup (`ownerLoginConsumptionUpTo`), the amendment evaluation (`evaluateAmendmentsAtU`)
+   and the computation between them; the head and policy reads run **before** the stopwatch (`appendOwnerLoginEvent`, lines 200–205)
+   and cannot have spent it (Codex R1-M3). The failure is fail-closed (N§4 row "evidence read failed / over budget") and correct as
+   specified. **None of the measured deliveries attributed a seat**; the code classifies each delivery afresh, so later deliveries are
+   unmeasured, not disabled — no fix-dependent condition exists in the code. Same family as the 2026-09-15 shadow deadline (`classify.ts`
+   `store.all` on the hot path; memory `retrace-shadow-deadline-store-all`), where the amendment evaluation was the cause; unmeasured here.
+3. **T3-F2 — the offline recompute did not finish within either timeout on the live export** (`retrace-export owner-login --recompute
+   --bundle <19,939,132-byte export of 9,442 events>`: killed at 240 s, then at 590.04 s wall with 497 MB resident and no output —
+   `evt_009be63c5cd441378e3609aa1451b247`). What two timeouts prove: not under ten minutes; nothing about the runtime beyond that. N§8's remedy for an
    `unavailable` seal is exactly this tool, so its runtime on a real export is part of the finding.
 4. **Normalisation: nothing to extend** (N§3.4). Four kinds measured live; `comment` and `pr_edit`, unmeasured on 2026-09-26 (R1-L1),
    now are.
 5. **Operational:** `gh pr edit` fails in this repository on a deprecated GraphQL field (`projectCards`); the REST `PATCH` works and
    is one call, so one declaration covers it. Recorded for the seats' declaration practice (agent-ops 19).
 
-**What this measurement does not show.** Whether the budget is missed by 10 ms or by seconds; which read misses it; whether a D1 index
+**What this measurement does not show.** Whether the budget is missed by 10 ms or by seconds; which read misses it; whether a cold isolate
+contributed to any sample; what any later, unmeasured delivery does; whether a D1 index
 is missing for the artifact-index query on `pr:`/`git:`/`commit:` keys; whether the pending-queue drain (which classifies with the
 same deadline) fares differently. The fix is a class S change to `owner-login.ts` / the D1 store and needs those numbers first:
-recommended first step is per-stage `ms` in the decision record plus a Workers-Logs read of the four deliveries, then the query plan.
-No claim is made that the four seals *would* have been `declared_by_seat`; the recompute (item 3) is the check that would show it.
+recommended first step is per-stage `ms` in the decision record plus a Workers-Logs read of these deliveries, then the query plan.
+No claim is made that the seals *would* have been `declared_by_seat`; the recompute (item 3) is the check that would show it.
 
 ## 5. Record
 
@@ -97,4 +118,6 @@ No claim is made that the four seals *would* have been `declared_by_seat`; the r
 | Skeleton edit / commit `cf64068` (hook seal) / push seal | `evt_4de6025746b2401f9d88d5e7de9b0c4d` / `evt_04d50372ba4644c78c81b89c017aa058` / `evt_5337c67c0aab40bbbfc5c036e82f3720` |
 | Samples 1–4: declarations, seals, outcomes | §3 table |
 | Results edit / commit `130d951` (hook seal, replayed) / sample-5 push declaration / push seal / synchronize seal | `evt_b449d0d329a74adfb10ab0bfe4797d75` / `evt_5af8024e0ebb40198810e9a750313917` / `evt_19bcba47b6df466da1a44a8d5c702a72` / `evt_266e34c2809a4819bc1e58a116f0afae` / `evt_b6aa4ee027d14db3b22e67ec5f5fbd39` |
-| Follow-up commit (this row; sample 6 = its push, declared) | the edit event and the `push` declaration that follow the sample-5 outcome in the ledger |
+| Follow-up commit `a449f9a` (sample 6 = its push) | edit `evt_8a04864f8c4245f7a47d75843b497c01` / hook `evt_b39d5c0bdb5643b09931343c274bd1ed` / declaration `evt_23c3db87ba424fcfb4c184c1e30cbeea` / seal `evt_93a8fcf0c2434ef0a807caa8d5b76d6a` / outcome `evt_62b15261c01048c3a59923925fd55061` |
+| Sample 7 (summary comment) and the recompute result | declaration `evt_c7b56332e91e42dbb974766f5d121ec4` / seal `evt_65db1fc072b54d58ba155d6c7610b2cc` / outcome `evt_91f39fa7345f47bcbf95a97e64bb31c7`; recompute `evt_009be63c5cd441378e3609aa1451b247` |
+| Round 1 (head `a449f9a`, go `evt_ccd6aa52e1284c05afd7bdc6047db154`): routing Codex `evt_7fde28f1…`, Grok seat `evt_34089e02…`, NOOA `evt_8794b2a2…`; verdicts Codex rejected 3 M `evt_ae2435e61ba2441989746ada805fc09c`, Grok seat rejected 1 M 2 L `evt_6a8040b0249444209a853660125ae10e`, NOOA rejected 1 M `evt_2008c8cb31fd43dba80cda555bc51a71`; gate checks `evt_9bab3c56…`, `evt_6af533af…`, `evt_059061bf…`; copies 5355627713 / 5355634617 / 5355653171 | Jordan: apply all seven in place, then scoped re-checks — the go is the instruct event that precedes the v1.2 edit event in the ledger |
