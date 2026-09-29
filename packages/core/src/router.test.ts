@@ -1186,6 +1186,27 @@ test("T8 /1, empty /2 and unlisted login retain baseline actor and omit owner de
   }
 });
 
+test("M1 workflow_run waits for a slow insert beyond the retained-delivery deadline and seals before 201", async () => {
+  const { WEBHOOK_DELIVERY_DEADLINE_MS } = await import("./router.js");
+  const store = new MemStore(), insert = store.insert.bind(store);
+  store.insert = async (e, extras) => {
+    await new Promise(resolve => setTimeout(resolve, WEBHOOK_DELIVERY_DEADLINE_MS + 100));
+    return insert(e, extras);
+  };
+  const handler = createHandler(store, { githubSecret: "secret", githubRepoProjects: { "owner/repo": "p" } });
+  const body = JSON.stringify({ action: "completed", repository: { full_name: "owner/repo" }, sender: { login: "owner" },
+    workflow_run: { id: 77, name: "gate", run_number: 5, run_attempt: 1, head_sha: "abcdef1234567890", head_branch: "main",
+      conclusion: "success", event: "push", html_url: "https://github.com/owner/repo/actions/runs/77",
+      updated_at: "2026-09-29T00:00:10Z", run_started_at: "2026-09-29T00:00:00Z", pull_requests: [] } });
+  const response = await handler(new Request("http://test/hooks/github", { method: "POST", body,
+    headers: { "x-github-event": "workflow_run", "x-github-delivery": "slow-workflow", "x-hub-signature-256": await ghSigned("secret", body) } }));
+  assert.equal(response.status, 201);
+  assert.equal(store.events.length, 1);
+  assert.equal(store.events[0].method!.params!.sealed_by, "webhook:github");
+  assert.deepEqual((await response.json()).logged, [{ id: store.events[0].id, seq: store.events[0].seq, deduped: false }]);
+  assert.deepEqual(store.pending, []);
+});
+
 test("T17 T18 non-push insert timeout without a delivery header retains original queue receipt; late atomic success drains idempotently", async () => {
   const { ownerLoginScenario } = await import("./owner-login-fixture.js");
   const { drainPendingGithubDeliveries } = await import("./router.js");

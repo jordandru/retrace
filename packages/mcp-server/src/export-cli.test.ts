@@ -379,6 +379,58 @@ test("verify basename fallback: no cfg.project, directory named projectB, B's wi
   }
 });
 
+test("L2 owner-login replay tolerates slow reads and identifies its own unavailable budget outcome", async (t) => {
+  const { MemoryEventStore, appendOwnerLoginEvent } = await import("@retrace-dev/core");
+  const { ownerLoginScenario } = await import("../../core/dist/owner-login-fixture.js");
+  const { recomputeOwnerLogin } = await import("./owner-login-replay.js");
+  const store = new MemoryEventStore(), f = await ownerLoginScenario(store);
+  const handler = createHandler(store, { token: "owner-token", ownerPrincipal: { type: "human", id: "owner" } });
+  const put = await handler(new Request(`http://test/projects/${f.project}/policy`, { method: "PUT",
+    headers: { authorization: "Bearer owner-token", "content-type": "application/json", "if-match": "none" }, body: JSON.stringify(f.policy.body) }));
+  assert.equal(put.status, 201, await put.text());
+  const policy = (await store.getPolicy(f.project, { current: true }))!;
+  await appendOwnerLoginEvent(store, f.input, policy, f.repo, Date.now()+2000);
+  const bundle = await buildExportBundle(store, { project: f.project });
+  const read = MemoryEventStore.prototype.eventsReferencingArtifacts;
+  const slow = t.mock.method(MemoryEventStore.prototype, "eventsReferencingArtifacts",
+    async function (this: InstanceType<typeof MemoryEventStore>, ...args: Parameters<typeof read>) {
+      await new Promise(resolve => setTimeout(resolve, 400));
+      return read.apply(this, args);
+    });
+  const replay = await recomputeOwnerLogin(bundle);
+  assert.equal(replay.ok, true, JSON.stringify(replay));
+  assert.equal(replay.results[0].replay_unavailable, undefined);
+  slow.mock.restore();
+  t.mock.method(MemoryEventStore.prototype, "eventsReferencingArtifacts", async () => ({ ok: false, reason: "budget" }));
+  const exhausted = await recomputeOwnerLogin(bundle);
+  assert.equal(exhausted.ok, false);
+  assert.equal(exhausted.results[0].result, "mismatch record.decision.status");
+  assert.equal(exhausted.results[0].replay_unavailable, "budget");
+});
+
+test("L2 recompute CLI prints when its row budget produces unavailable even if the sealed outcome matches", async () => {
+  const { MemoryEventStore, appendOwnerLoginEvent, ownerLoginRecord } = await import("@retrace-dev/core");
+  const { ownerLoginScenario } = await import("../../core/dist/owner-login-fixture.js");
+  const store = new MemoryEventStore(), f = await ownerLoginScenario(store);
+  const handler = createHandler(store, { token: "owner-token", ownerPrincipal: { type: "human", id: "owner" } });
+  const put = await handler(new Request(`http://test/projects/${f.project}/policy`, { method: "PUT",
+    headers: { authorization: "Bearer owner-token", "content-type": "application/json", "if-match": "none" }, body: JSON.stringify(f.policy.body) }));
+  assert.equal(put.status, 201, await put.text());
+  const policy = (await store.getPolicy(f.project, { current: true }))!;
+  for (let i = 0; i < 2001; i++) await appendEvent(store, { project: f.project, actor: { type: "agent", id: "codex" },
+    action: "read", artifacts: [{ id: `pr:${f.repo}#1`, role: "used" }] });
+  const sealed = (await appendOwnerLoginEvent(store, f.input, policy, f.repo, Date.now()+2000)).event;
+  assert.equal(ownerLoginRecord(sealed)!.decision.reason, "budget");
+  const dir = mkdtempSync(join(tmpdir(), "owner-login-budget-"));
+  try {
+    const file = join(dir, "bundle.json"); writeFileSync(file, JSON.stringify(await buildExportBundle(store, { project: f.project })));
+    const run = spawnSync(process.execPath, [bin, "owner-login", "--recompute", "--bundle", file], { encoding: "utf8", env: baseEnv });
+    assert.equal(run.status, 0, run.stderr + run.stdout);
+    assert.match(run.stdout, /match; replay produced unavailable \(budget\)/);
+    assert.match(run.stdout, /replay's own evidence reads, not a preserved sealed outcome/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("T2 T17 owner-login replay reconstructs decisions/table and rejects absent or after-L allocation consumers", async () => {
   const { MemoryEventStore, classifyOwnerLogin, ownerLoginAllocationFailed, appendOwnerLoginEvent, ownerLoginRecord } = await import("@retrace-dev/core");
   const { ownerLoginScenario } = await import("../../core/dist/owner-login-fixture.js");

@@ -190,8 +190,8 @@ export async function classifyOwnerLogin(args: OwnerLoginArgs): Promise<OwnerLog
 
 /** Shared ingress/drain append path, with exactly one reclassification on allocation loss. */
 export async function appendOwnerLoginEvent(store: EventStore, input: EventInput, policy: PolicyDocument | null,
-  canonicalR: string, deliveryDeadline: number, now: () => number = Date.now) {
-  const opts = { deadline: deliveryDeadline, now };
+  canonicalR: string, deliveryDeadline?: number, now: () => number = Date.now) {
+  const opts = deliveryDeadline === undefined ? { now } : { deadline: deliveryDeadline, now };
   let failures = 0;
   let classified = await classify();
   let toSeal = classified.kind === "decision" ? classified.input : input;
@@ -202,7 +202,7 @@ export async function appendOwnerLoginEvent(store: EventStore, input: EventInput
     const selectedPolicy = store.getPolicyByActivationSeq
       ? await appendReadWithinDeadline(() => store.getPolicyByActivationSeq!(input.project, readHead.seq), opts) ?? policy : policy;
     return selectedPolicy ? classifyOwnerLogin({ store, input, policy: selectedPolicy, canonicalR, readHead,
-      deadline: Math.min(now() + OWNER_LOGIN_DEADLINE_MS, deliveryDeadline), now }) : { kind: "not_applicable" as const };
+      deadline: Math.min(now() + OWNER_LOGIN_DEADLINE_MS, deliveryDeadline ?? Infinity), now }) : { kind: "not_applicable" as const };
   }
   for (let seqAttempt = 0; ; ) {
     const payload = object(input.method?.params?.github_payload);

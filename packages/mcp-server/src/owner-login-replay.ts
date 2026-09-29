@@ -4,7 +4,7 @@ import { Event, EventInput, ExportBundle, MemoryEventStore, OwnerLoginConsumptio
   policyDigestOf, verifyChain, githubWebhookProduced } from "@retrace-dev/core";
 export interface OwnerLoginReplay {
   ok: boolean;
-  results: Array<{ id: string; result: string; received_at: string; preserved: string[] }>;
+  results: Array<{ id: string; result: string; received_at: string; preserved: string[]; replay_unavailable?: string }>;
   consumption: OwnerLoginConsumption[];
 }
 function different(a: unknown, b: unknown, path = "record"): string | undefined {
@@ -21,8 +21,9 @@ export async function recomputeOwnerLogin(bundle: ExportBundle, policyOverride?:
   const events = [...bundle.events].sort((a, b) => a.seq - b.seq), store = new MemoryEventStore();
   store.events = events;
   const out: OwnerLoginReplay = { ok: true, results: [], consumption: [] };
-  const mismatch = (e: Event, field: string, preserved: string[] = []) => {
-    out.ok = false; out.results.push({ id: e.id, result: `mismatch ${field}`, received_at: e.received_at, preserved });
+  const mismatch = (e: Event, field: string, preserved: string[] = [], replay_unavailable?: string) => {
+    out.ok = false; out.results.push({ id: e.id, result: `mismatch ${field}`, received_at: e.received_at, preserved,
+      ...(replay_unavailable ? { replay_unavailable } : {}) });
   };
   const chain = await verifyChain(events);
   if (!chain.ok || bundle.scope.artifact_id || bundle.scope.actor_id || bundle.scope.since || bundle.scope.until || bundle.chain.total_events !== events.length) {
@@ -59,10 +60,11 @@ export async function recomputeOwnerLogin(bundle: ExportBundle, policyOverride?:
     const input: EventInput = { ...e, method: { ...e.method, params: { ...e.method?.params } } };
     delete input.method!.params![OWNER_LOGIN_DECISION_PARAM];
     const pr = e.artifacts.map(a => /^pr:(.+)#\d+$/.exec(a.id)?.[1]).find(Boolean);
-    const result = await classifyOwnerLogin({ store, input, policy, canonicalR: pr ?? "", readHead: head, deadline: Date.now()+300 });
+    const result = await classifyOwnerLogin({ store, input, policy, canonicalR: pr ?? "", readHead: head, deadline: Date.now()+60_000 });
     if (result.kind === "not_applicable") { if (sealed) mismatch(e, "applicability"); continue; }
-    if (!sealed) { mismatch(e, "missing decision"); continue; }
     let replay = ownerLoginRecord(result.input)!;
+    const replay_unavailable = replay.decision.status === "unavailable" ? replay.decision.reason ?? "unknown" : undefined;
+    if (!sealed) { mismatch(e, "missing decision", [], replay_unavailable); continue; }
     const preserved = ["classification_ms", "received.declaration", "received.webhook"];
     let allocation = false;
     if (sealed.decision.reason === "allocation_failed") {
@@ -72,7 +74,7 @@ export async function recomputeOwnerLogin(bundle: ExportBundle, policyOverride?:
         w.method?.params?.sealed_by === "webhook:github" && ownerLoginRecord(w)?.decision.consumed.includes(id) &&
         (a?.consumed_by === null || a?.consumed_by === w.id));
       if (!a || a.attempts !== 2 || a.read_head_seq !== u || replay.decision.status !== "declared_by_seat" || !winner) {
-        mismatch(e, "allocation", preserved); continue;
+        mismatch(e, "allocation", preserved, replay_unavailable); continue;
       }
       replay = ownerLoginRecord(ownerLoginAllocationFailed(result.input, a.consumed_by))!;
       replay.decision.allocation = structuredClone(a); allocation = true;
@@ -81,9 +83,10 @@ export async function recomputeOwnerLogin(bundle: ExportBundle, policyOverride?:
     replay.decision.classification_ms = sealed.decision.classification_ms;
     replay.decision.received = structuredClone(sealed.decision.received);
     const diff = different(replay, sealed);
-    if (diff) mismatch(e, diff, preserved);
-    else if (different(replay.decision.actor_written, e.actor)) mismatch(e, "actor_written", preserved);
-    else out.results.push({ id: e.id, result: allocation ? "match (allocation, by rule)" : "match", received_at: e.received_at, preserved });
+    if (diff) mismatch(e, diff, preserved, replay_unavailable);
+    else if (different(replay.decision.actor_written, e.actor)) mismatch(e, "actor_written", preserved, replay_unavailable);
+    else out.results.push({ id: e.id, result: allocation ? "match (allocation, by rule)" : "match", received_at: e.received_at, preserved,
+      ...(replay_unavailable ? { replay_unavailable } : {}) });
   }
   return out;
 }

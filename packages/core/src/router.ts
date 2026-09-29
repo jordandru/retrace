@@ -698,11 +698,12 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
           }
           const stamped = stampSealedBy(parsed.data, SEALED_BY_GITHUB_WEBHOOK);
           try {
-            const r = await appendOwnerLoginEvent(store, stamped, currentPolicy, repo, deliveryDeadline);
+            const r = await appendOwnerLoginEvent(store, stamped, currentPolicy, repo,
+              (isShadowPush || ownerLoginDelivery) ? deliveryDeadline : undefined);
             results.push({ id: r.event.id, seq: r.event.seq, deduped: r.deduped });
           } catch (e: any) {
             if (e instanceof AppendDeadlineExceededError || e?.name === "AppendDeadlineExceededError")
-              return json({ ok: true, pending: [], reason: "deadline" }, 202);
+              return json({ ok: true, pending: remainingShas(), reason: "deadline" }, 202);
             const client = writeClientError(e);
             if (client) return json({ error: client }, 400);
             throw e;

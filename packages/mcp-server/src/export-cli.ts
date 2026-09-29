@@ -64,7 +64,7 @@ async function main() {
     if (!flags.recompute || typeof flags.bundle !== "string") throw new Error("usage: retrace-export owner-login --recompute --bundle <export.json> [--policy <digest>]");
     const replay = await recomputeOwnerLogin(parseExportBundle(readFileSync(flags.bundle, "utf8")), typeof flags.policy === "string" ? flags.policy : undefined);
     console.log("owner-login consistency replay (does not establish issuer identity)");
-    for (const row of replay.results) console.log(`${row.id}: ${row.result}; event received_at ${row.received_at}; preserved observed fields: ${row.preserved.join(", ") || "none"}`);
+    for (const row of replay.results) console.log(`${row.id}: ${row.result}${row.replay_unavailable ? `; replay produced unavailable (${row.replay_unavailable}); this reason came from the replay's own evidence reads, not a preserved sealed outcome` : ""}; event received_at ${row.received_at}; preserved observed fields: ${row.preserved.join(", ") || "none"}`);
     console.log(`consumption rebuilt: ${replay.consumption.length} rows`);
     process.exitCode = replay.ok ? 0 : 1; return;
   }

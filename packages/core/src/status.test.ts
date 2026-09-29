@@ -166,6 +166,24 @@ test("status splits agent events by model source and missing-model cause", async
   assert.doesNotMatch(text, /credential-pinned/);
 });
 
+test("L2 read-time labels tolerate evidence reads beyond the webhook classifier deadline", async () => {
+  const { MemoryEventStore } = await import("./index.js");
+  const { ownerLoginScenario } = await import("./owner-login-fixture.js");
+  const { ownerLoginStats } = await import("./owner-login-status.js");
+  const store = new MemoryEventStore(), f = await ownerLoginScenario(store);
+  await appendEvent(store, f.input);
+  const read = store.eventsReferencingArtifacts.bind(store);
+  store.eventsReferencingArtifacts = async (...args) => {
+    await new Promise(resolve => setTimeout(resolve, 400));
+    return read(...args);
+  };
+  const stats = await ownerLoginStats(store, store.events, f.policy);
+  assert.equal(stats.read_time_labels.declared_by_seat, 1);
+  assert.equal(stats.read_time_labels.unresolved, 0);
+  assert.equal(store.events.at(-1)!.actor.type, "human");
+  assert.equal(store.ownerLoginConsumption.size, 0);
+});
+
 test("T10 raw-login totals include pre-hash, unstamped and declared-agent seals; outcome IDs label without changing sealed human", async () => {
   const { MemoryEventStore, ownerLoginRecord, appendOwnerLoginEvent } = await import("./index.js");
   const { ownerLoginScenario } = await import("./owner-login-fixture.js");

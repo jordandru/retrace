@@ -55,7 +55,7 @@ export async function ownerLoginStats(store: EventStore, events: Event[], policy
     if (!head) return null;
     const result = await evaluateAmendmentsAtU({ store, project: policy.body.project, U: head.seq, headHash: head.hash,
       policy: policy.body, policyDigest: policy.digest, canonicalRepo: repo, captureEvents: events,
-      coveredArtifactKeys: [], deadline: Date.now()+300, now: Date.now });
+      coveredArtifactKeys: [], deadline: Date.now()+60_000, now: Date.now });
     const ids = result.ok ? new Set(result.collection.effective.keys()) : null;
     amendedByRepo.set(repo, ids); return ids;
   };
@@ -73,7 +73,7 @@ export async function ownerLoginStats(store: EventStore, events: Event[], policy
     const amended = repoOf(e) ? await amendments(repoOf(e)!) : null;
     const seats = new Set(amended ? outcomeSeats(e, events, login, amended) : []);
     if (e.method?.params?.github_payload && head && repoOf(e)) {
-      const result = await classifyOwnerLogin({ store: readStore, input: e, policy, canonicalR: repoOf(e)!, readHead: head, deadline: Date.now()+300 });
+      const result = await classifyOwnerLogin({ store: readStore, input: e, policy, canonicalR: repoOf(e)!, readHead: head, deadline: Date.now()+60_000 });
       if (result.kind === "decision") {
         const decision = ownerLoginRecord(result.input)!.decision;
         for (const declaration of decision.declarations) seats.add(declaration.actor.id);
