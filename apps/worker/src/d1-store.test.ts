@@ -4,7 +4,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Event } from "@retrace-dev/core";
-import { POLICY_PROFILE, SCHEMA_PENDING_LEASE_COLUMNS_SQL, SCHEMA_SQL, RouteConflictError, planPolicyPut } from "@retrace-dev/core";
+import { POLICY_PROFILE, SCHEMA_PENDING_EVENT_COLUMNS_SQL, SCHEMA_PENDING_LEASE_COLUMNS_SQL, SCHEMA_SQL, RouteConflictError, planPolicyPut } from "@retrace-dev/core";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { D1Store } from "./d1-store.js";
 
@@ -101,14 +101,14 @@ test("deleteProject deletes checkpoint, export-cache, artifact index and pending
 
   assert.deepEqual(
     deletes.map((statement) => statement.sql.match(/^DELETE FROM (\w+)/)?.[1]),
-    ["events", "event_artifacts", "event_artifact_index", "pending_deliveries", "shares", "checkpoints", "export_cache", "project_policies", "classification_contexts", "classification_path_lowers", "classification_breakers"],
+    ["owner_login_consumption", "events", "event_artifacts", "event_artifact_index", "pending_deliveries", "shares", "checkpoints", "export_cache", "project_policies", "classification_contexts", "classification_path_lowers", "classification_breakers"],
   );
   for (const statement of deletes) {
     assert.match(statement.sql, /EXISTS \(SELECT 1 FROM events WHERE id = \?\)$/);
     assert.deepEqual(statement.params, [project, audit.id]);
   }
   assert.deepEqual(deleted, {
-    events: 1, event_artifacts: 1, event_artifact_index: 1, pending_deliveries: 1, shares: 1, checkpoints: 1, export_cache: 1, project_policies: 1, classification_contexts: 1, classification_path_lowers: 1, classification_breakers: 1,
+    owner_login_consumption: 1, events: 1, event_artifacts: 1, event_artifact_index: 1, pending_deliveries: 1, shares: 1, checkpoints: 1, export_cache: 1, project_policies: 1, classification_contexts: 1, classification_path_lowers: 1, classification_breakers: 1,
   });
 });
 
@@ -207,12 +207,12 @@ test("eventsReferencingArtifacts returns typed over-budget on a past deadline wi
 test("pending_deliveries insert/list/delete SQL", async () => {
   const db = new FakeD1();
   const store = new D1Store(db as unknown as D1Database);
-  await store.insertPendingDelivery({
+  await store.insertPendingDelivery({ gh_event: "push",
     delivery_id: "123", project: "retrace", raw_body: "{\"ok\":true}", received_at: "2026-09-08T00:00:00.000Z",
   });
   assert.match(db.last!.sql, /INSERT INTO pending_deliveries/);
   assert.doesNotMatch(db.last!.sql, /OR REPLACE/);
-  assert.deepEqual(db.last!.params, ["123", "retrace", "{\"ok\":true}", "2026-09-08T00:00:00.000Z", null, null, null, null]);
+  assert.deepEqual(db.last!.params, ["123", "retrace", "{\"ok\":true}", "2026-09-08T00:00:00.000Z", null, null, null, null, "push"]);
   await store.listPendingDeliveriesOlderThan("2026-09-09T00:00:00.000Z");
   assert.match(db.last!.sql, /FROM pending_deliveries WHERE received_at < \?/);
   await store.deletePendingDelivery("123");
@@ -381,11 +381,11 @@ test("F11 D1: lease acquisition is atomic across connections and stale owners ca
   const path = join(mkdtempSync(join(tmpdir(), "retrace-d1-lease-")), "ledger.db");
   const db1 = new DatabaseSync(path);
   db1.exec(SCHEMA_SQL);
-  for (const sql of SCHEMA_PENDING_LEASE_COLUMNS_SQL) db1.exec(sql);
+  for (const sql of [...SCHEMA_PENDING_LEASE_COLUMNS_SQL, ...SCHEMA_PENDING_EVENT_COLUMNS_SQL]) db1.exec(sql);
   const db2 = new DatabaseSync(path);
   const a = new D1Store(new SqliteD1(db1) as unknown as D1Database);
   const b = new D1Store(new SqliteD1(db2) as unknown as D1Database);
-  await a.insertPendingDelivery({
+  await a.insertPendingDelivery({ gh_event: "push",
     delivery_id: "delivery", project: "p", raw_body: "{}", received_at: "2026-09-10T12:00:00.000Z",
     repo: "acme/app", routing_state: "received",
   });

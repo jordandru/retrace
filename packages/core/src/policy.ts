@@ -8,6 +8,8 @@ import { newId, sealEvent, sha256Hex } from "./chain.js";
 import { ChainHead, EventStore, SEALED_BY_OWNER } from "./store.js";
 
 export const POLICY_PROFILE = "retrace-project-policy/1";
+export const POLICY_PROFILE_V2 = "retrace-project-policy/2";
+export const SUPPORTED_POLICY_PROFILES: ReadonlySet<string> = new Set([POLICY_PROFILE, POLICY_PROFILE_V2]);
 export const POLICY_IDEMPOTENCY_PREFIX = "policy:";
 export const POLICY_ACTOR_ID = "retrace-api";
 export const MAX_SAFE_UINT = Number.MAX_SAFE_INTEGER; // 2^53−1
@@ -39,12 +41,13 @@ export interface PolicyRepository {
 }
 
 export interface PolicyBody {
-  profile: typeof POLICY_PROFILE;
+  profile: typeof POLICY_PROFILE | typeof POLICY_PROFILE_V2;
   project: string;
   trusted_hook_stamps: string[];
   unresolved_claims: "record" | "withhold";
   repositories: PolicyRepository[];
   github_repos: string[];
+  github?: { shared_logins: string[]; identities: Record<string, string> };
 }
 
 export interface PolicyEnvelope {
@@ -315,7 +318,7 @@ export function parseJsonRejectDuplicateKeys(raw: string): unknown {
   return value;
 }
 
-const BODY_KEYS = new Set(["profile", "project", "trusted_hook_stamps", "unresolved_claims", "repositories", "github_repos"]);
+const BODY_KEYS_V1 = new Set(["profile", "project", "trusted_hook_stamps", "unresolved_claims", "repositories", "github_repos"]);
 const REPO_KEYS = new Set(["name", "aliases"]);
 const ENVELOPE_KEYS = new Set(["version", "created_at", "set_by", "supersedes", "activation"]);
 const SET_BY_KEYS = new Set(["type", "id"]);
@@ -357,6 +360,10 @@ function requireSortedUniqueStrings(v: unknown, label: string): string[] {
   return arr;
 }
 
+const BODY_KEYS_V2 = new Set([...BODY_KEYS_V1, "github"]);
+const GITHUB_KEYS = new Set(["shared_logins", "identities"]);
+const GITHUB_LOGIN_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?(?:\[bot\])?$/;
+
 const CREATED_AT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const DIGEST_RE = /^[0-9a-f]{64}$/;
 const GITHUB_REPO_RE = /^[a-z0-9._-]+\/[a-z0-9._-]+$/;
@@ -370,9 +377,11 @@ export function assertCanonicalGithubRepo(name: string, label: string): string {
 
 export function validatePolicyBody(raw: unknown, expectedProject?: string): PolicyBody {
   const obj = requireObject(raw, "policy body");
-  rejectUnknown(obj, BODY_KEYS, "policy body");
-  for (const k of BODY_KEYS) if (!hasOwn(obj, k)) throw new PolicyError(400, `missing required field ${k}`);
-  if (obj.profile !== POLICY_PROFILE) throw new PolicyError(400, `profile must be ${POLICY_PROFILE}`);
+  if (obj.profile !== POLICY_PROFILE && obj.profile !== POLICY_PROFILE_V2)
+    throw new PolicyError(400, `profile must be ${POLICY_PROFILE} or ${POLICY_PROFILE_V2}`);
+  const bodyKeys = obj.profile === POLICY_PROFILE ? BODY_KEYS_V1 : BODY_KEYS_V2;
+  rejectUnknown(obj, bodyKeys, "policy body");
+  for (const k of bodyKeys) if (!hasOwn(obj, k)) throw new PolicyError(400, `missing required field ${k}`);
   const project = requireString(obj.project, "project");
   if (!project) throw new PolicyError(400, "project must be non-empty");
   if (expectedProject !== undefined && project !== expectedProject)
@@ -397,13 +406,38 @@ export function validatePolicyBody(raw: unknown, expectedProject?: string): Poli
   const github_repos = requireSortedUniqueStrings(obj.github_repos, "github_repos").map((n, i) =>
     assertCanonicalGithubRepo(n, `github_repos[${i}]`),
   );
+  let github: PolicyBody["github"];
+  if (obj.profile === POLICY_PROFILE_V2) {
+    const g = requireObject(obj.github, "github");
+    rejectUnknown(g, GITHUB_KEYS, "github");
+    for (const k of GITHUB_KEYS) if (!hasOwn(g, k)) throw new PolicyError(400, `missing required github.${k}`);
+    const shared_logins = requireSortedUniqueStrings(g.shared_logins, "github.shared_logins");
+    const rawIdentities = requireObject(g.identities, "github.identities");
+    for (const logins of [shared_logins, Object.keys(rawIdentities)]) {
+      const seen = new Set<string>();
+      for (const login of logins) {
+        if (!GITHUB_LOGIN_RE.test(login)) throw new PolicyError(400, `invalid GitHub login ${JSON.stringify(login)}`);
+        const folded = login.toLowerCase();
+        if (seen.has(folded)) throw new PolicyError(400, "GitHub logins must be unique case-insensitively");
+        seen.add(folded);
+      }
+    }
+    const identities = Object.create(null) as Record<string, string>;
+    for (const [login, value] of Object.entries(rawIdentities)) {
+      const seat = requireString(value, `github.identities.${login}`);
+      if (!seat.trim()) throw new PolicyError(400, "GitHub identity seat must be non-empty");
+      identities[login] = seat;
+    }
+    github = { shared_logins, identities };
+  }
   return {
-    profile: POLICY_PROFILE,
+    profile: obj.profile,
     project,
     trusted_hook_stamps,
     unresolved_claims: obj.unresolved_claims,
     repositories,
     github_repos,
+    ...(github ? { github } : {}),
   };
 }
 
@@ -500,7 +534,7 @@ export function evaluateActivation(
   const doc = documents.get(documentMapKey(e.project, digest)) ?? documents.get(digest);
   // Builder note 1: clauses 1–3 hold and the required document is absent → incomplete, not ignored.
   if (!doc) return { status: "incomplete", reason: "policy_missing", seq: e.seq };
-  if (doc.body.project !== e.project || doc.body.profile !== POLICY_PROFILE)
+  if (doc.body.project !== e.project || !SUPPORTED_POLICY_PROFILES.has(doc.body.profile))
     return { status: "incomplete", reason: "policy_corrupt", seq: e.seq };
   // Clause 4/5 failures (forged or copied activations) are ordinary ignored events so a later
   // real activation stays selectable (P4). Missing document is the fail-closed case.
@@ -615,6 +649,7 @@ export function rfc3339UtcMs(d: Date): string {
 }
 
 async function sealActivationWithId(opts: {
+  profile: PolicyBody["profile"];
   project: string;
   digest: string;
   version: number;
@@ -640,7 +675,7 @@ async function sealActivationWithId(opts: {
       tool: "retrace-api",
       automated: true,
       params: {
-        policy_profile: POLICY_PROFILE,
+        policy_profile: opts.profile,
         policy_version: opts.version,
         policy_digest: opts.digest,
         supersedes: opts.supersedes,
@@ -736,6 +771,7 @@ export async function planPolicyPut(opts: {
   };
   const document = await assemblePolicyDocument(body, envelope);
   const event = await sealActivationWithId({
+    profile: body.profile,
     project: opts.project,
     digest: document.digest,
     version,
@@ -770,6 +806,7 @@ export async function planPolicyPut(opts: {
     };
     const fromDoc = await assemblePolicyDocument(routePlan.fromWrite.body, fromEnvelope);
     const fromEvent = await sealActivationWithId({
+      profile: fromDoc.body.profile,
       project: fromProject,
       digest: fromDoc.digest,
       version: fromVersion,
@@ -1042,7 +1079,7 @@ export function verifyPolicySelectionOffline(opts: {
   const findings: PolicyVerifyFinding[] = [];
   const documents = new Map<string, PolicyDocument>();
   for (const d of opts.policies) {
-    if (d.body.profile !== POLICY_PROFILE) findings.push("policy_unsupported_profile");
+    if (!SUPPORTED_POLICY_PROFILES.has(d.body.profile)) findings.push("policy_unsupported_profile");
     if (d.body.project !== opts.project) findings.push("policy_project_mismatch");
     const key = documentMapKey(d.body.project, d.digest);
     const prior = documents.get(key);
@@ -1089,7 +1126,8 @@ export function eventPolicyRef(e: Event): { digest?: string; readHeadSeq?: numbe
   const fromTop = p.context && typeof p.context === "object" && !Array.isArray(p.context)
     ? (p.context as { policy_digest?: unknown; read_head_seq?: unknown })
     : undefined;
-  const ctx = fromCd ?? fromTop;
+  const od = p.owner_login_decision as { decision?: { context?: { policy_digest?: unknown; read_head_seq?: unknown } } } | undefined;
+  const ctx = fromCd ?? od?.decision?.context ?? fromTop;
   const digest = typeof ctx?.policy_digest === "string" ? ctx.policy_digest : undefined;
   const readHeadSeq = typeof ctx?.read_head_seq === "number" ? ctx.read_head_seq : undefined;
   return { digest, readHeadSeq };

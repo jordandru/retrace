@@ -1019,3 +1019,229 @@ test("credentials: CI assert reader with empty allowed_actors can GET gate route
   assert.match((await write.json()).error, /allowed_actors/);
   assert.equal(store.events.length, 1);
 });
+
+test("T18 §1.2 ingress is captured before store reads and kept with a queued non-push delivery", async () => {
+  const store = new MemStore();
+  const firstReads: string[] = [];
+  const original = store.getPendingDelivery.bind(store);
+  store.getPendingDelivery = async (id) => {
+    firstReads.push(new Date().toISOString());
+    await new Promise(resolve => setTimeout(resolve, 15));
+    return original(id);
+  };
+  const payload = { repository: { full_name: "owner/repo" }, action: "created", sender: { login: "owner" },
+    issue: { number: 1, pull_request: {} }, comment: { id: 5, body: "queued", created_at: "2026-09-28T00:00:00Z" } };
+  const body = JSON.stringify(payload);
+  const handler = createHandler(store, { githubSecret: "test-secret", trailerPolicy: "shadow", githubRepoProjects: { "owner/repo": "p" } });
+  const signature = await ghSigned("test-secret", body);
+  const send = () => handler(new Request("http://test/hooks/github", { method: "POST", body,
+    headers: { "x-github-event": "issue_comment", "x-github-delivery": "queued-comment", "x-hub-signature-256": signature } }));
+  assert.equal((await send()).status, 202);
+  const row = await original("queued-comment");
+  assert.equal(row!.gh_event, "issue_comment");
+  assert.equal(row!.routing_state, "pending_policy");
+  assert.ok(row!.received_at <= firstReads[0]);
+  const arrival = row!.received_at;
+  assert.equal((await send()).status, 202);
+  assert.equal((await original("queued-comment"))!.received_at, arrival);
+  // The policy landing makes the pending row drainable. Classification is covered in the /2 T18 fixture.
+  await store.updatePendingDelivery({ ...row!, routing_state: "received" });
+  const { drainPendingGithubDeliveries } = await import("./router.js");
+  const result = await drainPendingGithubDeliveries(store, { trailerPolicy: "shadow" });
+  assert.deepEqual(result, { drained: 1, failed: 0 });
+  const sealed = await store.byIdempotencyKey("p", "gh:queued-comment");
+  assert.ok(sealed);
+  assert.equal((sealed.method!.params!.github_payload as any).ingress_at, arrival);
+  assert.equal((sealed.method!.params!.github_payload as any).comment_id, 5);
+  assert.equal(sealed.method!.params!.sealed_by, "webhook:github");
+  assert.equal(sealed.method!.params!.producer_sig_verdict, "none");
+  assert.equal(await original("queued-comment"), null);
+});
+
+test("T9 owner_login_decision is stripped from unsigned and both signature formats; signed require_signature rejects", async () => {
+  const { PRODUCER_SIG_FORMAT, PRODUCER_SIG_FORMAT_V2 } = await import("./producer-sig.js");
+  const key = await generateSigningKey();
+  const actor = { type: "agent" as const, id: "codex" };
+  const forged = { policy: "owner-login/1", decision: { status: "identity_mapped" } };
+  const input = ev({ actor, method: { params: { owner_login_decision: forged } }, timestamp: "2026-09-28T00:00:00Z", idempotency_key: "forged-owner" });
+  const unsignedStore = new MemStore();
+  assert.equal((await post(createHandler(unsignedStore, { token: "tok" }), "/events", input, "tok")).status, 201);
+  assert.equal(unsignedStore.events[0].method?.params?.owner_login_decision, undefined);
+  for (const format of [PRODUCER_SIG_FORMAT, PRODUCER_SIG_FORMAT_V2] as const) {
+    const store = new MemStore();
+    const cred = { token: "signed-owner-login-token", actor, trust: "pinned" as const, public_key: key.publicKey, require_signature: true };
+    const signed = await signProducer(input, key.privateKey, { format });
+    const res = await post(createHandler(store, { token: "tok", credentials: [cred] }), "/events", signed, cred.token);
+    assert.equal(res.status, 401, await res.text()); assert.equal(store.events.length, 0);
+  }
+});
+
+test("T1 T17 router consumes one declaration for two identical comment deliveries", async () => {
+  const { ownerLoginScenario } = await import("./owner-login-fixture.js");
+  const { ownerLoginRecord } = await import("./owner-login.js");
+  const store = new MemStore(), f = await ownerLoginScenario(store); store.policies.push(f.policy);
+  store.routes.set(f.repo, { repo: f.repo, state: "active", project: f.project, digest: f.policy.digest, activation_seq: 1, set_at: f.ingress });
+  const handler = createHandler(store, { githubSecret: "secret", trailerPolicy: "shadow", githubRepoProjects: { [f.repo]: f.project } });
+  const body = JSON.stringify(f.payload), signature = await ghSigned("secret", body);
+  for (const id of ["one", "two"]) assert.equal((await handler(new Request("http://test/hooks/github", { method: "POST", body,
+    headers: { "x-github-event": "issue_comment", "x-github-delivery": id, "x-hub-signature-256": signature } }))).status, 201);
+  const first = (await store.byIdempotencyKey(f.project, "gh:one"))!, second = (await store.byIdempotencyKey(f.project, "gh:two"))!;
+  assert.equal(ownerLoginRecord(first)!.decision.status, "declared_by_seat");
+  assert.equal(first.actor.id, "codex"); assert.equal(first.method!.params!.sealed_by, "webhook:github");
+  assert.equal(ownerLoginRecord(second)!.decision.status, "unresolved");
+  assert.equal(store.ownerLoginConsumption.size, 1); assert.equal(store.pending.length, 0);
+});
+
+test("T17 second allocation loss reads winner once, seals observed failure and never classifies a third time", async () => {
+  const { ownerLoginScenario } = await import("./owner-login-fixture.js");
+  const { appendOwnerLoginEvent, ownerLoginRecord } = await import("./owner-login.js");
+  const store = new MemStore(), f = await ownerLoginScenario(store);
+  let reads = 0, pointReads = 0, writes = 0;
+  const read = store.eventsReferencingArtifacts.bind(store), insert = store.insert.bind(store);
+  store.eventsReferencingArtifacts = async (...args) => { reads++; return read(...args); };
+  store.ownerLoginConsumptionRow = async () => { pointReads++; return { project: f.project, declaration_event_id: f.declaration.id, consumed_by_event_id: "winner", consumed_by_seq: 1, consumed_at: f.ingress }; };
+  store.insert = async (e, extras) => {
+    if (extras?.owner_login_consumption?.length) { writes++; throw new Error("UNIQUE constraint failed: owner_login_consumption.project, owner_login_consumption.declaration_event_id"); }
+    return insert(e, extras);
+  };
+  const result = await appendOwnerLoginEvent(store, f.input, f.policy, f.repo, Date.now()+2000);
+  const record = ownerLoginRecord(result.event)!;
+  assert.equal(reads, 2); assert.equal(writes, 2); assert.equal(pointReads, 1);
+  assert.equal(record.decision.reason, "allocation_failed"); assert.deepEqual(record.decision.consumed, []);
+  assert.deepEqual(record.decision.allocation, { attempts: 2, read_head_seq: 0, consumed_by: "winner" });
+});
+
+test("T17 F4 consumption sealed at U+1 stays invisible at U; allocation loses then reclassifies", async () => {
+  const { ownerLoginScenario } = await import("./owner-login-fixture.js");
+  const { appendOwnerLoginEvent, ownerLoginRecord } = await import("./owner-login.js");
+  const store = new MemStore(), f = await ownerLoginScenario(store);
+  const read = store.ownerLoginConsumptionUpTo.bind(store); let injected = false, failedAllocation = 0;
+  store.ownerLoginConsumptionUpTo = async (project, ids, u, budget) => {
+    if (!injected) {
+      injected = true;
+      await appendOwnerLoginEvent(store, { ...f.input, idempotency_key: "winner" }, f.policy, f.repo, Date.now()+2000);
+      const rows = await read(project, ids, u, budget);
+      assert.deepEqual(rows, { ok: true, rows: [] }); return rows;
+    }
+    return read(project, ids, u, budget);
+  };
+  const insert = store.insert.bind(store);
+  store.insert = async (e, extras) => { try { return await insert(e, extras); } catch (error) { if (/owner_login_consumption/.test(String(error))) failedAllocation++; throw error; } };
+  const result = await appendOwnerLoginEvent(store, f.input, f.policy, f.repo, Date.now()+2000);
+  assert.equal(failedAllocation, 1); assert.equal(ownerLoginRecord(result.event)!.decision.status, "unresolved");
+  assert.equal(store.ownerLoginConsumption.size, 1);
+});
+
+test("T18 queued /2 comment keeps arrival ingress and rejects a declaration received before drain but after arrival", async () => {
+  const { ownerLoginScenario } = await import("./owner-login-fixture.js");
+  const { ownerLoginRecord } = await import("./owner-login.js");
+  const { drainPendingGithubDeliveries } = await import("./router.js");
+  const store = new MemStore(), f = await ownerLoginScenario(store);
+  store.policies.push(f.policy);
+  const arrival = new Date(Date.parse(f.declaration.received_at) - 1000).toISOString();
+  await store.insertPendingDelivery({ delivery_id: "queued", project: f.project, repo: f.repo, raw_body: JSON.stringify(f.payload), received_at: arrival,
+    gh_event: "issue_comment", routing_state: "received", routing_source: "env" });
+  assert.deepEqual(await drainPendingGithubDeliveries(store, { trailerPolicy: "shadow" }), { drained: 1, failed: 0 });
+  const e = (await store.byIdempotencyKey(f.project, "gh:queued"))!;
+  assert.equal(ownerLoginRecord(e)!.decision.ingress_at, arrival);
+  assert.equal(ownerLoginRecord(e)!.decision.status, "unresolved"); assert.equal(store.ownerLoginConsumption.size, 0);
+});
+
+test("T13 merge webhook content binds a merge declaration and otherwise remains unresolved", async () => {
+  const { ownerLoginScenario } = await import("./owner-login-fixture.js");
+  const { ownerLoginRecord } = await import("./owner-login.js");
+  for (const declared of [true, false]) {
+    const store = new MemStore(), f = await ownerLoginScenario(store); store.policies.push(f.policy);
+    if (declared) await appendEvent(store, { project: f.project, actor: { type: "agent", id: "codex" }, action: "sent", artifacts: [{ id: `pr:${f.repo}#1`, role: "used" }],
+      method: { params: { sealed_by: "pinned:codex", producer_sig_verdict: "verified", github_action: { kind: "merge", repo: f.repo, login: "owner", pr: 1, merge_commit_sha: "a".repeat(40) } } } });
+    store.routes.set(f.repo, { repo: f.repo, state: "active", project: f.project, digest: f.policy.digest, activation_seq: 1, set_at: f.ingress });
+    const handler = createHandler(store, { githubSecret: "secret", trailerPolicy: "shadow", githubRepoProjects: { [f.repo]: f.project } });
+    const body = JSON.stringify({ repository: { full_name: f.repo }, action: "closed", sender: { login: "owner" }, pull_request: { number: 1, merged: true, merge_commit_sha: "a".repeat(40), head: { sha: "b".repeat(40), ref: "feature" } } });
+    const response = await handler(new Request("http://test/hooks/github", { method: "POST", body,
+      headers: { "x-github-event": "pull_request", "x-github-delivery": "merge", "x-hub-signature-256": await ghSigned("secret", body) } }));
+    assert.equal(response.status, 201);
+    const record = ownerLoginRecord((await store.byIdempotencyKey(f.project, "gh:merge"))!)!;
+    assert.equal(record.decision.status, declared ? "declared_by_seat" : "unresolved");
+  }
+});
+
+test("T8 /1, empty /2 and unlisted login retain baseline actor and omit owner decision; payload stays present", async () => {
+  const { readFileSync } = await import("node:fs");
+  const fixture = JSON.parse(readFileSync(new URL("./fixtures/owner-login/legacy-comment-actor.json", import.meta.url), "utf8"));
+  const { ownerLoginScenario } = await import("./owner-login-fixture.js");
+  for (const variant of ["v1", "empty", "unlisted"]) {
+    const store = new MemStore(), f = await ownerLoginScenario(store);
+    const bodyPolicy = structuredClone(f.policy.body);
+    if (variant === "v1") { bodyPolicy.profile = "retrace-project-policy/1"; delete bodyPolicy.github; }
+    else bodyPolicy.github!.shared_logins = variant === "empty" ? [] : ["someone-else"];
+    store.policies.push({ ...f.policy, body: bodyPolicy });
+    store.routes.set(f.repo, { repo: f.repo, state: "active", project: f.project, digest: f.policy.digest, activation_seq: 1, set_at: f.ingress });
+    const handler = createHandler(store, { githubSecret: "secret", trailerPolicy: "shadow", githubRepoProjects: { [f.repo]: f.project } });
+    const body = JSON.stringify(f.payload);
+    assert.equal((await handler(new Request("http://test/hooks/github", { method: "POST", body,
+      headers: { "x-github-event": "issue_comment", "x-github-delivery": "baseline", "x-hub-signature-256": await ghSigned("secret", body) } }))).status, 201);
+    const e = (await store.byIdempotencyKey(f.project, "gh:baseline"))!;
+    assert.deepEqual(e.actor, fixture.actor);
+    assert.equal(e.method!.params!.owner_login_decision, undefined); assert.ok(e.method!.params!.github_payload);
+  }
+});
+
+test("M1 workflow_run waits for a slow insert beyond the retained-delivery deadline and seals before 201", async () => {
+  const { WEBHOOK_DELIVERY_DEADLINE_MS } = await import("./router.js");
+  const store = new MemStore(), insert = store.insert.bind(store);
+  store.insert = async (e, extras) => {
+    await new Promise(resolve => setTimeout(resolve, WEBHOOK_DELIVERY_DEADLINE_MS + 100));
+    return insert(e, extras);
+  };
+  const handler = createHandler(store, { githubSecret: "secret", githubRepoProjects: { "owner/repo": "p" } });
+  const body = JSON.stringify({ action: "completed", repository: { full_name: "owner/repo" }, sender: { login: "owner" },
+    workflow_run: { id: 77, name: "gate", run_number: 5, run_attempt: 1, head_sha: "abcdef1234567890", head_branch: "main",
+      conclusion: "success", event: "push", html_url: "https://github.com/owner/repo/actions/runs/77",
+      updated_at: "2026-09-29T00:00:10Z", run_started_at: "2026-09-29T00:00:00Z", pull_requests: [] } });
+  const response = await handler(new Request("http://test/hooks/github", { method: "POST", body,
+    headers: { "x-github-event": "workflow_run", "x-github-delivery": "slow-workflow", "x-hub-signature-256": await ghSigned("secret", body) } }));
+  assert.equal(response.status, 201);
+  assert.equal(store.events.length, 1);
+  assert.equal(store.events[0].method!.params!.sealed_by, "webhook:github");
+  assert.deepEqual((await response.json()).logged, [{ id: store.events[0].id, seq: store.events[0].seq, deduped: false }]);
+  assert.deepEqual(store.pending, []);
+});
+
+test("T17 T18 non-push insert timeout without a delivery header retains original queue receipt; late atomic success drains idempotently", async () => {
+  const { ownerLoginScenario } = await import("./owner-login-fixture.js");
+  const { drainPendingGithubDeliveries } = await import("./router.js");
+  const store = new MemStore(), f = await ownerLoginScenario(store); store.policies.push(f.policy);
+  store.routes.set(f.repo, { repo: f.repo, state: "active", project: f.project, digest: f.policy.digest, activation_seq: 1, set_at: f.ingress });
+  const insert = store.insert.bind(store); let release!: () => void;
+  const barrier = new Promise<void>(resolve => release = resolve);
+  store.insert = async (e, extras) => { await barrier; return insert(e, extras); };
+  const handler = createHandler(store, { githubSecret: "secret", trailerPolicy: "shadow" });
+  const body = JSON.stringify(f.payload);
+  const response = await handler(new Request("http://test/hooks/github", { method: "POST", body,
+    headers: { "x-github-event": "issue_comment", "x-hub-signature-256": await ghSigned("secret", body) } }));
+  assert.equal(response.status, 202);
+  const pending = store.pending[0]!;
+  assert.match(pending.delivery_id, /^body:issue_comment:/);
+  assert.equal(pending.gh_event, "issue_comment"); assert.equal(store.ownerLoginConsumption.size, 0);
+  release(); await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(store.ownerLoginConsumption.size, 1);
+  assert.deepEqual(await drainPendingGithubDeliveries(store, { trailerPolicy: "shadow" }), { drained: 1, failed: 0 });
+  assert.equal(store.events.filter(e => e.idempotency_key === `gh:${pending.delivery_id}`).length, 1);
+  assert.equal((store.events.at(-1)!.method!.params!.github_payload as any).ingress_at, pending.received_at);
+});
+
+test("T2 policy activation between routing and classify selects the policy at recorded U", async () => {
+  const { ownerLoginScenario } = await import("./owner-login-fixture.js");
+  const { appendOwnerLoginEvent, ownerLoginRecord } = await import("./owner-login.js");
+  const store = new MemStore(), f = await ownerLoginScenario(store);
+  const handler = createHandler(store, { token: "owner-token", ownerPrincipal: { type: "human", id: "owner" } });
+  const put = async (body: typeof f.policy.body, etag: string) => {
+    const response = await handler(new Request(`http://test/projects/${f.project}/policy`, { method: "PUT", headers: { authorization: "Bearer owner-token", "content-type": "application/json", "if-match": etag }, body: JSON.stringify(body) }));
+    assert.equal(response.status, 201, await response.text()); return (await store.getPolicy(f.project, { current: true }))!;
+  };
+  const old = await put({ ...f.policy.body, github: { shared_logins: [], identities: {} } }, "none");
+  const current = await put(f.policy.body, old.digest);
+  const result = await appendOwnerLoginEvent(store, f.input, old, f.repo, Date.now()+2000);
+  assert.equal(ownerLoginRecord(result.event)!.decision.context.policy_digest, current.digest);
+  assert.equal(ownerLoginRecord(result.event)!.decision.status, "declared_by_seat");
+});

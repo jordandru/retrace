@@ -236,6 +236,22 @@ The provenance rules themselves are `docs/agent-rules.md`.
     tool exposes exactly the six fields a receiver checks, so no seat composes the signature by hand or curls the
     Worker; the envelope stays, because it is for the reader, not the machine.
 
+19. **Declare every `gh` write before you run it.** `gh` authenticates as the repository owner for every seat (agent-rules
+11), so the GitHub webhook cannot see which seat acted; until per-seat GitHub identities exist
+(`docs/design/github-owner-login-attribution.md` §6 step 5) the seat's own pinned event is the only evidence. Before a
+`gh pr comment`, `gh pr review`, `gh pr create`, `gh pr edit`, `gh pr merge` or a push to a pull-request branch, log one
+event under your own credential with the pull request as an artifact and `method.params.github_action` — `kind`, `repo`,
+`login`, and the content the kind needs: the sha256 of the body file (normalised: UTF-8, `\r\n`→`\n`, trailing
+whitespace and trailing newlines removed), the full sha you will push, or the merge commit you will land. Then run the
+command; afterwards you may log the outcome (`executed`, `github_action.result` with the review or comment id). A `gh`
+write with no declaration seals as the GitHub account with `status: unresolved`, and that is the record of the
+omission. Never declare content you did not write and will not post yourself. **Never push to the pull request between
+a review declaration and its post**: GitHub attaches the review to the head at post time, and a declaration for the
+earlier commit no longer matches (measured on PR 130, `evt_1d10e43e…`); declare after the push, or re-declare.
+→ unnecessary when [specific] (agent-ops' standing form: every environment rule names the product change that retires
+it; the rule binds until that change is measured, not before): every seat runs `gh` under its own GitHub App identity listed in the project policy's
+`github.identities` (step 5), and the owner's login is no longer in `github.shared_logins` (step 6).
+
 ## Build order (Grok's read, PR 40, evt_1626b03aea8d4911ae1c7523c94903d9)
 
 For priority 3 and the stranger-install bar: **13** (credentials out of the Worker secret, with the store

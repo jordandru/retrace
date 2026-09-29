@@ -378,3 +378,102 @@ test("verify basename fallback: no cfg.project, directory named projectB, B's wi
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("L2 owner-login replay tolerates slow reads and identifies its own unavailable budget outcome", async (t) => {
+  const { MemoryEventStore, appendOwnerLoginEvent } = await import("@retrace-dev/core");
+  const { ownerLoginScenario } = await import("../../core/dist/owner-login-fixture.js");
+  const { recomputeOwnerLogin } = await import("./owner-login-replay.js");
+  const store = new MemoryEventStore(), f = await ownerLoginScenario(store);
+  const handler = createHandler(store, { token: "owner-token", ownerPrincipal: { type: "human", id: "owner" } });
+  const put = await handler(new Request(`http://test/projects/${f.project}/policy`, { method: "PUT",
+    headers: { authorization: "Bearer owner-token", "content-type": "application/json", "if-match": "none" }, body: JSON.stringify(f.policy.body) }));
+  assert.equal(put.status, 201, await put.text());
+  const policy = (await store.getPolicy(f.project, { current: true }))!;
+  await appendOwnerLoginEvent(store, f.input, policy, f.repo, Date.now()+2000);
+  const bundle = await buildExportBundle(store, { project: f.project });
+  const read = MemoryEventStore.prototype.eventsReferencingArtifacts;
+  const slow = t.mock.method(MemoryEventStore.prototype, "eventsReferencingArtifacts",
+    async function (this: InstanceType<typeof MemoryEventStore>, ...args: Parameters<typeof read>) {
+      await new Promise(resolve => setTimeout(resolve, 400));
+      return read.apply(this, args);
+    });
+  const replay = await recomputeOwnerLogin(bundle);
+  assert.equal(replay.ok, true, JSON.stringify(replay));
+  assert.equal(replay.results[0].replay_unavailable, undefined);
+  slow.mock.restore();
+  t.mock.method(MemoryEventStore.prototype, "eventsReferencingArtifacts", async () => ({ ok: false, reason: "budget" }));
+  const exhausted = await recomputeOwnerLogin(bundle);
+  assert.equal(exhausted.ok, false);
+  assert.equal(exhausted.results[0].result, "mismatch record.decision.status");
+  assert.equal(exhausted.results[0].replay_unavailable, "budget");
+});
+
+test("L2 recompute CLI prints when its row budget produces unavailable even if the sealed outcome matches", async () => {
+  const { MemoryEventStore, appendOwnerLoginEvent, ownerLoginRecord } = await import("@retrace-dev/core");
+  const { ownerLoginScenario } = await import("../../core/dist/owner-login-fixture.js");
+  const store = new MemoryEventStore(), f = await ownerLoginScenario(store);
+  const handler = createHandler(store, { token: "owner-token", ownerPrincipal: { type: "human", id: "owner" } });
+  const put = await handler(new Request(`http://test/projects/${f.project}/policy`, { method: "PUT",
+    headers: { authorization: "Bearer owner-token", "content-type": "application/json", "if-match": "none" }, body: JSON.stringify(f.policy.body) }));
+  assert.equal(put.status, 201, await put.text());
+  const policy = (await store.getPolicy(f.project, { current: true }))!;
+  for (let i = 0; i < 2001; i++) await appendEvent(store, { project: f.project, actor: { type: "agent", id: "codex" },
+    action: "read", artifacts: [{ id: `pr:${f.repo}#1`, role: "used" }] });
+  const sealed = (await appendOwnerLoginEvent(store, f.input, policy, f.repo, Date.now()+2000)).event;
+  assert.equal(ownerLoginRecord(sealed)!.decision.reason, "budget");
+  const dir = mkdtempSync(join(tmpdir(), "owner-login-budget-"));
+  try {
+    const file = join(dir, "bundle.json"); writeFileSync(file, JSON.stringify(await buildExportBundle(store, { project: f.project })));
+    const run = spawnSync(process.execPath, [bin, "owner-login", "--recompute", "--bundle", file], { encoding: "utf8", env: baseEnv });
+    assert.equal(run.status, 0, run.stderr + run.stdout);
+    assert.match(run.stdout, /match; replay produced unavailable \(budget\)/);
+    assert.match(run.stdout, /replay's own evidence reads, not a preserved sealed outcome/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("T2 T17 owner-login replay reconstructs decisions/table and rejects absent or after-L allocation consumers", async () => {
+  const { MemoryEventStore, classifyOwnerLogin, ownerLoginAllocationFailed, appendOwnerLoginEvent, ownerLoginRecord } = await import("@retrace-dev/core");
+  const { ownerLoginScenario } = await import("../../core/dist/owner-login-fixture.js");
+  const { recomputeOwnerLogin } = await import("./owner-login-replay.js");
+  const dir = mkdtempSync(join(tmpdir(), "owner-login-replay-"));
+  for (const mode of ["before", "absent", "after-null", "after-id"] as const) {
+    const store = new MemoryEventStore(), f = await ownerLoginScenario(store);
+    const handler = createHandler(store, { token: "owner-token", ownerPrincipal: { type: "human", id: "owner" } });
+    const put = await handler(new Request(`http://test/projects/${f.project}/policy`, { method: "PUT", headers: { authorization: "Bearer owner-token", "content-type": "application/json", "if-match": "none" }, body: JSON.stringify(f.policy.body) }));
+    assert.equal(put.status, 201, await put.text());
+    const policy = (await store.getPolicy(f.project, { current: true }))!;
+    const selected = await classifyOwnerLogin({ store, input: f.input, policy, canonicalR: f.repo, readHead: (await store.head(f.project))!, deadline: Date.now()+1000 });
+    assert.equal(selected.kind, "decision"); if (selected.kind !== "decision") throw new Error("fixture");
+    let winner: import("@retrace-dev/core").Event | undefined;
+    if (mode === "before") winner = (await appendOwnerLoginEvent(store, { ...f.input, idempotency_key: "winner" }, policy, f.repo, Date.now()+2000)).event;
+    const failed = { ...ownerLoginAllocationFailed(selected.input, winner?.id ?? null), idempotency_key: "loser" };
+    // Deterministic event id lets the negative fixture name an actual consumer that has not sealed yet.
+    if (mode === "after-id") ownerLoginRecord(failed)!.decision.allocation!.consumed_by = "evt_11111111111111111111111111111111";
+    await appendEvent(store, failed);
+    if (mode.startsWith("after")) {
+      // Re-seal normally with a fixed id via sealEvent options; sequence/hash must remain valid.
+      const { sealEvent } = await import("@retrace-dev/core");
+      const e = await sealEvent({ ...selected.input, idempotency_key: "winner-late" }, await store.head(f.project), new Date(), { id: "evt_11111111111111111111111111111111" });
+      await store.insert(e, { owner_login_consumption: [{ declaration_event_id: f.declaration.id }] });
+    }
+    if (mode === "before") await appendOwnerLoginEvent(store, { ...f.input, idempotency_key: "second" }, policy, f.repo, Date.now()+2000);
+    if (mode === "before") {
+      for (const id of ["codex", "other"]) await appendEvent(store, { ...f.declaration, actor: { type: "agent", id } });
+      await appendOwnerLoginEvent(store, { ...f.input, idempotency_key: "conflict" }, policy, f.repo, Date.now()+2000);
+      assert.equal(ownerLoginRecord(store.events.at(-1)!)!.decision.status, "conflicting");
+    }
+    const bundle = await buildExportBundle(store, { project: f.project });
+    const replay = await recomputeOwnerLogin(bundle);
+    assert.equal(replay.ok, mode === "before", JSON.stringify(replay));
+    if (mode === "before") {
+      assert.ok(replay.results.some(r => r.result === "match (allocation, by rule)"));
+      assert.deepEqual(replay.consumption, [...store.ownerLoginConsumption.values()]);
+      assert.ok(replay.results.every(r => r.preserved.includes("classification_ms")));
+    } else assert.ok(replay.results.some(r => r.result === "mismatch allocation"), JSON.stringify(replay));
+    const file = join(dir, `${mode}.json`); writeFileSync(file, JSON.stringify(bundle));
+    const run = spawnSync(process.execPath, [bin, "owner-login", "--recompute", "--bundle", file], { encoding: "utf8", env: baseEnv });
+    assert.equal(run.status, mode === "before" ? 0 : 1, run.stderr + run.stdout);
+    assert.match(run.stdout, mode === "before" ? /match \(allocation, by rule\)/ : /mismatch allocation/);
+    assert.match(run.stdout, /preserved observed fields/);
+  }
+});

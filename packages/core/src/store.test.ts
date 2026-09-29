@@ -293,3 +293,30 @@ test("artifactKeyMatchSql and backfill SQL are bound, not interpolated; backfill
   assert.match(BACKFILL_ARTIFACT_INDEX_SQL, /INSERT OR IGNORE INTO event_artifact_index/);
   assert.match(BACKFILL_ARTIFACT_INDEX_SQL, /json_extract\(a\.value, '\$\.id'\)/);
 });
+
+test("T17 memory atomic consumption, read at U, rollback and concurrent single winner", async () => {
+  const { MemoryEventStore, appendOwnerLoginEvent, ownerLoginRecord } = await import("./index.js");
+  const { ownerLoginScenario } = await import("./owner-login-fixture.js");
+  const store = new MemoryEventStore(), f = await ownerLoginScenario(store);
+  const baseInsert = store.insert.bind(store);
+  let arrivals = 0, release!: () => void;
+  const barrier = new Promise<void>(resolve => release = resolve);
+  // Yield outside the synchronous transaction: both decisions read the unconsumed declaration.
+  store.insert = async (e, extras) => {
+    if (extras?.owner_login_consumption?.length && arrivals++ < 2) {
+      if (arrivals === 2) release();
+      await barrier;
+    }
+    return baseInsert(e, extras);
+  };
+  const results = await Promise.all(["a", "b"].map(id => appendOwnerLoginEvent(store, { ...f.input, idempotency_key: id }, f.policy, f.repo, Date.now()+5000)));
+  assert.deepEqual(results.map(r => ownerLoginRecord(r.event)!.decision.status).sort(), ["declared_by_seat", "unresolved"]);
+  assert.equal(store.ownerLoginConsumption.size, 1);
+  const winner = results.find(r => ownerLoginRecord(r.event)!.decision.status === "declared_by_seat")!.event;
+  assert.equal((await store.ownerLoginConsumptionRow(f.project, f.declaration.id))!.consumed_by_event_id, winner.id);
+  assert.deepEqual(await store.ownerLoginConsumptionUpTo(f.project, [f.declaration.id], 0, { deadline: Date.now()+1000, row_cap: 2 }), { ok: true, rows: [] });
+  const before = store.events.length;
+  await assert.rejects(baseInsert({ ...winner, id: "bad" }, { owner_login_consumption: [{ declaration_event_id: "unused" }] }), /UNIQUE/);
+  assert.equal(await store.ownerLoginConsumptionRow(f.project, "unused"), null);
+  assert.equal(store.events.length, before);
+});

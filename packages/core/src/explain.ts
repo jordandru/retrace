@@ -1,3 +1,4 @@
+import { ownerLoginDisplay } from "./owner-login-view.js";
 /** Human-readable rendering of events — used by the MCP server and CLI. */
 import { collectAttributionAmendments, effectiveActor, attributionSummary, type AttributionCollection } from "./attribution.js";
 import { ArtifactRole, Event } from "./schema.js";
@@ -58,6 +59,7 @@ export type ModelEventView = {
   intent_display?: string;
   location_display?: string;
   tool_display?: string;
+  owner_login_display?: string;
 };
 
 /**
@@ -81,6 +83,7 @@ export function eventForModel(event: Event): ModelEventView {
     ...(event.caused_by === undefined ? {} : { caused_by: eventReferenceForModel(event.caused_by) }),
     ...(event.duration_ms === undefined ? {} : { duration_ms: event.duration_ms }),
     project_display: markUntrustedText(event.project),
+    ...(ownerLoginDisplay(event) ? { owner_login_display: markUntrustedText(ownerLoginDisplay(event)!) } : {}),
     actor: {
       type: event.actor.type,
       identity_display: markUntrustedText(event.actor.display_name ?? event.actor.id),
@@ -101,6 +104,8 @@ export function eventForModel(event: Event): ModelEventView {
 }
 
 function describeRecordedActor(e: Event): string {
+  const ownerLogin = ownerLoginDisplay(e);
+  if (ownerLogin) return markUntrustedText(ownerLogin);
   const a = e.actor;
   const displayName = a.display_name === undefined ? "" : singleLine(a.display_name);
   const name = markUntrustedText(displayName || a.id);

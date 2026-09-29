@@ -4,7 +4,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, lstatSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
-import { isAttributionAmendment, Actor, Credential, Event, EventStore, HistoryQuery, ProjectStatus, ReconcileReport, asHistoryPage, causalRootState, localConfigDrift, renderProjectStatus, schemaSurface } from "@retrace-dev/core";
+import { ownerLoginRecord, PolicyDocument, policyDigestOf, evaluateActivation, looksLikePolicyActivation, isAttributionAmendment, Actor, Credential, Event, EventStore, HistoryQuery, ProjectStatus, ReconcileReport, asHistoryPage, causalRootState, localConfigDrift, renderProjectStatus, schemaSurface } from "@retrace-dev/core";
 import { Cfg, commitToEvent, resolveHookToken } from "./git-hook.js";
 import { ReconcileCfg, commitFacts, reconcileOptionsFrom, reconcileWithGit, repoNamesFor } from "./reconcile.js";
 import { RemoteStore, retraceHeaders } from "./remote-store.js";
@@ -223,8 +223,37 @@ export function doctorHistoryEvents(body: unknown): Event[] {
   return asHistoryPage(body).events;
 }
 
-export function sealedLooksAgent(event: { actor: { type: string }; location?: { surface?: string } }): boolean {
-  return event.actor.type === "agent" || event.location?.surface === "agent";
+export function sealedLooksAgent(event: { actor: { type: string }; location?: { surface?: string }; method?: Event["method"] }): boolean {
+  const status = ownerLoginRecord(event)?.decision.status;
+  return event.actor.type === "agent" || event.location?.surface === "agent" || (event.method?.params?.sealed_by === "webhook:github" && (status === "declared_by_seat" || status === "identity_mapped"));
+}
+
+/** First eligible /2 activation listing each login is adoption; later policies cannot reset it. */
+export async function ownerLoginFinding(events: Event[], policies: PolicyDocument[], gate: boolean): Promise<Finding> {
+  const documents = new Map<string, PolicyDocument>();
+  for (const doc of policies) {
+    if (await policyDigestOf(doc.body, doc.envelope) !== doc.digest)
+      return result(gate ? "fail" : "warn", "owner-login", "policy history digest mismatch; adoption not checked");
+    documents.set(doc.digest, doc);
+  }
+  const adopted = new Map<string, number>(), versions: number[] = [];
+  for (const event of [...events].sort((a, b) => a.seq - b.seq)) {
+    if (!looksLikePolicyActivation(event)) continue;
+    const activation = evaluateActivation(event, documents, versions);
+    if (activation.status === "incomplete") return result(gate ? "fail" : "warn", "owner-login", "policy history incomplete; adoption not checked");
+    if (activation.status !== "eligible") continue;
+    versions.push(activation.version);
+    if (activation.document.body.profile !== "retrace-project-policy/2") continue;
+    for (const login of activation.document.body.github?.shared_logins ?? []) if (!adopted.has(login.toLowerCase())) adopted.set(login.toLowerCase(), event.seq);
+  }
+  const bad = events.filter(e => {
+    const login = (e.method?.params?.github_payload as { login?: unknown } | undefined)?.login;
+    const after = typeof login === "string" ? adopted.get(login.toLowerCase()) : undefined;
+    return e.method?.params?.sealed_by === "webhook:github" && e.actor.type === "human" && after !== undefined && e.seq > after;
+  });
+  return result(bad.length ? gate ? "fail" : "warn" : "pass", "owner-login", bad.length
+    ? `${bad.length} shared-login human seals after first /2 adoption: ${bad.map(e => e.id).join(", ")}`
+    : "no shared-login human seals after first /2 adoption");
 }
 
 export function agentEvidenceOnHuman(event: { actor: { type: string; id?: string }; location?: { surface?: string } }): string[] {
@@ -937,12 +966,18 @@ async function main() {
     } catch (e: any) {
       findings.push(result(gate ? "fail" : "warn", "issuance", `${e.message}; /status not checked`));
     }
+    let ownerLoginPolicies: PolicyDocument[] = [];
+    let ownerLoginPolicyError: string | undefined;
     try {
       const res = await fetch(`${url}/projects/${encodeURIComponent(project)}/policy`, { headers });
       if (res.status === 404) {
         findings.push(result("warn", "local_config_drift", "no current policy document to compare against the local .retrace.json body"));
       } else if (res.ok) {
-        const doc = await res.json() as { body: { trusted_hook_stamps: string[]; repositories: { name: string; aliases: string[] }[] } };
+        const doc = await res.json() as PolicyDocument;
+        const history = await fetch(`${url}/projects/${encodeURIComponent(project)}/policy/history?limit=100000`, { headers });
+        if (!history.ok) throw new Error(`policy history ${history.status}`);
+        ownerLoginPolicies = await history.json() as PolicyDocument[];
+        if (!ownerLoginPolicies.some(d => d.digest === doc.digest)) throw new Error("current policy absent from history");
         const drift = localConfigDrift({
           stamps: cfg.reconcile?.hook_sealed_by,
           repositories: (cfg as { attribution?: { repositories?: { name: string; aliases?: string[] }[] } }).attribution?.repositories?.map((r) => ({ name: r.name, aliases: r.aliases ?? [] })),
@@ -950,6 +985,7 @@ async function main() {
         findings.push(result(drift.drifted ? "warn" : "pass", "local_config_drift", drift.detail));
       }
     } catch (e: any) {
+      ownerLoginPolicyError = e.message;
       findings.push(result("warn", "local_config_drift", `${e.message}; current policy body not compared`));
     }
     if (headEvent) {
@@ -961,6 +997,8 @@ async function main() {
           const remote = new RemoteStore(url, auth.token);
           const { findings: authFindings, verified } = await gateRemoteAuthorization(commit, remote, project, undefined, url, { project });
           findings.push(...authFindings);
+          findings.push(ownerLoginPolicyError ? result("fail", "owner-login", ownerLoginPolicyError)
+            : await ownerLoginFinding(verified.events, ownerLoginPolicies, true));
           if (routingModels) findings.push(...reviewEffortFindings(verified.events, routingModels, undefined, { gate: true }));
           const absent = modelClaimAbsentFinding(verified.events);
           if (absent) findings.push(absent);
@@ -970,7 +1008,10 @@ async function main() {
         } catch (e: any) { findings.push(result("fail", "HEAD delivery", e.message)); }
       } else {
         try {
-          findings.push(...await advisoryUnsignedFindings(new RemoteStore(url, auth.token), project, routingModels));
+          const advisoryStore = new RemoteStore(url, auth.token);
+          findings.push(...await advisoryUnsignedFindings(advisoryStore, project, routingModels));
+          findings.push(ownerLoginPolicyError ? result("warn", "owner-login", ownerLoginPolicyError)
+            : await ownerLoginFinding(await advisoryStore.all(project), ownerLoginPolicies, false));
         } catch (e: any) {
           findings.push(result("warn", "review routing", `${e.message}; advisory review history and model-claim listing not checked`));
         }

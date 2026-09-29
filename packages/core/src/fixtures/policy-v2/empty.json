@@ -1,0 +1,41 @@
+{
+  "name": "empty",
+  "body": {
+    "profile": "retrace-project-policy/2",
+    "project": "demo",
+    "trusted_hook_stamps": [
+      "assert:git hook (assert)"
+    ],
+    "unresolved_claims": "record",
+    "repositories": [
+      {
+        "name": "acme/demo",
+        "aliases": [
+          "demo"
+        ]
+      }
+    ],
+    "github_repos": [
+      "acme/demo"
+    ],
+    "github": {
+      "shared_logins": [],
+      "identities": {}
+    }
+  },
+  "envelope": {
+    "version": 1,
+    "created_at": "2026-09-10T03:45:00.000Z",
+    "set_by": {
+      "type": "human",
+      "id": "owner@example.com"
+    },
+    "supersedes": null,
+    "activation": {
+      "event_id": "evt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "seq": 0
+    }
+  },
+  "canonical": "{\"activation\":{\"event_id\":\"evt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"seq\":0},\"created_at\":\"2026-09-10T03:45:00.000Z\",\"github\":{\"identities\":{},\"shared_logins\":[]},\"github_repos\":[\"acme/demo\"],\"profile\":\"retrace-project-policy/2\",\"project\":\"demo\",\"repositories\":[{\"aliases\":[\"demo\"],\"name\":\"acme/demo\"}],\"set_by\":{\"id\":\"owner@example.com\",\"type\":\"human\"},\"supersedes\":null,\"trusted_hook_stamps\":[\"assert:git hook (assert)\"],\"unresolved_claims\":\"record\",\"version\":1}",
+  "digest": "74556d6a69591271ba525df5f02c2c14ee0a01c14e181a621be5f7552b846367"
+}

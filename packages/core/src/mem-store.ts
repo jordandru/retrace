@@ -4,7 +4,7 @@
  */
 import { Event } from "./schema.js";
 import {
-  ArtifactIndexQuery, ArtifactIndexResult, ChainHead, EventStore, HeadMovedError, HistoryQuery, HistoryPage,
+  InsertExtras, OwnerLoginConsumption, readOwnerLoginConsumption, ArtifactIndexQuery, ArtifactIndexResult, ChainHead, EventStore, HeadMovedError, HistoryQuery, HistoryPage,
   PendingDelivery, Share, eventsReferencingArtifactKeys, pageHistoryNewest,
 } from "./store.js";
 import { PolicyDocument, PolicyRouteRow, PolicySnapshot, PolicySnapshotBudget, PolicyWrite, assertRouteWriteConsistent, policySnapshotFromIndex } from "./policy.js";
@@ -14,6 +14,7 @@ import { isAttributionAmendment } from "./attribution-context.js";
 
 export class MemoryEventStore implements EventStore {
   events: Event[] = [];
+  ownerLoginConsumption = new Map<string, OwnerLoginConsumption>();
   shares = new Map<string, Share>();
   policies: PolicyDocument[] = [];
   routes = new Map<string, PolicyRouteRow>();
@@ -32,9 +33,21 @@ export class MemoryEventStore implements EventStore {
     const e = this.events.filter((x) => x.project === p).sort((a, b) => a.seq - b.seq).at(-1);
     return e ? { seq: e.seq, hash: e.hash } : null;
   }
-  async insert(e: Event) {
+  async insert(e: Event, extras?: InsertExtras) {
+    const rows = extras?.owner_login_consumption ?? [];
+    const keys = rows.map(r => `${e.project}\u0000${r.declaration_event_id}`);
+    if (new Set(keys).size !== keys.length || keys.some(key => this.ownerLoginConsumption.has(key)))
+      throw new Error("UNIQUE constraint failed: owner_login_consumption.project, owner_login_consumption.declaration_event_id");
     if (this.events.some((x) => x.project === e.project && x.seq === e.seq)) throw new Error("UNIQUE constraint failed: events.project, events.seq");
     this.events.push(e);
+    rows.forEach((row, i) => this.ownerLoginConsumption.set(keys[i], { ...row, project: e.project,
+      consumed_by_delivery: row.consumed_by_delivery ?? null, consumed_by_event_id: e.id, consumed_by_seq: e.seq, consumed_at: e.received_at }));
+  }
+  async ownerLoginConsumptionRow(project: string, id: string) { return this.ownerLoginConsumption.get(`${project}\u0000${id}`) ?? null; }
+  async ownerLoginConsumptionUpTo(project: string, ids: string[], throughSeq: number, budget: { deadline: number; row_cap: number }) {
+    return readOwnerLoginConsumption(ids, budget, async (batch, limit) => batch
+      .map(id => this.ownerLoginConsumption.get(`${project}\u0000${id}`))
+      .filter((r): r is OwnerLoginConsumption => !!r && r.consumed_by_seq <= throughSeq).slice(0, limit));
   }
   async byIdempotencyKey(p: string, k: string) { return this.events.find((e) => e.project === p && e.idempotency_key === k) ?? null; }
   async get(id: string) { return this.events.find((e) => e.id === id) ?? null; }
@@ -60,6 +73,7 @@ export class MemoryEventStore implements EventStore {
     const evs = this.events.filter((e) => e.project === p);
     const counts = { events: evs.length, event_artifacts: evs.reduce((n, e) => n + e.artifacts.length, 0), shares: [...this.shares.values()].filter((s) => s.project === p).length };
     if (this.events.some((e) => e.project === audit.project && e.seq === audit.seq)) throw new Error("UNIQUE constraint failed: events.project, events.seq");
+    for (const [key, row] of this.ownerLoginConsumption) if (row.project === p) this.ownerLoginConsumption.delete(key);
     this.events = this.events.filter((e) => e.project !== p);
     this.policies = this.policies.filter((d) => d.body.project !== p);
     for (const [id, s] of this.shares) if (s.project === p) this.shares.delete(id);

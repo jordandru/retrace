@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { recomputeOwnerLogin } from "./owner-login-replay.js";
 /**
  * retrace-export — signing keys, signed exports, offline verification.
  *   retrace-export keygen [--print-private]           create ~/.retrace/signing-key.json if missing; print kid + public JWK
@@ -59,6 +60,14 @@ function bundleVerifyOpts(flags: Record<string, string | boolean>, bundle: Expor
 async function main() {
   const { flags, pos } = parseArgs(process.argv.slice(2));
   const cmd = pos[0];
+  if (cmd === "owner-login") {
+    if (!flags.recompute || typeof flags.bundle !== "string") throw new Error("usage: retrace-export owner-login --recompute --bundle <export.json> [--policy <digest>]");
+    const replay = await recomputeOwnerLogin(parseExportBundle(readFileSync(flags.bundle, "utf8")), typeof flags.policy === "string" ? flags.policy : undefined);
+    console.log("owner-login consistency replay (does not establish issuer identity)");
+    for (const row of replay.results) console.log(`${row.id}: ${row.result}${row.replay_unavailable ? `; replay produced unavailable (${row.replay_unavailable}); this reason came from the replay's own evidence reads, not a preserved sealed outcome` : ""}; event received_at ${row.received_at}; preserved observed fields: ${row.preserved.join(", ") || "none"}`);
+    console.log(`consumption rebuilt: ${replay.consumption.length} rows`);
+    process.exitCode = replay.ok ? 0 : 1; return;
+  }
   if (cmd === "amend-attribution") { process.exitCode = await amendAttributionMain(flags); return; }
   if (cmd === "render") {
     if (!pos[1]) throw new Error("usage: retrace-export render <bundle.json> [--effective] [--repo . --policy policy.json]");

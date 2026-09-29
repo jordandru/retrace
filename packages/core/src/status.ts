@@ -1,3 +1,4 @@
+import { ownerLoginStats, OwnerLoginStats } from "./owner-login-status.js";
 import { collectAttributionAmendments, effectiveActor, isAttributionAmendment, type AttributionOptions } from "./attribution.js";
 import { Event, ModelSource } from "./schema.js";
 import { VerifyResult } from "./chain.js";
@@ -70,6 +71,7 @@ export type ProjectStatus = {
     agent_events_not_pinned: number;
     /** /1-signed git commit seals (absent format = /1). Unsigned commit seals are not counted. */
     legacy_client: number;
+    owner_login_events: OwnerLoginStats;
   };
   causality: { eligible_events: number; rooted_in_human_instruction: number; attested_events: number; broken_links: number; unlinked: number; coverage_pct: number };
   actors: StatusActor[];
@@ -147,6 +149,7 @@ export async function buildProjectStatus(
     integrity,
     events: { total: events.length, last_event_at: events.at(-1)?.timestamp },
     capture: {
+      owner_login_events: await ownerLoginStats(store, events, store.getPolicy ? await store.getPolicy(project, { current: true }) : null),
       artifact_refs: artifactRefs.length,
       artifact_refs_without_role: artifactRefs.filter(({ event, artifact, index }) => artifact.role === undefined && !amendedRoles.has(`${event.id}:${index}`)).length,
       amended_artifact_refs: amendedRoles.size,
@@ -271,6 +274,7 @@ export function renderProjectStatus(s: ProjectStatus): string {
     `${s.capture.agent_events_without_model}/${s.capture.agent_events} agent events missing model (${byCause.source_none} declared none · ${byCause.no_source_recorded} no source recorded) · ${s.capture.instructions_without_followup}/${s.capture.instructions} instructions without follow-up · ${s.capture.artifact_refs_without_role}/${s.capture.artifact_refs} artifact refs missing role\n` +
     (sourceParts.length ? `model sources: ${sourceParts.join(" · ")}\n` : "") +
     `append-only amendments: ${s.capture.amended_unlinked_commits} commits attested · ${s.capture.amended_artifact_refs} artifact roles supplied · ${s.capture.ineffective_amendments} rejected links\n` +
+    (s.capture.owner_login_events ? `GitHub owner-login events: ${s.capture.owner_login_events.sealed_as_human} sealed human · read-time: ${s.capture.owner_login_events.read_time_labels.declared_by_seat} declared-by-seat · ${s.capture.owner_login_events.read_time_labels.conflicting} conflicting · ${s.capture.owner_login_events.read_time_labels.unresolved} unresolved (computed at read, not sealed) · ${s.capture.owner_login_events.legacy_unknown_login} legacy unknown login · identity-mapped ${s.capture.owner_login_events.by_status.identity_mapped} (current policy identities, separate scope)\n` : "") +
     `sealed by: ${s.capture.sealed_by.pinned} pinned · ${s.capture.sealed_by.assert} assert · ${s.capture.sealed_by.webhook} webhook · ${s.capture.sealed_by.owner} owner-asserted · ${s.capture.sealed_by.unauthenticated} unauthenticated · ${s.capture.sealed_by.unstamped} unstamped; ${s.capture.agent_events_not_pinned}/${s.capture.agent_events} agent events not pinned\n` +
     (s.capture.attribution_unavailable ? `attribution evaluation unavailable: ${s.capture.attribution_unavailable} (${s.capture.attribution_attempts ?? 0} attempts)\n` : `attribution amendments: ${s.capture.attribution_amendments ?? 0} effective · ${s.capture.superseded_attribution_amendments ?? 0} superseded · ${s.capture.partially_amended_events ?? 0} partially amended events\n`) +
     `actors: ${s.actors.map((a) => `${a.type}/${markUntrustedText(a.id)} (${a.events})`).join(", ") || "none"}\n` +
