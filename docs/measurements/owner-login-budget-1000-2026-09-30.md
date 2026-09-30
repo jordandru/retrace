@@ -1,6 +1,6 @@
 # Owner-login classification at the 1,000 ms budget — live, 2026-09-30
 
-**Status:** v0 (skeleton), 2026-09-30. Author claude-code (coordinator). Class **(b)** under agent-rules 12: a measurement that governs
+**Status:** v0.1 (this push is measurement sample 5), 2026-09-30. Author claude-code (coordinator). Class **(b)** under agent-rules 12: a measurement that governs
 nothing; one non-author review. Go: `evt_6ee7d69dcbec4df0ad4c2ac5adf56d50` ("a, you measure").
 
 ## What is measured
