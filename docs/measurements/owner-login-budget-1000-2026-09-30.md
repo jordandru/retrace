@@ -2,7 +2,7 @@
 
 **Status:** v1, 2026-09-30 (≈ 20:40Z / 14:40 MDT). Author claude-code (coordinator). Class **(b)** under agent-rules 12: a measurement that
 governs nothing; one non-author review. Go: `evt_6ee7d69dcbec4df0ad4c2ac5adf56d50` ("a, you measure"). Earlier versions of this file: v0
-(skeleton) and v0.1 (the status line whose push is sample 5).
+(skeleton) and v0.1 (the status line whose push is sample 5). **v1.1** (2026-09-30, ≈ 22:35Z / 16:35 MDT): §5 added (diagnosis and fix); §§1–4 unchanged.
 
 ## 1. What is measured
 Worker Version `4cdeb1e9-d873-4633-9ba3-17d7f065244a` (main `bbf61d3d`, PR 145: `OWNER_LOGIN_DEADLINE_MS` 300 → 1,000 ms), deployed
@@ -41,3 +41,27 @@ roughly three calls at the measured per-call cost (amendment rows, `getMany`, on
 code comment above `classifierCaptureSeals` records a 2026-09-15 case in which one unresolvable commit reference made every classification
 unavailable (`evt_2a4dfb78`). Identifying the path needs a reproduction against the live events (replay at the sealed read head), and that
 is a separate step.
+
+## 5. Diagnosis and fix (added 2026-09-30, v1.1)
+Go for the diagnosis: `evt_873053bb47da43c2a139e56efabcef30` ("you diagnose"). Diagnosis event: `evt_1b22cec2b58045a78dd454eddff14b6d`.
+
+1. **The path.** It is the capture read inside `amendmentCaptureDependencies`, the third call that the §4 lead pointed to.
+   - The one amendment in scope (seq 2543, commit `5d7290f`, 11 files) makes the classifier look up each file under the policy's owner-less alias
+     `retrace`.
+   - Before PR 60, `artifactLookup` (`packages/core/src/capture.ts`) turned each lookup into `GLOB 'repo:*/retrace#<path>'`.
+   - Seven of the eleven patterns are longer than 50 bytes; the longest is 59 (`packages/mcp-server/src/producer-key.test.ts`).
+   - workerd/D1 rejects a LIKE or GLOB pattern over 50 bytes (`LIKE or GLOB pattern too complex`), and the bare catch in
+     `runArtifactIndexStatements` returns `store_error`.
+   - An offline `MemoryEventStore` replay at the sealed read head (U = 10265) succeeds, because that store matches in JavaScript and has no pattern
+     limit. That is also why no local test saw it.
+2. **Not new.** It is the same defect as the third shadow-window failure on 2026-09-15 (`evt_ea963123…`). A fix was built then as PR 60, approved
+   by its first review seat, and never merged. The 300 ms deadline hid the defect on the owner-login path until PR 145 raised it.
+3. **Fix.** PR 60 was revived (Codex, round 5) and merged as `b96676bc`. It replaces the GLOB with a `repo:` key range plus byte suffix equality,
+   and adds a workerd regression test using the 11 files of `5d7290f`. The test fails on the old code with exactly
+   `amendment capture read: {"ok":false,"reason":"store_error"}`, reproduced independently by the last review seat (`evt_3f792d8f…`).
+   - Deployed as Worker Version `77400e6e-668e-447e-b4e5-bfbc0a6970ee` at 2026-09-30T22:26:34Z (`evt_48a996bf…`), placement off, with a 1,000 ms
+     budget.
+4. **Before the fix, one more sample on the old Version.** Seq 10388 (the PR 60 merge, 22:16:29Z) was `unavailable / store_error`,
+   `stage_failed: amendments`, `amendments_ms` 258, `classification_ms` 511.
+5. **Not yet established.** Whether owner-login deliveries now seal a decision on the new Version. The push of this v1.1 is the first delivery
+   after the deploy. Its decision, and those that follow, will be recorded in a later version of this file, read raw from the ledger as in §2.
