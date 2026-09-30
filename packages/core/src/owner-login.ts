@@ -1,5 +1,5 @@
 /** Content-bound testimony for shared GitHub accounts (owner-login/1). */
-import { Actor, Event, EventInput, GENESIS_HASH } from "./schema.js";
+import { Actor, Event, EventInput, GENESIS_HASH, assertEventArtifactIds } from "./schema.js";
 import { PolicyDocument, POLICY_PROFILE_V2 } from "./policy.js";
 import { ArtifactIndexQuery, ChainHead, EventStore, appendEvent, appendReadWithinDeadline, artifactIndexRows } from "./store.js";
 import { evaluateAmendmentsAtU, OWNER_LOGIN_DEADLINE_MS } from "./classify.js";
@@ -220,6 +220,8 @@ export async function classifyOwnerLogin(args: OwnerLoginArgs): Promise<OwnerLog
 /** Shared ingress/drain append path, with exactly one reclassification on allocation loss. */
 export async function appendOwnerLoginEvent(store: EventStore, input: EventInput, policy: PolicyDocument | null,
   canonicalR: string, deliveryDeadline?: number, now: () => number = Date.now) {
+  // Validate new input before classification; read-only replay still accepts historical sealed events.
+  assertEventArtifactIds(input);
   const opts = deliveryDeadline === undefined ? { now } : { deadline: deliveryDeadline, now };
   let failures = 0;
   let classified = await classify();

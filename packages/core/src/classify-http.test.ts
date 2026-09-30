@@ -681,6 +681,27 @@ test("F9/F10: drain budgets are per-sha and terminal/policy-off work stays durab
   assert.equal(offOutcome[SHA]!.reason, "policy_off");
 });
 
+test("drain refuses malformed artifact ids in retained owner-login deliveries under their idempotency outcome key", async () => {
+  const store = new MemoryEventStore();
+  const raw = JSON.stringify({ repository: { full_name: "acme/ap\uD800p" }, action: "created", sender: { login: "owner" },
+    issue: { number: 1, pull_request: {} }, comment: { id: 1, body: "hello", created_at: "2026-09-30T00:00:00Z" } });
+  await store.insertPendingDelivery({ delivery_id: "bad-owner-login", project: "p", gh_event: "issue_comment",
+    raw_body: raw, received_at: "2026-09-30T00:00:00Z", repo: "acme/app", state: "received" });
+  const first = await drainPendingGithubDeliveries(store, { trailerPolicy: "shadow" });
+  assert.equal(first.failed, 1);
+  const retained = (await store.getPendingDelivery("bad-owner-login"))!;
+  assert.equal(retained.raw_body, raw);
+  const outcomes = JSON.parse(retained.outcomes!);
+  const keys = Object.keys(outcomes);
+  assert.equal(keys.length, 1);
+  assert.match(keys[0]!, /^idem:/);
+  assert.deepEqual(outcomes[keys[0]!], { status: "invalid_input", attempt_count: 0, reason: "invalid_artifact" });
+  assert.equal(store.events.length, 0);
+  const second = await drainPendingGithubDeliveries(store, { trailerPolicy: "shadow" });
+  assert.equal(second.failed, 0);
+  assert.equal((await store.getPendingDelivery("bad-owner-login"))!.outcomes, retained.outcomes);
+});
+
 test("drain records a terminal invalid_artifact outcome for a parked NUL path and keeps the raw payload", async () => {
   const { store, h } = handler();
   await putPolicy(h);

@@ -216,3 +216,61 @@ test("T17 workerd consumption batch rolls back on either constraint and reads ov
     assert.equal((await store.all(f.project)).length, 3);
   });
 });
+
+test("D1 in workerd: owner-login amendment capture reads all 11 files of 5d7290f", { timeout: 60_000 }, async () => {
+  await withD1(async db => {
+    const { ownerLoginScenario } = await import("../../../packages/core/dist/owner-login-fixture.js");
+    const { appendOwnerLoginEvent, ownerLoginRecord } = await import("@retrace-dev/core");
+    // git show --format= --name-only 5d7290f: the production amendment's target files.
+    const paths = [
+      "packages/core/src/producer-sig.test.ts",
+      "packages/core/src/producer-sig.ts",
+      "packages/mcp-server/README.md",
+      "packages/mcp-server/src/admin.test.ts",
+      "packages/mcp-server/src/admin.ts",
+      "packages/mcp-server/src/export-cli.test.ts",
+      "packages/mcp-server/src/export-cli.ts",
+      "packages/mcp-server/src/git-hook.test.ts",
+      "packages/mcp-server/src/git-hook.ts",
+      "packages/mcp-server/src/producer-key.test.ts",
+      "packages/mcp-server/src/producer-key.ts",
+    ];
+    const oldPatterns = paths.map(path => `repo:*/retrace#${path}`);
+    assert.equal(oldPatterns.filter(pattern => Buffer.byteLength(pattern) > 50).length, 7);
+    assert.equal(Math.max(...oldPatterns.map(pattern => Buffer.byteLength(pattern))), 59);
+
+    const store = new D1Store(db), f = await ownerLoginScenario(store);
+    f.policy.body.repositories.push({ name: "jordandru/retrace", aliases: ["retrace"] });
+    const root = (await appendEvent(store, { project: f.project, actor: { type: "human", id: "owner" },
+      action: "instructed", artifacts: [{ id: "task:amendment", role: "used" }] })).event;
+    const files = paths.map(path => ({ id: `repo:jordandru/retrace#${path}`, role: "generated" as const }));
+    const evidence = (await appendEvent(store, { project: f.project, actor: { type: "agent", id: "other" },
+      action: "edited", artifacts: files, caused_by: root.id })).event;
+    const target = (await appendEvent(store, { project: f.project, actor: { type: "agent", id: "codex" },
+      action: "edited", artifacts: files, caused_by: root.id })).event;
+    await appendEvent(store, { project: f.project, actor: root.actor, action: "other", action_detail: "amended",
+      tags: ["amendment", "attribution"], intent: "synthetic correction with the production target's file set",
+      caused_by: root.id, artifacts: [{ id: `event:${target.id}`, role: "used" }, { id: `event:${evidence.id}`, role: "used" }],
+      method: { tool: "retrace_amend", params: { sealed_by: "owner", target_event_id: target.id,
+        attribution: { from: target.actor, to: evidence.actor, evidence: [evidence.id] } } } });
+
+    const captureReads: { query: ArtifactIndexQuery; result: Awaited<ReturnType<D1Store["eventsReferencingArtifacts"]>> }[] = [];
+    const read = store.eventsReferencingArtifacts.bind(store);
+    store.eventsReferencingArtifacts = async (query, now) => {
+      const result = await read(query, now);
+      if (query.artifact_keys.some(key => key.startsWith("repo:retrace#"))) captureReads.push({ query, result });
+      return result;
+    };
+    const appended = await appendOwnerLoginEvent(store, f.input, f.policy, f.repo);
+    assert.equal(captureReads.length, 1, "owner-login must reach amendmentCaptureDependencies' file read");
+    const capture = captureReads[0]!;
+    assert.deepEqual(capture.query.artifact_keys.filter(key => key.startsWith("repo:retrace#")).sort(),
+      paths.map(path => `repo:retrace#${path}`).sort());
+    assert.equal(capture.result.ok, true, `amendment capture read: ${JSON.stringify(capture.result)}`);
+    if (capture.result.ok) assert.deepEqual(capture.result.events.map(e => e.id), [evidence.id, target.id]);
+    const decision = ownerLoginRecord(appended.event)!.decision;
+    assert.equal(decision.status, "declared_by_seat", JSON.stringify(decision));
+    assert.equal(decision.timing.stage_failed, null);
+    assert.deepEqual(decision.consumed, [f.declaration.id]);
+  });
+});
