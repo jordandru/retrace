@@ -1,6 +1,6 @@
 # Owner-login step B — live Worker timing after PR 138, 2026-09-30
 
-**Status:** v1, 03:47Z 2026-09-30 (9:47 PM MDT 2026-09-29) — five classified deliveries on PR 139, four kinds; the push that lands this text is sample 6. Author grok (measurer), `Grok 4.6 (high)`, harness-display. Class **(b)** under agent-rules 12: a measurement that governs nothing; one non-author review. Go: `evt_3625211c19b24549a439654f786a6674`. Routing: `evt_7bac1370d1d84ab0ac204258e7f842af`. Instruction: `evt_7018e21098e544ccade81d3fd3cc6c74`. Brief `~/.retrace/ops-2026-09-29/brief-grok-stepB-owner-login-timing.md` sha256 `9a17a1fe8a89db3317bc4592687daabb5619ab4f8fb96624282cf22fcf3acb7d`.
+**Status:** v1.1, 03:50Z 2026-09-30 (9:50 PM MDT 2026-09-29) — six classified deliveries on PR 139, five kinds; sample 6 (this file's v1 push) filled in place. Author grok (measurer), `Grok 4.6 (high)`, harness-display. Class **(b)** under agent-rules 12: a measurement that governs nothing; one non-author review. Go: `evt_3625211c19b24549a439654f786a6674`. Routing: `evt_7bac1370d1d84ab0ac204258e7f842af`. Instruction: `evt_7018e21098e544ccade81d3fd3cc6c74`. Brief `~/.retrace/ops-2026-09-29/brief-grok-stepB-owner-login-timing.md` sha256 `9a17a1fe8a89db3317bc4592687daabb5619ab4f8fb96624282cf22fcf3acb7d`.
 
 ## 1. What is measured
 
@@ -29,7 +29,7 @@ Classifier stopwatch (`owner-login.ts:119`) starts at `classifyOwnerLogin` entry
 
 ## 3. Timing blocks (seq > 9746)
 
-Every post-deploy owner-login decision read raw through seq 9775 carries a `timing` block. None is missing. All five sealed `system` `github:jordandru`, `unavailable` / `deadline`, `classification_ms 300` = `deadline_ms`, `consumed []`, `stage_failed` **amendments**. `filter_ms` is 0 on every sample. The sum `candidates_ms + filter_ms + consumption_ms + amendments_ms` equals 300 on every sample.
+Every post-deploy owner-login decision read raw through seq 9783 carries a `timing` block. None is missing. All six sealed `system` `github:jordandru`, `unavailable` / `deadline`, `classification_ms 300` = `deadline_ms`, `consumed []`, `stage_failed` **amendments**. `filter_ms` is 0 on every sample. The sum `candidates_ms + filter_ms + consumption_ms + amendments_ms` equals 300 on every sample.
 
 | # | kind | seal | seq | classification_ms | pre_ms | candidates_ms | filter_ms | consumption_ms | amendments_ms | stage_failed | candidates_rows | budget_rows_remaining | deadline_ms | read_head_seq | ingress_at |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
@@ -38,13 +38,13 @@ Every post-deploy owner-login decision read raw through seq 9775 carries a `timi
 | 3 | `pr_edit` | `evt_e0b84daa5e064b1daab9676d4b99f7cf` | 9769 | 300 | 159 | 87 | 0 | 80 | 133 | amendments | 11 | 1984 | 300 | 9768 | 2026-09-30T03:42:08.961Z |
 | 4 | `comment` | `evt_eb3862c5bfff4e1aaf12443c4580bb58` | 9772 | 300 | 163 | 86 | 0 | 81 | 133 | amendments | 11 | 1984 | 300 | 9771 | 2026-09-30T03:43:23.913Z |
 | 5 | `review` | `evt_b73292cfe21e458c815d1b75aa745178` | 9775 | 300 | 165 | 101 | 0 | 81 | 118 | amendments | 19 | 1972 | 300 | 9774 | 2026-09-30T03:45:48.434Z |
-| 6 | `push` | this commit's `pull_request` `synchronize` | — | — | — | — | — | — | — | — | — | — | — | — | after this push |
+| 6 | `push` | `evt_3df41332856a4714a72b34e964e2bb35` | 9783 | 300 | 162 | 111 | 0 | 91 | 98 | amendments | 23 | 1976 | 300 | 9782 | 2026-09-30T03:49:08.039Z |
 
-`candidates_ms` 86–101, `consumption_ms` 75–83, `amendments_ms` 118–136. `amendments_ms` equals the remainder `deadline_ms − candidates_ms − consumption_ms − filter_ms` on every row (136, 128, 133, 133, 118). `pre_ms` 146–222 sits outside the stopwatch and does not reduce `classification_ms`. `budget_rows_remaining` 1972–1991 of 2000: the failure is the deadline, not the row cap. `candidates_rows` grew 4 → 19 as PR 139 artifacts accumulated; a one-key comment (sample 2, no branch, no head_sha) still failed on amendments with the same shape as a three-key `pr_open`.
+`candidates_ms` 86–111, `consumption_ms` 75–91, `amendments_ms` 98–136. `amendments_ms` equals the remainder `deadline_ms − candidates_ms − consumption_ms − filter_ms` on every row (136, 128, 133, 133, 118, 98). Sample 6 spent more in candidates (111 ms, 23 rows) and consumption (91 ms), so amendments had only 98 ms left and still failed there. `pre_ms` 146–222 sits outside the stopwatch and does not reduce `classification_ms`. `budget_rows_remaining` 1972–1991 of 2000 (sample 6: 1976): the failure is the deadline, not the row cap. `candidates_rows` grew 4 → 23 as PR 139 artifacts accumulated; a one-key comment (sample 2, no branch, no head_sha) still failed on amendments with the same shape as a three-key `pr_open`.
 
-`payload_time` → `ingress_at`: 20.160 s (sample 1), 2.524 s, 2.961 s, 1.913 s, 2.434 s. Sample 1 is the PR-open delivery; the later four match T3's 2–4 s payload-to-ingress band. Ingress spacings: 59.364 s, 38.437 s, 74.952 s, 144.521 s.
+`payload_time` → `ingress_at`: 20.160 s (sample 1), 2.524 s, 2.961 s, 1.913 s, 2.434 s, 2.039 s. Sample 1 is the PR-open delivery; samples 2–6 match T3's 2–4 s payload-to-ingress band. Ingress spacings: 59.364 s, 38.437 s, 74.952 s, 144.521 s, 199.605 s.
 
-Declarations (agent-ops 19, before each `gh` write): sample 1 `evt_8bd1c1424c564fbca6835e50612973ae`; sample 2 `evt_7c2b4ab2bdfd41899ad03aa8f5dfc8e8`; sample 3 `evt_356aac73279644aea24e005b5ccdc218`; sample 4 `evt_55e493f2ef7e420ebc3407166f5da4be`; sample 5 `evt_9f60230ccd8c4402a3907907be510665`. GitHub objects: PR 139; comment 5903596852; body PATCH 03:42:06Z; comment 5903614160; review 5361238286 `COMMENTED` at `b8788cbff8dc682b9d9ee548d54d3ae71acebf78`.
+Declarations (agent-ops 19, before each `gh` write): sample 1 `evt_8bd1c1424c564fbca6835e50612973ae`; sample 2 `evt_7c2b4ab2bdfd41899ad03aa8f5dfc8e8`; sample 3 `evt_356aac73279644aea24e005b5ccdc218`; sample 4 `evt_55e493f2ef7e420ebc3407166f5da4be`; sample 5 `evt_9f60230ccd8c4402a3907907be510665`; sample 6 `evt_6adff91d608643fd8e425e0c5833d903`. GitHub objects: PR 139; comment 5903596852; body PATCH 03:42:06Z; comment 5903614160; review 5361238286 `COMMENTED` at `b8788cbff8dc682b9d9ee548d54d3ae71acebf78`; push `b8788cb..178d559`.
 
 ## 4. The failing stage's query (code at `3f926396`)
 
@@ -114,6 +114,7 @@ Deliveries for the dashboard filter:
 | 3 pr_edit | `e9126a50-bc80-11f1-87da-4827c8c8b09c` |
 | 4 comment | `15e57b80-bc81-11f1-842e-cc9734107f25` |
 | 5 review | `6c027770-bc81-11f1-9222-ae7e8f8fa114` |
+| 6 push | `e2e2e640-bc81-11f1-9ead-42d06c624027` |
 
 ## 6. Conclusion (bounded by the seals; plan still Jordan's)
 
@@ -129,7 +130,7 @@ Options for step C, each with the evidence it still needs:
 4. **Raise `OWNER_LOGIN_DEADLINE_MS`**, if the plan is already the intended seek and the live duration of that seek is ~130 ms with no missing index. That keeps fail-closed behaviour and buys the remainder; it does not remove a scan if one is there. Evidence required: the same EXPLAIN showing an index seek, plus Workers Logs wall/CPU for one delivery.
 5. **Leave candidates and consumption alone as the first cut.** They complete in 86–101 ms and 75–83 ms with 4–19 events; a one-key comment and a three-key PR open fail the same way. Evidence: §3.
 
-No option is a decision. Sample 6 (the push of this text) is expected to repeat `stage_failed` amendments; if it does not, that is a finding and this section is corrected in place.
+No option is a decision. Sample 6 (v1 push, seq 9783) repeated `stage_failed` amendments (`candidates_ms` 111, `consumption_ms` 91, `amendments_ms` 98). The v1.1 push that lands this correction is a seventh classified delivery; it is not required for the ≥6 / ≥3-kind bar and is not tabulated here unless it disagrees.
 
 ## 7. Record
 
