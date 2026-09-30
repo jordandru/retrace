@@ -82,3 +82,27 @@ Roll back if any of these holds:
 **Rollback** means removing the `[placement]` block from `apps/worker/wrangler.toml` and **deploying**. Editing the file alone changes nothing
 live. Both the change (a PR) and the deploy wait for Jordan's go (agent-rules 14). Nothing needs restoring: no binding, secret or data depends
 on placement.
+
+## 7. Result, rollback and a correction (2026-09-30, appended; agent-rules 10)
+
+*Appended on Jordan's go `evt_f50a1ec5eac64741bff18a788a4aa6e5`. The text above is unchanged.*
+
+**Result.** Deployed as Version `f3b73603-878f-4d6d-8c60-e152723c8c72` at 15:14:02Z (`evt_fce4ac4a07754da6a9ce64ce9237ba76`). Workers API
+`placement_status` was `SUCCESS` at 15:30:22Z (`evt_effe29bed231473181d468609db33672`). The first six classified deliveries after that read
+(seqs 10026, 10031, 10034, 10037, 10039, 10044) all sealed `unavailable` / `deadline`. Median `candidates_ms` was 129.5 (baseline 89) and
+median `consumption_ms` was 104.5 (baseline 81). §5 row: **Improvement threshold not met** (Codex's round-3 wording). The Grok seat's report is
+PR 142. The coordinator recomputed it from the seals (`evt_e49599f5936b4a86b8134f3bfaa9c365`).
+
+**Rollback.** Jordan rolled the Worker back with `wrangler rollback` to `0acfff97-4cf3-4a5e-b279-8fa3a971878a` at 16:03:01Z
+(`evt_1772404122494351b6ec61fba4356e87`). This PR removes the `[placement]` block so that main matches the live Worker again.
+
+**Correction to §6 (the `/api` probe rule).** The rule "roll back if the median `GET /api` probe time after deploy is more than twice the median
+before" measured the owner's laptop path, not the Worker. The medians were 0.193018 s before the deploy, 0.690811 s with placement, and
+0.645650 s after the rollback, so the slowdown did not come from placement. At 16:04Z the laptop's Cloudflare edge was YYZ (SJC at the
+2026-09-30 `wrangler d1 info` read). `/cdn-cgi/trace`, served by the edge without running the Worker, took 0.50–1.01 s, and one `/api` probe timed
+out. That condition was confounded; the rollback stands on the §5 row, which uses times measured inside the Worker. Any future placement or
+latency note should compare edge-only timings (`/cdn-cgi/trace`) against Worker timings, or measure inside the Worker, instead of using a bare
+laptop probe.
+
+**Not established.** Why per-call times rose with placement on. Whether any single request was placed. Whether the rollback to a version also
+cleared the script's placement setting (a Workers API re-read after the rollback answers this).
