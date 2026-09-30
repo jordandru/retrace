@@ -1,8 +1,12 @@
 # Smart Placement for retrace-api — deployment and measurement note
 
-**Status:** v1, 2026-09-30. Author claude-code (coordinator). Class **(a)** under agent-rules 12 (a deploy control), in PR 141 with the
-`[placement]` block it governs. Written on Jordan's go `evt_ad2606acb3a94ad980eb8c0e2d12df93` to answer PR 141 round-1 findings: Codex F1/F2
-(`evt_b0cba5056712470dba2c1eae7a9fdc80`), NOOA M1/M2/L3 (`evt_ee1dd85c75db4be8aabc4d1189136ddd`), Grok G-L1 (`evt_cd66dafed9754ee0bbc500f02a7e4f62`).
+**Status:** v1.1, 2026-09-30. Author claude-code (coordinator). Class **(a)** under agent-rules 12 (a deploy control), in PR 141 with the
+`[placement]` block it governs. v1 was written on Jordan's go `evt_ad2606acb3a94ad980eb8c0e2d12df93` to answer the PR 141 round-1 findings:
+Codex F1/F2 (`evt_b0cba5056712470dba2c1eae7a9fdc80`), NOOA M1/M2/L3 (`evt_ee1dd85c75db4be8aabc4d1189136ddd`) and Grok G-L1
+(`evt_cd66dafed9754ee0bbc500f02a7e4f62`). v1.1 was written on Jordan's go `evt_ca15a87dbe3f408497ced878f773d66f` to answer the round-2 findings:
+Codex F2a/F2b (`evt_8fa2de86955c4056a5619d6a1b376da0`), NOOA L1 (`evt_8afe9adedb5b45cd9779cc80002c4ada`) and Grok G-L2
+(`evt_e005226713654468a3fd34785a576b93`). v1 said each response carries a `cf-placement` header and prescribed a laptop check of it. That was
+wrong: Cloudflare documents the header on the request, and this Worker does not echo it. The error came from a summary of the Cloudflare page.
 Cloudflare source: https://developers.cloudflare.com/workers/configuration/placement/ (read 2026-09-30).
 
 ## 1. What is measured and what is not
@@ -22,49 +26,59 @@ Cloudflare source: https://developers.cloudflare.com/workers/configuration/place
   `*/5 * * * *`) are not placed.
 - It may take **up to 15 minutes** after deploy to analyse; until then the status is absent.
 - Status values (Workers API, `GET /accounts/<id>/workers/services/retrace-api`): absent (not analysed), `SUCCESS`, `INSUFFICIENT_INVOCATIONS`
-  ("not received enough requests from multiple locations"), `UNSUPPORTED_APPLICATION` (placement made it slower).
-- **1 % of requests stay unplaced** as Cloudflare's baseline.
-- Each response carries `cf-placement: remote-<colo>` (placed) or `local-<colo>` (not placed).
-- **It needs consistent traffic from multiple locations.** Nearly all of this Worker's fetch traffic is GitHub's webhooks from one source, plus
-  the owner's laptop and seats. `INSUFFICIENT_INVOCATIONS` is therefore a real outcome, in which case the change is inert (§5).
+  ("not received enough requests from multiple locations"), `UNSUPPORTED_APPLICATION` (placement made it slower). The status is **per deployment**:
+  `SUCCESS` means Cloudflare is placing the Worker. It does not show that any single webhook request was placed.
+- **1 % of requests stay unplaced** as Cloudflare's baseline. Sealed deliveries do not record which requests were placed. Cloudflare's
+  `cf-placement` value is a request header that this Worker neither records nor returns, so it is not used here.
+- **It needs consistent traffic from multiple locations.** Nearly all of this Worker's fetch traffic is GitHub's webhooks, plus the owner's
+  laptop and seats. `INSUFFICIENT_INVOCATIONS` is therefore a real outcome, in which case the change is inert (§5). One sender does not by itself
+  prove one Cloudflare ingress location; the status is what decides.
 
-## 3. Before the deploy (baseline, already on record)
+## 3. Baseline: what is on record, and what the deploy must record
 
-The step-B record is the baseline: 8 of 8 deliveries `unavailable`/`deadline`; per-call stage times in the bands above. Also recorded right before
-the deploy, by the deploy script: five `curl` timings of `GET /api` from the laptop (median ms) and the `cf-placement` header on one of them.
+- **On record now:** the step-B record's 7 deliveries plus seq 9900, 8 of 8 `unavailable`/`deadline`. Over the step-B samples 1–7,
+  `candidates_ms` is 86–118 (median 89) and `consumption_ms` is 75–91 (median 81).
+- **Recorded by the deploy script, before the deploy (a required deploy step, not yet on record):** five sequential probes of each of `GET /api` and
+  `GET /mcp` from the laptop, `curl -s -o /dev/null -w '%{http_code} %{time_total}'`, 1 second apart. Record every code and time, and the median time.
 
 ## 4. After the deploy (Grok seat, measurer, on its own go)
 
 1. Record the deployed Version ID (deploy script output).
-2. **Engagement.** Wait at least 15 minutes. Then, in a typed script under Jordan's Cloudflare login (agent-ops 16), read the placement status
-   from the Workers API, and read `cf-placement` on a laptop request. Record both verbatim. If the status is absent, wait and re-read, up to 60
-   minutes after the deploy.
-3. **Sample.** Once the status is `SUCCESS` (or at 60 minutes, whatever it is), read the next **six** classified deliveries across at least three
-   kinds, raw: `decision.status`, `decision.reason`, `classification_ms`, the whole `timing` block. Deliveries do not record whether they were in
-   the 1 % unplaced baseline; say so rather than guess.
-4. **Report** as a class (b) measurement with the numbers only.
+2. **Engagement.** No sooner than 15 minutes after the deploy, read the placement status from the Workers API in a typed script under Jordan's
+   Cloudflare login (agent-ops 16), and record it verbatim. If it is absent, re-read every 15 minutes up to 60 minutes after the deploy.
+3. **Sample**, taken only after a `SUCCESS` read: the next **six** classified deliveries, across at least three kinds. For each, read raw
+   `decision.status`, `decision.reason`, `classification_ms`, `candidates_ms`, `consumption_ms`, the whole `timing` block, and the GitHub delivery's
+   HTTP status (`gh api repos/jordandru/retrace/hooks/671790737/deliveries`, read-only).
+4. **Probes after:** repeat the §3 laptop probes once the sample is complete.
+5. **Report** as a class (b) measurement with the numbers only, reading them with the §5 table.
 
-## 5. How the result is read
+## 5. How the result is read (labels describe observations; none establishes cause)
 
-| outcome | reading |
-|---|---|
-| Status `SUCCESS`, per-call stage times fall below ~30 ms, and ≥ 5 of 6 deliveries finish without `unavailable`/`deadline` | The budget problem is resolved for now. Placement is the likely cause, but there is no concurrent control: the claim is "after placement engaged, timing changed from the step-B band to X". |
-| Status `SUCCESS`, per-call times fall, deliveries still deadline | Transport was part of it; Part 2 (fewer sequential calls) is still required. |
-| Status `SUCCESS`, per-call times unchanged | The transport hypothesis is not supported; roll back (below) and look at D1 execution time. |
-| `INSUFFICIENT_INVOCATIONS` or still absent at 60 minutes | Placement did not engage and says nothing about the hypothesis. Keep or roll back (it is inert). Next options: explicit targeted placement (`mode = "targeted"` with a region; schema-valid in wrangler 4.123.0) as its own class (a) PR, or Part 2. |
-| `UNSUPPORTED_APPLICATION` | Cloudflare judged placement slower; roll back. |
+**Threshold derivation (NOOA L1).** A classification with six sequential D1 calls fits the 300 ms budget only if the calls average **≤ 50 ms**
+(300 / 6). The step-B band's lower bound is **75 ms**, the smallest single-call stage time sealed (`consumption_ms` 75). The statistic is the
+**median over the six sampled deliveries**, computed separately for `candidates_ms` and for `consumption_ms`, the two stages that make exactly one D1
+call. `amendments_ms` is never read as a per-call time, because that stage makes several calls.
+
+| engagement status | sample | label |
+|---|---|---|
+| `SUCCESS` | both medians ≤ 50 ms and 6 of 6 deliveries not `unavailable`/`deadline` | **Per-call times fell and no delivery in the sample hit the deadline after placement engaged.** Cause is not established (no concurrent control). Part 2 is optional. |
+| `SUCCESS` | both medians ≤ 50 ms and ≥ 1 of 6 `unavailable`/`deadline` | **Per-call times fell; N of 6 deliveries still hit the deadline.** Part 2 is required. |
+| `SUCCESS` | both medians ≥ 75 ms | **No observed change in per-call times.** Roll back (§6). |
+| `SUCCESS` | any other combination | **Inconclusive.** Take one further sample of six. If still inconclusive, report it and Jordan decides. |
+| `INSUFFICIENT_INVOCATIONS`, or absent at 60 minutes | not taken | **Placement did not engage; the hypothesis is untested.** Jordan decides whether to keep it (inert) or roll it back. Next options: explicit targeted placement (`mode = "targeted"` with a region, schema-valid in wrangler 4.123.0) as its own class (a) PR, or Part 2. |
+| `UNSUPPORTED_APPLICATION` | not taken | **Cloudflare judged placement slower.** Roll back. |
 
 **Attribution limit, stated (NOOA M2).** A canary or statistical control is not practical at this traffic, a few classified deliveries an hour
-from one sender. The comparison is before/after against the step-B record, with placement status and the per-call timing as the evidence.
+from one sender. The comparison is before/after against the step-B record, with the placement status and the two medians as the evidence.
 
 ## 6. Regression and rollback
 
-Roll back if any of these holds after engagement:
-- per-call stage times do not fall below the step-B band;
-- the laptop median for `GET /api` more than doubles against the baseline in §3, or `/mcp` stops answering;
-- any webhook delivery returns 5xx (GitHub's delivery log or Workers Logs);
-- the status is `UNSUPPORTED_APPLICATION`.
+Roll back if any of these holds:
+- a §5 row says roll back;
+- the median `GET /api` probe time after deploy is more than twice the median before;
+- any `GET /mcp` probe returns a different HTTP status code from the one recorded before the deploy;
+- any GitHub delivery in the sample shows a 5xx status.
 
 **Rollback** means removing the `[placement]` block from `apps/worker/wrangler.toml` and **deploying**. Editing the file alone changes nothing
-live. Both the change (a PR) and the deploy wait for Jordan's go (agent-rules 14). Nothing to restore: no binding, secret or data depends on
-placement.
+live. Both the change (a PR) and the deploy wait for Jordan's go (agent-rules 14). Nothing needs restoring: no binding, secret or data depends
+on placement.
