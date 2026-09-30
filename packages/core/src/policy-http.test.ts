@@ -422,7 +422,7 @@ test("F10: pending-delivery routing is insert-once; redelivery reuses the stored
     action: "opened", repository: { full_name: "acme/envb" }, sender: { login: "j" },
     pull_request: { number: 1, title: "t", html_url: "https://x", updated_at: "2026-08-30T00:00:00Z", head: { sha: "abc", ref: "f" }, base: { ref: "main" } },
   });
-  store.pending.push({
+  store.pending.push({ gh_event: "push",
     delivery_id: "d-pin", project: "pinned-a", raw_body: payload, received_at: "2026-09-01T00:00:00.000Z",
     repo: "acme/envb", routing_source: "env", routing_state: "pending_policy",
   });

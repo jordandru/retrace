@@ -15,6 +15,7 @@ import {
 import { canonicalize, sha256Hex } from "./chain.js";
 import {
   CommitActorResolution, resolveCommitActor, validCausedById,
+  type ModelClaimCompleteness,
 } from "./commit-actor.js";
 import {
   actorKey, captureSealEligible, captureSeals, firstStampedSeq, generatesArtifact, previousCaptureTouch, sameArtifact,
@@ -37,6 +38,12 @@ import {
 
 export const CLASSIFIER_PROFILE = "trailer-consistency/1";
 export const CLASSIFY_DEADLINE_MS = 500;
+/** Owner-login classification budget. 300 until 2026-09-30; raised to 1000 because the live Worker's single-call D1 stages seal
+ *  73-118 ms each and a classification makes six sequential calls (docs/design/github-owner-login-attribution.md §3.5, correction
+ *  2026-09-30). The classifier's deadline is min(now + this, the delivery deadline), so it is clamped to what remains of
+ *  WEBHOOK_DELIVERY_DEADLINE_MS (router.ts). That is not a total HTTP/D1 timeout: the delivery timer starts after routing, the
+ *  pending insert is awaited outside it, and an in-flight write may finish later (recovered idempotently). */
+export const OWNER_LOGIN_DEADLINE_MS = 1_000;
 export const CLASSIFY_ROW_CAP = ARTIFACT_INDEX_DEFAULT_ROW_CAP;
 export const BREAKER_CONSECUTIVE_FAILURES = 3;
 export const BREAKER_WINDOW_MS = 5 * 60 * 1000;
@@ -89,6 +96,8 @@ export interface ClaimRecord {
   id: string;
   source: ClaimSource;
   model?: string;
+  /** Completeness of model trailers. Never a selector for supported/conflicting/unresolved. */
+  model_claim: ModelClaimCompleteness;
   raw_trailers: { "retrace-actor"?: string; "co-authored-by"?: string[] };
 }
 
@@ -249,6 +258,7 @@ export function deriveCommitClaim(input: EventInput): {
       id: actor.id,
       source,
       ...(actor.model ? { model: actor.model } : {}),
+      model_claim: resolved.modelClaim,
       raw_trailers: rawTrailersOf(resolved.trailers),
     },
     submittedDiffers,

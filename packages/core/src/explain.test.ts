@@ -95,3 +95,22 @@ test("renderTimeline / renderWhyChain: each event is one line; chain indent does
   assert.equal(why.split("\n").length, 2);
   assert.match(why, /↳ because #1 /);
 });
+
+test("T1 T4 T12 owner-login displays are untrusted declaration labels, including the UI badge", async () => {
+  const { MemoryEventStore, classifyOwnerLogin, ownerLoginRecord, ownerLoginDisplay, eventForModel, describeEvent } = await import("./index.js");
+  const { ownerLoginScenario } = await import("./owner-login-fixture.js");
+  const { readFileSync } = await import("node:fs");
+  const store = new MemoryEventStore(), f = await ownerLoginScenario(store);
+  const classified = await classifyOwnerLogin({ store, input: f.input, policy: f.policy, canonicalR: f.repo, readHead: (await store.head(f.project))!, deadline: Date.now()+1000 });
+  assert.equal(classified.kind, "decision"); if (classified.kind !== "decision") return;
+  const e = { ...f.declaration, ...classified.input } as import("./schema.js").Event;
+  assert.match(describeEvent(e), /declared by codex.*not identity-verified/);
+  assert.match(eventForModel(e).owner_login_display!, /^«.*not identity-verified»$/);
+  const html = readFileSync(new URL("../ui/retrace.html", import.meta.url), "utf8");
+  const fn = html.match(/const ownerLoginDisplay = \(e\) => \{([\s\S]*?)\n  \};/)![1];
+  const uiDisplay = new Function("e", fn);
+  for (const status of ["declared_by_seat", "conflicting", "unresolved", "unavailable", "identity_mapped"] as const) {
+    ownerLoginRecord(e)!.decision.status = status;
+    assert.equal(uiDisplay(e), ownerLoginDisplay(e));
+  }
+});

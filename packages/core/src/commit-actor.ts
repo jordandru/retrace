@@ -3,7 +3,7 @@
  * producers derive the SAME actor from the same bytes; a disagreement between them then means the commit was rewritten
  * after the hook ran, or one producer's event was forged — never a difference of parsers (reconciliation phase B).
  */
-import { EventInput } from "./schema.js";
+import { EventInput, ModelSource } from "./schema.js";
 
 const AGENT_COAUTHOR = /claude|copilot|codex|cursor|devin|aider|gpt|gemini|grok|\[bot\]/i;
 /** Agent families a Co-Authored-By name is mapped onto (first match wins) — the actor id (backlog #12). */
@@ -75,15 +75,53 @@ export function coauthorActor(coauthor: string, ae: string): EventInput["actor"]
 }
 
 
+/** Model-trailer completeness (§4.3). Separate from contribution classification. */
+export type ModelClaimCompleteness = "complete" | "source-missing" | "none" | "absent" | "inconsistent";
+
 export interface CommitActorResolution {
   actor: EventInput["actor"];
   claimSource: "retrace-actor" | "co-authored-by" | "bot-author" | "human-author" | "malformed";
+  /** Completeness of Retrace-Model / Retrace-Model-Source (Decision A/B). */
+  modelClaim: ModelClaimCompleteness;
   /** valid Retrace-Caused-By trailer, if any */
   causedBy?: string;
   trailers: Record<string, string[]>;
   /** subject + body with the trailer paragraphs removed */
   intent: string;
   isMerge: boolean;
+}
+
+function modelPresent(model: string | undefined): boolean {
+  return model !== undefined && model !== "";
+}
+
+/**
+ * Apply Retrace-Model-Source beside Retrace-Model / a Co-Authored-By-derived model.
+ * Consistent pair → set actor.model_source. Inconsistent pair (Decision A) → omit model_source, never 400.
+ * Co-Authored-By with no source trailer (Decision B) → no model_source, completeness source-missing or absent.
+ */
+function applyModelSourceTrailers(
+  actor: EventInput["actor"],
+  trailers: Record<string, string[]>,
+): { actor: EventInput["actor"]; modelClaim: ModelClaimCompleteness } {
+  const rawSource = trailers["retrace-model-source"]?.[0];
+  const hasSourceTrailer = rawSource !== undefined;
+  const parsed = hasSourceTrailer ? ModelSource.safeParse(rawSource) : undefined;
+  const validSource = parsed?.success ? parsed.data : undefined;
+  const hasModel = modelPresent(actor.model);
+
+  if (hasSourceTrailer && validSource === undefined) {
+    return { actor, modelClaim: "inconsistent" };
+  }
+  if (!hasSourceTrailer) {
+    return { actor, modelClaim: hasModel ? "source-missing" : "absent" };
+  }
+  if (validSource === "none") {
+    if (hasModel) return { actor, modelClaim: "inconsistent" };
+    return { actor: { ...actor, model_source: "none" }, modelClaim: "none" };
+  }
+  if (!hasModel) return { actor, modelClaim: "inconsistent" };
+  return { actor: { ...actor, model_source: validSource }, modelClaim: "complete" };
 }
 
 /** Same precedence as the hook: Retrace-Actor trailer → agent Co-Authored-By → [bot] author → human author. */
@@ -114,6 +152,7 @@ export function resolveCommitActor(input: { message: string; authorName?: string
       : agentCo ? "co-authored-by"
       : isBot ? "bot-author"
       : "human-author";
+  const withSource = applyModelSourceTrailers(actor, trailers);
   const cleanBody = stripTrailers(body, trailerText.length);
-  return { actor, claimSource, causedBy: validCausedById(trailers["retrace-caused-by"]?.[0]), trailers, intent: cleanBody ? `${subject}\n\n${cleanBody}` : subject, isMerge: (input.parents?.length ?? 0) > 1 };
+  return { actor: withSource.actor, claimSource, modelClaim: withSource.modelClaim, causedBy: validCausedById(trailers["retrace-caused-by"]?.[0]), trailers, intent: cleanBody ? `${subject}\n\n${cleanBody}` : subject, isMerge: (input.parents?.length ?? 0) > 1 };
 }

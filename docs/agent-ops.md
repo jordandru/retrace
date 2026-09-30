@@ -101,6 +101,90 @@ The provenance rules themselves are `docs/agent-rules.md`.
     (assessment priority 3). The design must answer: where they live (a D1 table or KV), what the
     Worker holds at runtime (hashed tokens only, never plaintext), and who may mint (self-serve per
     seat, or still owner-only). Until those three are answered this line is a direction, not a plan.
+16. **Terminal boundary.** A step in which a secret *value* is in play — minting, retiring or listing
+    credentials with `retrace-admin`, `wrangler secret put` / `wrangler login`, filling or editing the auditor
+    host's secret files, handling producer key files, rotating the owner token, shredding secret material —
+    runs in a plain non-admin Ubuntu (WSL) terminal **outside Orca**, as a script the coordinator wrote to disk
+    (`~/.retrace/<dir>/stepN-<what>.sh`, `chmod 700`, `read -p` gate before any outward change) that Jordan
+    types by hand (`bash ~/stepN.sh`). The script prints record names, counts, byte sizes, sha256 prefixes,
+    OK/FAILED and exit codes only; values pass through stdin or the environment, never argv, and are never printed.
+    Everything else — build, test, git, review, ledger reads, review runs on the host, coordination — stays in Orca panes.
+    Never hand Jordan a fenced code block to paste into a terminal: in the 2026-09-21T02:28Z incident (2026-09-20
+    evening MDT, evt_6bfe5f18) bash read the triple backticks of the pasted fences as command substitutions, each
+    opened a nested shell, and each fenced body ran on `exit` — a `wrangler secret put` and a `shred` ran
+    unintended. A three-line test fence was measured on a second machine on 2026-09-22 (foot on Omarchy, bracketed
+    paste on; prediction evt_80150188, result evt_ff7cbf84, `docs/measurements/omarchy-trial-2026-09-21.md` F1): inert
+    on paste, its body ran on Enter. So whether and when a pasted fence runs can depend on the receiving terminal,
+    which the sender does not control and cannot know from the message alone; the rule covers every terminal,
+    including one where a paste looks harmless. After any
+    rotation every open pane is stale until restarted; check a pane with
+    `printf '%s' "$RETRACE_TOKEN" | sha256sum | cut -c1-12` (the value goes into the pipe; only a twelve-character
+    hash prefix is printed) before running anything in it. The sinks this guards: agent transcripts capture pane
+    output (owner token leaked 2026-09-16, evt_c21df545); a pane's environment keeps a rotated-away token; the
+    clipboard executes.
+    → unnecessary when [direction]: 13 retires the Retrace-credential half (credentials out of process env and
+    out of the Worker secret, so no token ever passes through a shell); the other half — ssh keys, the auditor
+    host's secret files, `wrangler login` — retires only when harness transcripts redact secret-shaped strings
+    at write time, a vendor change. Until both, some part of this rule stands.
+17. **Docker is root.** Two routes reach Docker Desktop's engine from this account without a password. The Linux
+    socket: this distro's WSL integration is on (Jordan enabled it 2026-09-21 for the Omarchy trial,
+    evt_d387fa54) and `jordandrumiler` is in the `docker` group (`/var/run/docker.sock` is `root:docker`, 0660), a
+    group the Omarchy manual calls "effectively passwordless root". And the Windows CLI: `docker.exe` is on the
+    Windows PATH (evt_d387fa54), WSL interop lets any process here launch it, and Docker documents it reaching the
+    same engine without distro integration (a documented route, not tested here). Whenever the engine runs, every
+    process in this account, each agent pane, MCP server and hook included, can start a root container that
+    bind-mounts `~/.retrace`, `~/.ssh` or the files that hold the owner token and reads them whatever their mode;
+    a container handed this shell's `RETRACE_*` environment holds the owner token, which may append events to the
+    live ledger under any actor (`packages/core/src/router.ts`: an owner write keeps the actor as sent, stamped
+    `sealed_by` owner); `docker inspect` without `--format` prints a container's environment into the transcript;
+    and a container with a restart policy comes back whenever Docker Desktop starts. The NemoClaw sandbox did on
+    2026-09-21, its OpenClaw configuration recorded as holding
+    the retired shared token the laptop had already shredded (evt_e660b499; stopped on Jordan's go, evt_0f756347).
+    That is a fourth credential sink beside the three rule 16 names. So: Docker Desktop runs only while a
+    container task Jordan approved is in progress, and stays quit otherwise. The only `docker` or `docker.exe`
+    commands an agent runs without a go are three reads: `docker version`; `docker ps` with a `--format` naming
+    only `.Names`, `.Status` and `.Image`; and `docker inspect --format` naming only `.Name`, `.State.Status`,
+    `.HostConfig.RestartPolicy.Name`, `len .Mounts` and `len .HostConfig.Binds`. Every other `docker` or
+    `docker.exe` command needs a signed go naming the exact command and its arguments: `run`, `create`, `start`,
+    `exec`, `cp`, `logs`, `update`, `stop`, `rm`, `compose`, `inspect` without `--format`, and `inspect --format`
+    naming any field outside that list (`.Config` holds the environment, command and labels). Any of them that
+    passes a secret in the environment, mounts a credential file or writes to the ledger must also satisfy rules
+    13 and 16. A container's only bind mount is a scratch directory created for that
+    task, named in the go and holding nothing secret: never an ancestor of it (`/`, `/home`, `$HOME`, `/mnt`,
+    `/mnt/c`) and never a path that resolves, through a symlink or alias, into `~/.retrace`, `~/.ssh`, a shell
+    startup file or a repository checkout. Before the container starts, the agent runs `realpath` on each mount
+    source and on every symlink inside the directory it resolves to
+    (`find "$(realpath <source>)" -type l -exec realpath {} +`) and confirms that none resolves to or under
+    `~/.retrace`, `~/.ssh`, a shell startup file or a repository checkout. The hazard paragraph above says what a
+    container *can* do from this account; none of it is permitted. A container never
+    runs `--privileged`, with the Docker socket or with host namespaces; never receives `RETRACE_*` or any other
+    secret in its environment; uses images pinned by digest; and runs with `--rm` or restart policy `no`.
+    → unnecessary when [specific]: no Docker engine endpoint answers this account without a password, shown from
+    a pane running as `jordandrumiler` (the account every seat runs under) while Docker Desktop runs, endpoint by
+    endpoint, with each command naming its endpoint instead of relying on the selected context. The Linux socket:
+    `docker -H unix:///var/run/docker.sock version` fails with
+    permission denied or no such socket (this distro's WSL integration off and `jordandrumiler` out of the `docker`
+    group, Omarchy's own default). The Windows named pipe: `docker.exe -H npipe:////./pipe/docker_engine version`
+    is refused. Interop being disabled for this distro is not a substitute for that refusal: `[interop] enabled=false`
+    in `/etc/wsl.conf` takes effect only after the distro is fully restarted, and the state of the `WSLInterop`
+    binfmt entry shows only whether Windows executables dispatch automatically, not whether `/init` can still reach
+    a running interop server (Codex, `evt_1880ccc39ed5411b8d229afec6bc1fb3`, from Microsoft's WSL sources), so
+    neither setting is evidence that `docker.exe` cannot be launched. Any TCP endpoint:
+    Docker Desktop's "Expose daemon on tcp://localhost:2375" is off and `docker -H tcp://localhost:2375 version`
+    is refused. Every other endpoint named by `docker context ls`, `docker.exe context ls`, `DOCKER_HOST` or
+    `DOCKER_CONTEXT` is checked the same way. An error about an unrelated endpoint, a missing client or a
+    configuration problem proves nothing. These checks are the evidence the condition requires, not a proof of it:
+    an endpoint found later that they miss means the condition was never met. Until that evidence exists, every
+    guard above stands.
+    *Correction, 2026-09-23 (source: NOOA's round-6 verdict on #105, `evt_eeeadc50359d4b60af073adc2dc765bc`,
+    findings 4 and 5, recorded as not applied at the merge in the gate check `evt_6dbc7701d5f449f5a9a0321cfeceb037`;
+    applied on Jordan's signed go `evt_a8c1272ccbdc4b1fa58dcff0a548e1f2`; the form of the first change set by
+    Codex's review `evt_1880ccc39ed5411b8d229afec6bc1fb3`): the retirement condition's Windows named-pipe check
+    read "is refused, or `docker.exe` cannot be launched because interop is disabled for this distro". NOOA found
+    that the alternative named no check; a first draft named the binfmt entry and the `/etc/wsl.conf` setting, and
+    Codex showed that neither proves interop is off in the running distro. The alternative is removed: that route
+    retires only on the direct refusal, which is stricter than the merged text. A transition sentence now separates
+    the hazard description from the container guards. No guard or command list changed.*
 ## Coordination
 
 14. One coordinator at a time dispatches builders and merges. Other seats' task boards are their own
@@ -115,6 +199,58 @@ The provenance rules themselves are `docs/agent-rules.md`.
     agent-rules 11 — not an environment rule.)
     → unnecessary when [direction]: Orca's `terminal create` inherits the worktree's approval policy, and the
     routing skill launches reviewers itself with the routed model id.
+
+18. **Signed pane messages — the mechanics of agent-rules 15.** (Added 2026-09-24, same sources as agent-rules 15; Codex round-2 F4 `evt_8ad99634…` applied here too.)
+    The channel is `orca-ide terminal send --terminal <handle> --text <text> --enter`. Order of operations, because the
+    event must exist before its id can be appended: write the enveloped text (`SEAT … SEAT`) to disk, hash it, log the
+    `sent` event with that hash, the target handle and `enter_pressed_by`, then send the text with ` [sent-event <id>]`
+    appended. **Serialization** (NOOA round 1, `evt_69673ea1…`): the hashed text is the exact UTF-8 bytes of the file
+    as written — one line, no trailing whitespace, no terminal newline, the `SEAT` markers at the start and end of that
+    line — and the ` [sent-event <id>]` suffix (a single space, then the bracketed id) is appended only when sending; a
+    verifier removes exactly that final suffix and hashes the remaining bytes unchanged. Markers are not put on their
+    own lines: a multi-line paste is what Cursor folds (below). **Verification route:** `GET /events/<id>` on
+    the Worker with the seat's own credential returns the raw sealed event (`actor.id`, `method.params.sealed_by`,
+    `producer_sig_verdict`, `text_sha256`, `brief_sha256` — the seal and the verdict are what tie the seat name to its
+    pinned credential; an owner-relayed or asserted event carries the same shape with `sealed_by: owner` and verdict
+    `none` and is a refusal); the model-facing `retrace_why` / `retrace_history` views omit ids and hashes
+    by design (`packages/core/src/explain.ts`) and cannot verify a message. A `curl` with the credential in the
+    `Authorization` header from the environment — never on the command line, never printed — is the check today.
+    Read the pane before sending (a trust prompt or an update prompt takes a keystroke, not a message; that keystroke
+    is logged, not enveloped). **Keep the pane message short and on one line — at most 240 bytes including the envelope
+    and the suffix** — of the form `SEAT <verb and object> — brief <path> sha256 <first 12 hex> — routing <id> SEAT
+    [sent-event <id>]`, with everything else in the brief on disk whose hash the `sent` event records. Reason, measured
+    2026-09-24 (`evt_7b1b2a4fb7544709adc7f0c5ed7656bf`, probe series `evt_8d7ab8ec…` and `evt_452744b9…`): Cursor's TUI folds a pasted
+    input that wraps past a few visual lines into "[Pasted text #N +M lines]" — 850 bytes folded and 750 did not in a
+    200-column pane, and a 758-byte pointer folded in the owner's narrower pane — so the human watching sees neither the
+    message nor the envelope; the receiving agent still gets every byte (it verified 841 bytes it never displayed). The
+    envelope exists for the reader, so the message must render unfolded in the harness that folds soonest. Codex's TUI
+    showed every pointer in full. Never send into a human's pane; never press Enter for a human (2026-09-20,
+    `evt_2e3cdae1295b40c48ee70cdb7cbf57ed`). NOOA is not a pane: its dispatch is `push-and-launch.sh`, whose
+    `sent` event records the packet, wrapper and launcher hashes the host echoed back, and its verdict is
+    producer-signed under its own key — that pair is its signature. A brief on disk that a pointer names is part of
+    the message: the `sent` event records the brief's sha256 too, and the receiver states the hash it read.
+    Since the Orca restart of 2026-09-24 the CLI prints a crash-reporter line on stderr before its JSON; parse stdout
+    only.
+    → unnecessary when [direction]: a `retrace-send` helper does (b) and (c) of agent-rules 15 itself — logs, hashes,
+    envelopes and sends in one step, and refuses a target that is a human's pane — and a narrow `retrace_verify_send`
+    tool exposes exactly the six fields a receiver checks, so no seat composes the signature by hand or curls the
+    Worker; the envelope stays, because it is for the reader, not the machine.
+
+19. **Declare every `gh` write before you run it.** `gh` authenticates as the repository owner for every seat (agent-rules
+11), so the GitHub webhook cannot see which seat acted; until per-seat GitHub identities exist
+(`docs/design/github-owner-login-attribution.md` §6 step 5) the seat's own pinned event is the only evidence. Before a
+`gh pr comment`, `gh pr review`, `gh pr create`, `gh pr edit`, `gh pr merge` or a push to a pull-request branch, log one
+event under your own credential with the pull request as an artifact and `method.params.github_action` — `kind`, `repo`,
+`login`, and the content the kind needs: the sha256 of the body file (normalised: UTF-8, `\r\n`→`\n`, trailing
+whitespace and trailing newlines removed), the full sha you will push, or the merge commit you will land. Then run the
+command; afterwards you may log the outcome (`executed`, `github_action.result` with the review or comment id). A `gh`
+write with no declaration seals as the GitHub account with `status: unresolved`, and that is the record of the
+omission. Never declare content you did not write and will not post yourself. **Never push to the pull request between
+a review declaration and its post**: GitHub attaches the review to the head at post time, and a declaration for the
+earlier commit no longer matches (measured on PR 130, `evt_1d10e43e…`); declare after the push, or re-declare.
+→ unnecessary when [specific] (agent-ops' standing form: every environment rule names the product change that retires
+it; the rule binds until that change is measured, not before): every seat runs `gh` under its own GitHub App identity listed in the project policy's
+`github.identities` (step 5), and the owner's login is no longer in `github.shared_logins` (step 6).
 
 ## Build order (Grok's read, PR 40, evt_1626b03aea8d4911ae1c7523c94903d9)
 

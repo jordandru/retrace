@@ -13,7 +13,7 @@ import { SqliteStore } from "./sqlite-store.js";
  *  may run inside an Orca pane, which exports ORCA_*. Left inherited, the session/ide assertions would pass on this
  *  machine and fail in CI (or vice versa). */
 const withActorEnv = async (vars: Record<string, string | undefined>, fn: () => Promise<void>) => {
-  const keys = ["RETRACE_ACTOR", "RETRACE_ACTOR_MODEL", "RETRACE_ON_BEHALF_OF", "RETRACE_ACTOR_LOCK", "RETRACE_SYSTEM", "RETRACE_ENVIRONMENT", "RETRACE_ENV", "RETRACE_SESSION",
+  const keys = ["RETRACE_ACTOR", "RETRACE_ACTOR_MODEL", "RETRACE_ACTOR_MODEL_SOURCE", "RETRACE_ON_BEHALF_OF", "RETRACE_ACTOR_LOCK", "RETRACE_SYSTEM", "RETRACE_ENVIRONMENT", "RETRACE_ENV", "RETRACE_SESSION",
     "RETRACE_DEVICE", "RETRACE_IDE", "RETRACE_WORKSPACE", "CLAUDE_CODE_SESSION_ID", "GROK_SESSION_ID", "ORCA_PANE_KEY", "ORCA_TAB_ID", "ORCA_WORKTREE_ID", "ORCA_TERMINAL_HANDLE",
     "RETRACE_PRODUCER_KEY", "RETRACE_PRODUCER_KEY_FILE"];
   const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
@@ -279,7 +279,7 @@ test("actor lock: agent-branch id/on_behalf_of/model come from env, not the call
   })) as any;
   assert.notEqual(ok.isError, true);
   const [evt] = await store.all("default");
-  assert.deepEqual(evt.actor, { type: "agent", id: "claude-code", model: "claude-fable-5", on_behalf_of: "jordan@example.com", display_name: "Cowork", version: "1.2" });
+  assert.deepEqual(evt.actor, { type: "agent", id: "claude-code", model: "claude-fable-5", on_behalf_of: "jordan@example.com", display_name: "Cowork", version: "1.2", model_source: "harness-config", model_claims: [{ value: "gpt-x", note: "displaced by harness-config model" }] });
 }));
 
 test("actor lock: an unpinned agent may report its runtime model without overriding identity", async () => withActorEnv({ RETRACE_ACTOR: "gemini", RETRACE_ON_BEHALF_OF: "jordan@example.com" }, async () => {
@@ -292,6 +292,39 @@ test("actor lock: an unpinned agent may report its runtime model without overrid
   assert.notEqual(ok.isError, true);
   const [evt] = await store.all("default");
   assert.deepEqual(evt.actor, { type: "agent", id: "gemini", model: "gemini-2.5-pro", on_behalf_of: "jordan@example.com" });
+}));
+
+test("actor lock: a pinned RETRACE_ACTOR_MODEL displaces a differing caller model onto actor.model_claims", async () => withActorEnv(ENV, async () => {
+  const store = new SqliteStore(":memory:");
+  const client = await connect(store);
+  const ok = (await client.callTool({
+    name: "retrace_log",
+    arguments: { action: "edited", actor: { model: "gpt-x", model_source: "harness-runtime" }, artifacts: [{ id: "repo:rpg#a.ts", kind: "file" }] },
+  })) as any;
+  assert.notEqual(ok.isError, true);
+  const [evt] = await store.all("default");
+  assert.equal(evt.actor.model, "claude-fable-5");
+  assert.equal(evt.actor.model_source, "harness-config");
+  assert.deepEqual(evt.actor.model_claims, [{ value: "gpt-x", source: "harness-runtime", note: "displaced by harness-config model" }]);
+}));
+
+test("actor lock: an unpinned agent passes through model, model_source and model_claims as sent", async () => withActorEnv({ RETRACE_ACTOR: "gemini", RETRACE_ON_BEHALF_OF: "jordan@example.com" }, async () => {
+  const store = new SqliteStore(":memory:");
+  const client = await connect(store);
+  const ok = (await client.callTool({
+    name: "retrace_log",
+    arguments: {
+      action: "edited",
+      actor: { model: "gemini-2.5-pro", model_source: "harness-runtime", model_claims: [{ value: "self", source: "self-report" }] },
+      artifacts: [{ id: "repo:rpg#a.ts", kind: "file" }],
+    },
+  })) as any;
+  assert.notEqual(ok.isError, true);
+  const [evt] = await store.all("default");
+  assert.equal(evt.actor.id, "gemini");
+  assert.equal(evt.actor.model, "gemini-2.5-pro");
+  assert.equal(evt.actor.model_source, "harness-runtime");
+  assert.deepEqual(evt.actor.model_claims, [{ value: "self", source: "self-report" }]);
 }));
 
 test("actor lock: retrace_instruct only attributes to RETRACE_ON_BEHALF_OF", async () => withActorEnv(ENV, async () => {
@@ -329,9 +362,132 @@ test("actor lock: RETRACE_ACTOR_LOCK=0 restores caller overrides for both tools"
   const evts = await store.all("default");
   assert.deepEqual(evts.map((e) => e.actor), [
     { type: "human", id: "someone@example.com" },
-    { type: "agent", id: "claude-cowork", model: "claude-fable-5", on_behalf_of: "other@example.com" },
+    { type: "agent", id: "claude-cowork", model: "claude-fable-5", model_source: "harness-config", on_behalf_of: "other@example.com" },
     { type: "human", id: "other@example.com" },
   ]);
+}));
+
+test("actor lock: retrace_log rejects an inconsistent caller model_source before any write", async () => withActorEnv(ENV, async () => {
+  const store = new SqliteStore(":memory:");
+  const client = await connect(store);
+  for (const actor of [
+    { model_source: "harness-runtime" },
+    { model: "caller", model_source: "none" },
+  ]) {
+    const bad = (await client.callTool({
+      name: "retrace_log",
+      arguments: { action: "edited", actor, artifacts: [{ id: "repo:rpg#a.ts", kind: "file" }] },
+    })) as any;
+    assert.equal(bad.isError, true, JSON.stringify(actor));
+  }
+  assert.deepEqual(await store.projects(), []);
+  const modelOnly = (await client.callTool({
+    name: "retrace_log",
+    arguments: { action: "edited", actor: { model: "caller" }, artifacts: [{ id: "repo:rpg#a.ts", kind: "file" }] },
+  })) as any;
+  assert.notEqual(modelOnly.isError, true);
+  const neither = (await client.callTool({
+    name: "retrace_log",
+    arguments: { action: "edited", artifacts: [{ id: "repo:rpg#b.ts", kind: "file" }] },
+  })) as any;
+  assert.notEqual(neither.isError, true);
+  assert.equal((await store.all("default")).length, 2);
+}));
+
+test("actor lock off: a caller model override does not inherit harness-config from RETRACE_ACTOR_MODEL", async () => withActorEnv({ ...ENV, RETRACE_ACTOR_LOCK: "0" }, async () => {
+  const store = new SqliteStore(":memory:");
+  const client = await connect(store);
+  const ok = (await client.callTool({
+    name: "retrace_log",
+    arguments: { action: "edited", actor: { model: "caller" }, artifacts: [{ id: "repo:rpg#a.ts", kind: "file" }] },
+  })) as any;
+  assert.notEqual(ok.isError, true);
+  const [evt] = await store.all("default");
+  assert.equal(evt.actor.model, "caller");
+  assert.equal(evt.actor.model_source, undefined);
+  assert.equal(evt.actor.id, "claude-code");
+}));
+
+test("actor lock off: an explicit none is kept when RETRACE_ACTOR_MODEL is unset", async () => withActorEnv({ RETRACE_ACTOR: "gemini", RETRACE_ON_BEHALF_OF: "jordan@example.com", RETRACE_ACTOR_LOCK: "0" }, async () => {
+  const store = new SqliteStore(":memory:");
+  const client = await connect(store);
+  const ok = (await client.callTool({
+    name: "retrace_log",
+    arguments: { action: "edited", actor: { model_source: "none" }, artifacts: [{ id: "repo:rpg#a.ts", kind: "file" }] },
+  })) as any;
+  assert.notEqual(ok.isError, true);
+  const [evt] = await store.all("default");
+  assert.equal(evt.actor.model, undefined);
+  assert.equal(evt.actor.model_source, "none");
+  assert.equal(evt.actor.id, "gemini");
+}));
+
+test("actor lock: an empty legacy caller model is not displaced onto actor.model_claims", async () => withActorEnv(ENV, async () => {
+  const store = new SqliteStore(":memory:");
+  const client = await connect(store);
+  const ok = (await client.callTool({
+    name: "retrace_log",
+    arguments: { action: "edited", actor: { model: "" }, artifacts: [{ id: "repo:rpg#a.ts", kind: "file" }] },
+  })) as any;
+  assert.notEqual(ok.isError, true);
+  const [evt] = await store.all("default");
+  assert.equal(evt.actor.model, "claude-fable-5");
+  assert.equal(evt.actor.model_source, "harness-config");
+  assert.equal(evt.actor.model_claims, undefined);
+}));
+
+test("F1: empty RETRACE_ACTOR_MODEL with lock off seals a log without actor and a log with model_source none", async () => withActorEnv({
+  RETRACE_ACTOR: "claude-code",
+  RETRACE_ACTOR_MODEL: "",
+  RETRACE_ON_BEHALF_OF: "jordan@example.com",
+  RETRACE_ACTOR_LOCK: "0",
+}, async () => {
+  const store = new SqliteStore(":memory:");
+  const client = await connect(store);
+  const none = (await client.callTool({
+    name: "retrace_log",
+    arguments: { action: "edited", actor: { model_source: "none" }, artifacts: [{ id: "repo:rpg#a.ts", kind: "file" }] },
+  })) as any;
+  assert.notEqual(none.isError, true, none.content?.[0]?.text);
+  const bare = (await client.callTool({
+    name: "retrace_log",
+    arguments: { action: "edited", artifacts: [{ id: "repo:rpg#b.ts", kind: "file" }] },
+  })) as any;
+  assert.notEqual(bare.isError, true, bare.content?.[0]?.text);
+  const events = await store.all("default");
+  assert.equal(events.length, 2);
+  assert.equal(events[0].actor.model, undefined);
+  assert.equal(events[0].actor.model_source, "none");
+  assert.equal(events[1].actor.model, undefined);
+  assert.equal(events[1].actor.model_source, undefined);
+}));
+
+test("RETRACE_ACTOR_MODEL_SOURCE: valid source stamps the configured model", async () => withActorEnv({ ...ENV, RETRACE_ACTOR_MODEL_SOURCE: "harness-runtime" }, async () => {
+  const store = new SqliteStore(":memory:");
+  const client = await connect(store);
+  const ok = (await client.callTool({
+    name: "retrace_log",
+    arguments: { action: "edited", artifacts: [{ id: "repo:rpg#a.ts", kind: "file" }] },
+  })) as any;
+  assert.notEqual(ok.isError, true);
+  const [evt] = await store.all("default");
+  assert.equal(evt.actor.model, "claude-fable-5");
+  assert.equal(evt.actor.model_source, "harness-runtime");
+}));
+
+test("RETRACE_ACTOR_MODEL_SOURCE: invalid value is a startup error", async () => withActorEnv({ ...ENV, RETRACE_ACTOR_MODEL_SOURCE: "made-up" }, async () => {
+  const store = new SqliteStore(":memory:");
+  assert.throws(() => buildServer(store), /RETRACE_ACTOR_MODEL_SOURCE "made-up" is not a valid model source/);
+}));
+
+test("RETRACE_ACTOR_MODEL_SOURCE: none with a configured model is a startup error", async () => withActorEnv({ ...ENV, RETRACE_ACTOR_MODEL_SOURCE: "none" }, async () => {
+  const store = new SqliteStore(":memory:");
+  assert.throws(() => buildServer(store), /RETRACE_ACTOR_MODEL_SOURCE is "none" but RETRACE_ACTOR_MODEL is set/);
+}));
+
+test("RETRACE_ACTOR_MODEL_SOURCE: any value without a configured model is a startup error", async () => withActorEnv({ RETRACE_ACTOR: "claude-code", RETRACE_ACTOR_MODEL_SOURCE: "harness-runtime" }, async () => {
+  const store = new SqliteStore(":memory:");
+  assert.throws(() => buildServer(store), /RETRACE_ACTOR_MODEL_SOURCE is "harness-runtime" but RETRACE_ACTOR_MODEL is unset/);
 }));
 
 // ---- PROV artifact role (used / generated) on the MCP write path ----

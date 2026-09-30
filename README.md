@@ -2,14 +2,14 @@
 
 **A flight recorder for AI coding agents.** Every event records **who** (person or agent, server-stamped) did **what**, **when**, **where**, **why** — a `caused_by` chain back to the human instruction — and **how**, sealed in a tamper-evident hash chain that anyone can verify offline.
 
-It exists because a commit in this repo named the wrong AI agent as its author. Six agents share one checkout; Claude Code left ~300 lines uncommitted, Codex was told "re-integrate" and committed them under its own name, and `git blame` had no way to know. Retrace's ledger did — see example 1 below. Every commit of building this tool is in its own public ledger.
+It exists because a commit in this repo named the wrong AI agent as its author. Six agents share one checkout; Claude Code left ~300 lines uncommitted, Codex was told "re-integrate" and committed them under its own name, and `git blame` had no way to know. Retrace's ledger did — see example 1 below. Every commit of building this tool is recorded in its own ledger, and the [2026-09-03 snapshot](https://github.com/jordandru/retrace/releases/tag/ledger-2026-09-03) of it — 1,585 events, seq 0–1584 — is public and verifies offline. Live browsing of the ledger beyond that snapshot is paused until export redaction is designed and built ([#67](https://github.com/jordandru/retrace/issues/67)).
 
 ## Start here
 
 - **[Retrace by example](docs/examples.md)** — eight real problems from this repo's ledger and what Retrace shows for each. Three minutes.
 - **[Full reference](docs/reference.md)** — every adapter, the cloud Worker, team hosting, event shape, status and roadmap.
 - **[SETUP-GUIDE](SETUP-GUIDE.md)** — the guided walkthrough: clone → MCP → Worker → GitHub/Drive.
-- **Live ledger:** [browse](https://retrace-api.slcwitit.workers.dev/s/sh_ea81439e010abb1c0ec7167c) · [pre-verified snapshot](https://github.com/jordandru/retrace/releases/tag/ledger-2026-09-03) (bundle + checkpoints + witnesses + keys).
+- **Live ledger:** read-only public browsing is paused until export redaction is designed and built ([#67](https://github.com/jordandru/retrace/issues/67)); the [pre-verified snapshot](https://github.com/jordandru/retrace/releases/tag/ledger-2026-09-03) (bundle + checkpoints + witnesses + keys) is public and verifies offline against the published key.
 
 ## What you get
 
@@ -69,7 +69,7 @@ Commits, GitHub PRs and Google Drive become events through adapters; the hosted 
 ## What it deliberately does not do
 
 - It is **tamper-evident, not tamper-proof** — between hourly checkpoints there is a window in which an operator could rewrite; after a checkpoint, rewriting means rewriting Rekor.
-- **Model names are asserted** by the agent and labeled as such; the identity and time are what's cryptographically bound.
+- **Model names are asserted** by the agent and labeled as such; the identity and time are what's cryptographically bound. Agent events missing a model are counted as declared none (`model_source: none`) or no source recorded (legacy events with no `model_source` field).
 - **Coverage is what producers log** — complete for commits (enforced by the gate), not keystrokes, prompts, the harness's system prompt, or the model's reasoning.
 - **A wrong actor stays sealed.** Tier 1 human-sealed attribution amendments shipped in 0.1.7; the first real one is ledger #2543 (`evt_51c4a8ad2b3b450788ebc8f7b69969fe`): commit `5d7290f`, recorded as `codex`, with seven files under `packages/mcp-server` amended to `cursor-agent` on stamped evidence #1647/#1648. The recorded actor stays visible.
 - **No line-level attribution** ("GPT wrote this function") — not a feature, not planned.

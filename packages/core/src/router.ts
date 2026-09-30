@@ -39,7 +39,7 @@ import {
   OwnerPrincipal, PolicyError, RouteConflictError, canonicalGithubRepo, missingPolicyDisposition, parseOwnerPrincipal, planPolicyPut,
   routeGithubDelivery,
 } from "./policy.js";
-import { sealEvent } from "./chain.js";
+import { sealEvent, sha256Hex } from "./chain.js";
 import { buildExportBundle, verifyExportBundle } from "./export.js";
 import { ExportCacheStore } from "./export-cache.js";
 import {
@@ -54,6 +54,7 @@ import {
 import { renderReportHtml } from "./report.js";
 import { collectAttributionAmendments } from "./attribution.js";
 import { buildLineage, renderLineageDot, renderLineageMermaid } from "./lineage.js";
+import { appendOwnerLoginEvent, OWNER_LOGIN_DECISION_PARAM } from "./owner-login.js";
 import { mapGithubWebhook, verifyGithubSignature } from "./github.js";
 import { mapDriveActivities, DrivePayload } from "./gdrive.js";
 import { buildProjectStatus } from "./status.js";
@@ -362,19 +363,52 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
     }
     if (body.type !== actor.type)
       return { error: `actor.type "${body.type}" is not allowed: this credential is pinned to ${actor.type} "${actor.id}". Use an owner or assert-trust credential to record other actors.` };
-    return {
-      actor: {
-        ...actor,
-        ...(body.display_name !== undefined ? { display_name: body.display_name } : {}),
-        ...(body.version !== undefined ? { version: body.version } : {}),
-        // A pinned credential fixes WHO is acting, not WHICH MODEL ran: it is issued once and outlives every model
-        // swap, so a model pinned here goes stale silently and seals the wrong author into an append-only ledger.
-        // If the credential names a model it stays authoritative; if it omits one, the producer — the only side that
-        // knows what actually ran — reports it. Identity is stamped from the credential either way, so this widens
-        // nothing an operator did not opt into by leaving `model` out.
-        ...(actor.type === "agent" && actor.model === undefined && body.model !== undefined ? { model: body.model } : {}),
-      },
+    const stamped: Actor = {
+      ...actor,
+      ...(body.display_name !== undefined ? { display_name: body.display_name } : {}),
+      ...(body.version !== undefined ? { version: body.version } : {}),
     };
+    // A pinned credential fixes WHO is acting. If it names a model that value is authoritative and the source
+    // becomes credential-pinned in the same operation (model-source.md §4.1); the displaced pair lands on
+    // actor.model_claims, never method.params (producer-signed). If it omits a model, the producer reports
+    // model / model_source / model_claims as sent — do not invent a source. Empty-string model is absent (PR 118 F2).
+    const pinModel = actor.model !== undefined && actor.model !== "" ? actor.model : undefined;
+    if (actor.type === "agent" && pinModel === undefined) {
+      // No model pin: WHO stays the credential; model and source resolve together from the body.
+      // Drop the credential's empty model and its model_source so a source-less caller model
+      // cannot inherit none (PR 118 F2 residual).
+      const { model: _noPinModel, model_source: _noPinSource, model_claims: _noPinClaims, ...identity } = stamped;
+      return {
+        actor: {
+          ...identity,
+          ...(body.model !== undefined ? { model: body.model } : {}),
+          ...(body.model_source !== undefined ? { model_source: body.model_source } : {}),
+          ...(body.model_claims !== undefined ? { model_claims: body.model_claims } : {}),
+        },
+      };
+    }
+    if (pinModel !== undefined) {
+      const displacedModel = body.model !== undefined && body.model !== "" && body.model !== actor.model ? body.model : undefined;
+      return {
+        actor: {
+          ...stamped,
+          model_source: "credential-pinned",
+          ...(displacedModel !== undefined
+            ? {
+                model_claims: [
+                  ...(body.model_claims ?? []),
+                  {
+                    value: displacedModel,
+                    ...(body.model_source !== undefined ? { source: body.model_source } : {}),
+                    note: "displaced by credential-pinned model",
+                  },
+                ],
+              }
+            : body.model_claims !== undefined ? { model_claims: body.model_claims } : {}),
+        },
+      };
+    }
+    return { actor: stamped };
   };
 
   const lineageResponse = async (events: any[], fmt: string | null, actors: boolean, scoped = false) => {
@@ -478,8 +512,10 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
         if (!opts.githubSecret) return json({ error: "github webhook not configured (set RETRACE_GITHUB_SECRET)" }, 404);
         const raw = await req.text();
         if (!(await verifyGithubSignature(opts.githubSecret, raw, req.headers.get("x-hub-signature-256")))) return json({ error: "bad signature" }, 401);
+        const ingressAt = new Date().toISOString();
         const ghEvent = req.headers.get("x-github-event") ?? "";
-        const delivery = req.headers.get("x-github-delivery") ?? undefined;
+        const delivery = req.headers.get("x-github-delivery") ?? (["pull_request", "pull_request_review", "issue_comment"].includes(ghEvent)
+          ? `body:${ghEvent}:${await sha256Hex(raw)}` : undefined);
         if (ghEvent === "ping") return json({ ok: true, pong: true });
         let payload: any;
         try { payload = JSON.parse(raw); } catch { return json({ error: "invalid json" }, 400); }
@@ -506,7 +542,7 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
               delivery_id: delivery ?? `unresolved:${repo}:${Date.now()}`,
               project: "",
               raw_body: raw,
-              received_at: new Date().toISOString(),
+              received_at: ingressAt, gh_event: ghEvent,
               repo,
               routing_source: "unresolved",
               routing_state: "unresolved",
@@ -515,7 +551,8 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
           return json({ ok: true, pending: true, routing: "unresolved", repo, reason: routing.reason }, 202);
         }
         const project = routing.project;
-        const hasDoc = !!(store.getPolicy && await store.getPolicy(project, { current: true }));
+        const currentPolicy = store.getPolicy ? await store.getPolicy(project, { current: true }) : null;
+        const hasDoc = !!currentPolicy;
         const mode = parseTrailerPolicy(opts.trailerPolicy);
         if (routing.source === "env" && !hasDoc) {
           const disp = missingPolicyDisposition(mode, false);
@@ -525,7 +562,7 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
                 delivery_id: delivery ?? `pending:${repo}:${Date.now()}`,
                 project,
                 raw_body: raw,
-                received_at: new Date().toISOString(),
+                received_at: ingressAt, gh_event: ghEvent,
                 repo,
                 routing_source: "env",
                 routing_digest: routing.digest,
@@ -543,20 +580,24 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
               return json({ error: `github delivery already sealed in project "${p}"` }, 409);
           }
         }
+        const ownerLoginDelivery = ["pull_request", "pull_request_review", "issue_comment"].includes(ghEvent);
+        const retainedDelivery = delivery ?? `github:${repo}:${crypto.randomUUID()}`;
         const isShadowPush = mode === "shadow" && ghEvent === "push" && !!opts.githubIncludePush;
         const deliveryStarted = Date.now();
         const deliveryDeadline = deliveryStarted + WEBHOOK_DELIVERY_DEADLINE_MS;
         let probe = false;
-        if (isShadowPush && store.insertPendingDelivery) {
+        if ((isShadowPush || ownerLoginDelivery) && store.insertPendingDelivery) {
           try {
             await store.insertPendingDelivery({
-              delivery_id: delivery ?? `push:${repo}:${Date.now()}`,
-              project, raw_body: raw, received_at: new Date().toISOString(),
+              delivery_id: retainedDelivery,
+              project, raw_body: raw, received_at: ingressAt, gh_event: ghEvent,
               repo, routing_source: routing.source, routing_digest: routing.digest, routing_state: "received",
             });
           } catch {
             return json({ error: "pending insert failed" }, 500);
           }
+        }
+        if (isShadowPush) {
           const probeOwner = `${delivery ?? `probe:${repo}`}:${crypto.randomUUID()}`;
           const admit = await withinDeliveryDeadline(
             webhookBreakerAdmission(store, project, Date.now(), probeOwner),
@@ -567,7 +608,7 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
           if (admit === "pending") return json({ ok: true, pending: (payload.commits ?? []).map((c: any) => c.id), reason: "breaker_open" }, 202);
           probe = admit === "probe";
         }
-        const inputs = mapGithubWebhook(ghEvent, payload, { project, includePush: opts.githubIncludePush, deliveryId: delivery && inputs_needs_unique(ghEvent) ? delivery : undefined });
+        const inputs = await mapGithubWebhook(ghEvent, payload, { project, includePush: opts.githubIncludePush, ingressAt, deliveryId: delivery && inputs_needs_unique(ghEvent) ? delivery : undefined });
         const results = [];
         const pendingShas: string[] = [];
         for (let inputIndex = 0; inputIndex < inputs.length; inputIndex++) {
@@ -656,27 +697,22 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
             continue;
           }
           const stamped = stampSealedBy(parsed.data, SEALED_BY_GITHUB_WEBHOOK);
-          for (let attempt = 0; ; attempt++) {
-            try {
-              const r = await appendEvent(store, stamped, isShadowPush ? { deadline: deliveryDeadline } : {});
-              results.push({ id: r.event.id, seq: r.event.seq, deduped: r.deduped });
-              break;
-            }
-            catch (e: any) {
-              if (e instanceof AppendDeadlineExceededError || e?.name === "AppendDeadlineExceededError")
-                return json({ ok: true, pending: remainingShas(), reason: "deadline" }, 202);
-              const client = writeClientError(e);
-              if (client) return json({ error: client }, 400);
-              if (!/UNIQUE/i.test(String(e?.message)) || attempt >= 4) throw e;
-            }
+          try {
+            const r = await appendOwnerLoginEvent(store, stamped, currentPolicy, repo,
+              (isShadowPush || ownerLoginDelivery) ? deliveryDeadline : undefined);
+            results.push({ id: r.event.id, seq: r.event.seq, deduped: r.deduped });
+          } catch (e: any) {
+            if (e instanceof AppendDeadlineExceededError || e?.name === "AppendDeadlineExceededError")
+              return json({ ok: true, pending: remainingShas(), reason: "deadline" }, 202);
+            const client = writeClientError(e);
+            if (client) return json({ error: client }, 400);
+            throw e;
           }
         }
-        if (isShadowPush) {
-          if (delivery && store.deletePendingDelivery) {
-            const deleted = await withinDeliveryDeadline(store.deletePendingDelivery(delivery), deliveryDeadline);
-            if (deleted === DELIVERY_DEADLINE_EXPIRED)
-              return json({ ok: true, pending: [], reason: "deadline" }, 202);
-          }
+        if ((isShadowPush || ownerLoginDelivery) && store.deletePendingDelivery) {
+          const deleted = await withinDeliveryDeadline(store.deletePendingDelivery(retainedDelivery), deliveryDeadline);
+          if (deleted === DELIVERY_DEADLINE_EXPIRED)
+            return json({ ok: true, pending: [], reason: "deadline" }, 202);
         }
         return json({ ok: true, event: ghEvent, project, logged: results }, 201);
       }
@@ -781,6 +817,7 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
         const resolved = resolveActor(principal, parsed.data.actor, parsed.data.action);
         if ("error" in resolved) return json(resolved, 403);
         const params = { ...parsed.data.method?.params };
+        delete params[OWNER_LOGIN_DECISION_PARAM];
         delete params.relayed_by;
         delete params[SEALED_BY_PARAM];
         delete params[PRODUCER_SIG_VERDICT_PARAM];
@@ -1110,7 +1147,7 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
   };
 }
 
-/** Drain pending GitHub push deliveries. Breaker is not consulted (brief §7(b)); drain failures do not trip it (§7(a)). */
+/** Drain pending GitHub deliveries. Breaker is not consulted (brief §7(b)); drain failures do not trip it (§7(a)). */
 export async function drainPendingGithubDeliveries(store: EventStore, opts: {
   trailerPolicy: TrailerPolicy;
   now?: () => number;
@@ -1136,7 +1173,11 @@ export async function drainPendingGithubDeliveries(store: EventStore, opts: {
       failed++;
       continue;
     }
-    const inputs = mapGithubWebhook("push", payload, { project: row.project, includePush: true });
+    const ghEvent = row.gh_event ?? "push";
+    const inputs = await mapGithubWebhook(ghEvent, payload, { project: row.project, includePush: true, deliveryId: row.delivery_id, ingressAt: row.received_at });
+    const outcomeKey = (input: EventInput) => ghEvent === "push"
+      ? String(input.method?.params?.sha ?? "")
+      : input.idempotency_key ? `idem:${input.idempotency_key}` : "";
     type Outcome = { status: "pending" | "sealed" | "budget_failed" | "invalid_input"; attempt_count: number; reason?: string };
     const terminalSha = (status: Outcome["status"] | undefined) => status === "sealed" || status === "budget_failed" || status === "invalid_input";
     const rawOutcomes: Record<string, string | Outcome> = row.outcomes ? JSON.parse(row.outcomes) as Record<string, string | Outcome> : {};
@@ -1149,7 +1190,7 @@ export async function drainPendingGithubDeliveries(store: EventStore, opts: {
     for (const input of inputs) {
       const parsed = EventInput.safeParse(input);
       if (!parsed.success) {
-        const sha = String(input.method?.params?.sha ?? "");
+        const sha = outcomeKey(input);
         if (!sha || terminalSha(outcomes[sha]?.status)) continue;
         const artifactIssue = parsed.error.issues.some((issue) =>
           issue.path.includes("artifacts") || /artifact id/i.test(issue.message),
@@ -1161,9 +1202,26 @@ export async function drainPendingGithubDeliveries(store: EventStore, opts: {
         };
         continue;
       }
-      const sha = String(parsed.data.method?.params?.sha ?? "");
+      const sha = outcomeKey(parsed.data);
       if (!sha || terminalSha(outcomes[sha]?.status)) continue;
       if (parsed.data.idempotency_key && await store.byIdempotencyKey(row.project, parsed.data.idempotency_key)) {
+        outcomes[sha] = { status: "sealed", attempt_count: outcomes[sha]?.attempt_count ?? 0 };
+        continue;
+      }
+      if (ghEvent !== "push") {
+        const stamped = {
+          ...parsed.data,
+          method: { ...parsed.data.method, params: { ...parsed.data.method?.params,
+            [SEALED_BY_PARAM]: SEALED_BY_GITHUB_WEBHOOK, producer_sig_verdict: "none" } },
+        };
+        try {
+          const policy = store.getPolicy ? await store.getPolicy(row.project, { current: true }) : null;
+          await appendOwnerLoginEvent(store, stamped, policy, row.repo ?? "", now() + WEBHOOK_DELIVERY_DEADLINE_MS, now);
+        } catch (e) {
+          if (!(e instanceof AppendDeadlineExceededError)) throw e;
+          outcomes[sha] = { status: "pending", attempt_count: outcomes[sha]?.attempt_count ?? 0, reason: "deadline" };
+          continue;
+        }
         outcomes[sha] = { status: "sealed", attempt_count: outcomes[sha]?.attempt_count ?? 0 };
         continue;
       }
@@ -1195,7 +1253,7 @@ export async function drainPendingGithubDeliveries(store: EventStore, opts: {
         outcomes[sha] = { status: "pending", attempt_count: outcomes[sha]?.attempt_count ?? 0, reason: classified.reason };
       }
     }
-    const shas = inputs.map((input) => String(input.method?.params?.sha ?? "")).filter(Boolean);
+    const shas = inputs.map(outcomeKey).filter(Boolean);
     const allSealed = shas.length > 0 && shas.every((sha) => outcomes[sha]?.status === "sealed");
     const terminal = shas.some((sha) => outcomes[sha]?.status === "budget_failed" || outcomes[sha]?.status === "invalid_input");
     const next = {

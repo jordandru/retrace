@@ -1,8 +1,8 @@
 /** Local SQLite store using Node's built-in node:sqlite (Node >= 22.13). No native deps. */
 import { DatabaseSync } from "node:sqlite";
 import {
-  ArtifactIndexQuery, ArtifactIndexResult, BACKFILL_ARTIFACT_INDEX_SQL, ChainHead, Event, EventStore, HeadMovedError,
-  HistoryQuery, HistoryPage, PendingDelivery, SCHEMA_PENDING_LEASE_COLUMNS_SQL, SCHEMA_PENDING_ROUTE_COLUMNS_SQL, SCHEMA_SQL, Share, artifactIndexRows, clampHistoryLimit,
+  InsertExtras, OwnerLoginConsumption, readOwnerLoginConsumption, ArtifactIndexQuery, ArtifactIndexResult, BACKFILL_ARTIFACT_INDEX_SQL, ChainHead, Event, EventStore, HeadMovedError,
+  HistoryQuery, HistoryPage, PendingDelivery, SCHEMA_PENDING_EVENT_COLUMNS_SQL, SCHEMA_PENDING_LEASE_COLUMNS_SQL, SCHEMA_PENDING_ROUTE_COLUMNS_SQL, SCHEMA_SQL, Share, artifactIndexRows, clampHistoryLimit,
   ArtifactIndexHit, runArtifactIndexStatements, historyPageFromNewestFirst, likeContains,
 } from "@retrace-dev/core";
 import type { BreakerRow, ClassificationContextRow, PolicyRouteRow, PolicySnapshot, PolicySnapshotBudget, PolicyWrite } from "@retrace-dev/core";
@@ -20,6 +20,11 @@ export class SqliteStore implements EventStore {
     }
     for (const sql of SCHEMA_PENDING_LEASE_COLUMNS_SQL) {
       try { this.db.exec(sql); } catch { /* column already present */ }
+    }
+    for (const sql of SCHEMA_PENDING_EVENT_COLUMNS_SQL) {
+      try { this.db.exec(sql); } catch (e) {
+        if (!/duplicate column name/i.test(String(e))) throw e;
+      }
     }
     this.backfillArtifactIndexOnce();
   }
@@ -56,9 +61,12 @@ export class SqliteStore implements EventStore {
     for (const r of artifactIndexRows(e)) insIdx.run(r.project, r.artifact_key, r.seq, r.actor_type, r.actor_id, r.role, r.sealed_by);
   }
 
-  async insert(e: Event) {
+  async insert(e: Event, extras?: InsertExtras) {
     this.db.exec("BEGIN");
     try {
+      for (const row of extras?.owner_login_consumption ?? []) this.db.prepare(
+        "INSERT INTO owner_login_consumption (project, declaration_event_id, consumed_by_delivery, consumed_by_event_id, consumed_by_seq, consumed_at) VALUES (?, ?, ?, ?, ?, ?)"
+      ).run(e.project, row.declaration_event_id, row.consumed_by_delivery ?? null, e.id, e.seq, e.received_at);
       this.insertRows(e);
       this.db.exec("COMMIT");
     } catch (err) {
@@ -67,10 +75,19 @@ export class SqliteStore implements EventStore {
     }
   }
 
+  async ownerLoginConsumptionRow(project: string, id: string): Promise<OwnerLoginConsumption | null> {
+    return this.db.prepare("SELECT * FROM owner_login_consumption WHERE project = ? AND declaration_event_id = ?").get(project, id) as unknown as OwnerLoginConsumption ?? null;
+  }
+  async ownerLoginConsumptionUpTo(project: string, ids: string[], throughSeq: number, budget: { deadline: number; row_cap: number }) {
+    return readOwnerLoginConsumption(ids, budget, async (batch, limit) => this.db.prepare(
+      `SELECT * FROM owner_login_consumption WHERE project = ? AND consumed_by_seq <= ? AND declaration_event_id IN (${batch.map(() => "?").join(",")}) LIMIT ?`
+    ).all(project, throughSeq, ...batch, limit) as unknown as OwnerLoginConsumption[]);
+  }
+
   /** Deletes + audit insert in one transaction (B3); the local server's DELETE /projects/:p needs this. The head
    *  check runs inside the same transaction, so the audit can only ever commit against the head it describes. */
   async deleteProject(project: string, audit: Event, expectedHead: ChainHead) {
-    const tables = ["events", "event_artifacts", "event_artifact_index", "pending_deliveries", "shares", "project_policies", "classification_contexts", "classification_path_lowers", "classification_breakers"];
+    const tables = ["owner_login_consumption", "events", "event_artifacts", "event_artifact_index", "pending_deliveries", "shares", "project_policies", "classification_contexts", "classification_path_lowers", "classification_breakers"];
     this.db.exec("BEGIN");
     try {
       const head = this.headSync(project); // synchronous: the transaction never yields between check and deletes
@@ -171,8 +188,8 @@ export class SqliteStore implements EventStore {
   async insertPendingDelivery(row: PendingDelivery) {
     try {
       this.db.prepare(
-        "INSERT INTO pending_deliveries (delivery_id, project, raw_body, received_at, repo, routing_source, routing_digest, routing_state) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-      ).run(row.delivery_id, row.project, row.raw_body, row.received_at, row.repo ?? null, row.routing_source ?? null, row.routing_digest ?? null, row.routing_state ?? null);
+        "INSERT INTO pending_deliveries (delivery_id, project, raw_body, received_at, repo, routing_source, routing_digest, routing_state, gh_event) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      ).run(row.delivery_id, row.project, row.raw_body, row.received_at, row.repo ?? null, row.routing_source ?? null, row.routing_digest ?? null, row.routing_state ?? null, row.gh_event ?? null);
     } catch (e: unknown) {
       if (!/UNIQUE/i.test(String((e as Error)?.message))) throw e;
     }
@@ -180,7 +197,7 @@ export class SqliteStore implements EventStore {
 
   async getPendingDelivery(delivery_id: string): Promise<PendingDelivery | null> {
     return (this.db.prepare(
-      `SELECT delivery_id, project, raw_body, received_at, repo, routing_source, routing_digest, routing_state,
+      `SELECT delivery_id, project, raw_body, received_at, gh_event, repo, routing_source, routing_digest, routing_state,
               lease_owner, lease_until, outcomes, attempt_count, state
        FROM pending_deliveries WHERE delivery_id = ?`,
     ).get(delivery_id) as PendingDelivery | undefined) ?? null;
@@ -188,7 +205,7 @@ export class SqliteStore implements EventStore {
 
   async listPendingDeliveriesOlderThan(received_at: string): Promise<PendingDelivery[]> {
     return this.db.prepare(
-      `SELECT delivery_id, project, raw_body, received_at, repo, routing_source, routing_digest, routing_state,
+      `SELECT delivery_id, project, raw_body, received_at, gh_event, repo, routing_source, routing_digest, routing_state,
               lease_owner, lease_until, outcomes, attempt_count, state
        FROM pending_deliveries WHERE received_at < ? ORDER BY received_at ASC`,
     ).all(received_at) as unknown as PendingDelivery[];
@@ -358,7 +375,7 @@ export class SqliteStore implements EventStore {
 
   async listDrainablePendingDeliveries(nowIso: string, limit = 20) {
     return this.db.prepare(
-      `SELECT delivery_id, project, raw_body, received_at, repo, routing_source, routing_digest, routing_state,
+      `SELECT delivery_id, project, raw_body, received_at, gh_event, repo, routing_source, routing_digest, routing_state,
               lease_owner, lease_until, outcomes, attempt_count, state
        FROM pending_deliveries
        WHERE IFNULL(routing_state, '') NOT IN ('unresolved', 'pending_policy')
@@ -378,7 +395,7 @@ export class SqliteStore implements EventStore {
     ).run(owner, untilIso, delivery_id, nowIso).changes;
     if (changed < 1) return null;
     return (this.db.prepare(
-      `SELECT delivery_id, project, raw_body, received_at, repo, routing_source, routing_digest, routing_state,
+      `SELECT delivery_id, project, raw_body, received_at, gh_event, repo, routing_source, routing_digest, routing_state,
               lease_owner, lease_until, outcomes, attempt_count, state
        FROM pending_deliveries WHERE delivery_id=? AND lease_owner=?`,
     ).get(delivery_id, owner) as PendingDelivery | undefined) ?? null;

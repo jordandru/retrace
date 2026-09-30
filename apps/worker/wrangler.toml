@@ -31,6 +31,14 @@ RETRACE_MCP_ENABLED = "1"
 # Makes the /mcp host/origin checks bite (they are no-ops without an expected origin).
 RETRACE_PUBLIC_URL = "https://retrace-api.slcwitit.workers.dev"
 
+# Smart Placement was enabled 2026-09-30 (PR 141, Version f3b73603) and is being turned off: per-call owner-login stage
+# medians rose (candidates 89 -> 129.5 ms, consumption 81 -> 104.5 ms) and every delivery still hit the deadline.
+# `wrangler rollback` to 0acfff97 (16:03Z) restored the code but NOT this setting (placement_mode still smart, 16:15Z).
+# `mode = "off"` states the intent. Wrangler 4.123.0 uploads no placement field for "off" or for no block, so only a
+# placement-status read after the next deploy proves it is off. Record: docs/design/smart-placement-deploy-note.md §7.
+[placement]
+mode = "off"
+
 # Hourly head checkpoints witnessed in Rekor (roadmap rung 2); handler = `scheduled` in src/index.ts
 [triggers]
 crons = ["7 * * * *", "*/5 * * * *"]

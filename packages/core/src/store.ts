@@ -120,13 +120,27 @@ export interface Share {
   created_by?: string;
 }
 
+export interface OwnerLoginConsumption {
+  project: string;
+  declaration_event_id: string;
+  consumed_by_delivery?: string | null;
+  consumed_by_event_id: string;
+  consumed_by_seq: number;
+  consumed_at: string;
+}
+export type OwnerLoginConsumptionResult = { ok: true; rows: OwnerLoginConsumption[] } | { ok: false; reason: "budget" | "deadline" | "store_error" };
+
+export interface InsertExtras {
+  owner_login_consumption?: Array<{ declaration_event_id: string; consumed_by_delivery?: string }>;
+}
+
 export interface EventStore {
   head(project: string): Promise<ChainHead | null>;
   createShare(share: Share): Promise<void>;
   getShare(id: string): Promise<Share | null>;
   /** Owner-only share revoke (audit 2026-08-30). Optional — stores without it 501 DELETE /s/:id. */
   deleteShare?(id: string): Promise<boolean>;
-  insert(e: Event): Promise<void>;
+  insert(e: Event, extras?: InsertExtras): Promise<void>;
   byIdempotencyKey(project: string, key: string): Promise<Event | null>;
   get(id: string): Promise<Event | null>;
   /** Bounded point-read batch. Missing ids are omitted; callers decide whether absence is fatal. */
@@ -146,6 +160,8 @@ export interface EventStore {
   deleteProject?(project: string, audit: Event, expectedHead: ChainHead): Promise<Record<string, number>>;
   /** Bounded artifact-index read (§3.5). Over budget / deadline / store error is a typed result, never a throw. */
   eventsReferencingArtifacts?(q: ArtifactIndexQuery, now?: () => number): Promise<ArtifactIndexResult>;
+  ownerLoginConsumptionUpTo?(project: string, declaration_ids: string[], throughSeq: number, budget: { deadline: number; row_cap: number }): Promise<OwnerLoginConsumptionResult>;
+  ownerLoginConsumptionRow?(project: string, declaration_event_id: string): Promise<OwnerLoginConsumption | null>;
   insertPendingDelivery?(row: PendingDelivery): Promise<void>;
   getPendingDelivery?(delivery_id: string): Promise<PendingDelivery | null>;
   listPendingDeliveriesOlderThan?(received_at: string): Promise<PendingDelivery[]>;
@@ -211,6 +227,8 @@ export type ArtifactIndexResult =
   | { ok: false; reason: "budget" | "deadline" | "store_error" };
 
 export interface PendingDelivery {
+  /** NULL identifies a pre-upgrade row, drained as push. */
+  gh_event: string | null;
   delivery_id: string;
   project: string;
   raw_body: string;
@@ -494,6 +512,16 @@ export function isHeadMovedError(e: unknown): e is HeadMovedError {
 }
 
 export const SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS owner_login_consumption (
+  project TEXT NOT NULL,
+  declaration_event_id TEXT NOT NULL,
+  consumed_by_delivery TEXT,
+  consumed_by_event_id TEXT NOT NULL,
+  consumed_by_seq INTEGER NOT NULL,
+  consumed_at TEXT NOT NULL,
+  PRIMARY KEY (project, declaration_event_id)
+);
+
 CREATE TABLE IF NOT EXISTS events (
   id TEXT PRIMARY KEY,
   project TEXT NOT NULL,
@@ -628,6 +656,11 @@ export const SCHEMA_PENDING_LEASE_COLUMNS_SQL = [
   "ALTER TABLE pending_deliveries ADD COLUMN state TEXT",
 ];
 
+/** Preserve the original GitHub event kind through queued delivery retries. */
+export const SCHEMA_PENDING_EVENT_COLUMNS_SQL = [
+  "ALTER TABLE pending_deliveries ADD COLUMN gh_event TEXT",
+];
+
 export function newShareId(): string {
   const bytes = new Uint8Array(12);
   (globalThis as any).crypto.getRandomValues(bytes);
@@ -760,6 +793,7 @@ export class AppendInsertInFlightError extends AppendDeadlineExceededError {
 }
 
 export interface AppendEventOptions {
+  extras?: InsertExtras;
   /** Absolute wall-clock deadline. Store reads are raced individually so a timed-out append cannot later seal. */
   deadline?: number;
   now?: () => number;
@@ -770,7 +804,7 @@ function assertAppendDeadline(opts: AppendEventOptions): void {
     throw new AppendDeadlineExceededError();
 }
 
-async function appendReadWithinDeadline<T>(read: () => Promise<T>, opts: AppendEventOptions): Promise<T> {
+export async function appendReadWithinDeadline<T>(read: () => Promise<T>, opts: AppendEventOptions): Promise<T> {
   if (opts.deadline === undefined) return read();
   assertAppendDeadline(opts);
   const remaining = opts.deadline - (opts.now ?? Date.now)();
@@ -793,14 +827,14 @@ const APPEND_INSERT_DEADLINE_EXPIRED = Symbol("append insert deadline expired");
 
 async function appendInsertWithinDeadline(store: EventStore, event: Event, opts: AppendEventOptions): Promise<void> {
   if (opts.deadline === undefined) {
-    await store.insert(event);
+    await store.insert(event, opts.extras);
     return;
   }
   assertAppendDeadline(opts);
   const remaining = opts.deadline - (opts.now ?? Date.now)();
   // This promise always fulfills, so a late insert rejection is observed even after the response deadline wins.
   const completion: Promise<AppendInsertOutcome> = Promise.resolve()
-    .then(() => store.insert(event))
+    .then(() => store.insert(event, opts.extras))
     .then<AppendInsertOutcome, AppendInsertOutcome>(
       () => ({ inserted: true }),
       (error: unknown) => ({ inserted: false, error }),
@@ -875,4 +909,19 @@ export async function explainEvent(store: EventStore, id: string, maxDepth = 25)
     cur = parent?.project === project ? parent : null;
   }
   return chain;
+}
+
+/** Bounded consumption reads: batches stay below D1's 100-parameter limit; count actual rows. */
+export async function readOwnerLoginConsumption(ids: string[], budget: { deadline: number; row_cap: number },
+  read: (ids: string[], limit: number) => Promise<OwnerLoginConsumption[]>): Promise<OwnerLoginConsumptionResult> {
+  const rows: OwnerLoginConsumption[] = [], unique = [...new Set(ids)];
+  try {
+    for (let start = 0; start < unique.length; start += 90) {
+      if (Date.now() >= budget.deadline) return { ok: false, reason: "deadline" };
+      const batch = await appendReadWithinDeadline(() => read(unique.slice(start, start + 90), budget.row_cap - rows.length + 1), budget);
+      rows.push(...batch);
+      if (rows.length > budget.row_cap) return { ok: false, reason: "budget" };
+    }
+    return Date.now() >= budget.deadline ? { ok: false, reason: "deadline" } : { ok: true, rows };
+  } catch (e) { return { ok: false, reason: e instanceof AppendDeadlineExceededError ? "deadline" : "store_error" }; }
 }

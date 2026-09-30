@@ -36,8 +36,10 @@ const request = (token = TOKEN, extra: RequestInit = {}) => new Request("https:/
   body: extra.body ?? "{}",
 });
 
-test("remote MCP authentication accepts only pinned, unsigned agent credentials scoped to one project", async () => {
+test("remote MCP authentication accepts only live, pinned, unsigned agent credentials scoped to one project", async () => {
   assert.equal((await authenticateRemoteMcp(request(), raw()))?.actor.id, "openclaw");
+  assert.equal(await authenticateRemoteMcp(request(), raw([credential({ retired_at: "2026-09-20T15:00:00Z" })])), null, "a retired credential never authenticates, as on the REST path");
+  assert.equal((await authenticateRemoteMcp(request(), raw([credential({ retired_at: "2026-09-20T15:00:00Z" }), credential({ actor: { type: "agent", id: "successor", on_behalf_of: "jordan@example.com" } })])))?.actor.id, "successor", "a live successor with the same token shape still authenticates");
   assert.equal(await authenticateRemoteMcp(request("wrong"), raw()), null);
   assert.equal(await authenticateRemoteMcp(new Request("https://retrace.example/mcp?token=" + TOKEN), raw()), null, "query tokens are never accepted");
   assert.equal(await authenticateRemoteMcp(request(), raw([credential({ trust: "assert" })])), null);
@@ -99,6 +101,102 @@ test("remote MCP exposes exactly the audit tools and stamps OpenClaw identity an
   assert.match(wrongProject.content[0].text, /pinned to project "retrace"/);
   const committed = await client.callTool({ name: "retrace_log", arguments: { action: "committed", artifacts: [{ id: "commit:x" }] } }) as any;
   assert.equal(committed.isError, true);
+  await client.close();
+});
+
+test("remote MCP passes model_source and model_claims through to the router on an unpinned credential", async () => {
+  const store = new MemStore();
+  const parsed = await authenticateRemoteMcp(request(), raw());
+  assert.ok(parsed);
+  const apiHandler = createHandler(store, { requireAuth: true, credentials: parseCredentials(raw()) });
+  const server = buildRemoteMcpServer(store, parsed, { requestUrl: "https://retrace.example/mcp", apiHandler });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverTransport);
+  const client = new Client({ name: "nemoclaw", version: "0.1" });
+  await client.connect(clientTransport);
+  const logged = (await client.callTool({
+    name: "retrace_log",
+    arguments: {
+      action: "read",
+      actor: {
+        model: "caller",
+        model_source: "harness-runtime",
+        model_claims: [{ value: "older", source: "harness-display" }],
+      },
+      artifacts: [{ id: "repo:retrace#README.md" }],
+    },
+  })) as any;
+  assert.notEqual(logged.isError, true);
+  const [event] = store.events;
+  assert.deepEqual(event.actor, {
+    type: "agent",
+    id: "openclaw",
+    on_behalf_of: "jordan@example.com",
+    model: "caller",
+    model_source: "harness-runtime",
+    model_claims: [{ value: "older", source: "harness-display" }],
+  });
+  await client.close();
+});
+
+test("remote MCP lets the router displace a caller model on a model-pinning credential and keeps existing claims", async () => {
+  const pinned = raw([credential({ actor: { type: "agent", id: "openclaw", model: "configured", on_behalf_of: "jordan@example.com" } })]);
+  const store = new MemStore();
+  const parsed = await authenticateRemoteMcp(request(), pinned);
+  assert.ok(parsed);
+  const apiHandler = createHandler(store, { requireAuth: true, credentials: parseCredentials(pinned) });
+  const server = buildRemoteMcpServer(store, parsed, { requestUrl: "https://retrace.example/mcp", apiHandler });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverTransport);
+  const client = new Client({ name: "nemoclaw", version: "0.1" });
+  await client.connect(clientTransport);
+  const logged = (await client.callTool({
+    name: "retrace_log",
+    arguments: {
+      action: "read",
+      actor: {
+        model: "caller",
+        model_source: "harness-runtime",
+        model_claims: [{ value: "older", source: "harness-display" }],
+      },
+      artifacts: [{ id: "repo:retrace#README.md" }],
+    },
+  })) as any;
+  assert.notEqual(logged.isError, true);
+  const [event] = store.events;
+  assert.equal(event.actor.model, "configured");
+  assert.equal(event.actor.model_source, "credential-pinned");
+  assert.deepEqual(event.actor.model_claims, [
+    { value: "older", source: "harness-display" },
+    { value: "caller", source: "harness-runtime", note: "displaced by credential-pinned model" },
+  ]);
+  await client.close();
+});
+
+test("remote MCP: caller model_source none on a model-pinning credential is resolved by the router, not the adapter", async () => {
+  const pinned = raw([credential({ actor: { type: "agent", id: "openclaw", model: "configured", on_behalf_of: "jordan@example.com" } })]);
+  const store = new MemStore();
+  const parsed = await authenticateRemoteMcp(request(), pinned);
+  assert.ok(parsed);
+  const apiHandler = createHandler(store, { requireAuth: true, credentials: parseCredentials(pinned) });
+  const server = buildRemoteMcpServer(store, parsed, { requestUrl: "https://retrace.example/mcp", apiHandler });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverTransport);
+  const client = new Client({ name: "nemoclaw", version: "0.1" });
+  await client.connect(clientTransport);
+  const logged = (await client.callTool({
+    name: "retrace_log",
+    arguments: {
+      action: "read",
+      actor: { model_source: "none" },
+      artifacts: [{ id: "repo:retrace#README.md" }],
+    },
+  })) as any;
+  assert.notEqual(logged.isError, true);
+  const [event] = store.events;
+  assert.equal(event.actor.model, "configured");
+  assert.equal(event.actor.model_source, "credential-pinned");
+  assert.equal(event.actor.model_claims, undefined);
   await client.close();
 });
 

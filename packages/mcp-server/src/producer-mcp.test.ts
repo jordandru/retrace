@@ -10,7 +10,7 @@ import { SqliteStore } from "./sqlite-store.js";
 
 test("stdio MCP signs instruct, log, and amend with RETRACE_PRODUCER_KEY_FILE", async () => {
   const keys = [
-    "RETRACE_ACTOR", "RETRACE_ACTOR_MODEL", "RETRACE_ON_BEHALF_OF", "RETRACE_ACTOR_LOCK",
+    "RETRACE_ACTOR", "RETRACE_ACTOR_MODEL", "RETRACE_ACTOR_MODEL_SOURCE", "RETRACE_ON_BEHALF_OF", "RETRACE_ACTOR_LOCK",
     "RETRACE_PROJECT", "RETRACE_PRODUCER_KEY", "RETRACE_PRODUCER_KEY_FILE",
   ];
   const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]));

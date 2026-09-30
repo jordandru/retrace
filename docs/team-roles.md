@@ -34,7 +34,16 @@ with doc quotes and scratch-ledger events (#2411, #2428), the bfe87c3 dry run th
 repair on its own clone and the WSL-DNS root cause of the audit outage (#2174, #2180), and the seq-123
 fixture that became PR 21. Grok's answers come with commands and numbers; that is its value. It also
 calibrates other reviewers' findings against reality (Nemotron's v6-vs-v7 confusion, #2355). Weekly budget
-is finite; stand it down when it reports single digits.
+is finite; stand it down when it reports single digits. When the coordinator is capped, Grok may spec-author
+or rank the queue only for the act Jordan or a recorded routing event directs (agent-rules 12) — still
+not coordinator or merger. Ranking the queue is not coordination: the coordinator keeps classification
+authority; the act exists only under Jordan's instruction or a recorded routing event. Evidence, 2026-09-20:
+ranked the queue once, under Jordan's instruction `evt_47c1614ac9cb486daaa0ea453d506da5` /
+`evt_d505999fa95f4ec090556ea7e8d097f4` (ranking events `evt_1e8340260e46408e810352a7fc474dd6` /
+`evt_b085b8146e82452fa2b3897112a9c056`); advised Jordan on the NOOA host cutover he performed on the
+2026-09-18 close-out steps (first host seal `evt_e80678c58feb4878a4587c60a7f76db7`); and took PR 90's
+first-pass review on his reassignment (`evt_4f4c20d38e3d4dbd95020df4a171deba` /
+`evt_08be04d445c74d41b0a7c5b33c801df1`) while Claude was token-capped.
 
 **NVIDIA — NOOA on Nemotron (NVIDIA Labs research preview) — the witness.** The only seat whose judgment
 and signing key belong to a vendor that wrote none of the code under review. Hourly independent audits of
@@ -67,7 +76,15 @@ gate (rule 2) applies to anything that governs behaviour, whatever its file type
 files included — while documents that govern nothing (measurements, snapshots, references, dated corrections)
 merge on one non-author review. One addition from practice: on 2026-09-12 cursor-agent at high
 effort took the first-pass review seat for PR 37 while Codex was rate-capped (routing evt_44b11c82, verdict
-evt_a742fc51), so "reviewer when routed" is now part of that seat.
+evt_a742fc51), so "reviewer when routed" is now part of that seat. *Correction 2026-09-20:* while Claude
+was token-capped, Grok ranked the queue once, under Jordan's instruction `evt_47c1614ac9cb486daaa0ea453d506da5`
+/ `evt_d505999fa95f4ec090556ea7e8d097f4` (ranking events `evt_1e8340260e46408e810352a7fc474dd6` /
+`evt_b085b8146e82452fa2b3897112a9c056`); advised Jordan on the NOOA host cutover he performed on the
+2026-09-18 close-out steps (first host seal `evt_e80678c58feb4878a4587c60a7f76db7`); and took PR 90's
+first-pass review on his reassignment (`evt_4f4c20d38e3d4dbd95020df4a171deba` /
+`evt_08be04d445c74d41b0a7c5b33c801df1`). "Substitute spec author when the coordinator is capped" is now
+part of the Grok seat, per act when so directed, not as a standing power. Measurer remains the standing
+job. Jordan's decision this session: keep measurer; do not rename the seat architect.
 
 1. **Reviewer ≠ builder for the same change.** Whoever built it does not review it. Astra's PR 15 was
    reviewed by Grok, NOOA and Claude; cursor-agent's PR 16 by Codex (read-only) and Claude; Claude's design
@@ -90,6 +107,42 @@ evt_a742fc51), so "reviewer when routed" is now part of that seat.
    A harness that must read another seat's identity file does not join (the OpenCode decision, PR 19).
 7. **Honest self-report.** If a runtime does not expose its model identifier, omit `actor.model`; never
    pin a value that overrides the real one.
+8. **Severity governs the gate.** (Added 2026-09-23 on Jordan's signed go, evt_da1f333b1fb547018324f08cc7ccd25a;
+   round 2 after Codex's review evt_d39789d27e9443a18c6114d8a875adaf; round 3 after NOOA's evt_42a447523fcf44ed97ea78660884896c;
+   wording corrected 2026-09-23 on Jordan's go evt_719ccbacb1b44cb1becbaa1781c992e9 after NOOA's three round-3 Lows,
+   evt_72cfcce1dade4ea798485e283917db60: "from any seat" made explicit, guard (b)'s example words extended, "passed"
+   changed to "approved"; no rule changed.) Every finding in a verdict carries a
+   severity, and the severity is a claim about consequence, not a label of convenience. **High** and **Medium**
+   name what a reader would wrongly believe or what capability is given away, with the evidence. **Low** is a
+   finding that alleges neither: wording, placement, a citation one hop off, a check that could be stated more
+   precisely without changing what it proves. A finding blocks a merge only when it is Medium or High. **A
+   rejection from any seat whose findings are all Low does not block:** the merger records it as a rejection with its Lows,
+   disposes of each Low in the gate check as applied or declined with a reason, and merges on the other seats'
+   approvals. Two guards on that. (a) The seat's verdict and its labels stay on the record as written; nothing is
+   re-labelled, and any calibration note the merger makes is recorded separately, in the gate check. (b) A Low
+   whose text alleges, or could be read as alleging, a wrong belief or a capability given away (it names a security
+   check or a condition, or says missed, incomplete, weakened, unverified, not checked, insufficient, inadequate,
+   missing, absent) is not routine: before the
+   merge the gate check quotes the finding, records the merger's own reading of it, and either resolves it with
+   evidence or escalates it to Jordan. The seat's label stays; the gate check carries the merger's reading, so an
+   auditor can compare the two. A seat that means to block states a Medium or High. Two limits on re-rounds, because a witness that reviews against the packet can add a new
+   finding each round without end. (i) A re-check is scoped to the diff since that seat's last verdict and the
+   author's dispositions of its findings. A newly found Medium or High is in scope anywhere in the reviewed
+   change. On text the seat previously approved without a finding, it is stated with its evidence. On text where the
+   seat previously had a finding, it also states what changed in the seat's assessment, and its severity is never
+   lowered because the text was visible before. A new Low on text the seat already approved is recorded as new.
+   (ii) The coordinator sets a stop rule before every re-round: a concrete predicate the gate check can evaluate,
+   named findings or a count ("F1 or F3 re-raised", "three or more findings re-raised", "a rejection whose
+   findings are all Low"), recorded on the routing event. The gate check records the evaluation, and when the
+   predicate is met the question goes to Jordan rather than to another round. A finding that another seat has
+   refuted with a command and its output is closed unless the seat re-raising it answers that output. Evidence:
+   PR 90 (repeated rounds and calibration), and PR 105, where the witness went from approved with one Low (round 4,
+   evt_a3220a2a) to rejected with four Lows (round 5, evt_2efcba05) to rejected with five Lows (round 6,
+   evt_eeeadc50), re-raising two points the other seats had refuted in `/tmp`; Jordan overruled the Low-only
+   rejection and merged (evt_e0ba0951, gate check evt_6dbc7701). This rule makes that decision the standing one,
+   with the two guards above, so the merger does not need an owner decision for each Low-only rejection.
+   Agent-rules 11 is unchanged: the verdict of record is still the ledger event, approved or rejected; this rule
+   says how the merger counts it.
 
 ## How to change this
 

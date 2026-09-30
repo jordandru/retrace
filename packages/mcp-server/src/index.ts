@@ -15,6 +15,9 @@
  *                    Set 0 to allow caller overrides (backfill / trusted contexts only).
  *   RETRACE_ACTOR    default actor id for this agent (e.g. "claude-code")
  *   RETRACE_ACTOR_MODEL default model string
+ *   RETRACE_ACTOR_MODEL_SOURCE source of RETRACE_ACTOR_MODEL (one of the seven ModelSource values).
+ *                    Unset → harness-config when a model is configured, as before. Set with a model to name that
+ *                    model's source. `none` with a configured model, or any value without one, is a startup error.
  *   RETRACE_ON_BEHALF_OF the human this agent works for (e.g. jordan@...)
  *   RETRACE_SESSION  override location.session (default: CLAUDE_CODE_SESSION_ID or GROK_SESSION_ID, else a run id)
  *   RETRACE_DEVICE   override location.device (default: os.hostname() — an opt-out, since a hostname is sealed into
@@ -34,7 +37,7 @@ import { homedir, hostname } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import {
-  Actor as CoreActor, Location, EventInput, applyDefaultRoles,
+  Actor as CoreActor, Location, EventInput, ModelSource, applyDefaultRoles,
   appendEvent, CausedByError, causedByProblem, causedByErrorMessage,
   verifyProject, explainEvent, renderTimeline, renderWhyChain, describeEvent, eventForModel, markUntrustedText,
   buildExportBundle, verifyExportBundle, renderReportHtml, parseSigningKey, publicFromPrivate, newShareId,
@@ -62,13 +65,41 @@ export function confinedWritePath(p: string, cwd: string = process.cwd()): strin
   }
   return abs;
 }
+/** Empty-string `model` is absent for resolution (PR 118 F1). */
+function presentModel(model: string | undefined): model is string {
+  return model !== undefined && model !== "";
+}
+
+/** Source of the configured model. Throws at startup (buildServer) on an invalid pairing. */
+function configuredActorModelSource(model: string | undefined): CoreActor["model_source"] | undefined {
+  const raw = env.RETRACE_ACTOR_MODEL_SOURCE;
+  const hasModel = presentModel(model);
+  if (raw === undefined || raw === "") return hasModel ? "harness-config" : undefined;
+  const parsed = ModelSource.safeParse(raw);
+  if (!parsed.success) {
+    throw new Error(`RETRACE_ACTOR_MODEL_SOURCE "${raw}" is not a valid model source (one of: ${ModelSource.options.join(", ")})`);
+  }
+  if (!hasModel) {
+    throw new Error(`RETRACE_ACTOR_MODEL_SOURCE is "${parsed.data}" but RETRACE_ACTOR_MODEL is unset; a source other than none requires a configured model`);
+  }
+  if (parsed.data === "none") {
+    throw new Error(`RETRACE_ACTOR_MODEL_SOURCE is "none" but RETRACE_ACTOR_MODEL is set; none requires no configured model`);
+  }
+  return parsed.data;
+}
+
 /** Read at buildServer() time (not module load) so tests and embedders can configure it via env before building. */
-const readDefaultActor = () => ({
-  type: "agent" as const,
-  id: env.RETRACE_ACTOR ?? "mcp-agent",
-  model: env.RETRACE_ACTOR_MODEL,
-  on_behalf_of: env.RETRACE_ON_BEHALF_OF,
-});
+const readDefaultActor = () => {
+  const model = presentModel(env.RETRACE_ACTOR_MODEL) ? env.RETRACE_ACTOR_MODEL : undefined;
+  const modelSource = configuredActorModelSource(model);
+  return {
+    type: "agent" as const,
+    id: env.RETRACE_ACTOR ?? "mcp-agent",
+    model,
+    ...(modelSource !== undefined ? { model_source: modelSource } : {}),
+    on_behalf_of: env.RETRACE_ON_BEHALF_OF,
+  };
+};
 
 /** Location keys only the server may set. These are evidence ABOUT the writer — which session and machine produced
  *  the event, which client and IDE it came from, whether a human was at a keyboard — so a caller that could assert
@@ -194,19 +225,72 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
    *  "claude-cowork" event from a server configured as "claude-code") now needs the escape hatch; the credentialed
    *  per-actor version is backlog #6. */
   const resolveActor = (callerActor?: Partial<CoreActor>): CoreActor => {
+    const display = {
+      ...(callerActor?.display_name !== undefined ? { display_name: callerActor.display_name } : {}),
+      ...(callerActor?.version !== undefined ? { version: callerActor.version } : {}),
+    };
+    const callerModel = callerActor?.model !== undefined && callerActor.model !== "" ? callerActor.model : undefined;
     if (!actorLock) {
-      return (callerActor?.type && callerActor.type !== "agent" ? callerActor : { ...defaultActor, ...(callerActor ?? {}) }) as CoreActor;
+      if (callerActor?.type && callerActor.type !== "agent") return callerActor as CoreActor;
+      const identity = {
+        type: "agent" as const,
+        id: callerActor?.id ?? defaultActor.id,
+        ...(callerActor?.on_behalf_of !== undefined ? { on_behalf_of: callerActor.on_behalf_of } : defaultActor.on_behalf_of !== undefined ? { on_behalf_of: defaultActor.on_behalf_of } : {}),
+        ...display,
+      };
+      // Caller model and source resolve together: an override must not inherit harness-config from the pin.
+      if (callerActor?.model !== undefined) {
+        return {
+          ...identity,
+          model: callerActor.model,
+          ...(callerActor.model_source !== undefined ? { model_source: callerActor.model_source } : {}),
+          ...(callerActor.model_claims !== undefined ? { model_claims: callerActor.model_claims } : {}),
+        };
+      }
+      if (presentModel(defaultActor.model)) {
+        return {
+          ...identity,
+          model: defaultActor.model,
+          model_source: defaultActor.model_source ?? "harness-config" as const,
+          ...(callerActor?.model_claims !== undefined ? { model_claims: callerActor.model_claims } : {}),
+        };
+      }
+      return {
+        ...identity,
+        ...(callerActor?.model_source !== undefined ? { model_source: callerActor.model_source } : {}),
+        ...(callerActor?.model_claims !== undefined ? { model_claims: callerActor.model_claims } : {}),
+      };
     }
     if (callerActor?.type === "human" || callerActor?.type === "system")
       throw new Error(`actor.type "${callerActor.type}" is not allowed: this Retrace MCP server logs as its configured agent ("${defaultActor.id}"). Human instructions go through retrace_instruct; other human/system actors need the git hook or a credentialed context. ${ACTOR_LOCK_HINT}`);
+    // A configured model stays authoritative and carries harness-config; a differing caller pair is displaced
+    // onto actor.model_claims before signing. When unpinned, pass the caller's model / model_source /
+    // model_claims through as sent. An empty legacy model is absent for displacement (no claim from "").
+    if (!presentModel(defaultActor.model)) {
+      return {
+        ...defaultActor,
+        ...display,
+        ...(callerActor?.model !== undefined ? { model: callerActor.model } : {}),
+        ...(callerActor?.model_source !== undefined ? { model_source: callerActor.model_source } : {}),
+        ...(callerActor?.model_claims !== undefined ? { model_claims: callerActor.model_claims } : {}),
+      };
+    }
+    const displacedModel = callerModel !== undefined && callerModel !== defaultActor.model ? callerModel : undefined;
     return {
       ...defaultActor,
-      // A configured model stays authoritative. When it is deliberately unpinned, accept the runtime model reported
-      // by the agent client; the credential and actor lock still control id/type/on_behalf_of. This lets clients such
-      // as Gemini CLI switch models without sealing stale attribution into the ledger.
-      ...(defaultActor.model === undefined && callerActor?.model !== undefined ? { model: callerActor.model } : {}),
-      ...(callerActor?.display_name !== undefined ? { display_name: callerActor.display_name } : {}),
-      ...(callerActor?.version !== undefined ? { version: callerActor.version } : {}),
+      ...display,
+      ...(displacedModel !== undefined
+        ? {
+            model_claims: [
+              ...(callerActor?.model_claims ?? []),
+              {
+                value: displacedModel,
+                ...(callerActor?.model_source !== undefined ? { source: callerActor.model_source } : {}),
+                note: `displaced by ${defaultActor.model_source ?? "harness-config"} model`,
+              },
+            ],
+          }
+        : callerActor?.model_claims !== undefined ? { model_claims: callerActor.model_claims } : {}),
     };
   };
   /** Human actor for retrace_instruct. With the lock on, this server may only speak for its configured human. */

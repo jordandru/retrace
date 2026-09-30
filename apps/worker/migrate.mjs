@@ -9,7 +9,7 @@
  *
  * Schema statements are idempotent (CREATE … IF NOT EXISTS, INSERT OR IGNORE).
  * Re-running this script is safe. ALTER TABLE … ADD COLUMN is treated as
- * success when the column already exists (half-A pending_deliveries).
+ * success when the column already exists (pending routing, leases and gh_event).
  *
  * Failure: any spawn result other than status === 0 stops the script before the
  * next statement (exit code, killed-by-signal, or spawn error).

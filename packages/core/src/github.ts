@@ -21,6 +21,7 @@
  */
 import { EventInput, Actor, ArtifactRole } from "./schema.js";
 import { resolveCommitActor } from "./commit-actor.js";
+import { sha256Hex } from "./chain.js";
 
 const enc = new TextEncoder();
 const subtle: SubtleCrypto = (globalThis as any).crypto.subtle;
@@ -53,10 +54,19 @@ export function githubActor(user: any, fallback = "github"): Actor {
 const causedByFrom = (text?: string | null): string | undefined => text?.match(/Retrace-Caused-By:\s*(evt_[a-f0-9]+)/i)?.[1];
 const trim = (s: string | null | undefined, n = 300) => { const t = s?.replace(/^\s*Retrace-[\w-]+:.*$/gim, "").trim(); return t ? (t.length > n ? t.slice(0, n - 1) + "…" : t) : undefined; };
 
-export interface GithubMapOptions { project?: string; includePush?: boolean; deliveryId?: string }
+/** The declaration and ingestion paths hash exactly these UTF-8 bytes (N§3.4). */
+export function normaliseGithubBody(s: string): string {
+  return s.replace(/\r\n/g, "\n").split("\n").map(line => line.trimEnd()).join("\n").replace(/\n+$/, "");
+}
+
+export function githubBodySha256(s: string): Promise<string> {
+  return sha256Hex(normaliseGithubBody(s));
+}
+
+export interface GithubMapOptions { project?: string; includePush?: boolean; deliveryId?: string; ingressAt?: string }
 
 /** Map one webhook delivery to zero or more events. `event` = X-GitHub-Event header. */
-export function mapGithubWebhook(event: string, payload: any, opts: GithubMapOptions = {}): EventInput[] {
+export async function mapGithubWebhook(event: string, payload: any, opts: GithubMapOptions = {}): Promise<EventInput[]> {
   const repoFull: string = payload?.repository?.full_name ?? "unknown/unknown";
   const project = opts.project ?? repoFull;
   const idem = (suffix: string) => (opts.deliveryId ? `gh:${opts.deliveryId}` : `gh:${repoFull}:${suffix}`);
@@ -65,9 +75,23 @@ export function mapGithubWebhook(event: string, payload: any, opts: GithubMapOpt
 
   if (event === "pull_request") {
     const pr = payload.pull_request; const a = payload.action;
+    const merged = a === "closed" && pr.merged;
+    const withBody = a === "opened" || a === "reopened" || a === "edited";
+    const githubPayload = {
+      login: merged ? (pr.merged_by?.login ?? payload.sender?.login) : payload.sender?.login,
+      login_source: merged && pr.merged_by?.login != null ? "merged_by" : "sender",
+      branch: pr.head?.ref, head_repo: pr.head?.repo?.full_name,
+      ...(withBody ? { body_sha256: await githubBodySha256(pr.body ?? ""), body_null: pr.body == null,
+        title_sha256: await githubBodySha256(pr.title ?? "") } : {}),
+      ...(a === "opened" || a === "reopened" ? { head_sha: pr.head?.sha } : {}),
+      ...(a === "synchronize" ? { head_sha: payload.after } : {}),
+      ...(merged ? { merge_commit_sha: pr.merge_commit_sha } : {}),
+      delivery: opts.deliveryId, ingress_at: opts.ingressAt,
+      payload_time: merged ? pr.merged_at : pr.updated_at,
+    };
     const base: Omit<EventInput, "action"> = {
       project, actor: githubActor(payload.sender), artifacts: [prArtifact(pr)], timestamp: pr.updated_at ?? new Date().toISOString(),
-      location: where(pr.html_url), caused_by: causedByFrom(pr.body), method: { tool: "github", automated: false, params: { action: a, head: pr.head?.ref, base: pr.base?.ref, head_sha: pr.head?.sha, additions: pr.additions, deletions: pr.deletions, changed_files: pr.changed_files } },
+      location: where(pr.html_url), caused_by: causedByFrom(pr.body), method: { tool: "github", automated: false, params: { action: a, head: pr.head?.ref, base: pr.base?.ref, head_sha: pr.head?.sha, additions: pr.additions, deletions: pr.deletions, changed_files: pr.changed_files, github_payload: githubPayload } },
       idempotency_key: idem(`pr${pr.number}:${a}:${pr.updated_at}`), tags: ["github", "pr"],
     };
     if (a === "opened" || a === "reopened") return [{ ...base, action: "created", artifacts: [prArtifact(pr, "generated")], intent: trim(pr.body) ?? `Opened PR: ${pr.title}`, change: { summary: `${pr.title} (${pr.head?.ref} → ${pr.base?.ref})`, after_hash: pr.head?.sha } }];
@@ -86,7 +110,13 @@ export function mapGithubWebhook(event: string, payload: any, opts: GithubMapOpt
       project, actor: githubActor(r.user ?? payload.sender), action, action_detail: action === "other" ? "reviewed" : undefined,
       artifacts: [prArtifact(pr, "used")], timestamp: r.submitted_at ?? new Date().toISOString(), location: where(r.html_url ?? pr.html_url),
       intent: trim(r.body) ?? (state === "approved" ? `approved PR #${pr.number}` : state === "changes_requested" ? `requested changes on PR #${pr.number}` : `reviewed PR #${pr.number}`),
-      caused_by: causedByFrom(r.body) ?? causedByFrom(pr.body), method: { tool: "github-review", automated: false, params: { state, commit: r.commit_id } },
+      caused_by: causedByFrom(r.body) ?? causedByFrom(pr.body), method: { tool: "github-review", automated: false, params: { state, commit: r.commit_id, github_payload: {
+        login: r.user?.login ?? payload.sender?.login, login_source: r.user?.login != null ? "review.user" : "sender",
+        branch: pr.head?.ref, head_repo: pr.head?.repo?.full_name,
+        body_sha256: await githubBodySha256(r.body ?? ""), body_null: r.body == null,
+        review_state: state, head_sha: r.commit_id, review_id: r.id,
+        delivery: opts.deliveryId, ingress_at: opts.ingressAt, payload_time: r.submitted_at,
+      } } },
       idempotency_key: idem(`review${r.id}`), tags: ["github", "review"],
     }];
   }
@@ -94,7 +124,11 @@ export function mapGithubWebhook(event: string, payload: any, opts: GithubMapOpt
     const c = payload.comment, n = payload.issue.number;
     return [{
       project, actor: githubActor(c.user ?? payload.sender), action: "sent", artifacts: [{ id: `pr:${repoFull}#${n}`, kind: "pr", label: `PR #${n} ${payload.issue.title ?? ""}`.trim(), role: "used" as const }],
-      timestamp: c.created_at, location: where(c.html_url), intent: trim(c.body), caused_by: causedByFrom(c.body), method: { tool: "github-comment", automated: false },
+      timestamp: c.created_at, location: where(c.html_url), intent: trim(c.body), caused_by: causedByFrom(c.body), method: { tool: "github-comment", automated: false, params: { github_payload: {
+        login: c.user?.login ?? payload.sender?.login, login_source: c.user?.login != null ? "comment.user" : "sender",
+        body_sha256: await githubBodySha256(c.body ?? ""), body_null: c.body == null, comment_id: c.id,
+        delivery: opts.deliveryId, ingress_at: opts.ingressAt, payload_time: c.created_at,
+      } } },
       idempotency_key: idem(`comment${c.id}`), tags: ["github", "comment"],
     }];
   }
@@ -125,7 +159,7 @@ export function mapGithubWebhook(event: string, payload: any, opts: GithubMapOpt
         method: { tool: "git", automated: r.actor.type !== "human", params: {
           sha: c.id, producer: "github-push", ref: payload.ref, pusher: payload.pusher?.name,
           raw_message: String(c.message ?? ""), author: { name: c.author?.name, email: c.author?.email ?? (c.author?.username ? `github:${c.author.username}` : undefined) },
-          parents, parents_complete: parentsComplete,
+          parents, parents_complete: parentsComplete, model_claim: r.modelClaim,
         } },
         idempotency_key: `gh:push:${repoFull}:${c.id}`, tags: ["github", "push"],
       };
@@ -135,12 +169,12 @@ export function mapGithubWebhook(event: string, payload: any, opts: GithubMapOpt
 }
 
 /** Map a REST /pulls item (+ its reviews) for backfill. */
-export function mapGithubPullRest(repoFull: string, pr: any, reviews: any[] = [], project = repoFull): EventInput[] {
+export async function mapGithubPullRest(repoFull: string, pr: any, reviews: any[] = [], project = repoFull): Promise<EventInput[]> {
   const fake = { repository: { full_name: repoFull } };
   const out: EventInput[] = [];
-  out.push(...mapGithubWebhook("pull_request", { ...fake, action: "opened", sender: pr.user, pull_request: { ...pr, updated_at: pr.created_at } }, { project }));
-  for (const r of reviews) out.push(...mapGithubWebhook("pull_request_review", { ...fake, action: "submitted", sender: r.user, review: r, pull_request: pr }, { project }));
-  if (pr.merged_at) out.push(...mapGithubWebhook("pull_request", { ...fake, action: "closed", sender: pr.merged_by ?? pr.user, pull_request: { ...pr, merged: true, updated_at: pr.merged_at } }, { project }));
-  else if (pr.state === "closed") out.push(...mapGithubWebhook("pull_request", { ...fake, action: "closed", sender: pr.user, pull_request: { ...pr, merged: false, updated_at: pr.closed_at ?? pr.updated_at } }, { project }));
+  out.push(...await mapGithubWebhook("pull_request", { ...fake, action: "opened", sender: pr.user, pull_request: { ...pr, updated_at: pr.created_at } }, { project }));
+  for (const r of reviews) out.push(...await mapGithubWebhook("pull_request_review", { ...fake, action: "submitted", sender: r.user, review: r, pull_request: pr }, { project }));
+  if (pr.merged_at) out.push(...await mapGithubWebhook("pull_request", { ...fake, action: "closed", sender: pr.merged_by ?? pr.user, pull_request: { ...pr, merged: true, updated_at: pr.merged_at } }, { project }));
+  else if (pr.state === "closed") out.push(...await mapGithubWebhook("pull_request", { ...fake, action: "closed", sender: pr.user, pull_request: { ...pr, merged: false, updated_at: pr.closed_at ?? pr.updated_at } }, { project }));
   return out.sort((a, b) => String(a.timestamp).localeCompare(String(b.timestamp)));
 }

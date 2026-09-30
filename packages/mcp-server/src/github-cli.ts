@@ -67,7 +67,7 @@ or with the GitHub CLI:
       if (!prs.length) break;
       for (const pr of prs.slice(0, max)) {
         const reviews: any[] = await gh(`/repos/${repo}/pulls/${pr.number}/reviews`, token).catch(() => []);
-        inputs.push(...mapGithubPullRest(repo, pr, reviews, project));
+        inputs.push(...await mapGithubPullRest(repo, pr, reviews, project));
       }
       if (prs.length < 50) break;
     }
@@ -78,7 +78,7 @@ or with the GitHub CLI:
   }
   if (cmd === "replay") {
     const file = pos[1]; const ev = flags.event as string; if (!file || !ev) throw new Error("usage: retrace-github replay <payload.json> --event <x-github-event>");
-    const inputs = mapGithubWebhook(ev, JSON.parse(readFileSync(file, "utf8")), { project: (flags.project as string) ?? process.env.RETRACE_PROJECT, includePush: !!flags.push });
+    const inputs = await mapGithubWebhook(ev, JSON.parse(readFileSync(file, "utf8")), { project: (flags.project as string) ?? process.env.RETRACE_PROJECT, includePush: !!flags.push });
     const r = await logAll(inputs);
     console.log(`replay: ${r.logged} logged, ${r.deduped} deduped`);
     return;

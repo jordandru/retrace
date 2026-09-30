@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Credential, Event, EventInput, EventStore, HistoryQuery, Share, appendEvent, buildExportBundle, generateSigningKey, pageHistoryNewest, schemaSurface, signCanonical } from "@retrace-dev/core";
-import { attributionFinding, cliVersionGap, credentialAuthorization, doctorHistoryEvents, gateRemoteAuthorization, headDelivery, instructRootFinding, issuanceFindingsFromStatus, loadReviewEffortEvents, loadRoutingModels, missingSchema, parseDoctorArgs, pendingSealsFinding, pinSessionFinding, remoteCaptureCoverage, REVIEW_EFFORT_RECENT_LIMIT, REVIEW_EFFORT_ROUTING_PAGE, resolveRoutingModel, reviewEffortFindings, sealedCommitEvent, sealedLooksAgent } from "./doctor.js";
+import { attributionFinding, cliVersionGap, credentialAuthorization, doctorHistoryEvents, gateRemoteAuthorization, headDelivery, instructRootFinding, issuanceFindingsFromStatus, loadReviewEffortEvents, loadRoutingModels, missingSchema, modelClaimAbsentFinding, advisoryUnsignedFindings, parseDoctorArgs, pendingSealsFinding, pinSessionFinding, remoteCaptureCoverage, REVIEW_EFFORT_RECENT_LIMIT, REVIEW_EFFORT_ROUTING_PAGE, resolveRoutingModel, reviewEffortFindings, sealedCommitEvent, sealedLooksAgent } from "./doctor.js";
 import { RemoteStore } from "./remote-store.js";
 import { SqliteStore } from "./sqlite-store.js";
 
@@ -20,6 +20,12 @@ test("doctor: schema comparison names only fields the deployment would drop", ()
   assert.deepEqual(missingSchema({ ...local, future: ["x"] }), []);
 });
 
+test("doctor: missingSchema reports actor.model_source when the remote surface lacks the actor group", () => {
+  const local = schemaSurface();
+  const { actor: _drop, ...remote } = structuredClone(local);
+  assert.ok(missingSchema(remote).includes("actor.model_source"));
+});
+
 test("doctor: review effort warns only when the model supports effort, routing is absent, or routed and run effort differ", () => {
   const routing = commitEvt({
     id: "evt_route", seq: 1, action: "other", action_detail: "routed",
@@ -27,7 +33,7 @@ test("doctor: review effort warns only when the model supports effort, routing i
     method: { tool: "routing", params: { target: { agent: "codex", model: "gpt-6-astra", effort: "high" } } },
   });
   const review = (id: string, model: string, params: Record<string, unknown>): Event => commitEvt({
-    id, seq: 2, action: "approved", actor: { type: "agent", id: "codex", model },
+    id, seq: 2, action: "approved", actor: { type: "agent", id: "codex", model, model_source: "harness-runtime" },
     tags: ["review"], method: { tool: "review", params },
   });
   const models = {
@@ -121,7 +127,7 @@ test("doctor: un-routed review finding count does not grow with ledger size", ()
   };
   const unrouted = (count: number): Event[] => Array.from({ length: count }, (_, i) => commitEvt({
     id: `evt_unrouted_${i}`, seq: 2 + i, action: "approved",
-    actor: { type: "agent", id: "codex", model: "gpt-6-astra" },
+    actor: { type: "agent", id: "codex", model: "gpt-6-astra", model_source: "harness-runtime" },
     tags: ["review"], method: { tool: "review", params: {} },
   }));
 
@@ -165,7 +171,7 @@ test("doctor: routed missing-metadata finding count does not grow with ledger si
   });
   const missingEffort = (count: number): Event[] => Array.from({ length: count }, (_, i) => commitEvt({
     id: `evt_missing_effort_${i}`, seq: 2 + i, action: "approved",
-    actor: { type: "agent", id: "codex", model: "gpt-6-astra" },
+    actor: { type: "agent", id: "codex", model: "gpt-6-astra", model_source: "harness-runtime" },
     tags: ["review"], method: { tool: "review", params: { routing_event_id: effortRouting.id } },
   }));
   const fiveEfforts = reviewEffortFindings([effortRouting, ...missingEffort(5)], models);
@@ -184,7 +190,7 @@ test("doctor: routing model aliases resolve exactly and remain case-sensitive", 
     method: { tool: "routing", params: { target: { agent: "codex", model: "canonical-model", effort: "high" } } },
   });
   const review = (id: string, model: string): Event => commitEvt({
-    id, seq: 2, action: "approved", actor: { type: "agent", id: "codex", model },
+    id, seq: 2, action: "approved", actor: { type: "agent", id: "codex", model, model_source: "harness-runtime" },
     tags: ["review"], method: { tool: "review", params: { routing_event_id: routing.id, reasoning_effort: "high" } },
   });
   const models = {
@@ -205,8 +211,10 @@ test("doctor: shipped routing registry resolves exact harness model spellings an
     ["claude-fable-5-1", "claude-fable-5-1"],
     ["grok-4.6", "grok-4.6"],
     ["Grok 4.6", "grok-4.6"],
+    ["Cursor Grok 4.6", "grok-4.6"],
     ["claude-opus-4-8", "claude-opus-4-8"],
     ["claude-opus-4.8", "claude-opus-4-8"],
+    ["claude-opus-5-5", "claude-opus-5-5"],
   ]);
   for (const [reported, canonical] of expected) {
     assert.equal(resolveRoutingModel(models, reported)?.id, canonical, reported);
@@ -234,6 +242,306 @@ test("doctor: routing model registry rejects invalid and colliding aliases", () 
   })), /collides with an alias for a/);
 });
 
+test("doctor: source-aware review model — one review per source; gate counts none and self-report as no model", () => {
+  const routing = commitEvt({
+    id: "evt_route", seq: 1, action: "other", action_detail: "routed",
+    actor: { type: "agent", id: "claude-code" },
+    method: { tool: "routing", params: { target: { agent: "codex", model: "gpt-6-astra", effort: "high" } } },
+  });
+  const models = { "gpt-6-astra": { supports_effort: true, levels: ["low", "medium", "high", "xhigh"] } };
+  const review = (id: string, actor: Event["actor"]): Event => commitEvt({
+    id, seq: 2, action: "approved", actor,
+    tags: ["review"], method: { tool: "review", params: { routing_event_id: routing.id, reasoning_effort: "high" } },
+  });
+  const registered = (source: NonNullable<Event["actor"]["model_source"]>): Event["actor"] => ({
+    type: "agent", id: "codex", model: "gpt-6-astra", model_source: source,
+  });
+  const passSources = ["harness-runtime", "harness-config", "harness-display", "credential-pinned", "operator-stated"] as const;
+  for (const source of passSources) {
+    assert.deepEqual(reviewEffortFindings([routing, review(`evt_${source}`, registered(source))], models), [], source);
+  }
+  const none = reviewEffortFindings([routing, review("evt_none", { type: "agent", id: "codex", model_source: "none" })], models);
+  assert.equal(none[0]?.label, "review model");
+  assert.match(none[0]!.detail, /no model; source none/);
+  const self = reviewEffortFindings([routing, review("evt_self", registered("self-report"))], models);
+  assert.equal(self[0]?.label, "review model");
+  assert.match(self[0]!.detail, /model is the reviewer's own word/);
+  const legacy = reviewEffortFindings([routing, review("evt_legacy", { type: "agent", id: "codex", model: "unlisted-model" })], models);
+  assert.equal(legacy[0]?.label, "review model");
+  assert.match(legacy[0]!.detail, /no source recorded/);
+  const gatedNone = reviewEffortFindings([routing, review("evt_none_gate", { type: "agent", id: "codex", model_source: "none" })], models, undefined, { gate: true });
+  const gatedSelf = reviewEffortFindings([routing, review("evt_self_gate", registered("self-report"))], models, undefined, { gate: true });
+  assert.equal(gatedNone[0]?.label, "review model");
+  assert.equal(gatedSelf[0]?.label, "review model");
+  assert.deepEqual(reviewEffortFindings([routing, review("evt_display_gate", registered("harness-display"))], models, undefined, { gate: true }), []);
+});
+
+test("doctor: a registered source-less model warns even when the name resolves", () => {
+  const routing = commitEvt({
+    id: "evt_route", seq: 1, action: "other", action_detail: "routed",
+    actor: { type: "agent", id: "claude-code" },
+    method: { tool: "routing", params: { target: { agent: "codex", model: "gpt-6-astra", effort: "high" } } },
+  });
+  const models = {
+    "gpt-6": { supports_effort: true, levels: ["low", "medium", "high", "xhigh"], aliases: ["gpt-6-astra"] },
+  };
+  const review = (id: string, actor: Event["actor"], seq = 2): Event => commitEvt({
+    id, seq, action: "approved", actor,
+    tags: ["review"], method: { tool: "review", params: { routing_event_id: routing.id, reasoning_effort: "high" } },
+  });
+  const aliasLegacy = reviewEffortFindings([routing, review("evt_alias_legacy", { type: "agent", id: "codex", model: "gpt-6-astra" })], models);
+  assert.equal(aliasLegacy[0]?.label, "review model");
+  assert.match(aliasLegacy[0]!.detail, /registered actor.model with no model_source \(no source recorded\)/);
+  assert.doesNotMatch(aliasLegacy[0]!.detail, /unknown models have no inferred fallback/);
+  const aliasSourced = reviewEffortFindings([routing, review("evt_alias_sourced", { type: "agent", id: "codex", model: "gpt-6-astra", model_source: "harness-runtime" })], models);
+  assert.equal(aliasSourced.filter((finding) => finding.label === "review model").length, 0);
+
+  const shipped = loadRoutingModels(fileURLToPath(new URL("../../../", import.meta.url)))!;
+  const grokRouting = commitEvt({
+    id: "evt_route_grok", seq: 1, action: "other", action_detail: "routed",
+    actor: { type: "agent", id: "claude-code" },
+    method: { tool: "routing", params: { target: { agent: "cursor-agent", model: "cursor-grok-4.6-high", effort: "high" } } },
+  });
+  const patternLegacy = reviewEffortFindings([grokRouting, {
+    ...review("evt_pattern_legacy", { type: "agent", id: "cursor-agent", model: "Cursor Grok 4.6" }),
+    method: { tool: "review", params: { routing_event_id: grokRouting.id, reasoning_effort: "high" } },
+  }], shipped);
+  assert.equal(patternLegacy[0]?.label, "review model");
+  assert.match(patternLegacy[0]!.detail, /registered actor.model with no model_source \(no source recorded\)/);
+  const patternSourced = reviewEffortFindings([grokRouting, {
+    ...review("evt_pattern_sourced", { type: "agent", id: "cursor-agent", model: "Cursor Grok 4.6", model_source: "harness-display" }),
+    method: { tool: "review", params: { routing_event_id: grokRouting.id, reasoning_effort: "high" } },
+  }], shipped);
+  assert.equal(patternSourced.filter((finding) => finding.label === "review model").length, 0);
+
+  const unlisted = reviewEffortFindings([routing, review("evt_legacy", { type: "agent", id: "codex", model: "unlisted-model" })], models);
+  assert.equal(unlisted[0]?.label, "review model");
+  assert.match(unlisted[0]!.detail, /unknown models have no inferred fallback\) \(no source recorded\)/);
+});
+
+test("doctor: claude-opus-5-5 at max with harness-runtime is not a review model or effort finding", () => {
+  const models = loadRoutingModels(fileURLToPath(new URL("../../../", import.meta.url)))!;
+  const routing = commitEvt({
+    id: "evt_route_opus", seq: 1, action: "other", action_detail: "routed",
+    actor: { type: "agent", id: "claude-code" },
+    method: { tool: "routing", params: { target: { agent: "claude-code", model: "claude-opus-5-5", effort: "max" } } },
+  });
+  const review = commitEvt({
+    id: "evt_opus", seq: 2, action: "approved",
+    actor: { type: "agent", id: "claude-code", model: "claude-opus-5-5", model_source: "harness-runtime" },
+    tags: ["review"], method: { tool: "review", params: { routing_event_id: routing.id, reasoning_effort: "max" } },
+  });
+  assert.deepEqual(reviewEffortFindings([routing, review], models).map((finding) => finding.label), []);
+});
+
+test("doctor: Cursor display vs launch id is not a review model mismatch; captured display effort fills a missing self-report", () => {
+  const models = loadRoutingModels(fileURLToPath(new URL("../../../", import.meta.url)))!;
+  const routing = commitEvt({
+    id: "evt_route_grok", seq: 1, action: "other", action_detail: "routed",
+    actor: { type: "agent", id: "claude-code" },
+    method: { tool: "routing", params: { target: { agent: "cursor-agent", model: "cursor-grok-4.6-high", effort: "high" } } },
+  });
+  const display = commitEvt({
+    id: "evt_display", seq: 2, action: "approved",
+    actor: { type: "agent", id: "cursor-agent", model: "Cursor Grok 4.6", model_source: "harness-display" },
+    tags: ["review"], method: { tool: "review", params: { routing_event_id: routing.id, reasoning_effort: "high" } },
+  });
+  assert.deepEqual(reviewEffortFindings([routing, display], models).map((finding) => finding.label), []);
+  const fromDisplay = commitEvt({
+    id: "evt_from_display", seq: 2, action: "approved",
+    actor: { type: "agent", id: "cursor-agent", model: "Cursor Grok 4.6 (high)", model_source: "harness-display" },
+    tags: ["review"], method: { tool: "review", params: { routing_event_id: routing.id } },
+  });
+  assert.deepEqual(reviewEffortFindings([routing, fromDisplay], models).map((finding) => finding.label), []);
+  const mismatchDisplay = commitEvt({
+    id: "evt_mismatch_display", seq: 2, action: "approved",
+    actor: { type: "agent", id: "cursor-agent", model: "Cursor Grok 4.6 (low)", model_source: "harness-display" },
+    tags: ["review"], method: { tool: "review", params: { routing_event_id: routing.id } },
+  });
+  const mismatch = reviewEffortFindings([routing, mismatchDisplay], models);
+  assert.equal(mismatch[0]?.label, "review effort mismatch");
+  assert.match(mismatch[0]!.detail, /effort from display string/);
+  const reportedWins = commitEvt({
+    id: "evt_reported", seq: 2, action: "approved",
+    actor: { type: "agent", id: "cursor-agent", model: "Cursor Grok 4.6 (low)", model_source: "harness-display" },
+    tags: ["review"], method: { tool: "review", params: { routing_event_id: routing.id, reasoning_effort: "high" } },
+  });
+  assert.deepEqual(reviewEffortFindings([routing, reportedWins], models).map((finding) => finding.label), []);
+});
+
+const commitArt = (sha: string) => [{ id: `commit:jordandru/retrace@${sha}`, kind: "commit" as const, role: "generated" as const }];
+
+test("doctor: model claim absent lists only commits whose model_claim is absent", () => {
+  const absent = commitEvt({
+    id: "evt_absent", seq: 1, actor: { type: "agent", id: "cursor-agent" }, artifacts: commitArt("absent"),
+    method: { tool: "git", params: { model_claim: "absent" } },
+  });
+  const complete = commitEvt({
+    id: "evt_complete", seq: 2, artifacts: commitArt("complete"),
+    method: { tool: "git", params: { model_claim: "complete" } },
+  });
+  const finding = modelClaimAbsentFinding([absent, complete]);
+  assert.equal(finding?.label, "model claim absent");
+  assert.equal(finding?.level, "warn");
+  assert.match(finding!.detail, /1 of 2 commits in the inspected window have model_claim absent with agent evidence/);
+  assert.match(finding!.detail, /oldest evt_absent/);
+  assert.equal(modelClaimAbsentFinding([complete]), undefined);
+});
+
+test("doctor: model claim absent is a producer defect only with agent evidence, counted once per sha", () => {
+  const usedArt = (sha: string) => [{ id: `commit:jordandru/retrace@${sha}`, kind: "commit" as const, role: "used" as const }];
+  const humanAbsent = commitEvt({
+    id: "evt_human_absent", seq: 1, actor: { type: "human", id: "jordan@example.com" },
+    artifacts: commitArt("human"), method: { tool: "git", params: { model_claim: "absent" } },
+  });
+  const humanOnly = modelClaimAbsentFinding([humanAbsent]);
+  assert.equal(humanOnly?.label, "model claim absent");
+  assert.equal(humanOnly?.level, "pass");
+  assert.match(humanOnly!.detail, /0 of 1 commits in the inspected window have model_claim absent with agent evidence/);
+  assert.match(humanOnly!.detail, /1 has model_claim absent and no agent evidence on its seals — not counted as defects/);
+  assert.doesNotMatch(humanOnly!.detail, /producer defect/);
+  assert.doesNotMatch(humanOnly!.detail, /human-authored|hook seal is missing|agent commit/);
+
+  const agentRead = commitEvt({
+    id: "evt_agent_read", seq: 2, action: "read", actor: { type: "agent", id: "codex" },
+    artifacts: usedArt("human"), location: { surface: "agent" },
+  });
+  const agentReview = commitEvt({
+    id: "evt_agent_review", seq: 3, action: "approved", actor: { type: "agent", id: "codex" },
+    artifacts: usedArt("human"), tags: ["review"], method: { tool: "review", params: {} },
+  });
+  const readDoesNotAccuse = modelClaimAbsentFinding([humanAbsent, agentRead, agentReview]);
+  assert.equal(readDoesNotAccuse?.level, "pass");
+  assert.match(readDoesNotAccuse!.detail, /0 of 1 commits/);
+  assert.match(readDoesNotAccuse!.detail, /1 has model_claim absent and no agent evidence on its seals/);
+  assert.doesNotMatch(readDoesNotAccuse!.detail, /producer defect/);
+
+  const generatedNoClaim = commitEvt({
+    id: "evt_generated_no_claim", seq: 4, actor: { type: "agent", id: "cursor-agent" },
+    artifacts: commitArt("human"), location: { surface: "agent" }, method: { tool: "github" },
+  });
+  const notASeal = modelClaimAbsentFinding([humanAbsent, generatedNoClaim]);
+  assert.equal(notASeal?.level, "pass");
+  assert.match(notASeal!.detail, /0 of 1 commits/);
+
+  const hook = commitEvt({
+    id: "evt_hook_agent_surface", seq: 10, actor: { type: "human", id: "jordan@example.com" },
+    location: { surface: "agent" }, artifacts: commitArt("mixed"),
+    method: { tool: "git", params: { model_claim: "absent" } },
+  });
+  const webhook = commitEvt({
+    id: "evt_webhook_human", seq: 11, actor: { type: "human", id: "jordan@example.com" },
+    artifacts: commitArt("mixed"), method: { tool: "git", params: { model_claim: "absent" } },
+  });
+  const mixed = modelClaimAbsentFinding([hook, webhook]);
+  assert.equal(mixed?.level, "warn");
+  assert.match(mixed!.detail, /1 of 1 commits in the inspected window have model_claim absent with agent evidence/);
+  assert.match(mixed!.detail, /0 agent actor · 1 no controlling terminal at commit time, which non-agent commits can also have, such as a human's IDE-button commit/);
+  assert.match(mixed!.detail, /oldest evt_hook_agent_surface/);
+  assert.doesNotMatch(mixed!.detail, /more /);
+
+  const agentActor = commitEvt({
+    id: "evt_agent_actor", seq: 20, actor: { type: "agent", id: "cursor-agent" },
+    artifacts: commitArt("agent"), method: { tool: "git", params: { model_claim: "absent" } },
+  });
+  const agentOnly = modelClaimAbsentFinding([agentActor]);
+  assert.equal(agentOnly?.level, "warn");
+  assert.match(agentOnly!.detail, /1 of 1 commits/);
+  assert.match(agentOnly!.detail, /1 agent actor · 0 no controlling terminal at commit time/);
+  assert.doesNotMatch(agentOnly!.detail, /IDE-button commit/);
+  assert.match(agentOnly!.detail, /oldest evt_agent_actor/);
+  assert.match(agentOnly!.detail, /producer defect after adoption where the evidence is right/);
+
+  const fourProducers = [
+    commitEvt({
+      id: "evt_hook", seq: 30, actor: { type: "agent", id: "cursor-agent" }, location: { surface: "agent" },
+      artifacts: commitArt("ce335c31f4e0"), method: { tool: "git", params: { model_claim: "absent" } },
+    }),
+    commitEvt({
+      id: "evt_webhook", seq: 31, actor: { type: "human", id: "jordan@example.com" },
+      artifacts: commitArt("ce335c31f4e0"), method: { tool: "git", params: { model_claim: "absent" } },
+    }),
+    commitEvt({
+      id: "evt_pr_merge", seq: 32, action: "merged", actor: { type: "human", id: "jordan@example.com" },
+      artifacts: commitArt("ce335c31f4e0"), method: { tool: "github" },
+    }),
+    commitEvt({
+      id: "evt_ci", seq: 33, action: "other", actor: { type: "system", id: "github-actions" },
+      artifacts: commitArt("ce335c31f4e0"), method: { tool: "github" },
+    }),
+  ];
+  const once = modelClaimAbsentFinding(fourProducers);
+  assert.equal(once?.level, "warn");
+  assert.match(once!.detail, /1 of 1 commits in the inspected window have model_claim absent with agent evidence/);
+  assert.match(once!.detail, /1 agent actor · 0 no controlling terminal at commit time/);
+  assert.doesNotMatch(once!.detail, /IDE-button commit/);
+  assert.doesNotMatch(once!.detail, /2 of |4 of /);
+
+  const complete = commitEvt({
+    id: "evt_complete_only", seq: 40, artifacts: commitArt("complete"),
+    method: { tool: "git", params: { model_claim: "complete" } },
+  });
+  assert.equal(modelClaimAbsentFinding([complete, fourProducers[2]!, fourProducers[3]!]), undefined);
+});
+
+test("doctor: a system-bot absent seal is K and the finding states only evidence", () => {
+  const bot = commitEvt({
+    id: "evt_bot_absent", seq: 1,
+    actor: { type: "system", id: "323890924+retrace-checkpoint[bot]@users.noreply.github.com" },
+    artifacts: commitArt("3e2bf255ce72"),
+    method: { tool: "github", params: { model_claim: "absent", sealed_by: "webhook:github" }, automated: true },
+  });
+  const finding = modelClaimAbsentFinding([bot]);
+  assert.equal(finding?.label, "model claim absent");
+  assert.equal(finding?.level, "pass");
+  assert.match(finding!.detail, /0 of 1 commits in the inspected window have model_claim absent with agent evidence/);
+  assert.match(finding!.detail, /1 has model_claim absent and no agent evidence on its seals — not counted as defects/);
+  assert.doesNotMatch(finding!.detail, /human-authored/);
+  assert.doesNotMatch(finding!.detail, /hook seal is missing/);
+  assert.doesNotMatch(finding!.detail, /agent commit/);
+});
+
+test("doctor: without a routing registry, the absent-claim listing still inspects the recent window", async () => {
+  const project = "retrace";
+  const absent = commitEvt({
+    id: "evt_absent_recent", seq: 10, project,
+    actor: { type: "agent", id: "cursor-agent" }, location: { surface: "agent" },
+    method: { tool: "git", params: { model_claim: "absent" } },
+  });
+  const queries: HistoryQuery[] = [];
+  const store = {
+    async all() { throw new Error("absent-claim listing must not read the whole ledger"); },
+    async history(q: HistoryQuery) {
+      queries.push({ ...q });
+      assert.ok(typeof q.limit === "number" && q.limit <= REVIEW_EFFORT_RECENT_LIMIT, `unbounded history limit: ${q.limit}`);
+      return pageHistoryNewest([absent], q);
+    },
+  };
+
+  const withoutRegistry = await advisoryUnsignedFindings(store, project, undefined);
+  assert.deepEqual(withoutRegistry.map((finding) => finding.label), ["model claim absent"]);
+  assert.ok(withoutRegistry.every((finding) => !finding.label.startsWith("review")));
+  assert.match(withoutRegistry[0]!.detail, /unsigned history; --gate uses the verified ledger/);
+  assert.equal(queries.length, 1, "one recent-window history call, no routing walk");
+  assert.equal(queries[0]!.limit, REVIEW_EFFORT_RECENT_LIMIT);
+  assert.equal(queries[0]!.text, undefined);
+
+  queries.length = 0;
+  const models = { "gpt-6-astra": { supports_effort: true, levels: ["low", "medium", "high", "xhigh"] } };
+  const withRegistry = await advisoryUnsignedFindings(store, project, models);
+  assert.equal(withRegistry.some((finding) => finding.label === "model claim absent"), true);
+  assert.equal(queries.some((q) => q.text?.includes("routing")), true);
+  assert.equal(queries.some((q) => !q.text && q.limit === REVIEW_EFFORT_RECENT_LIMIT), true);
+
+  const failing = {
+    async all() { throw new Error("must not read the whole ledger"); },
+    async history() { throw new Error("history unavailable"); },
+  };
+  const failed = await advisoryUnsignedFindings(failing, project, undefined);
+  assert.equal(failed[0]?.label, "model claim absent");
+  assert.match(failed[0]!.detail, /advisory model-claim listing not checked/);
+});
+
 test("doctor: review-routing history is bounded and still fires when adoption is outside the recent window", async () => {
   const project = "retrace";
   const models = { "gpt-6-astra": { supports_effort: true, levels: ["low", "medium", "high", "xhigh"] } };
@@ -256,7 +564,7 @@ test("doctor: review-routing history is bounded and still fires when adoption is
   }
   ledger.push(evt({
     id: "evt_unrouted_recent", seq: 401, action: "approved",
-    actor: { type: "agent", id: "codex", model: "gpt-6-astra" },
+    actor: { type: "agent", id: "codex", model: "gpt-6-astra", model_source: "harness-runtime" },
     tags: ["review"], method: { tool: "review", params: {} },
   }));
 
@@ -309,7 +617,7 @@ test("doctor: exhausted routing search reports incomplete history without droppi
   }
   ledger.push(commitEvt({
     project, id: "evt_recent_review", seq: 3203, action: "rejected",
-    actor: { type: "agent", id: "codex", model: "gpt-6-astra" },
+    actor: { type: "agent", id: "codex", model: "gpt-6-astra", model_source: "harness-runtime" },
     tags: ["review"], method: { tool: "review", params: {} },
   }));
   let calls = 0;
@@ -348,7 +656,7 @@ test("doctor: capped real routing rows never claim the oldest observed row is ad
   }
   ledger.push(commitEvt({
     project, id: "evt_recent_review", seq: 3203, action: "rejected",
-    actor: { type: "agent", id: "codex", model: "gpt-6-astra" },
+    actor: { type: "agent", id: "codex", model: "gpt-6-astra", model_source: "harness-runtime" },
     tags: ["review"], method: { tool: "review", params: {} },
   }));
   let calls = 0;
@@ -724,7 +1032,8 @@ test("gate authorization: unsigned /events omitting the seal cannot hide a verif
   } finally { globalThis.fetch = savedFetch; }
 });
 
-import { gateDualWitness, hookFindings, objectStoreFinding, parseDoctorArgs as parseArgs2 } from "./doctor.js";
+import { gateDualWitness, hookFindings, hookTargetCommand, objectStoreFinding, probeHookTarget, probeTimeoutMs, DEFAULT_PROBE_TIMEOUT_MS, parseDoctorArgs as parseArgs2 } from "./doctor.js";
+import { hookScript as realHookScript, runningVersion as hookVersion } from "./git-hook.js";
 import { execFileSync as execGit, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync as mkTemp, readFileSync, readdirSync, statSync, truncateSync, writeFileSync as writeF } from "node:fs";
 import { tmpdir as tmpD } from "node:os";
@@ -863,8 +1172,8 @@ test("objectStoreFinding: packed-only commit objects pass without loose files", 
 test("hookFindings: linked worktrees use hooks from the common Git directory", () => {
   const fixture = objectStoreRepo();
   fixture.commit("hooks\n");
-  writeF(joinP(fixture.repo, ".git", "hooks", "post-commit"), "#!/bin/sh\n# retrace-git hook\n");
-  writeF(joinP(fixture.repo, ".git", "hooks", "post-merge"), "#!/bin/sh\n# retrace-git hook\n");
+  writeF(joinP(fixture.repo, ".git", "hooks", "post-commit"), realHookScript("post-commit"));
+  writeF(joinP(fixture.repo, ".git", "hooks", "post-merge"), realHookScript("post-merge"));
   const parent = mkTemp(joinP(tmpD(), "retrace-hook-worktree-"));
   const worktree = joinP(parent, "linked");
   fixture.g("worktree", "add", "-q", "-b", "feature", worktree);
@@ -872,6 +1181,77 @@ test("hookFindings: linked worktrees use hooks from the common Git directory", (
   const findings = hookFindings(worktree);
   assert.deepEqual(findings.map((finding) => finding.level), ["pass", "pass"]);
   assert.ok(findings.every((finding) => finding.detail.startsWith(joinP(fixture.repo, ".git", "hooks"))));
+  assert.ok(findings.every((finding) => finding.detail.includes(`(retrace-git ${hookVersion()})`)), findings.map((f) => f.detail).join("\n"));
+});
+
+test("issue #84: doctor executes the hook's target and FAILS when the script it names cannot load", () => {
+  const fixture = objectStoreRepo();
+  fixture.commit("hooks\n");
+  const hookBin = fileURLToPath(new URL("./git-hook.js", import.meta.url));
+  // the target command is whatever precedes ` commit --hook`, for either install form
+  assert.equal(hookTargetCommand(realHookScript("post-commit")), `node "${hookBin}"`);
+  assert.equal(hookTargetCommand(realHookScript("post-merge")), `node "${hookBin}"`);
+  assert.equal(hookTargetCommand(realHookScript("post-commit", "npx -y -p @retrace-dev/cli@0.1.9 retrace-git")), "npx -y -p @retrace-dev/cli@0.1.9 retrace-git");
+  assert.equal(hookTargetCommand("#!/bin/sh\n# retrace-git hook\n"), undefined);
+
+  // the dry run's hook: an npx cache path that is no longer there
+  const gone = joinP(fixture.repo, "gone", "_npx", "8791fae00a73ff5d", "node_modules", "@retrace-dev", "cli", "dist", "git-hook.js");
+  const evicted = realHookScript("post-commit", `node "${gone}"`);
+  const probe = probeHookTarget(fixture.repo, evicted);
+  assert.equal(probe.ok, false);
+  assert.match(probe.detail, /exited 1: Error: Cannot find module/);
+
+  writeF(joinP(fixture.repo, ".git", "hooks", "post-commit"), evicted);
+  writeF(joinP(fixture.repo, ".git", "hooks", "post-merge"), realHookScript("post-merge", `node "${gone}"`));
+  const broken = hookFindings(fixture.repo);
+  assert.deepEqual(broken.map((finding) => [finding.level, finding.label]), [["fail", "post-commit hook"], ["fail", "post-merge hook"]]);
+  for (const finding of broken) {
+    assert.match(finding.detail, /Cannot find module/, finding.detail);
+    assert.match(finding.detail, new RegExp(`run retrace-git install --repo ${fixture.repo.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`), finding.detail);
+  }
+
+  // a non-zero exit is a failure too, and a mark with no command line at all cannot be trusted either
+  const exits = realHookScript("post-commit", `node -e "process.exit(3)" --`);
+  assert.match(probeHookTarget(fixture.repo, exits).detail, /^exited 3/);
+  // a target that never answers fails at the probe budget, and the FAIL names the override (PR 92 round 1, finding 4)
+  const stalls = realHookScript("post-commit", `node -e "setTimeout(() => {}, 30000)" --`);
+  const stalled = probeHookTarget(fixture.repo, stalls, 300);
+  assert.equal(stalled.ok, false);
+  assert.match(stalled.detail, /^did not finish within 300 ms \(raise RETRACE_DOCTOR_PROBE_TIMEOUT_MS/, stalled.detail);
+  assert.equal(probeTimeoutMs({}), DEFAULT_PROBE_TIMEOUT_MS);
+  assert.equal(probeTimeoutMs({ RETRACE_DOCTOR_PROBE_TIMEOUT_MS: "120000" }), 120_000);
+  for (const bad of ["", "0", "-5", "12s", "abc"]) assert.equal(probeTimeoutMs({ RETRACE_DOCTOR_PROBE_TIMEOUT_MS: bad }), DEFAULT_PROBE_TIMEOUT_MS, JSON.stringify(bad));
+  writeF(joinP(fixture.repo, ".git", "hooks", "post-commit"), "#!/bin/sh\n# retrace-git hook\n");
+  assert.equal(hookFindings(fixture.repo)[0].level, "fail");
+  assert.match(hookFindings(fixture.repo)[0].detail, /no `commit --hook` line/);
+
+  // the repaired hook passes again, and the probe runs once for both hooks with the same target
+  writeF(joinP(fixture.repo, ".git", "hooks", "post-commit"), realHookScript("post-commit"));
+  writeF(joinP(fixture.repo, ".git", "hooks", "post-merge"), realHookScript("post-merge"));
+  let probes = 0;
+  const counted = hookFindings(fixture.repo, (script) => { probes++; return probeHookTarget(fixture.repo, script); });
+  assert.deepEqual(counted.map((finding) => finding.level), ["pass", "pass"]);
+  assert.equal(probes, 1);
+
+  // end to end: the CLI prints NOT READY with the repair on the evicted hook, READY on the repaired one
+  const doctorBin = fileURLToPath(new URL("./doctor.js", import.meta.url));
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("RETRACE_")));
+  writeF(joinP(fixture.repo, ".retrace.json", ), JSON.stringify({ project: "evicted", db: joinP(fixture.repo, "ledger.db") }, null, 2) + "\n");
+  const ready = spawnSync(process.execPath, [doctorBin, "doctor", fixture.repo], { encoding: "utf8", env });
+  assert.equal(ready.status, 0, ready.stdout + ready.stderr);
+  assert.match(ready.stdout, /^PASS  post-commit hook/m);
+  writeF(joinP(fixture.repo, ".git", "hooks", "post-commit"), evicted);
+  const notReady = spawnSync(process.execPath, [doctorBin, "doctor", fixture.repo], { encoding: "utf8", env });
+  assert.equal(notReady.status, 1, notReady.stdout + notReady.stderr);
+  const failLine = notReady.stdout.split("\n").find((line) => line.startsWith("FAIL  post-commit hook"));
+  assert.ok(failLine, notReady.stdout); // level + label
+  assert.match(failLine, /Cannot find module/); // the cause
+  assert.ok(failLine.endsWith(`run retrace-git install --repo ${fixture.repo}`), failLine); // the repair
+  assert.match(notReady.stdout, /NOT READY/);
+  // the same evicted hook with the budget overridden: the override changes nothing about a target that fails fast
+  const overridden = spawnSync(process.execPath, [doctorBin, "doctor", fixture.repo], { encoding: "utf8", env: { ...env, RETRACE_DOCTOR_PROBE_TIMEOUT_MS: "5000" } });
+  assert.equal(overridden.status, 1, overridden.stdout + overridden.stderr);
+  assert.match(overridden.stdout, /^FAIL  post-commit hook .*Cannot find module/m);
 });
 
 test("doctor: a local-db repo with installed hooks and a sealed commit is READY without a credential", async () => {
@@ -928,4 +1308,27 @@ test("gate dual witness never infers leniency from the ref layout: a detached, p
   assert.throws(() => gateDualWitness({ gate: true, local: true }, { CI: "1" }), /not allowed under CI/);
   assert.equal(parseArgs2(["doctor", "--gate", "--local"]).local, true);
   assert.equal(parseArgs2(["doctor", "--gate"]).local, false);
+});
+
+test("T11 owner-login gate uses first /2 adoption, passes declarations/unresolved and fails later human seals", async () => {
+  const { ownerLoginFinding, sealedLooksAgent } = await import("./doctor.js");
+  const { MemoryEventStore, createHandler, appendOwnerLoginEvent, appendEvent } = await import("@retrace-dev/core");
+  const { ownerLoginScenario } = await import("../../core/dist/owner-login-fixture.js");
+  const store = new MemoryEventStore(), f = await ownerLoginScenario(store);
+  const handler = createHandler(store, { token: "owner-token", ownerPrincipal: { type: "human", id: "owner" } });
+  const put = async (body: typeof f.policy.body, etag: string) => {
+    const res = await handler(new Request(`http://test/projects/${f.project}/policy`, { method: "PUT", headers: { authorization: "Bearer owner-token", "content-type": "application/json", "if-match": etag }, body: JSON.stringify(body) }));
+    assert.equal(res.status, 201, await res.text());
+    return (await store.getPolicy(f.project, { current: true }))!;
+  };
+  const policy = await put(f.policy.body, "none");
+  await appendOwnerLoginEvent(store, f.input, policy, f.repo, Date.now()+2000);
+  await appendOwnerLoginEvent(store, { ...f.input, idempotency_key: "second" }, policy, f.repo, Date.now()+2000);
+  assert.equal((await ownerLoginFinding(await store.all(f.project), store.policies, true)).level, "pass");
+  const bad = await appendEvent(store, { ...f.input, idempotency_key: "bad" });
+  const next = structuredClone(policy.body); next.github!.shared_logins.push("someone");
+  await put(next, policy.digest);
+  assert.equal((await ownerLoginFinding(await store.all(f.project), store.policies, true)).level, "fail");
+  assert.match((await ownerLoginFinding(await store.all(f.project), store.policies, false)).detail, new RegExp(bad.event.id));
+  for (const status of ["declared_by_seat", "identity_mapped"]) assert.equal(sealedLooksAgent({ actor: { type: "system" }, method: { params: { sealed_by: "webhook:github", owner_login_decision: { policy: "owner-login/1", decision: { status } } } } }), true);
 });

@@ -646,7 +646,7 @@ test("F9/F10: drain budgets are per-sha and terminal/policy-off work stays durab
     id, message: "work\n\nRetrace-Actor: codex\n", timestamp: "2026-09-10T12:00:00.000Z",
     author: { name: "Jordan", email: "jordan@example.com" }, added: ["a.ts"], modified: [], removed: [],
   })) });
-  await store.insertPendingDelivery({
+  await store.insertPendingDelivery({ gh_event: "push",
     delivery_id: "d-per-sha", project: "p", raw_body: JSON.stringify(payload),
     received_at: "2026-09-10T12:00:00.000Z", repo: "acme/app", routing_state: "received",
   });
@@ -668,7 +668,7 @@ test("F9/F10: drain budgets are per-sha and terminal/policy-off work stays durab
   assert.equal(row!.state, "terminal_failure");
 
   const offStore = new MemoryEventStore();
-  await offStore.insertPendingDelivery({
+  await offStore.insertPendingDelivery({ gh_event: "push",
     delivery_id: "d-off", project: "p", raw_body: JSON.stringify(pushPayload()),
     received_at: "2026-09-10T12:00:00.000Z", repo: "acme/app", routing_state: "received",
   });
@@ -705,11 +705,11 @@ test("drain records a terminal invalid_artifact outcome for a parked NUL path an
     }],
   }));
   await store.insertPendingDelivery({
-    delivery_id: "d-astral", project: "p", raw_body: JSON.stringify(astralPayload),
+    delivery_id: "d-astral", project: "p", gh_event: "push", raw_body: JSON.stringify(astralPayload),
     received_at: "2026-09-10T12:00:00.000Z", repo: "acme/app", routing_state: "received", state: "received",
   });
   await store.insertPendingDelivery({
-    delivery_id: "d-nul", project: "p", raw_body: badRaw,
+    delivery_id: "d-nul", project: "p", gh_event: "push", raw_body: badRaw,
     received_at: "2026-09-10T12:00:01.000Z", repo: "acme/app", routing_state: "received", state: "received",
   });
 
@@ -744,11 +744,11 @@ test("F11/F12: one atomic drainer wins and unresolved rows cannot starve ready w
   const store = new MemoryEventStore();
   const { h } = handler(store);
   await putPolicy(h);
-  for (let i = 0; i < 20; i++) await store.insertPendingDelivery({
+  for (let i = 0; i < 20; i++) await store.insertPendingDelivery({ gh_event: "push",
     delivery_id: `unresolved-${i}`, project: "", raw_body: "{}",
     received_at: "2026-09-01T00:00:00.000Z", routing_state: "unresolved",
   });
-  await store.insertPendingDelivery({
+  await store.insertPendingDelivery({ gh_event: "push",
     delivery_id: "d-ready", project: "p", raw_body: JSON.stringify(pushPayload()),
     received_at: "2026-09-10T12:00:00.000Z", repo: "acme/app", routing_state: "received",
   });
@@ -777,7 +777,7 @@ test("F11/F12: one atomic drainer wins and unresolved rows cannot starve ready w
   assert.equal(await store.getPendingDelivery("d-ready"), null);
   assert.equal(store.pending.filter((row) => row.routing_state === "unresolved").length, 20);
 
-  await store.insertPendingDelivery({
+  await store.insertPendingDelivery({ gh_event: "push",
     delivery_id: "d-reclaim", project: "p", raw_body: JSON.stringify(pushPayload()),
     received_at: "2026-09-10T12:00:00.000Z", repo: "acme/app", routing_state: "received",
   });

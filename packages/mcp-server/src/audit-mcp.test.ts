@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { EventInput } from "@retrace-dev/core";
-import { LogArgs } from "./audit-mcp.js";
+import { AuditActor, LogArgs } from "./audit-mcp.js";
 
 test("shared retrace_log schema covers every client-suppliable core EventInput field", () => {
   // producer_sig belongs to the producer-signing adapter, not the compatibility-first audit MCP surface.
@@ -23,4 +23,15 @@ test("shared retrace_log schema refuses NUL and unpaired surrogates and accepts 
   assert.equal(LogArgs.safeParse({ ...base, artifacts: [{ id: "repo:o/retrace#a\uD800b" }] }).success, false);
   assert.equal(LogArgs.safeParse({ ...base, artifacts: [{ id: "repo:o/retrace#a\uDC00b" }] }).success, false);
   assert.equal(LogArgs.safeParse({ ...base, artifacts: [{ id: "repo:o/retrace#😀.ts" }] }).success, true);
+});
+
+test("AuditActor rejects an inconsistent model_source and keeps legacy model-only and neither forms", () => {
+  assert.equal(AuditActor.safeParse({ model_source: "harness-runtime" }).success, false);
+  assert.equal(AuditActor.safeParse({ model: "caller", model_source: "none" }).success, false);
+  assert.equal(AuditActor.safeParse({ model: "caller" }).success, true, "legacy: model without source");
+  assert.equal(AuditActor.safeParse({}).success, true, "legacy: neither field");
+  assert.equal(AuditActor.safeParse({ model_source: "none" }).success, true);
+  assert.equal(AuditActor.safeParse({ model: "caller", model_source: "harness-runtime" }).success, true);
+  assert.equal(AuditActor.safeParse({ model: "", model_source: "harness-runtime" }).success, false, "empty-string model is absent");
+  assert.equal(AuditActor.safeParse({ model: "", model_source: "none" }).success, true, "none with empty-string model");
 });

@@ -1,4 +1,4 @@
-import { ArtifactIndexQuery, ArtifactIndexResult, ChainHead, Event, EventStore, HeadMovedError, HistoryQuery, HistoryPage, PendingDelivery, Share, artifactIndexRows, clampHistoryLimit, runArtifactIndexStatements, ArtifactIndexHit, historyPageFromNewestFirst, likeContains, policyDocumentFromRow, policySnapshotFromIndex, assertRouteWriteConsistent, RouteConflictError } from "@retrace-dev/core";
+import { InsertExtras, OwnerLoginConsumption, readOwnerLoginConsumption, ArtifactIndexQuery, ArtifactIndexResult, ChainHead, Event, EventStore, HeadMovedError, HistoryQuery, HistoryPage, PendingDelivery, Share, artifactIndexRows, clampHistoryLimit, runArtifactIndexStatements, ArtifactIndexHit, historyPageFromNewestFirst, likeContains, policyDocumentFromRow, policySnapshotFromIndex, assertRouteWriteConsistent, RouteConflictError } from "@retrace-dev/core";
 import type { BreakerRow, ClassificationContextRow, PolicyRouteRow, PolicySnapshot, PolicySnapshotBudget, PolicyWrite } from "@retrace-dev/core";
 
 export class D1Store implements EventStore {
@@ -30,8 +30,22 @@ export class D1Store implements EventStore {
     ];
   }
 
-  async insert(e: Event) {
-    await this.db.batch(this.insertStatements(e)); // batch is atomic in D1
+  async insert(e: Event, extras?: InsertExtras) {
+    await this.db.batch([
+      ...(extras?.owner_login_consumption ?? []).map(row => this.db.prepare(
+        "INSERT INTO owner_login_consumption (project, declaration_event_id, consumed_by_delivery, consumed_by_event_id, consumed_by_seq, consumed_at) VALUES (?, ?, ?, ?, ?, ?)"
+      ).bind(e.project, row.declaration_event_id, row.consumed_by_delivery ?? null, e.id, e.seq, e.received_at)),
+      ...this.insertStatements(e),
+    ]); // batch is atomic in D1
+  }
+
+  async ownerLoginConsumptionRow(project: string, id: string): Promise<OwnerLoginConsumption | null> {
+    return this.db.prepare("SELECT * FROM owner_login_consumption WHERE project = ? AND declaration_event_id = ?").bind(project, id).first<OwnerLoginConsumption>();
+  }
+  async ownerLoginConsumptionUpTo(project: string, ids: string[], throughSeq: number, budget: { deadline: number; row_cap: number }) {
+    return readOwnerLoginConsumption(ids, budget, async (batch, limit) => (await this.db.prepare(
+      `SELECT * FROM owner_login_consumption WHERE project = ? AND consumed_by_seq <= ? AND declaration_event_id IN (${batch.map(() => "?").join(",")}) LIMIT ?`
+    ).bind(project, throughSeq, ...batch, limit).all<OwnerLoginConsumption>()).results);
   }
 
   /** Deletes + the audit insert run in one D1 batch, which is atomic: if the audit's (project, seq) collides the
@@ -42,7 +56,7 @@ export class D1Store implements EventStore {
     if (audit.project === project) throw new Error("audit event must not live in the project being deleted");
     // Keep every project-owned row in this guarded transaction. In particular, leaving export_cache behind would
     // retain the deleted ledger bytes and could serve them as a stale bundle if the project name were recreated.
-    const tables = ["events", "event_artifacts", "event_artifact_index", "pending_deliveries", "shares", "checkpoints", "export_cache", "project_policies", "classification_contexts", "classification_path_lowers", "classification_breakers"];
+    const tables = ["owner_login_consumption", "events", "event_artifacts", "event_artifact_index", "pending_deliveries", "shares", "checkpoints", "export_cache", "project_policies", "classification_contexts", "classification_path_lowers", "classification_breakers"];
     const headMatches = {
       sql: "EXISTS (SELECT 1 FROM events WHERE project = ? AND seq = ? AND hash = ?) AND NOT EXISTS (SELECT 1 FROM events WHERE project = ? AND seq > ?)",
       params: [project, expectedHead.seq, expectedHead.hash, project, expectedHead.seq],
@@ -144,8 +158,8 @@ export class D1Store implements EventStore {
   async insertPendingDelivery(row: PendingDelivery) {
     try {
       await this.db.prepare(
-        "INSERT INTO pending_deliveries (delivery_id, project, raw_body, received_at, repo, routing_source, routing_digest, routing_state) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-      ).bind(row.delivery_id, row.project, row.raw_body, row.received_at, row.repo ?? null, row.routing_source ?? null, row.routing_digest ?? null, row.routing_state ?? null).run();
+        "INSERT INTO pending_deliveries (delivery_id, project, raw_body, received_at, repo, routing_source, routing_digest, routing_state, gh_event) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      ).bind(row.delivery_id, row.project, row.raw_body, row.received_at, row.repo ?? null, row.routing_source ?? null, row.routing_digest ?? null, row.routing_state ?? null, row.gh_event ?? null).run();
     } catch (e: unknown) {
       if (!/UNIQUE/i.test(String((e as Error)?.message))) throw e;
     }
@@ -153,7 +167,7 @@ export class D1Store implements EventStore {
 
   async getPendingDelivery(delivery_id: string): Promise<PendingDelivery | null> {
     return (await this.db.prepare(
-      `SELECT delivery_id, project, raw_body, received_at, repo, routing_source, routing_digest, routing_state,
+      `SELECT delivery_id, project, raw_body, received_at, gh_event, repo, routing_source, routing_digest, routing_state,
               lease_owner, lease_until, outcomes, attempt_count, state
        FROM pending_deliveries WHERE delivery_id = ?`,
     ).bind(delivery_id).first<PendingDelivery>()) ?? null;
@@ -161,7 +175,7 @@ export class D1Store implements EventStore {
 
   async listPendingDeliveriesOlderThan(received_at: string): Promise<PendingDelivery[]> {
     const { results } = await this.db.prepare(
-      `SELECT delivery_id, project, raw_body, received_at, repo, routing_source, routing_digest, routing_state,
+      `SELECT delivery_id, project, raw_body, received_at, gh_event, repo, routing_source, routing_digest, routing_state,
               lease_owner, lease_until, outcomes, attempt_count, state
        FROM pending_deliveries WHERE received_at < ? ORDER BY received_at ASC`,
     ).bind(received_at).all<PendingDelivery>();
@@ -361,7 +375,7 @@ export class D1Store implements EventStore {
 
   async listDrainablePendingDeliveries(nowIso: string, limit = 20) {
     const { results } = await this.db.prepare(
-      `SELECT delivery_id, project, raw_body, received_at, repo, routing_source, routing_digest, routing_state,
+      `SELECT delivery_id, project, raw_body, received_at, gh_event, repo, routing_source, routing_digest, routing_state,
               lease_owner, lease_until, outcomes, attempt_count, state
        FROM pending_deliveries
        WHERE IFNULL(routing_state, '') NOT IN ('unresolved', 'pending_policy')
@@ -381,7 +395,7 @@ export class D1Store implements EventStore {
          AND (lease_until IS NULL OR lease_until <= ?)`,
     ).bind(owner, untilIso, delivery_id, nowIso).run();
     const row = await this.db.prepare(
-      `SELECT delivery_id, project, raw_body, received_at, repo, routing_source, routing_digest, routing_state,
+      `SELECT delivery_id, project, raw_body, received_at, gh_event, repo, routing_source, routing_digest, routing_state,
               lease_owner, lease_until, outcomes, attempt_count, state
        FROM pending_deliveries WHERE delivery_id=? AND lease_owner=?`,
     ).bind(delivery_id, owner).first<PendingDelivery>();
