@@ -85,24 +85,33 @@ on placement.
 
 ## 7. Result, rollback and a correction (2026-09-30, appended; agent-rules 10)
 
-*Appended on Jordan's go `evt_f50a1ec5eac64741bff18a788a4aa6e5`. The text above is unchanged.*
+*Appended on Jordan's go `evt_f50a1ec5eac64741bff18a788a4aa6e5`, revised in PR 143 before review on `evt_326a3954d2b54ce08c625b03c6068bef`. The text
+above is unchanged.*
 
 **Result.** Deployed as Version `f3b73603-878f-4d6d-8c60-e152723c8c72` at 15:14:02Z (`evt_fce4ac4a07754da6a9ce64ce9237ba76`). Workers API
 `placement_status` was `SUCCESS` at 15:30:22Z (`evt_effe29bed231473181d468609db33672`). The first six classified deliveries after that read
-(seqs 10026, 10031, 10034, 10037, 10039, 10044) all sealed `unavailable` / `deadline`. Median `candidates_ms` was 129.5 (baseline 89) and
-median `consumption_ms` was 104.5 (baseline 81). §5 row: **Improvement threshold not met** (Codex's round-3 wording). The Grok seat's report is
-PR 142. The coordinator recomputed it from the seals (`evt_e49599f5936b4a86b8134f3bfaa9c365`).
+(seqs 10026, 10031, 10034, 10037, 10039, 10044) all sealed `unavailable` / `deadline`. Median `candidates_ms` was 129.5 (baseline 89) and median
+`consumption_ms` was 104.5 (baseline 81). §5 row: **Improvement threshold not met** (Codex's round-3 wording). The Grok seat's report is PR 142. The
+coordinator recomputed it from the seals (`evt_e49599f5936b4a86b8134f3bfaa9c365`).
 
-**Rollback.** Jordan rolled the Worker back with `wrangler rollback` to `0acfff97-4cf3-4a5e-b279-8fa3a971878a` at 16:03:01Z
-(`evt_1772404122494351b6ec61fba4356e87`). This PR removes the `[placement]` block so that main matches the live Worker again.
+**Rollback, partial.** Jordan ran `wrangler rollback` to `0acfff97-4cf3-4a5e-b279-8fa3a971878a` at 16:03:01Z (`evt_1772404122494351b6ec61fba4356e87`).
+It restored the code. It did **not** clear placement: at 16:15:18Z the Workers API still reported `placement_mode: smart`, `status: SUCCESS`,
+and script `modified_on` 15:14:01Z (`evt_5d5ae2bfd24a43b8bb11250aba50227a`). So from 16:03Z the live Worker ran the 0acfff97 code **with placement on**.
+Rolling back to a version does not revert a script setting; §6's "remove the block and deploy" is the revert that counts.
+
+**The actual revert (this PR, then a deploy).** `apps/worker/wrangler.toml` sets `[placement] mode = "off"`. In wrangler 4.123.0,
+`parseConfigPlacement` returns no placement for `mode = "off"` (without a hint), and the same happens when the block is absent, so the deploy uploads no
+placement field either way. Whether Cloudflare then clears the setting is **not known in advance**. After the deploy, the same Workers API read
+decides it: `placement_mode` absent or not `smart`. If it is still `smart`, the next step is an explicit Workers API change to the script's
+placement setting, as its own step on Jordan's go.
 
 **Correction to §6 (the `/api` probe rule).** The rule "roll back if the median `GET /api` probe time after deploy is more than twice the median
-before" measured the owner's laptop path, not the Worker. The medians were 0.193018 s before the deploy, 0.690811 s with placement, and
-0.645650 s after the rollback, so the slowdown did not come from placement. At 16:04Z the laptop's Cloudflare edge was YYZ (SJC at the
-2026-09-30 `wrangler d1 info` read). `/cdn-cgi/trace`, served by the edge without running the Worker, took 0.50–1.01 s, and one `/api` probe timed
-out. That condition was confounded; the rollback stands on the §5 row, which uses times measured inside the Worker. Any future placement or
-latency note should compare edge-only timings (`/cdn-cgi/trace`) against Worker timings, or measure inside the Worker, instead of using a bare
-laptop probe.
+before" measures the owner's laptop path together with the Worker. The medians were 0.193018 s before the deploy (15:13Z), 0.690811 s at 15:51Z, and
+0.645650 s at 16:03Z. Placement was on at both of the later reads, so they cannot separate placement from the network. What they do show: at
+16:04Z the laptop's Cloudflare edge was YYZ (SJC at the earlier `wrangler d1 info` read); `/cdn-cgi/trace`, which the edge serves without running
+the Worker, took 0.50–1.01 s; and one `/api` probe timed out. The laptop's own path was slow, so that condition cannot be attributed to placement. The
+rollback rests on the §5 row, which uses times measured inside the Worker. Any future latency note should compare edge-only timings
+(`/cdn-cgi/trace`) with Worker timings, or measure inside the Worker.
 
-**Not established.** Why per-call times rose with placement on. Whether any single request was placed. Whether the rollback to a version also
-cleared the script's placement setting (a Workers API re-read after the rollback answers this).
+**Not established.** Why per-call times rose with placement on. Whether any single request was placed. Whether the next deploy clears the
+placement setting (checked by the read above).
