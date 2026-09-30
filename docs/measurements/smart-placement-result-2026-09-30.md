@@ -95,8 +95,8 @@ That is the SUCCESS / both-medians-≥-75-ms row of the note. The brief directs 
 
 Two §6 conditions hold. Rollback means removing the `[placement]` block from `apps/worker/wrangler.toml` and deploying. Both the change (a PR) and the deploy wait for Jordan's go. This seat does not deploy, roll back, or change config.
 
+**Correction (2026-09-30, appended; agent-rules 10).** On Jordan's go `evt_c9f052f9a8144996a8b2bf79de5104d1`, after claude-code review `evt_4c954e129dbc4fa385bc2138aef4e5e1` (L1, L2). The §6 table is unchanged. `docs/design/smart-placement-deploy-note.md` §7 records that later laptop `/api` probes cannot separate placement from the network: placement was on at both later reads. The laptop's own path was slow: edge YYZ, `/cdn-cgi/trace` 0.50–1.01 s, one timeout. The `/api` condition held as written; it cannot be attributed to placement. The rollback rests on the §5 row. A stray body line `Retrace-Caused-By: evt_dd964d92dac64f118dc6367de6438fd1` belonged in the commit message and has been removed.
+
 ## What this result does not show
 
 Cause. Whether any single request was placed. Cloudflare's `cf-placement` value is a request header this Worker neither records nor returns. `placement_status` SUCCESS is per deployment. 1 % of requests stay unplaced as Cloudflare's baseline. The comparison is before/after against the step-B record.
-
-Retrace-Caused-By: evt_dd964d92dac64f118dc6367de6438fd1
