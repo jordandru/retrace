@@ -31,6 +31,15 @@ RETRACE_MCP_ENABLED = "1"
 # Makes the /mcp host/origin checks bite (they are no-ops without an expected origin).
 RETRACE_PUBLIC_URL = "https://retrace-api.slcwitit.workers.dev"
 
+# Smart Placement (2026-09-30, step C Part 1). D1 retrace-db runs in WNAM with read replication off (`wrangler d1 info`,
+# evt_49c7d153). Owner-login stages that make one D1 call seal 73–118 ms per call against 1.4 ms of executed SQL
+# (docs/measurements/owner-login-timing-stepB-2026-09-30.md), so each call is mostly transport and the six sequential calls
+# of a classification cannot fit the 300 ms budget. Smart Placement lets Cloudflare run the Worker near D1 when that lowers
+# latency; it changes where requests execute, not what they do. The decision.timing block on the next deliveries is the
+# check. Remove this block to return to default placement.
+[placement]
+mode = "smart"
+
 # Hourly head checkpoints witnessed in Rekor (roadmap rung 2); handler = `scheduled` in src/index.ts
 [triggers]
 crons = ["7 * * * *", "*/5 * * * *"]
