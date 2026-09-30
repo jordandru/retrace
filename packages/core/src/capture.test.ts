@@ -24,11 +24,11 @@ test("sameArtifact: owner/repo matches its basename alias; two full names do not
 test("artifactLookup expands the same owner/repo ↔ basename rule as sameArtifact", () => {
   const full = artifactLookup("repo:jordandru/retrace#a.ts");
   assert.deepEqual(full.equals.slice().sort(), ["repo:jordandru/retrace#a.ts", "repo:retrace#a.ts"].sort());
-  assert.equal(full.glob, undefined);
+  assert.equal(full.suffix, undefined);
 
   const short = artifactLookup("repo:retrace#a.ts");
   assert.deepEqual(short.equals, ["repo:retrace#a.ts"]);
-  assert.equal(short.glob, "repo:*/retrace#a.ts");
+  assert.equal(short.suffix, "/retrace#a.ts");
 
   const other = artifactLookup("repo:otherorg/retrace#a.ts");
   assert.equal(other.equals.includes("repo:jordandru/retrace#a.ts"), false);
@@ -39,6 +39,33 @@ test("artifactLookup expands the same owner/repo ↔ basename rule as sameArtifa
 
 test("escapeGlobLiteral keeps * ? [ from matching as wildcards in a path", () => {
   assert.equal(escapeGlobLiteral("a*b?[c]"), "a[*]b[?][[]c[]]");
-  const look = artifactLookup("repo:retrace#file*[x].ts");
-  assert.equal(look.glob, "repo:*/retrace#file[*][[]x[]].ts");
+});
+
+test("alias suffix is equivalent to GLOB repo:*/alias#path for a hit and a near-miss", () => {
+  // GLOB `repo:*/retrace#<path>` has one wildcard, `*`, which matches `/` and `#`. The matched set is
+  // therefore keys that start with `repo:` and end with `/retrace#<path>`. Suffix equality is that
+  // filter; the explicit `[repo:, repo;)` range supplies the prefix. `escapeGlobLiteral` protected
+  // `*`, `?`, `[` in the GLOB form; a literal suffix compare does not need it and must not apply it.
+  const path = "packages/core/src/store.ts";
+  const query = `repo:retrace#${path}`;
+  const look = artifactLookup(query);
+  const suffix = `/retrace#${path}`;
+  assert.equal(look.suffix, suffix);
+  assert.equal("glob" in look, false);
+
+  const match = `repo:jordandru/retrace#${path}`;
+  const nearMiss = `repo:jordandru/retrace-extra#${path}`;
+  assert.equal(sameArtifact(match, query), true);
+  assert.equal(match.startsWith("repo:") && match.endsWith(suffix), true, "hit: owner/alias#path ends with the suffix");
+  assert.equal(sameArtifact(nearMiss, query), false);
+  assert.equal(nearMiss.endsWith(suffix), false, "near-miss: basename retrace-extra must not satisfy /retrace#path");
+
+  const wild = artifactLookup("repo:retrace#file*[x].ts");
+  assert.equal(wild.suffix, "/retrace#file*[x].ts", "suffix is literal; brackets from escapeGlobLiteral would search for the wrong key");
+  assert.equal("repo:acme/retrace#file*[x].ts".endsWith(wild.suffix!), true);
+  assert.equal("repo:acme/retrace#fileQ[x].ts".endsWith(wild.suffix!), false);
+
+  const oldGlob = `repo:*/retrace#${"a".repeat(47)}`;
+  assert.equal(new TextEncoder().encode(oldGlob).length, 62);
+  assert.equal(artifactLookup(`repo:retrace#${"a".repeat(47)}`).suffix, `/${"retrace"}#${"a".repeat(47)}`);
 });

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { Event, EventInput, GENESIS_HASH } from "./schema.js";
+import { Event, EventInput, GENESIS_HASH, InvalidArtifactIdError } from "./schema.js";
 import { MemoryEventStore } from "./mem-store.js";
 import { EventStore } from "./store.js";
 import { PolicyDocument, POLICY_PROFILE_V2 } from "./policy.js";
@@ -35,6 +35,22 @@ async function classify(store: EventStore, input?: EventInput, doc = policy, dea
   if (result.kind !== "decision") throw new Error("not applicable");
   return ownerLoginRecord(result.input)!;
 }
+
+test("owner-login append rejects malformed artifact ids before classification or sealing", async () => {
+  const { appendOwnerLoginEvent } = await import("./owner-login.js");
+  for (const bad of ["pr:owner/repo#\0", "pr:owner/repo#\uD800", "pr:owner/repo#\uDC00"]) {
+    for (const artifact of [{ id: bad }, { id: "pr:owner/repo#1", derived_from: [bad] }]) {
+      const store = storeOf([]), input = { ...await comment(), artifacts: [artifact] };
+      store.head = async () => { throw new Error("invalid input must fail before any store read"); };
+      await assert.rejects(appendOwnerLoginEvent(store, input, policy, repo), InvalidArtifactIdError);
+      await assert.rejects(appendOwnerLoginEvent(store, input, null, repo), InvalidArtifactIdError);
+      assert.equal(store.events.length, 0);
+    }
+  }
+  const store = storeOf([]), input = { ...await comment(), artifacts: [{ id: "pr:owner/repo#1", role: "used" as const, derived_from: ["repo:owner/repo#😀.ts"] }] };
+  const { event } = await appendOwnerLoginEvent(store, input, policy, repo);
+  assert.deepEqual(event.artifacts, input.artifacts);
+});
 
 test("T1 T19 sequence-zero declaration and same-seat duplicates select only the lowest seq", async () => {
   const first = await declaration(), next = await declaration({ id: "later", seq: 2 });

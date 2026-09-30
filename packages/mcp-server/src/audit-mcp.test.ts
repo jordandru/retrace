@@ -17,6 +17,14 @@ test("shared retrace_log schema retains capture-role and causal-link operating g
   assert.match(LogArgs.shape.caused_by.description ?? "", /dangling or cross-project ids are rejected/);
 });
 
+test("shared retrace_log schema refuses NUL and unpaired surrogates and accepts an astral pair", () => {
+  const base = { action: "edited" as const, artifacts: [{ id: "a" }] };
+  assert.equal(LogArgs.safeParse({ ...base, artifacts: [{ id: "repo:o/retrace#a\0b" }] }).success, false);
+  assert.equal(LogArgs.safeParse({ ...base, artifacts: [{ id: "repo:o/retrace#a\uD800b" }] }).success, false);
+  assert.equal(LogArgs.safeParse({ ...base, artifacts: [{ id: "repo:o/retrace#a\uDC00b" }] }).success, false);
+  assert.equal(LogArgs.safeParse({ ...base, artifacts: [{ id: "repo:o/retrace#😀.ts" }] }).success, true);
+});
+
 test("AuditActor rejects an inconsistent model_source and keeps legacy model-only and neither forms", () => {
   assert.equal(AuditActor.safeParse({ model_source: "harness-runtime" }).success, false);
   assert.equal(AuditActor.safeParse({ model: "caller", model_source: "none" }).success, false);

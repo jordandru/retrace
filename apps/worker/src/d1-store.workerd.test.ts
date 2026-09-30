@@ -97,6 +97,91 @@ test("D1 in workerd: this harness enforces the five-term compound limit the roun
   });
 });
 
+test("D1 in workerd: alias lookup whose old GLOB exceeded 50 bytes returns the matching row", { timeout: 60_000 }, async () => {
+  await withD1(async (db) => {
+    const glob50 = "a".repeat(50);
+    const glob51 = "a".repeat(51);
+    await db.prepare("SELECT 'x' GLOB ?").bind(glob50).all();
+    await assert.rejects(db.prepare("SELECT 'x' GLOB ?").bind(glob51).all(), /LIKE or GLOB pattern too complex/);
+
+    const path = "packages/mcp-server/src/sqlite-store.test.ts";
+    const oldGlob = `repo:*/retrace#${path}`;
+    assert.equal(new TextEncoder().encode(oldGlob).length, 59);
+    assert.ok(new TextEncoder().encode(oldGlob).length > 50);
+
+    const store = new D1Store(db);
+    const memory = new MemoryEventStore();
+    const hit = `repo:jordandru/retrace#${path}`;
+    const miss = `repo:jordandru/retrace-extra#${path}`;
+    for (const id of [hit, miss]) {
+      const input = { project: "p", actor: { type: "agent" as const, id: "A" }, action: "edited" as const, artifacts: [{ id, role: "generated" as const }] };
+      await appendEvent(memory, input);
+      await appendEvent(store, input);
+    }
+    const q: ArtifactIndexQuery = {
+      project: "p", artifact_keys: [`repo:retrace#${path}`], after_seq: -1, through_seq: 10, row_cap: 100, deadline: Date.now() + 30_000,
+    };
+    for (const st of eventsReferencingArtifactsStatements(q)) {
+      assert.doesNotMatch(st.sql, /\bGLOB\b|\bLIKE\b/);
+    }
+    const got = await store.eventsReferencingArtifacts(q);
+    const want = await memory.eventsReferencingArtifacts(q);
+    assert.equal(got.ok, true, `D1 must not throw store_error; got ${JSON.stringify(got)}`);
+    assert.deepEqual(seqs(got), seqs(want), "workerd D1 must match the memory spec");
+    assert.deepEqual(seqs(got), [0], "hit owner/retrace#path; near-miss retrace-extra must not match");
+  });
+});
+
+test("D1 in workerd: refuses NUL and unpaired surrogates and accepts an astral-plane path", { timeout: 60_000 }, async () => {
+  await withD1(async (db) => {
+    const store = new D1Store(db);
+    const high = "repo:o/retrace#a\uD800b";
+    const low = "repo:o/retrace#a\uDC00b";
+    const nul = "repo:o/retrace#a\0b";
+    const astral = "repo:o/retrace#😀.ts";
+    for (const [id, re] of [[nul, /U\+0000/], [high, /unpaired surrogates/], [low, /unpaired surrogates/]] as const) {
+      await assert.rejects(
+        () => appendEvent(store, { project: "p", actor: { type: "agent" as const, id: "A" }, action: "edited" as const, artifacts: [{ id, role: "generated" as const }] }),
+        (e: unknown) => e instanceof Error && re.test(e.message),
+      );
+    }
+    const { event } = await appendEvent(store, { project: "p", actor: { type: "agent" as const, id: "A" }, action: "edited" as const, artifacts: [{ id: astral, role: "generated" as const }] });
+    assert.equal(event.artifacts[0]?.id, astral);
+    const q: ArtifactIndexQuery = {
+      project: "p", artifact_keys: [`repo:retrace#😀.ts`], after_seq: -1, through_seq: 10, row_cap: 100, deadline: Date.now() + 30_000,
+    };
+    for (const st of eventsReferencingArtifactsStatements(q)) {
+      assert.doesNotMatch(st.sql, /\bGLOB\b|\bLIKE\b/);
+    }
+    const got = await store.eventsReferencingArtifacts(q);
+    assert.equal(got.ok, true, `D1 must not throw; got ${JSON.stringify(got)}`);
+    assert.deepEqual(seqs(got), [0]);
+  });
+});
+
+test("D1 in workerd: suffix lookup drops the U+FFFE/U+FFFF false positive old GLOB admitted", { timeout: 60_000 }, async () => {
+  await withD1(async (db) => {
+    const stored = "repo:o/retrace#\uFFFE";
+    const store = new D1Store(db);
+    await appendEvent(store, { project: "p", actor: { type: "agent" as const, id: "A" }, action: "edited" as const, artifacts: [{ id: stored, role: "generated" as const }] });
+    const glob = await db.prepare("SELECT COUNT(*) AS n FROM event_artifact_index WHERE artifact_key GLOB ?").bind("repo:*/retrace#\uFFFF").all() as { results: { n: number }[] };
+    assert.equal(glob.results[0]?.n, 1, "old GLOB overmatched U+FFFE against U+FFFF");
+    const q: ArtifactIndexQuery = {
+      project: "p", artifact_keys: ["repo:retrace#\uFFFF"], after_seq: -1, through_seq: 10, row_cap: 100, deadline: Date.now() + 30_000,
+    };
+    for (const st of eventsReferencingArtifactsStatements(q)) {
+      assert.doesNotMatch(st.sql, /\bGLOB\b|\bLIKE\b/);
+    }
+    const got = await store.eventsReferencingArtifacts(q);
+    assert.equal(got.ok, true, `D1 must not throw; got ${JSON.stringify(got)}`);
+    assert.deepEqual(seqs(got), [], "new byte predicate must not restore the overmatch");
+    const trueAlias = await store.eventsReferencingArtifacts({
+      ...q, artifact_keys: ["repo:retrace#\uFFFE"],
+    });
+    assert.deepEqual(seqs(trueAlias), [0]);
+  });
+});
+
 test("T18 §1.2 D1 pending gh_event round-trip, redelivery receipt and NULL migration", async () => {
   await withD1(async db => {
     const store = new D1Store(db);
@@ -129,5 +214,63 @@ test("T17 workerd consumption batch rolls back on either constraint and reads ov
     await assert.rejects(store.insert({ ...first.event, id: "bad2", seq: 3 }, { owner_login_consumption: [{ declaration_event_id: f.declaration.id }] }), /owner_login_consumption/);
     assert.equal(await store.get("bad2"), null);
     assert.equal((await store.all(f.project)).length, 3);
+  });
+});
+
+test("D1 in workerd: owner-login amendment capture reads all 11 files of 5d7290f", { timeout: 60_000 }, async () => {
+  await withD1(async db => {
+    const { ownerLoginScenario } = await import("../../../packages/core/dist/owner-login-fixture.js");
+    const { appendOwnerLoginEvent, ownerLoginRecord } = await import("@retrace-dev/core");
+    // git show --format= --name-only 5d7290f: the production amendment's target files.
+    const paths = [
+      "packages/core/src/producer-sig.test.ts",
+      "packages/core/src/producer-sig.ts",
+      "packages/mcp-server/README.md",
+      "packages/mcp-server/src/admin.test.ts",
+      "packages/mcp-server/src/admin.ts",
+      "packages/mcp-server/src/export-cli.test.ts",
+      "packages/mcp-server/src/export-cli.ts",
+      "packages/mcp-server/src/git-hook.test.ts",
+      "packages/mcp-server/src/git-hook.ts",
+      "packages/mcp-server/src/producer-key.test.ts",
+      "packages/mcp-server/src/producer-key.ts",
+    ];
+    const oldPatterns = paths.map(path => `repo:*/retrace#${path}`);
+    assert.equal(oldPatterns.filter(pattern => Buffer.byteLength(pattern) > 50).length, 7);
+    assert.equal(Math.max(...oldPatterns.map(pattern => Buffer.byteLength(pattern))), 59);
+
+    const store = new D1Store(db), f = await ownerLoginScenario(store);
+    f.policy.body.repositories.push({ name: "jordandru/retrace", aliases: ["retrace"] });
+    const root = (await appendEvent(store, { project: f.project, actor: { type: "human", id: "owner" },
+      action: "instructed", artifacts: [{ id: "task:amendment", role: "used" }] })).event;
+    const files = paths.map(path => ({ id: `repo:jordandru/retrace#${path}`, role: "generated" as const }));
+    const evidence = (await appendEvent(store, { project: f.project, actor: { type: "agent", id: "other" },
+      action: "edited", artifacts: files, caused_by: root.id })).event;
+    const target = (await appendEvent(store, { project: f.project, actor: { type: "agent", id: "codex" },
+      action: "edited", artifacts: files, caused_by: root.id })).event;
+    await appendEvent(store, { project: f.project, actor: root.actor, action: "other", action_detail: "amended",
+      tags: ["amendment", "attribution"], intent: "synthetic correction with the production target's file set",
+      caused_by: root.id, artifacts: [{ id: `event:${target.id}`, role: "used" }, { id: `event:${evidence.id}`, role: "used" }],
+      method: { tool: "retrace_amend", params: { sealed_by: "owner", target_event_id: target.id,
+        attribution: { from: target.actor, to: evidence.actor, evidence: [evidence.id] } } } });
+
+    const captureReads: { query: ArtifactIndexQuery; result: Awaited<ReturnType<D1Store["eventsReferencingArtifacts"]>> }[] = [];
+    const read = store.eventsReferencingArtifacts.bind(store);
+    store.eventsReferencingArtifacts = async (query, now) => {
+      const result = await read(query, now);
+      if (query.artifact_keys.some(key => key.startsWith("repo:retrace#"))) captureReads.push({ query, result });
+      return result;
+    };
+    const appended = await appendOwnerLoginEvent(store, f.input, f.policy, f.repo);
+    assert.equal(captureReads.length, 1, "owner-login must reach amendmentCaptureDependencies' file read");
+    const capture = captureReads[0]!;
+    assert.deepEqual(capture.query.artifact_keys.filter(key => key.startsWith("repo:retrace#")).sort(),
+      paths.map(path => `repo:retrace#${path}`).sort());
+    assert.equal(capture.result.ok, true, `amendment capture read: ${JSON.stringify(capture.result)}`);
+    if (capture.result.ok) assert.deepEqual(capture.result.events.map(e => e.id), [evidence.id, target.id]);
+    const decision = ownerLoginRecord(appended.event)!.decision;
+    assert.equal(decision.status, "declared_by_seat", JSON.stringify(decision));
+    assert.equal(decision.timing.stage_failed, null);
+    assert.deepEqual(decision.consumed, [f.declaration.id]);
   });
 });
