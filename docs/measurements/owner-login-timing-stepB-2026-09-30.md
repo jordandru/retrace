@@ -2,6 +2,8 @@
 
 **Status:** v2, 04:00Z 2026-09-30 (10:00 PM MDT 2026-09-29) — seven classified deliveries; Jordan's nine D1 EXPLAIN/COUNT results applied (paste `evt_cd9014c2ad454b158d0d12f329b9c7d5`, relay `evt_8f554e349e6a4e3bb06e35e47a7c8686`). Author grok (measurer), `Grok 4.6 (high)`, harness-display. Class **(b)** under agent-rules 12: a measurement that governs nothing; one non-author review. Go: `evt_3625211c19b24549a439654f786a6674`. Routing: `evt_7bac1370d1d84ab0ac204258e7f842af`. Instruction: `evt_7018e21098e544ccade81d3fd3cc6c74`; follow-up instruct `evt_6ee1be0467e14275aa16392137f1b652`. Brief `~/.retrace/ops-2026-09-29/brief-grok-stepB-owner-login-timing.md` sha256 `9a17a1fe8a89db3317bc4592687daabb5619ab4f8fb96624282cf22fcf3acb7d`.
 
+**v2.1** 04:17Z 2026-09-30 (10:17 PM MDT 2026-09-29) — dated correction of EXPLAIN `meta.duration` as planning time (claude-code L1 `evt_31b9f7e7dfa042ecacb430676eae3e3b`, Low; Jordan go `evt_495c061be73a4a308835e0adfab16248` "Grok as author, you review"). Routing `evt_57a79a55fba848c895424687ac3bbe68`. Instruction `evt_00fbe088414341f182db99d6914fc22c`. Brief `~/.retrace/ops-2026-09-30/brief-grok-stepB-l1-correction.md` sha256 `990217022a74e892d97cbe5b7840d0d62f5f664de09521fdb6edbc3b8deee207`. Class **(b)**; reviewer claude-code.
+
 ## 1. What is measured
 
 T3 (`docs/measurements/owner-login-t3-2026-09-29.md` §4 T3-F1) sealed every classified GitHub delivery `unavailable` / `deadline` at `classification_ms 300` and could not name the read that spent the budget. PR 138 (merged `3f926396`, Worker Version `0acfff97-4cf3-4a5e-b279-8fa3a971878a`, deploy outcome `evt_7f536ba93b22418cb6e55943c53b7812` seq 9746) adds `decision.timing`. This file records every owner-login decision sealed after that deploy (seq > 9746), names the failing stage's D1 statements at `3f926396`, and points at the read-only script Jordan runs for `EXPLAIN QUERY PLAN` and Workers Logs.
@@ -104,7 +106,7 @@ No D1 statement. `filter_ms` measured 0.
 
 ## 5. Live D1 plan and Workers Logs
 
-Jordan ran `~/.retrace/ops-2026-09-30/stepB-d1-plan-and-logs.sh` (paste `evt_cd9014c2ad454b158d0d12f329b9c7d5`). Raw wrangler `--json` files: `~/.retrace/ops-2026-09-30/stepB-output/`. Manifest file sha256 `8b561b1389575a2411abb97bc740defb134f964d2965ff002f26a9697a91c410`; `sha256sum -c` matches every result file (the manifest's self-line is the empty-file digest and is unused). All nine calls: wrangler exit 0, `rows_written` 0. `meta.duration` below is D1 SQL engine time. Script `wall_ms` 1537–2135 is the laptop wrangler path and is not used as Worker-to-D1 RTT.
+Jordan ran `~/.retrace/ops-2026-09-30/stepB-d1-plan-and-logs.sh` (paste `evt_cd9014c2ad454b158d0d12f329b9c7d5`). Raw wrangler `--json` files: `~/.retrace/ops-2026-09-30/stepB-output/`. Manifest file sha256 `8b561b1389575a2411abb97bc740defb134f964d2965ff002f26a9697a91c410`; `sha256sum -c` matches every result file (the manifest's self-line is the empty-file digest and is unused). All nine calls: wrangler exit 0, `rows_written` 0. `meta.duration` below is D1 SQL engine time. *(corrected below.)* Script `wall_ms` 1537–2135 is the laptop wrangler path and is not used as Worker-to-D1 RTT.
 
 | call | plan / result | D1 `duration_ms` | `rows_read` |
 |---|---|---:|---:|
@@ -117,6 +119,8 @@ Jordan ran `~/.retrace/ops-2026-09-30/stepB-d1-plan-and-logs.sh` (paste `evt_cd9
 | count candidates pr_open 9760 | `index_rows` = 7 | 0.3427 | 13 |
 | list candidate index 9760 (`artifact_key IN (...)`, diagnostic) | 7 rows | 40.8151 | 29,463 |
 | explain consumption | `SEARCH owner_login_consumption USING INDEX sqlite_autoindex_owner_login_consumption_1 (project=? AND declaration_event_id=?)` | 0.3443 | 0 |
+
+*Correction, 04:17Z 2026-09-30 (10:17 PM MDT 2026-09-29; source: claude-code review `evt_31b9f7e7dfa042ecacb430676eae3e3b`, L1, Low; Jordan go `evt_495c061be73a4a308835e0adfab16248`): the `meta.duration` values on the `EXPLAIN QUERY PLAN` rows (0.4555, 0.5142, 0.3633, 0.5496, 0.3443; `rows_read` 0) are planning time. `EXPLAIN QUERY PLAN` compiles and does not run the statement. Only the two amendment COUNTs executed a production predicate: full filter 1.3754 ms, 528 rows read, n=1; partial 0.2903 ms, 159 rows read, n=159. Candidate and consumption execution time was not measured. The sentence above the table that calls every `meta.duration` "D1 SQL engine time" is the claim this paragraph corrects.*
 
 **The 40.8 ms / 29,463-row query is not a production classifier statement.** It is this measurement's `list-candidate-index-9760.sql` (`IN` on `artifact_key` with a seq filter). `eventsReferencingArtifactsStatements` (`store.ts:371–427`) binds keys through `json_each` and seeks `idx_eai_project_key_seq` with the seq window in the seek — the 0.36 ms covering-index plan. `artifactKeyMatchSql`'s `artifact_key IN (?)` form (`store.ts:306`) is reached only from tests (`store.test.ts:286–287`), not from `classifyOwnerLogin`. Consumption's `declaration_event_id IN (...)` is a primary-key seek per id (EXPLAIN above), a different table.
 
@@ -151,9 +155,11 @@ Minimum sequential D1 **inside** the 300 ms stopwatch: **3** (candidates, consum
 
 The failing stage on every measured delivery is **`amendments`**. The deploy took (`timing` present on every seq > 9746 decision). The row cap is not exhausted. The query **plans are index searches**, not table scans.
 
-D1 SQL engine time on the production-shaped statements is **0.29–1.38 ms**. Sealed stage times on those same stages are **75–136 ms**. The COUNT of the failing statement returns **one row**. The planner and the row counts do not account for the sealed milliseconds.
+D1 SQL engine time on the production-shaped statements is **0.29–1.38 ms**. *(corrected below.)* Sealed stage times on those same stages are **75–136 ms**. The COUNT of the failing statement returns **one row**. The planner and the row counts do not account for the sealed milliseconds.
 
-That gap is consistent with the coordinator's hypothesis (relay §hypothesis): the 300 ms budget is spent on **sequential Worker→D1 round trips and the number of those calls**, not on a missing index. Workers Logs were not read, so round-trip time itself is **unmeasured**; what is measured is that SQL `duration_ms` is two orders of magnitude below `*_ms` on every indexed query.
+That gap is consistent with the coordinator's hypothesis (relay §hypothesis): the 300 ms budget is spent on **sequential Worker→D1 round trips and the number of those calls**, not on a missing index. Workers Logs were not read, so round-trip time itself is **unmeasured**; what is measured is that SQL `duration_ms` is two orders of magnitude below `*_ms` on every indexed query. *(corrected below.)*
+
+*Correction, 04:17Z 2026-09-30 (10:17 PM MDT 2026-09-29; same sources as §5): the "0.29–1.38 ms" band and the "two orders of magnitude below `*_ms` on every indexed query" sentence treat EXPLAIN `meta.duration` as SQL engine time. Those EXPLAIN durations are planning time (`rows_read` 0). The executed production-predicate times in §5 are the two amendment COUNTs only (1.3754 ms full, 0.2903 ms partial). Candidate and consumption execution time is unmeasured, so a comparison of SQL engine time to sealed `candidates_ms` / `consumption_ms` is not in the record. The conclusion of this section is unchanged: amendments spends the budget; the plans are index searches; Worker→D1 round-trip time is unmeasured.*
 
 A picture that fits both the seals and the plans, without claiming the unread logs: three sequential D1 calls (candidates, consumption, first amendment SELECT) consume most of 300 ms; the next sequential call inside `evaluateAmendmentsAtU` (`getMany` on the `caused_by` walk, or a capture `eventsReferencingArtifacts`) starts with ~98–136 ms remaining and hits the deadline, so `stage_failed` is always `amendments`. Sample 7 (v1.1 push, seq 9793) repeated the same shape (`candidates_ms` 118, `consumption_ms` 84, `amendments_ms` 98).
 
@@ -181,3 +187,5 @@ Option 1 of v1.1 (rewrite the first SELECT for a missing scan) is closed by the 
 | Samples 1–7 seals | §3 |
 | Jordan script / paste / relay | `~/.retrace/ops-2026-09-30/stepB-d1-plan-and-logs.sh` / `evt_cd9014c2ad454b158d0d12f329b9c7d5` / `evt_8f554e349e6a4e3bb06e35e47a7c8686` |
 | Raw D1 JSON | `~/.retrace/ops-2026-09-30/stepB-output/` (manifest file sha256 `8b561b1389575a2411abb97bc740defb134f964d2965ff002f26a9697a91c410`) |
+| claude-code L1 (Low) / Jordan go / routing | `evt_31b9f7e7dfa042ecacb430676eae3e3b` / `evt_495c061be73a4a308835e0adfab16248` / `evt_57a79a55fba848c895424687ac3bbe68` |
+| L1 correction sent / received / instruct | `evt_aed7b090433d4e6d905551f431820741` / `evt_952c41a31e4749fa979b84b1828599e8` / `evt_00fbe088414341f182db99d6914fc22c` |
