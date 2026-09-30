@@ -317,6 +317,19 @@ the read plan are therefore **unmeasured assumptions until a class S fix records
 deliveries attributed a seat, and later deliveries are classified afresh and unmeasured. The 2026-09-15 shadow deadline (`classify.ts`
 `store.all` on the hot path) is the precedent.*
 
+*Correction, 2026-09-30 (Jordan's decision `evt_df7212b9526a415baf0bed46687c939d`, option (c): raise the budget now, and cache the immutable amendment
+closure as a follow-up design; analysis `evt_15cb1f4dc5f647099b2c74479b9544f6`): the budget above is raised from **300 ms to 1,000 ms**
+(`OWNER_LOGIN_DEADLINE_MS`, `packages/core/src/classify.ts`). The row cap (2,000) is unchanged, and so is the fail-closed rule: over budget or any
+store error → `unavailable`. Evidence (`docs/measurements/owner-login-timing-stepB-2026-09-30.md` §3–§6, PRs 139/140; Smart Placement result, PRs
+142/144): on the live Worker, stages that make exactly one D1 call seal 73–118 ms (`candidates_ms` 86–118, `consumption_ms` 75–91, `pre_ms` 146–222
+for two calls). With the ledger's one attribution amendment, a classification makes **six** sequential calls: candidates, consumption,
+`amendmentEventsUpTo`, one `getMany` of the amendment's target, evidence and caused_by, and two capture `eventsReferencingArtifacts`. That is
+≈ 440–710 ms at the measured cost. 1,000 ms covers it with room for one more `caused_by` hop. The owner-login deadline is
+`min(now + OWNER_LOGIN_DEADLINE_MS, delivery deadline)`, and `WEBHOOK_DELIVERY_DEADLINE_MS` (2,000 ms, `router.ts`) still bounds the whole delivery,
+including the pre-classifier reads and the seal write. A delivery that runs out of that budget is retained and drained, as before. What this does not
+change: the number of calls. The follow-up design (cache the sealed, immutable amendment closure) targets ≤ 2 sequential calls. Whether 1,000 ms is
+enough is measured on the live `decision.timing` blocks after deploy, not assumed.*
+
 ## 4. Decision table
 
 Applies only when `github_payload.login` is in the project policy's `github.shared_logins` (§5). Every other login keeps
