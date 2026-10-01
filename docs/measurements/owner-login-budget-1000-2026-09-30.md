@@ -2,7 +2,7 @@
 
 **Status:** v1, 2026-09-30 (≈ 20:40Z / 14:40 MDT). Author claude-code (coordinator). Class **(b)** under agent-rules 12: a measurement that
 governs nothing; one non-author review. Go: `evt_6ee7d69dcbec4df0ad4c2ac5adf56d50` ("a, you measure"). Earlier versions of this file: v0
-(skeleton) and v0.1 (the status line whose push is sample 5). **v1.1** (2026-09-30, ≈ 22:35Z / 16:35 MDT): §5 added (diagnosis and fix); §§1–4 unchanged. **v1.2** (2026-10-01, ≈ 03:50Z / 21:50 MDT): §6 added (first post-fix sample and the read-only probes); §§1–5 unchanged. **v1.3** (2026-10-01, ≈ 12:50Z / 06:50 MDT): §7 added (every owner-login delivery after seq 10403, including the first per-call samples after PR 147); §§1–6 unchanged.
+(skeleton) and v0.1 (the status line whose push is sample 5). **v1.1** (2026-09-30, ≈ 22:35Z / 16:35 MDT): §5 added (diagnosis and fix); §§1–4 unchanged. **v1.2** (2026-10-01, ≈ 03:50Z / 21:50 MDT): §6 added (first post-fix sample and the read-only probes); §§1–5 unchanged. **v1.3** (2026-10-01, ≈ 12:50Z / 06:50 MDT): §7 added (every owner-login delivery after seq 10403, including the first per-call samples after PR 147); §§1–6 unchanged. **v1.3.1** (2026-10-01, ≈ 14:15Z / 08:15 MDT): a dated correction in §6 (the event count of the capture read); nothing else changed.
 
 ## 1. What is measured
 Worker Version `4cdeb1e9-d873-4633-9ba3-17d7f065244a` (main `bbf61d3d`, PR 145: `OWNER_LOGIN_DEADLINE_MS` 300 → 1,000 ms), deployed
@@ -85,6 +85,13 @@ Go: `evt_ac83ca0df60c4a4099a4caba402a7630`.
    - **SQL time:** 170–188 ms. The same keys owner-qualified (exact matches only) take 28–49 ms. So the suffix range scan costs about 140 ms.
    - **Volume:** 946 rows and 3,584,145 bytes of event bodies, for about 945 events in both variants. Only 389 rows (41 %, 1,784,532 bytes)
      are shaped like capture seals; the rest are agent logs and reviews the classifier discards.
+     *Correction, 2026-10-01 (source: step 20, read-only on production D1, `evt_0981b98dbb434490b94e93793d36ad10`; raw output sealed in
+     `evt_b17eb4dcadd74023af16f4981a6b932d`; Jordan's go `evt_ae6bf7b816a64cbebf4f09ae9344ec38`):* "for about 945 events in both variants"
+     is wrong.
+     - The read returns its 946 rows from **503 distinct events**.
+     - 945 was the exact-key control's **row** count in step 17, mislabelled "events" in the coordinator's 09-30 draft and carried into this
+       section.
+     - The row and byte figures stand.
    - **Duplicated bodies:** each body is returned once per matching (event, file) pair. Capture-shaped events average about 2.25 copies.
 3. **Reading.** SQL accounts for at most about 190 ms of the 802 ms. The remainder (transfer, `JSON.parse`, the stage's other reads) is
    **inferred, not measured**. Per-call timing inside the stage is being built (cursor-agent, `evt_f3bb53d4…`) to measure it before any fix is
