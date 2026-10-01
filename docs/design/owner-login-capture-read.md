@@ -1,6 +1,6 @@
 # Owner-login amendments stage: read less from the capture index (design note v1)
 
-**Status:** v1.3, 2026-10-01, by claude-code (coordinator and spec author, `claude-opus-5-5`, harness-runtime). Not built.
+**Status:** v1.4, 2026-10-01, by claude-code (coordinator and spec author, `claude-opus-5-5`, harness-runtime). Not built.
 - v1 opened PR 148.
 - v1.1, before review: adds the second live sample (seq 10626) to §1, and a rough budget inference to §4.
 - v1.2, before review: R3 now covers all three budget counters, not only the runner's.
@@ -10,6 +10,12 @@
   - "about 945 events" corrected to 503 distinct events (§1); 945 was a row count
   - the index's TEXT affinity (R3)
   - Grok's G-L1 (§1 citation) and G-L2 (R3 boundary per call)
+- v1.4, before Codex, on Jordan's go `evt_ed35f070144344ed91648b1c91205da7`. The author found a gap while drafting the build brief
+  (`evt_be58a21db80849ea8a6cd2b0eab45f5e`):
+  - v1.3 carried the unfiltered counts and the boundary on the rows the statement returns, and returned rows only for seals. A read with no
+    seal among its matched events returned no row at all, and a read split over several statements could not deduplicate its counts.
+  - R1–R4 now return one row per matched event, with the body only for seals; the runner counts exactly as today. Measured as P3c (§6).
+  - Grok's G-L3: step 21's same-run control read 159,758 rows, not 159,736.
 - Go: `evt_af819387f1784392891f33a5c46a61a4` (Jordan, "let's go w/ 1": finish this note with the measured split).
 - Earlier draft: `~/.retrace/ops-2026-09-30/design-capture-read-volume-draft.md` v0.1, written on go `evt_5642b1dfda3e4cf79574c09dda2d3094`, Jordan's
   option (c) part (b) (`evt_df7212b9526a415baf0bed46687c939d`).
@@ -17,8 +23,9 @@
 - Code references are at main `82a56d14`.
 
 ## 0. Decisions this note asks the gate to confirm
-1. **Build step 1 only:** filter the two capture reads to commit seals (option i) and return each event body once (option ii).
-   - The read must also carry the unfiltered boundary and row count from the index, so decisions do not change (§4).
+1. **Build step 1 only:** in the two capture reads, return event bodies only for commit seals (option i), once per event (option ii).
+   - Every matched event still returns one small row (its keys and whether it is stamped), so counts and the boundary, and therefore decisions,
+     do not change (§4).
 2. **Keep every budget's meaning.** All three budget counters still count the unfiltered matched set (pairs or events, as each does today), not
    only the rows the filter keeps (§4, R3).
 3. **Step 2 only if step 1 is measured not to fit.** That is the cached amendment closure, option iv. It adds cached state to a WHO path, so it
@@ -108,63 +115,74 @@ These are code facts at `82a56d14`.
 - **One round trip per read.** Each capture read stays a single round trip, because a round trip costs about 90 ms (§1).
 
 ## 4. Requirements for step 1 (options i + ii)
-- **R1. Filter.** Each capture read returns only events whose `events.action` is `committed` or `merged`. That is a strict superset of
-  `captureSealEligible`. JavaScript still applies the exact predicate, so the filter can drop only events that can never be seals.
-- **R2. One body per event.** Each returned event's body appears once per statement, for example grouped by `seq`, with its matched artifact keys
-  aggregated (`json_group_array`). The runner still sees every matched (seq, key) pair.
-- **R3. Unfiltered boundary and counts.** The same statement returns, from the index alone (no body), for the **unfiltered** matched (seq, key)
-  set:
-  - the count of distinct pairs
-  - the count of distinct events (seqs)
-  - `MIN(seq)` over rows whose `sealed_by` is a string
+- **R1. Bodies only for seals.** Each capture read returns an event's body only when `events.action` is `committed` or `merged`. That is a
+  strict superset of `captureSealEligible`. JavaScript still applies the exact predicate, so only bodies that can never be seals are withheld.
+  - *v1.4:* v1–v1.3 filtered the rows themselves. That lost the counts and boundary of a read whose matched events hold no seal (R3).
+- **R2. One row per matched event.** Each statement returns exactly one row for every matched event, filtered or not. The row carries the
+  event's `seq`, its matched artifact keys (`json_group_array`), a stamped flag (R3), and the body or NULL (R1). The runner still sees every
+  matched (seq, key) pair.
+- **R3. Counts and boundary, exactly as today.** The runner computes everything from the rows of every statement in the read, deduplicating
+  across statements as it does today (`seenRows`, `store.ts:529-533`):
+  - distinct (seq, key) pairs from the keys
+  - distinct events from the seqs
+  - the boundary: the lowest seq whose stamped flag is set
 
-  Then every budget counter that today counts what the read returns counts the unfiltered set instead, so every budget outcome is unchanged. There
-  are three such counters at `82a56d14`:
-  - **The runner.** `runArtifactIndexStatements` applies `row_cap` to distinct (seq, key) pairs. It uses the unfiltered pair count.
-  - **The amendments stage.** `amendmentCaptureDependencies` adds the returned **event** count to `rowsRead` and checks `CLASSIFY_ROW_CAP`
-    (`classify.ts:621–622`). It adds the unfiltered event count.
-  - **The owner-login budget.** `EvidenceBudget` takes `indexedRows(returned events, query)`, the matching (event, key) rows
-    (`owner-login.ts:99,121`). It takes the unfiltered pair count.
+  So every budget counter that counts the read counts what it counts today, and every budget outcome is unchanged. There are three such
+  counters at `82a56d14`:
+  - **The runner.** `runArtifactIndexStatements` applies `row_cap` to distinct (seq, key) pairs.
+  - **The amendments stage.** `amendmentCaptureDependencies` adds the **event** count to `rowsRead` and checks `CLASSIFY_ROW_CAP`
+    (`classify.ts:621–622`).
+  - **The owner-login budget.** `EvidenceBudget` takes `indexedRows(events, query)`, the matching (event, key) rows (`owner-login.ts:99,121`).
+
+  Each counts all matched events and pairs, not only the ones whose bodies came back.
+
+  *Why not v1.3's per-statement aggregate (v1.4):* it rode on returned rows, so a read with no seal returned no row and lost the counts and
+  the boundary. And a read split at 400 terms (`ARTIFACT_INDEX_MAX_TERMS`, `store.ts:348`) cannot add per-statement counts without
+  double-counting pairs matched in two statements. Either changes a decision. Local fixtures show the first case: the v1.3 shape returns no
+  row, and v1.4 returns both events with the boundary (`evt_58f399ced3b342298d0b1f397e90428f`).
 
   And the boundary, per call (v1.3, G-L2):
   - **The `preliminary` call** (`classify.ts:653`) runs after the target read and before the commit read. It takes the minimum of the boundary
-    over the events in memory at that point (base events and the target read's returned events) and the target read's index boundary.
-  - **The `complete` call** (`:668`) also takes the commit read's index boundary.
+    over the events in memory at that point (base events and the target read's seals) and the target read's stamped seqs.
+  - **The `complete` call** (`:668`) also takes the commit read's stamped seqs.
   - Each call passes its value as `CapturePolicy.firstStampedSeq`. That is the existing pin; `capture.ts` does not change.
   - This matches today's semantics: today `preliminary` sees only the pool as it stands before the commit read.
-  - *v1.2: before review, the author found that v1 named only the runner's counter. The two other counters are added here.*
 
   And which index rows count as stamped (v1.3):
-  - The index boundary uses `sealed_by IS NOT NULL`. On today's ledger that equals "the body's `method.params.sealed_by` is a string" on every
+  - The stamped flag uses `sealed_by IS NOT NULL`. On today's ledger that equals "the body's `method.params.sealed_by` is a string" on every
     one of the 31,936 index rows, in both directions (P2, step 20).
   - `event_artifact_index.sealed_by` has TEXT affinity, so a non-string value written there would read back as text. `typeof(sealed_by) = 'text'`
     therefore cannot tell a string stamp from a numeric one. That held on a local fixture.
   - The guard that stands is the insert path, which writes only strings (`store.ts:250`), plus the P2 equality.
   - The build adds a test that a non-string `sealed_by` is indexed as NULL. Any future backfill keeps that rule, or P2 is rerun before it is
     trusted.
-- **R4. The statement shape (measured; v1.3).**
+- **R4. The statement shape (measured; v1.4).**
   - **Matched set unchanged.** The matched-set members stay exactly as today: `SELECT DISTINCT i.seq, i.artifact_key` only. Adding any other
     index column to the member select moves the suffix member off `idx_eai_project_key_seq` onto a seq-range scan of the whole project index.
     Step 20 measured that: SQL 373–541 ms and `rows_read` 346,674, against 150–234 ms and 159,736 for today's statement.
-  - **`sealed_by` by primary-key lookup.** For the boundary, `sealed_by` comes by primary-key lookup on the matched pairs
+  - **Per event:** `GROUP BY m.seq` over the matched pairs, with the stamped flag as `max(sealed_by IS NOT NULL)` by primary-key lookup
     (`sqlite_autoindex_event_artifact_index_1`).
-  - **A plain CTE.** On D1 (step 21, same run, 3 runs each):
-    - plain CTE: SQL 152–176 ms
-    - `MATERIALIZED`: 179–195 ms
-    - today's statement: 135–155 ms
+  - **Body:** `CASE WHEN e.action IN ('committed','merged') THEN e.body END`, joining `events` by primary key.
+  - **Measured on D1 (step 22, P3c, same run):**
+    - v1.4: SQL 129–138 ms (3 runs), `rows_read` 161,831
+    - v1.3's shape: 147–172 ms, `rows_read` 164,844
+    - today's statement: 164–173 ms (2 runs; the first failed with a Cloudflare API 7403 error and returned nothing), `rows_read` 160,825
 
-    `rows_read` is 163,777 against 159,736. Both members seek the covering `idx_eai_project_key_seq` (the suffix member by `artifact_key`
-    range, as today).
+    In step 21, v1.3's shape ran 152–176 ms against 135–155 ms for today's statement, with `rows_read` 163,777 against 159,758 (G-L3; v1.3
+    said 159,736). The control's `rows_read` differs between steps 21 and 22 (159,758 and 160,825) for the same keys and window; why is not
+    established. Read the timings as same-run comparisons only.
+  - **Plan (step 22):** both members seek the covering `idx_eai_project_key_seq` (the equality member by key, the suffix member by key
+    range); `s` and `e` are primary-key lookups.
   - **Proof in the build.** The build shows the same plan with `EXPLAIN QUERY PLAN` under workerd.
 - **R5. Unchanged elsewhere.** The commit path's own window read (`readWindow`), the candidates read and the consumption read are out of scope.
   Unused fields in the shared reader stay unused, and other callers see identical results.
-- **R6. Instrumentation.** Each capture call's `amendments_calls` entry still reports `rows.statement_rows` (unfiltered matched pairs),
-  `distinct_events` (returned), `body_chars` (returned) and `sql_ms`.
+- **R6. Instrumentation.** Each capture call's `amendments_calls` entry still reports `rows.statement_rows` (matched pairs), `distinct_events`
+  (matched events), `body_chars` (returned bodies) and `sql_ms`.
 
-**Effect on the read (measured in SQL, steps 20 and 21):**
-- Returned rows: 946 → 175 (one per event).
+**Effect on the read (measured in SQL, step 22):**
+- Returned rows: 946 → 503 (one per matched event), of which 175 carry a body.
 - Body bytes: 3,584,145 → 698,902 (5.1× fewer).
-- SQL time: about 15–40 ms more than today's statement in the same run.
+- SQL time: no worse than today's statement in the same run (129–138 ms against 164–173 ms).
 
 **Effect on the Worker: not measured.**
 - The suffix scan (about 140 ms of SQL) and the per-call round trip stay.
@@ -178,7 +196,7 @@ These are code facts at `82a56d14`.
   - The success test decides.
 
 ## 5. Build plan, proof and success test
-1. **Probes P1–P3 and P3b are done** (§6). P2 found no non-string `sealed_by`, so R3 stands as written.
+1. **Probes P1–P3, P3b and P3c are done** (§6). P2 found no non-string `sealed_by`, so R3 stands as written.
 2. **Build (class S),** in one pull request with:
    - **(a) Unit tests** on `MemoryEventStore` and `SqliteStore`, with fixtures for each boundary case:
      - a stamped non-seal before the first stamped seal
@@ -188,6 +206,8 @@ These are code facts at `82a56d14`.
      - a `merged` GitHub event that is not a git seal
      - an unfiltered count above each cap with a filtered count below it (must still be `budget`): the runner's `row_cap`, `CLASSIFY_ROW_CAP`
        through `rowsRead`, and the owner-login `EvidenceBudget`
+     - a read whose matched events hold no seal (counts and boundary still carried; v1.4)
+     - a read split over several statements (more than 400 terms), with pairs matched in two statements (counted once; v1.4)
    - **(b) A workerd test** on the `5d7290f` fixture (production schema), asserting the same seals and decision as before.
    - **(c) An offline replay over a fresh export.** For every owner-login decision and every recorded commit classification with a read head,
      recompute the capture seals with the old and the new read and require them to be identical. Record the counts in the pull request.
@@ -203,7 +223,8 @@ How they were run:
 - Steps 20 and 21 were run by Jordan in a plain terminal, with SQL files hashed in each script.
 - The SQL was validated on an empty local schema and a fixture first.
 - Same keys and window as steps 17 and 18b: amendment seq 2543's 11 files, through seq 10402.
-- Results: `evt_0981b98dbb434490b94e93793d36ad10` (step 20) and `evt_e3bc896dafa84edc8f8efa8dd8498191` (step 21).
+- Results: `evt_0981b98dbb434490b94e93793d36ad10` (step 20), `evt_e3bc896dafa84edc8f8efa8dd8498191` (step 21) and
+  `evt_e1be75bfee144d2480e4a6baa198e8a7` (step 22, Jordan's verbatim output).
 
 The probes:
 - **P1, the filter's effect.** `action IN ('committed','merged')` keeps 391 of 946 rows, across 175 of 503 events: 1,789,352 bytes as rows,
@@ -219,6 +240,9 @@ The probes:
 - **P3b, the corrected shape** (R4). Members as today, `sealed_by` by primary-key lookup, plain CTE: SQL 152–176 ms (3 runs), against 135–155 ms
   for today's statement in the same run. It returns 175 rows and 698,902 bytes, with the unfiltered pair count 946, event count 503 and boundary
   970.
+- **P3c, v1.4's shape** (R4; step 22). One row per matched event, body only for seals: 503 rows, 175 bodies, 698,902 body bytes, 946 pairs,
+  503 events, boundary 970, exactly as expected. SQL 129–138 ms (3 runs), against 147–172 ms for v1.3's shape and 164–173 ms for today's
+  statement in the same run (one control run failed with Cloudflare API error 7403 and returned nothing).
 
 ## 7. The other options (not proposed for step 1)
 - **(iii) Exact owner-qualified keys instead of the suffix scan.** Saves about 140 ms of SQL (28–49 ms against 170–188 ms). But the extra suffix
@@ -233,7 +257,8 @@ The probes:
 
 ## 8. What this note does not claim
 - It does not claim step 1 fits the budget. The capture read's full live duration has not been observed (§1).
-  - The SQL-side figures are measured (§6). The Worker-side saving is not: transfer and parse of 0.7 MB instead of 3.6 MB.
+  - The SQL-side figures are measured (§6). The Worker-side saving is not: transfer and parse of 0.7 MB of bodies plus 503 small rows,
+    instead of 3.6 MB.
 - The row reduction and the index's `sealed_by` parity are measured on one amendment's keys and on today's ledger (§6), not proven for every
   future read. The equality proof in §5 is still required.
 - The 85–103 ms per small call is a reading of two samples on I/O-gated timers, not a network measurement.
@@ -251,3 +276,6 @@ The probes:
 | Round 1: Grok approved, 2 Low; NOOA approved | `evt_d073dd971d0c4afba0b03f45e13032d5`, `evt_a6e12a3871f8456aa62fc6667553d3ca` |
 | Probes P1–P3 (step 20) and P3b (step 21) | `evt_0981b98dbb434490b94e93793d36ad10`, `evt_e3bc896dafa84edc8f8efa8dd8498191` |
 | Go for v1.3 | `evt_ae6bf7b816a64cbebf4f09ae9344ec38` |
+| Gap found in R3/R4 while drafting the build brief | `evt_be58a21db80849ea8a6cd2b0eab45f5e` |
+| Go for v1.4 and probe P3c | `evt_ed35f070144344ed91648b1c91205da7` |
+| Probe P3c (step 22), local validation and output | `evt_58f399ced3b342298d0b1f397e90428f`, `evt_e1be75bfee144d2480e4a6baa198e8a7` |
