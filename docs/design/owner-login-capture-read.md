@@ -1,9 +1,15 @@
 # Owner-login amendments stage: read less from the capture index (design note v1)
 
-**Status:** v1.2, 2026-10-01, by claude-code (coordinator and spec author, `claude-opus-5-5`, harness-runtime). Not built.
+**Status:** v1.3, 2026-10-01, by claude-code (coordinator and spec author, `claude-opus-5-5`, harness-runtime). Not built.
 - v1 opened PR 148.
 - v1.1, before review: adds the second live sample (seq 10626) to §1, and a rough budget inference to §4.
 - v1.2, before review: R3 now covers all three budget counters, not only the runner's.
+- v1.3, after the round-1 approvals of Grok (2 Low) and NOOA, on Jordan's go `evt_ae6bf7b816a64cbebf4f09ae9344ec38`:
+  - probes P1–P3 and a re-probe P3b, run on production D1 (§6), and their results through §1, §4 and §8
+  - the measured statement shape (R4)
+  - "about 945 events" corrected to 503 distinct events (§1); 945 was a row count
+  - the index's TEXT affinity (R3)
+  - Grok's G-L1 (§1 citation) and G-L2 (R3 boundary per call)
 - Go: `evt_af819387f1784392891f33a5c46a61a4` (Jordan, "let's go w/ 1": finish this note with the measured split).
 - Earlier draft: `~/.retrace/ops-2026-09-30/design-capture-read-volume-draft.md` v0.1, written on go `evt_5642b1dfda3e4cf79574c09dda2d3094`, Jordan's
   option (c) part (b) (`evt_df7212b9526a415baf0bed46687c939d`).
@@ -17,7 +23,7 @@
    only the rows the filter keeps (§4, R3).
 3. **Step 2 only if step 1 is measured not to fit.** That is the cached amendment closure, option iv. It adds cached state to a WHO path, so it
    gets its own note.
-4. **Run three read-only probes before the build brief is written** (§6).
+4. **The probes are done** (§6). The build brief can be written on Jordan's go, using the measured statement shape (R4).
 
 ## 1. The problem, measured
 Owner-login deliveries on the live Worker seal `unavailable / deadline`, failing closed: the seal names the account and attributes no seat. The
@@ -58,10 +64,19 @@ What this shows. These are two samples, so read them as two samples.
 **Read-only probes on production D1** (`evt_c0af48a7…`, `evt_19d8e70c…`, `evt_c3c5760c…`). They used amendment seq 2543, whose target is commit
 `5d7290f`, with 11 files and the whole history.
 - **SQL time:** 170–188 ms, of which the suffix scan is about 140 ms. An owner-qualified exact-key control runs in 28–49 ms.
-- **Volume:** the read returns 946 statement rows and 3,584,145 body bytes, about 945 events.
-- **Capture-shaped rows:** only 389 of the rows (1,784,532 bytes) are commit seals, across 173 events. The rest are agent logs, reviews and
+  - Re-timed in steps 20 and 21: 135–234 ms over 5 runs.
+- **Volume:** the read returns 946 statement rows from **503 distinct events**, and 3,584,145 body bytes (step 20,
+  `evt_0981b98dbb434490b94e93793d36ad10`).
+  - *v1.3 correction:* v1–v1.2 said "about 945 events". 945 was probe 17's control **row** count, mislabelled "events" in the 09-30 draft.
+- **Capture-shaped rows:** only 389 of the rows (1,784,532 bytes), across 173 events, are git commit seals. The rest are agent logs, reviews and
   instructions.
+  - Source: step 18b's output, as recorded in the 09-30 draft §6 (`design-capture-read-volume-draft.md`). The 18b event's own params do not carry
+    these figures (G-L1).
+  - The `committed`/`merged` filter of R1 keeps 391 rows across 175 events (step 20). The two rows beyond 18b's git-tool subset are `committed`
+    or `merged` rows whose `method.tool` is not `git`. Which events they are was not identified; R1 keeps them, and JavaScript applies the exact
+    test.
 - **Duplicated bodies:** each body is returned once per matching (event, file) pair, so commit seals average about 2.25 copies.
+  - Returned once per event, the 175 filtered events carry 698,902 bytes (step 20).
 
 ## 2. What the capture reads feed
 These are code facts at `82a56d14`.
@@ -80,7 +95,7 @@ These are code facts at `82a56d14`.
      `{ ok: false }`.
 - **Consequence:** an event whose `action` is neither `committed` nor `merged` can affect the result only through `firstStampedSeq`.
   - The live ledger has exactly that case. Inside this read, the first stamped event is seq **970**, which is not a seal; the first stamped seal
-    is **975** (probe 18).
+    is **975** (probe 18). Steps 20 and 21 computed the same boundary (970) from the index.
   - Dropping non-seals without carrying the boundary would move the boundary to 975, and the unstamped git seals at 970–974 would become
     eligible.
 
@@ -111,22 +126,47 @@ These are code facts at `82a56d14`.
   - **The owner-login budget.** `EvidenceBudget` takes `indexedRows(returned events, query)`, the matching (event, key) rows
     (`owner-login.ts:99,121`). It takes the unfiltered pair count.
 
-  And the boundary:
-  - The classifier takes the boundary as the minimum of three values: the boundary over the events already in memory (base events and
-    returned events), and each capture read's index boundary.
-  - It passes that value as `CapturePolicy.firstStampedSeq` to both `classifierCaptureSeals` calls. That is the existing pin; `capture.ts` does
-    not change.
+  And the boundary, per call (v1.3, G-L2):
+  - **The `preliminary` call** (`classify.ts:653`) runs after the target read and before the commit read. It takes the minimum of the boundary
+    over the events in memory at that point (base events and the target read's returned events) and the target read's index boundary.
+  - **The `complete` call** (`:668`) also takes the commit read's index boundary.
+  - Each call passes its value as `CapturePolicy.firstStampedSeq`. That is the existing pin; `capture.ts` does not change.
+  - This matches today's semantics: today `preliminary` sees only the pool as it stands before the commit read.
   - *v1.2: before review, the author found that v1 named only the runner's counter. The two other counters are added here.*
-- **R4. Matched set computed once.** The matched set is computed once per statement (for example a `MATERIALIZED` CTE). The suffix scan (§1) is not
-  paid twice. Show this with `EXPLAIN QUERY PLAN` under workerd and with probe P3.
+
+  And which index rows count as stamped (v1.3):
+  - The index boundary uses `sealed_by IS NOT NULL`. On today's ledger that equals "the body's `method.params.sealed_by` is a string" on every
+    one of the 31,936 index rows, in both directions (P2, step 20).
+  - `event_artifact_index.sealed_by` has TEXT affinity, so a non-string value written there would read back as text. `typeof(sealed_by) = 'text'`
+    therefore cannot tell a string stamp from a numeric one. That held on a local fixture.
+  - The guard that stands is the insert path, which writes only strings (`store.ts:250`), plus the P2 equality.
+  - The build adds a test that a non-string `sealed_by` is indexed as NULL. Any future backfill keeps that rule, or P2 is rerun before it is
+    trusted.
+- **R4. The statement shape (measured; v1.3).**
+  - **Matched set unchanged.** The matched-set members stay exactly as today: `SELECT DISTINCT i.seq, i.artifact_key` only. Adding any other
+    index column to the member select moves the suffix member off `idx_eai_project_key_seq` onto a seq-range scan of the whole project index.
+    Step 20 measured that: SQL 373–541 ms and `rows_read` 346,674, against 150–234 ms and 159,736 for today's statement.
+  - **`sealed_by` by primary-key lookup.** For the boundary, `sealed_by` comes by primary-key lookup on the matched pairs
+    (`sqlite_autoindex_event_artifact_index_1`).
+  - **A plain CTE.** On D1 (step 21, same run, 3 runs each):
+    - plain CTE: SQL 152–176 ms
+    - `MATERIALIZED`: 179–195 ms
+    - today's statement: 135–155 ms
+
+    `rows_read` is 163,777 against 159,736. Both members seek the covering `idx_eai_project_key_seq` (the suffix member by `artifact_key`
+    range, as today).
+  - **Proof in the build.** The build shows the same plan with `EXPLAIN QUERY PLAN` under workerd.
 - **R5. Unchanged elsewhere.** The commit path's own window read (`readWindow`), the candidates read and the consumption read are out of scope.
   Unused fields in the shared reader stay unused, and other callers see identical results.
 - **R6. Instrumentation.** Each capture call's `amendments_calls` entry still reports `rows.statement_rows` (unfiltered matched pairs),
   `distinct_events` (returned), `body_chars` (returned) and `sql_ms`.
 
-**Expected effect (estimate, from probe 18b; not measured):**
-- Returned rows: about 946 → about 400.
-- Body bytes: about 3.6 MB → about 0.8 MB, once each body is returned once.
+**Effect on the read (measured in SQL, steps 20 and 21):**
+- Returned rows: 946 → 175 (one per event).
+- Body bytes: 3,584,145 → 698,902 (5.1× fewer).
+- SQL time: about 15–40 ms more than today's statement in the same run.
+
+**Effect on the Worker: not measured.**
 - The suffix scan (about 140 ms of SQL) and the per-call round trip stay.
 - Whether the capture read then fits the budget is **unknown**. It is measured after deploy (§5, success test).
 - **A rough budget, inference only.** Say the outside-SQL part shrinks in proportion to the bytes, from more than 410 ms to roughly 90–100 ms plus
@@ -138,8 +178,7 @@ These are code facts at `82a56d14`.
   - The success test decides.
 
 ## 5. Build plan, proof and success test
-1. **Probes P1–P3** (§6), read-only, before the build brief. If P2 finds a non-string `sealed_by` in the index, R3 stops until that is resolved
-   (§6).
+1. **Probes P1–P3 and P3b are done** (§6). P2 found no non-string `sealed_by`, so R3 stands as written.
 2. **Build (class S),** in one pull request with:
    - **(a) Unit tests** on `MemoryEventStore` and `SqliteStore`, with fixtures for each boundary case:
      - a stamped non-seal before the first stamped seal
@@ -159,15 +198,27 @@ These are code facts at `82a56d14`.
 
    If either fails on 2 or more of the 6, step 2 (option iv) gets its own note.
 
-## 6. Probes before the build brief (read-only, production D1, same method as steps 17 and 18b)
-- **P1.** For amendment seq 2543's 11 keys, how many matched rows and distinct events have `action IN ('committed','merged')`? Expected: about 389
-  rows. This confirms R1's reduction.
-- **P2.** Does any `event_artifact_index` row have a non-NULL `sealed_by` whose event body does not have a **string** `method.params.sealed_by`?
-  - Why it matters: the insert path stores `sealed_by` only when it is a string (`store.ts:250`, `artifactIndexRows`). The one-time backfill
-    stored `json_extract(body, '$.method.params.sealed_by')` (`apps/worker/schema.sql:99`), which keeps numbers and objects.
-  - If the count is not zero, R3's boundary must use `typeof(i.sealed_by) = 'text'` **and** a corrective step, or read the boundary from bodies.
-    That is decided before building.
-- **P3.** Time the R2/R3 statement shape against the deployed SQL (`sql_ms` and `rows_read`), with the same keys.
+## 6. Probes before the build brief (read-only, production D1; done)
+How they were run:
+- Steps 20 and 21 were run by Jordan in a plain terminal, with SQL files hashed in each script.
+- The SQL was validated on an empty local schema and a fixture first.
+- Same keys and window as steps 17 and 18b: amendment seq 2543's 11 files, through seq 10402.
+- Results: `evt_0981b98dbb434490b94e93793d36ad10` (step 20) and `evt_e3bc896dafa84edc8f8efa8dd8498191` (step 21).
+
+The probes:
+- **P1, the filter's effect.** `action IN ('committed','merged')` keeps 391 of 946 rows, across 175 of 503 events: 1,789,352 bytes as rows,
+  698,902 bytes once per event.
+  - The `events.action` column equals the body's `action` on all 946 rows, so R1 can filter on the column.
+- **P2, index against bodies.** No `event_artifact_index` row (31,936 in the project) has a non-NULL `sealed_by` whose body lacks a string
+  `method.params.sealed_by`, and none the other way round, and no value differs.
+  - Why it was asked: the insert path stores `sealed_by` only when it is a string (`store.ts:250`, `artifactIndexRows`). The one-time backfill
+    stored `json_extract(body, '$.method.params.sealed_by')` (`apps/worker/schema.sql:99`), which would keep numbers and objects.
+  - See R3 for the TEXT-affinity caveat.
+- **P3, the first prototype.** The first shape added `i.sealed_by` to the matched-set members. It returned the right rows and boundary, but took
+  SQL 373–541 ms (6 runs) with `rows_read` 346,674: the suffix member moved to `idx_eai_project_seq`. Not to be built.
+- **P3b, the corrected shape** (R4). Members as today, `sealed_by` by primary-key lookup, plain CTE: SQL 152–176 ms (3 runs), against 135–155 ms
+  for today's statement in the same run. It returns 175 rows and 698,902 bytes, with the unfiltered pair count 946, event count 503 and boundary
+  970.
 
 ## 7. The other options (not proposed for step 1)
 - **(iii) Exact owner-qualified keys instead of the suffix scan.** Saves about 140 ms of SQL (28–49 ms against 170–188 ms). But the extra suffix
@@ -181,10 +232,11 @@ These are code facts at `82a56d14`.
   move into SQL. Not proposed.
 
 ## 8. What this note does not claim
-- It does not claim step 1 fits the budget. The capture read's full live duration has not been observed (§1), and the reduction figures are
-  estimates.
-- It does not claim the row reduction until P1 is run. It does not claim that the index's `sealed_by` matches the bodies until P2 is run.
-- The ~90 ms per call is one sample's reading of I/O-gated timers, not a network measurement.
+- It does not claim step 1 fits the budget. The capture read's full live duration has not been observed (§1).
+  - The SQL-side figures are measured (§6). The Worker-side saving is not: transfer and parse of 0.7 MB instead of 3.6 MB.
+- The row reduction and the index's `sealed_by` parity are measured on one amendment's keys and on today's ledger (§6), not proven for every
+  future read. The equality proof in §5 is still required.
+- The 85–103 ms per small call is a reading of two samples on I/O-gated timers, not a network measurement.
 - Owner-login stays fail-closed throughout. Until a fix is live and measured, no GitHub delivery attributes a seat.
 
 ## 9. Record
@@ -196,3 +248,6 @@ These are code facts at `82a56d14`.
 | PR 147 (per-call timing) merged as `82a56d14`; deployed as `5d1b9edc` | `evt_84d21fe982cc4e10b5cd6b9d9a4b1cd8`, `evt_79152cbce4c14963a5ad43b3e981b771` |
 | First per-call sample (seq 10611), read raw | `evt_2801fab20533439a95a937c2d1981cad` |
 | Go for this note | `evt_af819387f1784392891f33a5c46a61a4` |
+| Round 1: Grok approved, 2 Low; NOOA approved | `evt_d073dd971d0c4afba0b03f45e13032d5`, `evt_a6e12a3871f8456aa62fc6667553d3ca` |
+| Probes P1–P3 (step 20) and P3b (step 21) | `evt_0981b98dbb434490b94e93793d36ad10`, `evt_e3bc896dafa84edc8f8efa8dd8498191` |
+| Go for v1.3 | `evt_ae6bf7b816a64cbebf4f09ae9344ec38` |
