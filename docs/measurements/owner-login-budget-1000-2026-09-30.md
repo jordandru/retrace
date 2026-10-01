@@ -2,7 +2,7 @@
 
 **Status:** v1, 2026-09-30 (≈ 20:40Z / 14:40 MDT). Author claude-code (coordinator). Class **(b)** under agent-rules 12: a measurement that
 governs nothing; one non-author review. Go: `evt_6ee7d69dcbec4df0ad4c2ac5adf56d50` ("a, you measure"). Earlier versions of this file: v0
-(skeleton) and v0.1 (the status line whose push is sample 5). **v1.1** (2026-09-30, ≈ 22:35Z / 16:35 MDT): §5 added (diagnosis and fix); §§1–4 unchanged. **v1.2** (2026-10-01, ≈ 03:50Z / 21:50 MDT): §6 added (first post-fix sample and the read-only probes); §§1–5 unchanged.
+(skeleton) and v0.1 (the status line whose push is sample 5). **v1.1** (2026-09-30, ≈ 22:35Z / 16:35 MDT): §5 added (diagnosis and fix); §§1–4 unchanged. **v1.2** (2026-10-01, ≈ 03:50Z / 21:50 MDT): §6 added (first post-fix sample and the read-only probes); §§1–5 unchanged. **v1.3** (2026-10-01, ≈ 12:50Z / 06:50 MDT): §7 added (every owner-login delivery after seq 10403, including the first per-call samples after PR 147); §§1–6 unchanged.
 
 ## 1. What is measured
 Worker Version `4cdeb1e9-d873-4633-9ba3-17d7f065244a` (main `bbf61d3d`, PR 145: `OWNER_LOGIN_DEADLINE_MS` 300 → 1,000 ms), deployed
@@ -89,3 +89,75 @@ Go: `evt_ac83ca0df60c4a4099a4caba402a7630`.
 3. **Reading.** SQL accounts for at most about 190 ms of the 802 ms. The remainder (transfer, `JSON.parse`, the stage's other reads) is
    **inferred, not measured**. Per-call timing inside the stage is being built (cursor-agent, `evt_f3bb53d4…`) to measure it before any fix is
    chosen.
+
+## 7. Every owner-login delivery after seq 10403, through seq 10649 (added 2026-10-01, v1.3)
+Go: `evt_1799013926ae4cc5b5cf4c8a3ec0704c`.
+
+How the sample was taken:
+- Every event sealed after seq 10403 that carries `method.params.owner_login_decision`, read raw (listed at 2026-10-01T12:44:53Z, through
+  seq 10649).
+- There are **17 deliveries**. Every one is `unavailable / deadline`, with `classification_ms` 1000 and `stage_failed: amendments`.
+- None attributed a seat. Each seal names the account, failing closed as designed.
+- Nothing was selected out.
+
+### 7.1 On Worker `77400e6e` (PR 60), before the PR 147 deploy at 2026-10-01T12:17:41Z: 11 deliveries
+| seq | seal | kind | sealed | pre_ms | candidates_ms | candidates_rows | consumption_ms | amendments_ms |
+|---|---|---|---|---|---|---|---|---|
+| 10454 | `evt_b15f808607464618aa5e12157d521a71` | `push` | 03:37:25Z | 169 | 161 | 32 | 98 | 741 |
+| 10481 | `evt_f4bdca18dace40edaa07b61648766e7f` | `pr_open` | 04:15:15Z | 339 | 191 | 9 | 166 | 643 |
+| 10504 | `evt_512c468848f64c88bc5c121c3099ea10` | `merge` | 10:30:32Z | 172 | 122 | 43 | 83 | 795 |
+| 10533 | `evt_9caae2a3ecef4855ac9e9a745a29d00a` | `push` | 11:11:05Z | 173 | 111 | 17 | 85 | 804 |
+| 10539 | `evt_90b1f1eefd7f4568849893e20d4aa5bf` | `pr_edit` | 11:18:18Z | 166 | 110 | 21 | 89 | 801 |
+| 10558 | `evt_c6ab3410c65d4cc7920cb56044a81e6a` | `review` | 11:38:06Z | 187 | 200 | 38 | 95 | 705 |
+| 10573 | `evt_7186026e95174769a892e949a4c24c56` | `pr_edit` | 11:58:33Z | 164 | 192 | 44 | 84 | 724 |
+| 10576 | `evt_7751e060aa284856809d63de79d4d851` | `review` | 12:00:24Z | 347 | 372 | 49 | 176 | 452 |
+| 10586 | `evt_4f8d882123a8415990e1dbb63177f95b` | `review` | 12:06:29Z | 186 | 182 | 53 | 89 | 729 |
+| 10591 | `evt_cf96afab5e524da99c3e3fa92d17f553` | `review` | 12:08:36Z | 167 | 185 | 57 | 91 | 724 |
+| 10598 | `evt_ee02ab94dc9544f2baac02faf4031f0e` | `merge` | 12:13:55Z | 168 | 164 | 60 | 86 | 750 |
+
+Ranges and medians over the 11 (computed):
+- `candidates_ms` 110–372 (median 182), with `candidates_rows` 9–60 (median 43)
+- `consumption_ms` 83–176 (median 89)
+- `amendments_ms` 452–804 (median 729)
+- `pre_ms` 164–347 (median 172)
+
+### 7.2 On Worker `5d1b9edc` (PR 147, deployed 2026-10-01T12:17:41Z, `evt_79152cbce4c14963a5ad43b3e981b771`): 6 deliveries with per-call timing
+| seq | seal | kind | sealed | pre_ms | candidates_ms | candidates_rows | consumption_ms | amendments_ms |
+|---|---|---|---|---|---|---|---|---|
+| 10611 | `evt_2a9715af0e1d477ca4c3e961389e6d43` | `comment` | 12:20:26Z | 165 | 210 | 62 | 95 | 695 |
+| 10626 | `evt_fc1b852216f34eb0a26d04703ba5cbda` | `pr_open` | 12:31:12Z | 194 | 100 | 4 | 93 | 807 |
+| 10633 | `evt_dd083cedebb641daae24d0eaa3fb01c1` | `push` | 12:33:00Z | 179 | 90 | 8 | 79 | 831 |
+| 10636 | `evt_c75466a5e043433cba32f6b458709800` | `pr_edit` | 12:33:32Z | 172 | 103 | 9 | 86 | 811 |
+| 10647 | `evt_7c280c1be68942aeabda9dc95de6d61b` | `push` | 12:39:14Z | 157 | 94 | 17 | 77 | 829 |
+| 10649 | `evt_ce3fd1c33b9d4f4abaa97f96cc6e90a7` | `pr_edit` | 12:39:29Z | 162 | 109 | 17 | 85 | 806 |
+
+Each delivery's `decision.timing.amendments_calls` holds three entries. `sql_ms` is D1's `meta.duration`. `wall_ms` is I/O-gated on a deployed
+Worker: it covers the call's I/O plus CPU since the previous I/O (PR 147).
+
+| seq | `amendment_rows` wall / sql ms | `dependencies` wall / sql ms | `capture_targets` wall ms (outcome) |
+|---|---|---|---|
+| 10611 | 95 / 3.2581 | 86 / 0.7258 | 514 (deadline) |
+| 10626 | 104 / 4.0694 | 103 / 1.0374 | 600 (deadline) |
+| 10633 | 80 / 1.9803 | 79 / 0.7294 | 672 (deadline) |
+| 10636 | 90 / 1.7252 | 96 / 0.376 | 625 (deadline) |
+| 10647 | 82 / 2.341 | 82 / 0.4349 | 665 (deadline) |
+| 10649 | 89 / 2.4265 | 83 / 0.4449 | 634 (deadline) |
+
+Over the 6 (computed):
+- **`amendment_rows`:** wall 80–104 ms (median 89.5), SQL 1.7252–4.0694 ms, 1 row and 2,010 body characters each time.
+- **`dependencies`:** wall 79–103 ms (median 84.5), SQL 0.376–1.0374 ms, 4 rows and 9,637 body characters each time.
+- **Outside SQL:** wall minus `sql_ms` is 78.0–102.0 ms across these 12 small calls.
+- **`capture_targets`:** cut off by the deadline in all 6, after 514–672 ms (median 629.5). So it recorded no SQL time, rows or bytes.
+- **`capture_commits`:** never ran.
+
+### 7.3 Reading
+1. **Unchanged since §6.** The amendments stage reaches the 1,000 ms deadline on every delivery, on both Workers, and the decision fails closed.
+2. **New, measured on 6.** Each small D1 call in the stage spends 78–102 ms outside SQL. Its SQL time is 0.4–4.1 ms.
+3. **New, measured on 6.** The capture-target read is still running when the deadline fires, every time. Its full duration is not observed; in at
+   least one delivery (seq 10633) it exceeded 672 ms.
+   - Its SQL was 170–188 ms in the read-only probe (§6.2), so most of its time is spent outside SQL. That is an inference from the probe and these
+     cut-offs.
+4. **The candidates read varies with the pull request's activity:** 4–62 rows, 90–372 ms. A busy pull request leaves the least budget for the
+   amendments stage.
+5. **Next:** the design note in PR 148 (`docs/design/owner-login-capture-read.md`) proposes reading less from the capture index. It cites the
+   first two of these samples.
