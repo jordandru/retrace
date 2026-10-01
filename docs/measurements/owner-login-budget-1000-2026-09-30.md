@@ -2,7 +2,7 @@
 
 **Status:** v1, 2026-09-30 (≈ 20:40Z / 14:40 MDT). Author claude-code (coordinator). Class **(b)** under agent-rules 12: a measurement that
 governs nothing; one non-author review. Go: `evt_6ee7d69dcbec4df0ad4c2ac5adf56d50` ("a, you measure"). Earlier versions of this file: v0
-(skeleton) and v0.1 (the status line whose push is sample 5). **v1.1** (2026-09-30, ≈ 22:35Z / 16:35 MDT): §5 added (diagnosis and fix); §§1–4 unchanged.
+(skeleton) and v0.1 (the status line whose push is sample 5). **v1.1** (2026-09-30, ≈ 22:35Z / 16:35 MDT): §5 added (diagnosis and fix); §§1–4 unchanged. **v1.2** (2026-10-01, ≈ 03:50Z / 21:50 MDT): §6 added (first post-fix sample and the read-only probes); §§1–5 unchanged.
 
 ## 1. What is measured
 Worker Version `4cdeb1e9-d873-4633-9ba3-17d7f065244a` (main `bbf61d3d`, PR 145: `OWNER_LOGIN_DEADLINE_MS` 300 → 1,000 ms), deployed
@@ -65,3 +65,27 @@ Go for the diagnosis: `evt_873053bb47da43c2a139e56efabcef30` ("you diagnose"). D
    `stage_failed: amendments`, `amendments_ms` 258, `classification_ms` 511.
 5. **Not yet established.** Whether owner-login deliveries now seal a decision on the new Version. The push of this v1.1 is the first delivery
    after the deploy. Its decision, and those that follow, will be recorded in a later version of this file, read raw from the ledger as in §2.
+
+## 6. After the fix: one sample and three read-only probes (added 2026-10-01, v1.2)
+Go: `evt_ac83ca0df60c4a4099a4caba402a7630`.
+
+1. **Sample 7, the first delivery on Worker `77400e6e`.** It was the v1.1 push of this PR (head `e7a75559`, declared
+   `evt_0be1ab270ab749c8a7a3b4052ac5d5c7`), sealed as seq 10403 (`evt_32c1e45665864f3a8b796046647222aa`, 2026-09-30T22:33:21Z):
+
+   | # | kind | status / reason | classification_ms | pre_ms | candidates_ms | filter_ms | consumption_ms | amendments_ms | stage_failed | candidates_rows | budget_rows_remaining |
+   |---|---|---|---|---|---|---|---|---|---|---|---|
+   | 7 | `push` | unavailable / deadline | 1000 | 165 | 107 | 0 | 91 | 802 | amendments | 26 | 1969 |
+
+   - **`store_error` is gone:** the amendments stage now runs its reads.
+   - **But it takes 802 ms**, and the classification reaches the 1,000 ms deadline. The decision is still fail-closed: the seal names the
+     account and attributes no seat.
+   - This is **one sample**. No further owner-login delivery had arrived when this was written.
+2. **Probes on production D1, read-only** (step 17 `evt_c0af48a7`, step 18 `evt_19d8e70c`, step 18b `evt_c3c5760c`; every query reported 0 changes).
+   They ran the stage's capture read for amendment seq 2543 (11 files, whole history) as the deployed code builds it:
+   - **SQL time:** 170–188 ms. The same keys owner-qualified (exact matches only) take 28–49 ms. So the suffix range scan costs about 140 ms.
+   - **Volume:** 946 rows and 3,584,145 bytes of event bodies, for about 945 events in both variants. Only 389 rows (41 %, 1,784,532 bytes)
+     are shaped like capture seals; the rest are agent logs and reviews the classifier discards.
+   - **Duplicated bodies:** each body is returned once per matching (event, file) pair. Capture-shaped events average about 2.25 copies.
+3. **Reading.** SQL accounts for at most about 190 ms of the 802 ms. The remainder (transfer, `JSON.parse`, the stage's other reads) is
+   **inferred, not measured**. Per-call timing inside the stage is being built (cursor-agent, `evt_f3bb53d4…`) to measure it before any fix is
+   chosen.
