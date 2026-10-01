@@ -1,6 +1,8 @@
 # Owner-login amendments stage: read less from the capture index (design note v1)
 
-**Status:** v1, 2026-10-01, by claude-code (coordinator and spec author, `claude-opus-5-5`, harness-runtime). Not built.
+**Status:** v1.1, 2026-10-01, by claude-code (coordinator and spec author, `claude-opus-5-5`, harness-runtime). Not built.
+- v1 opened PR 148.
+- v1.1, before review: adds the second live sample (seq 10626) to §1, and a rough budget inference to §4.
 - Go: `evt_af819387f1784392891f33a5c46a61a4` (Jordan, "let's go w/ 1": finish this note with the measured split).
 - Earlier draft: `~/.retrace/ops-2026-09-30/design-capture-read-volume-draft.md` v0.1, written on go `evt_5642b1dfda3e4cf79574c09dda2d3094`, Jordan's
   option (c) part (b) (`evt_df7212b9526a415baf0bed46687c939d`).
@@ -24,21 +26,28 @@ classification budget is 1,000 ms (`OWNER_LOGIN_DEADLINE_MS`).
 | seq 10403 (`evt_32c1e456…`) | `77400e6e` (PR 60) | 107 | 91 | 802 | deadline |
 | seq 10454 (`evt_b15f808607464618aa5e12157d521a71`) | `77400e6e` | 161 (32 rows) | 98 | 741 | deadline |
 | seq 10611 (`evt_2a9715af0e1d477ca4c3e961389e6d43`) | `5d1b9edc` (PR 147) | 210 (62 rows) | 95 | 695 | deadline |
+| seq 10626 (`evt_fc1b852216f34eb0a26d04703ba5cbda`, this note's own `pr_open`) | `5d1b9edc` | 100 (4 rows) | 93 | 807 | deadline |
 
-**Per call, seq 10611** (`decision.timing.amendments_calls`, read raw; record `evt_2801fab20533439a95a937c2d1981cad`):
+**Per call** (`decision.timing.amendments_calls`, read raw; seq 10611 is recorded in `evt_2801fab20533439a95a937c2d1981cad`):
 
-| call | wall_ms | sql_ms (D1 `meta.duration`) | rows | body_chars | outcome |
-|---|---|---|---|---|---|
-| `amendment_rows` | 95 | 3.2581 | 1 | 2,010 | ok |
-| `dependencies` | 86 | 0.7258 | 4 | 9,637 | ok |
-| `capture_targets` | 514, then cut off | not recorded | not recorded | not recorded | deadline |
+| seq | call | wall_ms | sql_ms (D1 `meta.duration`) | rows | body_chars | outcome |
+|---|---|---|---|---|---|---|
+| 10611 | `amendment_rows` | 95 | 3.2581 | 1 | 2,010 | ok |
+| 10611 | `dependencies` | 86 | 0.7258 | 4 | 9,637 | ok |
+| 10611 | `capture_targets` | 514, then cut off | not recorded | not recorded | not recorded | deadline |
+| 10626 | `amendment_rows` | 104 | 4.0694 | 1 | 2,010 | ok |
+| 10626 | `dependencies` | 103 | 1.0374 | 4 | 9,637 | ok |
+| 10626 | `capture_targets` | 600, then cut off | not recorded | not recorded | not recorded | deadline |
 
-What this shows. This is one sample, so read it as one sample.
-1. **A small D1 call costs about 85–92 ms outside SQL.**
+What this shows. These are two samples, so read them as two samples.
+1. **A small D1 call costs about 85–103 ms outside SQL.**
    - On a deployed Worker, timers advance only at I/O. So a call's `wall_ms` covers its own I/O plus any CPU since the previous I/O.
-   - Each classification makes five or six sequential calls, which is roughly 450–550 ms before any data volume. This is an inference from one
-     sample.
-2. **The capture read is the dominant cost.** It had 514 ms left and did not finish, so its full duration is **not observed**.
+   - Each classification makes five or six sequential calls, which is roughly 450–600 ms before any data volume. This is an inference from two
+     samples.
+2. **The capture read is the dominant cost.** It took more than 600 ms (seq 10626, where the candidates read was light) and did not finish, so its
+   full duration is **not observed**.
+   - Its SQL is 170–188 ms (probe 17). So more than about 410 ms of it is spent outside SQL: transfer and handling of about 3.6 MB.
+   - That is an inference from the probe and one cut-off sample.
 3. **The candidates read grows with pull-request activity.**
    - 210 ms for 62 rows here
    - 161 ms for 32 rows at seq 10454
@@ -108,6 +117,13 @@ These are code facts at `82a56d14`.
 - Body bytes: about 3.6 MB → about 0.8 MB, once each body is returned once.
 - The suffix scan (about 140 ms of SQL) and the per-call round trip stay.
 - Whether the capture read then fits the budget is **unknown**. It is measured after deploy (§5, success test).
+- **A rough budget, inference only.** Say the outside-SQL part shrinks in proportion to the bytes, from more than 410 ms to roughly 90–100 ms plus
+  the round trip.
+  - Then the capture read is roughly 300–400 ms, and a classification is roughly 800–1,000 ms when candidates are light. That is still close to
+    the budget.
+  - On busy pull requests (candidates 160–210 ms) it would likely still miss. So option (iii) may be needed with step 1, and option (iv) remains
+    the structural fix.
+  - The success test decides.
 
 ## 5. Build plan, proof and success test
 1. **Probes P1–P3** (§6), read-only, before the build brief. If P2 finds a non-string `sealed_by` in the index, R3 stops until that is resolved
