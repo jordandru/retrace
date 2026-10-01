@@ -1,8 +1,9 @@
 # Owner-login amendments stage: read less from the capture index (design note v1)
 
-**Status:** v1.1, 2026-10-01, by claude-code (coordinator and spec author, `claude-opus-5-5`, harness-runtime). Not built.
+**Status:** v1.2, 2026-10-01, by claude-code (coordinator and spec author, `claude-opus-5-5`, harness-runtime). Not built.
 - v1 opened PR 148.
 - v1.1, before review: adds the second live sample (seq 10626) to §1, and a rough budget inference to §4.
+- v1.2, before review: R3 now covers all three budget counters, not only the runner's.
 - Go: `evt_af819387f1784392891f33a5c46a61a4` (Jordan, "let's go w/ 1": finish this note with the measured split).
 - Earlier draft: `~/.retrace/ops-2026-09-30/design-capture-read-volume-draft.md` v0.1, written on go `evt_5642b1dfda3e4cf79574c09dda2d3094`, Jordan's
   option (c) part (b) (`evt_df7212b9526a415baf0bed46687c939d`).
@@ -12,7 +13,8 @@
 ## 0. Decisions this note asks the gate to confirm
 1. **Build step 1 only:** filter the two capture reads to commit seals (option i) and return each event body once (option ii).
    - The read must also carry the unfiltered boundary and row count from the index, so decisions do not change (§4).
-2. **Keep the row budget's meaning.** It still counts every matching index row, not only the rows the filter keeps (§4, R3).
+2. **Keep every budget's meaning.** All three budget counters still count the unfiltered matched set (pairs or events, as each does today), not
+   only the rows the filter keeps (§4, R3).
 3. **Step 2 only if step 1 is measured not to fit.** That is the cached amendment closure, option iv. It adds cached state to a WHO path, so it
    gets its own note.
 4. **Run three read-only probes before the build brief is written** (§6).
@@ -95,16 +97,26 @@ These are code facts at `82a56d14`.
   `captureSealEligible`. JavaScript still applies the exact predicate, so the filter can drop only events that can never be seals.
 - **R2. One body per event.** Each returned event's body appears once per statement, for example grouped by `seq`, with its matched artifact keys
   aggregated (`json_group_array`). The runner still sees every matched (seq, key) pair.
-- **R3. Unfiltered boundary and count.** The same statement returns, from the index alone (no body), for the **unfiltered** matched (seq, key) set:
+- **R3. Unfiltered boundary and counts.** The same statement returns, from the index alone (no body), for the **unfiltered** matched (seq, key)
+  set:
   - the count of distinct pairs
+  - the count of distinct events (seqs)
   - `MIN(seq)` over rows whose `sealed_by` is a string
 
-  Then:
-  - The runner applies `row_cap` to that unfiltered count, so the budget means what it means today.
+  Then every budget counter that today counts what the read returns counts the unfiltered set instead, so every budget outcome is unchanged. There
+  are three such counters at `82a56d14`:
+  - **The runner.** `runArtifactIndexStatements` applies `row_cap` to distinct (seq, key) pairs. It uses the unfiltered pair count.
+  - **The amendments stage.** `amendmentCaptureDependencies` adds the returned **event** count to `rowsRead` and checks `CLASSIFY_ROW_CAP`
+    (`classify.ts:621–622`). It adds the unfiltered event count.
+  - **The owner-login budget.** `EvidenceBudget` takes `indexedRows(returned events, query)`, the matching (event, key) rows
+    (`owner-login.ts:99,121`). It takes the unfiltered pair count.
+
+  And the boundary:
   - The classifier takes the boundary as the minimum of three values: the boundary over the events already in memory (base events and
     returned events), and each capture read's index boundary.
   - It passes that value as `CapturePolicy.firstStampedSeq` to both `classifierCaptureSeals` calls. That is the existing pin; `capture.ts` does
     not change.
+  - *v1.2: before review, the author found that v1 named only the runner's counter. The two other counters are added here.*
 - **R4. Matched set computed once.** The matched set is computed once per statement (for example a `MATERIALIZED` CTE). The suffix scan (§1) is not
   paid twice. Show this with `EXPLAIN QUERY PLAN` under workerd and with probe P3.
 - **R5. Unchanged elsewhere.** The commit path's own window read (`readWindow`), the candidates read and the consumption read are out of scope.
@@ -135,7 +147,8 @@ These are code facts at `82a56d14`.
      - webhook push seals
      - two seals of one reference with different full OIDs (the veto)
      - a `merged` GitHub event that is not a git seal
-     - an unfiltered count above `row_cap` with a filtered count below it (must still be `budget`)
+     - an unfiltered count above each cap with a filtered count below it (must still be `budget`): the runner's `row_cap`, `CLASSIFY_ROW_CAP`
+       through `rowsRead`, and the owner-login `EvidenceBudget`
    - **(b) A workerd test** on the `5d7290f` fixture (production schema), asserting the same seals and decision as before.
    - **(c) An offline replay over a fresh export.** For every owner-login decision and every recorded commit classification with a read head,
      recompute the capture seals with the old and the new read and require them to be identical. Record the counts in the pull request.
