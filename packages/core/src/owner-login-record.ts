@@ -16,10 +16,11 @@ export type OwnerLoginAmendmentsCall =
   | "capture_commits";
 export interface OwnerLoginAmendmentsCallTiming {
   call: OwnerLoginAmendmentsCall;
+  /** Deployed Workers advance timers only at I/O: this covers the call's I/O plus CPU since the previous I/O,
+   * and excludes the call's own CPU after its last I/O (including parsing). Node/local workerd use elapsed time. */
   wall_ms: number;
   rows: { statement_rows: number; distinct_events: number };
   body_chars: number;
-  parse_ms: number;
   sql_ms: number | null;
   statements: number;
   outcome: "ok" | OwnerLoginFailure;

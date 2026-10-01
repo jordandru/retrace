@@ -355,7 +355,6 @@ export interface StoreReadMetrics {
   statement_rows: number;
   distinct_events: number;
   body_chars: number;
-  parse_ms: number;
   /** D1 `meta.duration` summed across statements; non-D1 stores report null. */
   sql_ms: number | null;
   statements: number;
@@ -368,21 +367,12 @@ export interface StoreReadMetricsSink {
   storeCallFinished?: () => void;
 }
 
-function measurementNow(): number | undefined {
-  try {
-    const value = globalThis.performance?.now();
-    return typeof value === "number" && Number.isFinite(value) ? value : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
 export function emitStoreReadMetrics(sink: StoreReadMetricsSink | undefined, metrics: StoreReadMetrics): void {
   if (!sink) return;
   try { sink(metrics); } catch { /* Observation must never alter a store result. */ }
 }
 
-/** Parse event bodies once while observing transfer and parse cost, without serialising or copying them again. */
+/** Parse event bodies once while observing transfer size, without serialising or copying them again. */
 export function parseEventBodyRows(
   rows: readonly { body: string }[],
   metrics?: StoreReadMetricsSink,
@@ -390,18 +380,15 @@ export function parseEventBodyRows(
   statements = 1,
 ): Event[] {
   let body_chars = 0;
-  for (const row of rows) body_chars += row.body.length;
-  const started = measurementNow();
+  for (const row of rows) if (typeof row.body === "string") body_chars += row.body.length;
   const events: Event[] = [];
   for (const row of rows) {
     events.push(JSON.parse(row.body) as Event);
   }
-  const ended = measurementNow();
   emitStoreReadMetrics(metrics, {
     statement_rows: rows.length,
     distinct_events: rows.length,
     body_chars,
-    parse_ms: started === undefined || ended === undefined ? 0 : Math.max(0, ended - started),
     sql_ms,
     statements,
   });
@@ -516,20 +503,26 @@ export async function runArtifactIndexStatements(
   metrics?: StoreReadMetricsSink,
   sqlDuration?: () => number | null,
 ): Promise<ArtifactIndexResult> {
-  let statement_rows = 0, body_chars = 0, parse_ms = 0, statements = 0;
+  if (now() >= q.deadline) {
+    emitStoreReadMetrics(metrics, { statement_rows: 0, distinct_events: 0, body_chars: 0, sql_ms: null, statements: 0 });
+    return { ok: false, reason: "deadline" };
+  }
+  if (!q.artifact_keys.length && !q.artifact_prefixes?.length) {
+    emitStoreReadMetrics(metrics, { statement_rows: 0, distinct_events: 0, body_chars: 0, sql_ms: null, statements: 0 });
+    return { ok: true, events: [] };
+  }
+  let statement_rows = 0, body_chars = 0, statements = 0;
   const distinctEvents = new Set<number>();
   const seenRows = new Set<string>();
   const bySeq = new Map<number, Event>();
   try {
-    if (now() >= q.deadline) return { ok: false, reason: "deadline" };
-    if (!q.artifact_keys.length && !q.artifact_prefixes?.length) return { ok: true, events: [] };
     for (const statement of eventsReferencingArtifactsStatements(q)) {
       if (now() >= q.deadline) return { ok: false, reason: "deadline" };
       statements++;
       const rows = await exec(statement);
       statement_rows += rows.length;
       for (const row of rows) {
-        body_chars += row.body.length;
+        if (typeof row.body === "string") body_chars += row.body.length;
         distinctEvents.add(row.seq);
       }
       if (now() >= q.deadline) return { ok: false, reason: "deadline" };
@@ -538,13 +531,7 @@ export async function runArtifactIndexStatements(
         if (seenRows.has(rowKey)) continue;
         seenRows.add(rowKey);
         if (seenRows.size > q.row_cap) return { ok: false, reason: "budget" };
-        if (!bySeq.has(r.seq)) {
-          const started = measurementNow();
-          const event = JSON.parse(r.body) as Event;
-          const ended = measurementNow();
-          if (started !== undefined && ended !== undefined) parse_ms += Math.max(0, ended - started);
-          bySeq.set(r.seq, event);
-        }
+        if (!bySeq.has(r.seq)) bySeq.set(r.seq, JSON.parse(r.body) as Event);
       }
     }
   } catch {
@@ -556,7 +543,6 @@ export async function runArtifactIndexStatements(
       statement_rows,
       distinct_events: distinctEvents.size,
       body_chars,
-      parse_ms,
       sql_ms,
       statements: sqlDuration ? statements : 0,
     });

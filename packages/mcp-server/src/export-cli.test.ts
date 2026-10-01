@@ -541,7 +541,7 @@ test("owner-login replay preserves sealed amendments call timing verbatim", asyn
   const timing = ownerLoginRecord(result.input)!.decision.timing;
   timing.amendments_calls = [{
     call: "capture_targets", wall_ms: 91.25, rows: { statement_rows: 17, distinct_events: 4 },
-    body_chars: 123456, parse_ms: 7.5, sql_ms: 42.75, statements: 3, outcome: "ok",
+    body_chars: 123456, sql_ms: 42.75, statements: 3, outcome: "ok",
   }];
   timing.amendments_calls_truncated = true;
   await appendEvent(store, result.input);

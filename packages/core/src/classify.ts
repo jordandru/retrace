@@ -451,7 +451,7 @@ function observationNow(): number | undefined {
 }
 
 function emptyReadMetrics(statement_rows = 0, distinct_events = statement_rows): StoreReadMetrics {
-  return { statement_rows, distinct_events, body_chars: 0, parse_ms: 0, sql_ms: null, statements: 0 };
+  return { statement_rows, distinct_events, body_chars: 0, sql_ms: null, statements: 0 };
 }
 
 function storeFailure(error: unknown): OwnerLoginFailure {
@@ -491,7 +491,6 @@ function createAmendmentStoreCallMeasure(
           wall_ms: Math.max(0, ended - started),
           rows: { statement_rows: measured.statement_rows, distinct_events: measured.distinct_events },
           body_chars: measured.body_chars,
-          parse_ms: measured.parse_ms,
           sql_ms: measured.sql_ms,
           statements: measured.statements,
           outcome: result,

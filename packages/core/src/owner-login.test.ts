@@ -280,7 +280,6 @@ test("amendments per-call timing records MemoryEventStore calls in order with bo
   for (const entry of calls) {
     assert.ok(entry.wall_ms >= 0);
     assert.equal(entry.body_chars, 0);
-    assert.equal(entry.parse_ms, 0);
     assert.equal(entry.sql_ms, null);
     assert.equal(entry.statements, 0);
     assert.equal(entry.outcome, "ok");

@@ -5,7 +5,7 @@ import {
   EventInput, Event, EventStore, Share, likeContains, clampHistoryLimit, HISTORY_LIMIT_MAX,
   pageHistoryNewest, collectHistory, asHistoryPage, explainEvent,
   artifactIndexRows, eventsReferencingArtifactKeys, artifactKeyMatchSql, BACKFILL_ARTIFACT_INDEX_SQL, eventsReferencingArtifactsSql, eventsReferencingArtifactsStatements, prefixRangeUpperBound, ARTIFACT_INDEX_MAX_TERMS, D1_MAX_BOUND_PARAMS, D1_MAX_COMPOUND_SELECT_TERMS,
-  ARTIFACT_INDEX_DEFAULT_ROW_CAP, D1_LIKE_GLOB_PATTERN_MAX_BYTES, ALIAS_KEY_RANGE_LO,
+  ARTIFACT_INDEX_DEFAULT_ROW_CAP, D1_LIKE_GLOB_PATTERN_MAX_BYTES, ALIAS_KEY_RANGE_LO, runArtifactIndexStatements,
   InvalidArtifactIdError,
 } from "./index.js";
 
@@ -240,6 +240,22 @@ test("eventsReferencingArtifactsStatements binds the window once and one json_ea
   assert.equal(params.at(-1), 11, "LIMIT is row_cap + 1");
   assert.deepEqual(eventsReferencingArtifactsStatements({ project: "p", artifact_keys: [], after_seq: -1, through_seq: 1, row_cap: 1, deadline: 0 }), []);
   assert.deepEqual(eventsReferencingArtifactsSql(q), only);
+});
+
+test("runArtifactIndexStatements preserves pre-try exits and contains malformed queries", async () => {
+  const base = { project: "p", artifact_keys: ["a"], after_seq: -1, through_seq: 1, row_cap: 1, deadline: 10 };
+  await assert.rejects(runArtifactIndexStatements(base, () => { throw new Error("clock failed"); }, async () => []), /clock failed/);
+  let executed = false;
+  const observed: unknown[] = [];
+  assert.deepEqual(await runArtifactIndexStatements({ ...base, deadline: 0 }, () => 0, async () => {
+    executed = true; return [];
+  }, (metrics) => observed.push(metrics)), { ok: false, reason: "deadline" });
+  assert.equal(executed, false);
+  assert.deepEqual(observed, [{ statement_rows: 0, distinct_events: 0, body_chars: 0, sql_ms: null, statements: 0 }]);
+  assert.deepEqual(await runArtifactIndexStatements({ ...base, artifact_keys: [], artifact_prefixes: [] }, () => 0,
+    async () => { assert.fail("empty query must not execute"); }), { ok: true, events: [] });
+  assert.deepEqual(await runArtifactIndexStatements({ ...base, artifact_keys: [Symbol("bad") as unknown as string] }, () => 0,
+    async () => []), { ok: false, reason: "store_error" });
 });
 
 test("eventsReferencingArtifactsStatements keeps every statement under D1's parameter and compound-SELECT limits", () => {
