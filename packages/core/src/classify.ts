@@ -22,9 +22,11 @@ import {
   type CapturePolicy, type CaptureSeal,
 } from "./capture.js";
 import {
-  ARTIFACT_INDEX_DEFAULT_ROW_CAP, ArtifactIndexResult, CausedByProblem, EventStore,
+  ARTIFACT_INDEX_DEFAULT_ROW_CAP, ArtifactIndexResult, CausedByProblem, EventStore, StoreReadMetrics, StoreReadMetricsSink,
+  artifactIndexRows,
   SEALED_BY_GITHUB_WEBHOOK, SEALED_BY_PARAM, causedByProblem,
 } from "./store.js";
+import type { OwnerLoginAmendmentsCall, OwnerLoginAmendmentsCallTiming, OwnerLoginFailure } from "./owner-login-record.js";
 import { GENESIS_HASH, assertArtifactId, assertEventArtifactIds, InvalidArtifactIdError } from "./schema.js";
 import type { Actor, Event, EventInput } from "./schema.js";
 import {
@@ -432,11 +434,86 @@ type DependencyRead =
   | { ok: true; events: Event[] }
   | { ok: false; reason: "deadline" | "budget" | "store_error" };
 
+type AmendmentStoreCallMeasure = <T>(
+  call: OwnerLoginAmendmentsCall,
+  operation: (metrics: StoreReadMetricsSink) => Promise<T>,
+  fallback: (value: T) => StoreReadMetrics,
+  outcome?: (value: T) => "ok" | OwnerLoginFailure,
+) => Promise<T>;
+
+function observationNow(): number | undefined {
+  try {
+    const value = globalThis.performance?.now();
+    return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function emptyReadMetrics(statement_rows = 0, distinct_events = statement_rows): StoreReadMetrics {
+  return { statement_rows, distinct_events, body_chars: 0, sql_ms: null, statements: 0 };
+}
+
+function storeFailure(error: unknown): OwnerLoginFailure {
+  const match = /owner-login (deadline|budget|store_error)/.exec(String((error as Error)?.message ?? error));
+  return match?.[1] as OwnerLoginFailure | undefined ?? "store_error";
+}
+
+function createAmendmentStoreCallMeasure(
+  onStoreCall?: (entry: OwnerLoginAmendmentsCallTiming, order: number) => void,
+): AmendmentStoreCallMeasure {
+  let order = 0;
+  return async <T>(
+    call: OwnerLoginAmendmentsCall,
+    operation: (metrics: StoreReadMetricsSink) => Promise<T>,
+    fallback: (value: T) => StoreReadMetrics,
+    outcome: (value: T) => "ok" | OwnerLoginFailure = () => "ok",
+  ): Promise<T> => {
+    let thisOrder: number | undefined;
+    let started: number | undefined, finished: number | undefined;
+    let observed: StoreReadMetrics | undefined;
+    let storeCalled = false;
+    const metrics: StoreReadMetricsSink = (value) => { try { observed = value; } catch { /* observation only */ } };
+    metrics.storeCallStarted = () => {
+      storeCalled = true;
+      if (thisOrder === undefined) thisOrder = order++;
+      if (started === undefined) started = observationNow();
+    };
+    metrics.storeCallFinished = () => { finished = observationNow(); };
+    const emit = (value: T | undefined, result: "ok" | OwnerLoginFailure) => {
+      if (!onStoreCall || !storeCalled || started === undefined) return;
+      try {
+        const ended = finished ?? observationNow();
+        if (ended === undefined) return;
+        const measured = observed ?? (value === undefined ? emptyReadMetrics() : fallback(value));
+        onStoreCall({
+          call,
+          wall_ms: Math.max(0, ended - started),
+          rows: { statement_rows: measured.statement_rows, distinct_events: measured.distinct_events },
+          body_chars: measured.body_chars,
+          sql_ms: measured.sql_ms,
+          statements: measured.statements,
+          outcome: result,
+        }, thisOrder!);
+      } catch { /* A timing failure cannot change the store call. */ }
+    };
+    try {
+      const value = await operation(metrics);
+      emit(value, outcome(value));
+      return value;
+    } catch (error) {
+      emit(undefined, storeFailure(error));
+      throw error;
+    }
+  };
+}
+
 async function amendmentDependencies(opts: {
   store: EventStore;
   candidates: Event[];
   deadline: number;
   now: () => number;
+  measure: AmendmentStoreCallMeasure;
 }): Promise<DependencyRead> {
   const candidateById = new Map(opts.candidates.map((e) => [e.id, e]));
   const dependencies = new Map<string, Event>();
@@ -459,8 +536,10 @@ async function amendmentDependencies(opts: {
     if (opts.candidates.length + dependencies.size + missing.length > CLASSIFY_ROW_CAP) return false;
     if (!missing.length) return true;
     const rows = opts.store.getMany
-      ? await opts.store.getMany(missing)
-      : (await Promise.all(missing.map((id) => opts.store.get(id)))).filter((e): e is Event => e !== null);
+      ? await opts.measure("dependencies", (metrics) => opts.store.getMany!(missing, metrics),
+        (events) => emptyReadMetrics(events.length))
+      : (await Promise.all(missing.map((id) => opts.measure("dependencies", (metrics) => opts.store.get(id, metrics),
+        (event) => emptyReadMetrics(event ? 1 : 0))))).filter((e): e is Event => e !== null);
     if (opts.now() >= opts.deadline) throw new Error("deadline");
     const byId = new Map(rows.map((e) => [e.id, e]));
     if (missing.some((id) => !byId.has(id))) throw new Error("unresolvable");
@@ -510,15 +589,16 @@ async function amendmentCaptureDependencies(opts: {
   coveredArtifactKeys: string[];
   deadline: number;
   now: () => number;
+  measure: AmendmentStoreCallMeasure;
 }): Promise<CaptureDependencyRead> {
   const events = new Map(opts.baseEvents.map((e) => [e.id, e]));
   let rowsRead = opts.baseEvents.length;
-  const read = async (artifactKeys: string[], artifactPrefixes: string[] = []): Promise<CaptureDependencyRead | null> => {
+  const read = async (call: Extract<OwnerLoginAmendmentsCall, "capture_targets" | "capture_commits">, artifactKeys: string[], artifactPrefixes: string[] = []): Promise<CaptureDependencyRead | null> => {
     if (!artifactKeys.length && !artifactPrefixes.length) return null;
     if (!opts.store.eventsReferencingArtifacts) return { ok: false, reason: "store_error" };
     const remaining = CLASSIFY_ROW_CAP - rowsRead;
     if (remaining < 1) return { ok: false, reason: "budget" };
-    const result = await opts.store.eventsReferencingArtifacts({
+    const query = {
       project: opts.project,
       artifact_keys: [...new Set(artifactKeys)],
       artifact_prefixes: [...new Set(artifactPrefixes)],
@@ -526,7 +606,17 @@ async function amendmentCaptureDependencies(opts: {
       through_seq: opts.U,
       row_cap: remaining,
       deadline: opts.deadline,
-    }, opts.now);
+    };
+    const result = await opts.measure(call,
+      (metrics) => opts.store.eventsReferencingArtifacts!(query, opts.now, metrics),
+      (value) => {
+        if (!value.ok) return emptyReadMetrics();
+        const rows = value.events.reduce((count, event) => count + artifactIndexRows(event).filter((row) =>
+          query.artifact_keys.some((key) => sameArtifact(key, row.artifact_key))
+          || query.artifact_prefixes.some((prefix) => row.artifact_key.startsWith(prefix))).length, 0);
+        return emptyReadMetrics(rows, value.events.length);
+      },
+      (value) => value.ok ? "ok" : value.reason);
     if (!result.ok) return result;
     rowsRead += result.events.length;
     if (rowsRead > CLASSIFY_ROW_CAP) return { ok: false, reason: "budget" };
@@ -556,7 +646,7 @@ async function amendmentCaptureDependencies(opts: {
     }
   }
   const uncovered = [...targetKeys].filter((key) => !opts.coveredArtifactKeys.some((covered) => sameArtifact(key, covered)));
-  const targetRead = await read(uncovered);
+  const targetRead = await read("capture_targets", uncovered);
   if (targetRead) return targetRead;
   if (opts.now() >= opts.deadline) return { ok: false, reason: "deadline" };
 
@@ -572,7 +662,7 @@ async function amendmentCaptureDependencies(opts: {
       commitPrefixes.add(`commit:${name}@${split[2].slice(0, 7)}`);
     }
   }
-  const groupRead = await read([], [...commitPrefixes]);
+  const groupRead = await read("capture_commits", [], [...commitPrefixes]);
   if (groupRead) return groupRead;
   if (opts.now() >= opts.deadline) return { ok: false, reason: "deadline" };
   const complete = classifierCaptureSeals([...events.values()], opts.policy, opts.canonicalRepo);
@@ -592,6 +682,7 @@ export async function evaluateAmendmentsAtU(opts: {
   coveredArtifactKeys: string[];
   deadline: number;
   now: () => number;
+  onStoreCall?: (entry: OwnerLoginAmendmentsCallTiming, order: number) => void;
 }): Promise<AmendmentEval> {
   const fail = (reason: "deadline" | "budget" | "store_error"): AmendmentEval => ({
     ok: false,
@@ -611,9 +702,12 @@ export async function evaluateAmendmentsAtU(opts: {
   }
   // Fail closed: a store without the bounded candidate read never falls back to all() (NOOA F1).
   if (!opts.store.amendmentEventsUpTo) return fail("store_error");
+  const measure = createAmendmentStoreCallMeasure(opts.onStoreCall);
   let candidates: Event[];
   try {
-    candidates = await opts.store.amendmentEventsUpTo(opts.project, opts.U, CLASSIFY_ROW_CAP + 1);
+    candidates = await measure("amendment_rows",
+      (metrics) => opts.store.amendmentEventsUpTo!(opts.project, opts.U, CLASSIFY_ROW_CAP + 1, metrics),
+      (events) => emptyReadMetrics(events.length));
   } catch {
     return fail("store_error");
   }
@@ -623,13 +717,13 @@ export async function evaluateAmendmentsAtU(opts: {
     return { ok: true, collection: emptyAmendmentCollection(), snapshotJson: amendmentSnapshotJson({ effective: [] }), captureSeals: baseSeals };
   }
   const dependencies = await amendmentDependencies({
-    store: opts.store, candidates, deadline: opts.deadline, now: opts.now,
+    store: opts.store, candidates, deadline: opts.deadline, now: opts.now, measure,
   });
   if (!dependencies.ok) return fail(dependencies.reason);
   const captures = await amendmentCaptureDependencies({
     store: opts.store, project: opts.project, U: opts.U, policy: opts.policy, canonicalRepo: opts.canonicalRepo,
     candidates, dependencies: dependencies.events, baseEvents: opts.captureEvents,
-    coveredArtifactKeys: opts.coveredArtifactKeys, deadline: opts.deadline, now: opts.now,
+    coveredArtifactKeys: opts.coveredArtifactKeys, deadline: opts.deadline, now: opts.now, measure,
   });
   if (!captures.ok) return fail(captures.reason);
   try {

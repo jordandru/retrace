@@ -1,5 +1,11 @@
-import { InsertExtras, OwnerLoginConsumption, readOwnerLoginConsumption, ArtifactIndexQuery, ArtifactIndexResult, ChainHead, Event, EventStore, HeadMovedError, HistoryQuery, HistoryPage, PendingDelivery, Share, artifactIndexRows, clampHistoryLimit, runArtifactIndexStatements, ArtifactIndexHit, historyPageFromNewestFirst, likeContains, policyDocumentFromRow, policySnapshotFromIndex, assertRouteWriteConsistent, RouteConflictError } from "@retrace-dev/core";
+import { InsertExtras, OwnerLoginConsumption, readOwnerLoginConsumption, ArtifactIndexQuery, ArtifactIndexResult, ChainHead, Event, EventStore, HeadMovedError, HistoryQuery, HistoryPage, PendingDelivery, Share, artifactIndexRows, clampHistoryLimit, runArtifactIndexStatements, ArtifactIndexHit, historyPageFromNewestFirst, likeContains, policyDocumentFromRow, policySnapshotFromIndex, assertRouteWriteConsistent, RouteConflictError, parseEventBodyRows } from "@retrace-dev/core";
+import type { StoreReadMetricsSink } from "@retrace-dev/core";
 import type { BreakerRow, ClassificationContextRow, PolicyRouteRow, PolicySnapshot, PolicySnapshotBudget, PolicyWrite } from "@retrace-dev/core";
+
+function d1Duration(result: { meta?: { duration?: unknown } }): number | null {
+  const value = result.meta?.duration;
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
 
 export class D1Store implements EventStore {
   constructor(private db: D1Database) {}
@@ -93,17 +99,17 @@ export class D1Store implements EventStore {
     return row ? (JSON.parse(row.body) as Event) : null;
   }
 
-  async get(id: string) {
+  async get(id: string, metrics?: StoreReadMetricsSink) {
     const row = await this.db.prepare("SELECT body FROM events WHERE id = ?").bind(id).first<{ body: string }>();
-    return row ? (JSON.parse(row.body) as Event) : null;
+    return row ? parseEventBodyRows([row], metrics)[0]! : (parseEventBodyRows([], metrics), null);
   }
 
-  async getMany(ids: string[]) {
-    if (!ids.length) return [];
-    const { results } = await this.db.prepare(
+  async getMany(ids: string[], metrics?: StoreReadMetricsSink) {
+    if (!ids.length) return parseEventBodyRows([], metrics, 0, 0);
+    const result = await this.db.prepare(
       "SELECT body FROM events WHERE id IN (SELECT value FROM json_each(?))",
     ).bind(JSON.stringify([...new Set(ids)])).all<{ body: string }>();
-    return results.map((r) => JSON.parse(r.body) as Event);
+    return parseEventBodyRows(result.results, metrics, d1Duration(result));
   }
 
   async all(project: string) {
@@ -111,8 +117,8 @@ export class D1Store implements EventStore {
     return results.map((r) => JSON.parse(r.body) as Event);
   }
 
-  async amendmentEventsUpTo(project: string, throughSeq: number, limit: number) {
-    const { results } = await this.db.prepare(
+  async amendmentEventsUpTo(project: string, throughSeq: number, limit: number, metrics?: StoreReadMetricsSink) {
+    const result = await this.db.prepare(
       `SELECT body FROM events
        WHERE project = ? AND seq <= ? AND action = 'other'
          AND json_extract(body, '$.action_detail') = 'amended'
@@ -122,7 +128,7 @@ export class D1Store implements EventStore {
          )
        ORDER BY seq ASC LIMIT ?`,
     ).bind(project, throughSeq, limit).all<{ body: string }>();
-    return results.map((r) => JSON.parse(r.body) as Event);
+    return parseEventBodyRows(result.results, metrics, d1Duration(result));
   }
 
   async projects() {
@@ -148,11 +154,15 @@ export class D1Store implements EventStore {
     return historyPageFromNewestFirst(results.map((r) => JSON.parse(r.body) as Event), limit);
   }
 
-  async eventsReferencingArtifacts(q: ArtifactIndexQuery, now: () => number = Date.now): Promise<ArtifactIndexResult> {
+  async eventsReferencingArtifacts(q: ArtifactIndexQuery, now: () => number = Date.now, metrics?: StoreReadMetricsSink): Promise<ArtifactIndexResult> {
+    let sql_ms = 0, durationAvailable = true;
     return runArtifactIndexStatements(q, now, async ({ sql, params }) => {
-      const { results } = await this.db.prepare(sql).bind(...params).all<ArtifactIndexHit>();
-      return results;
-    });
+      const result = await this.db.prepare(sql).bind(...params).all<ArtifactIndexHit>();
+      const duration = d1Duration(result);
+      if (duration === null) durationAvailable = false;
+      else sql_ms += duration;
+      return result.results;
+    }, metrics, () => durationAvailable ? sql_ms : null);
   }
 
   async insertPendingDelivery(row: PendingDelivery) {

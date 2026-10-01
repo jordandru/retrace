@@ -254,6 +254,29 @@ test("D1 in workerd: owner-login amendment capture reads all 11 files of 5d7290f
       method: { tool: "retrace_amend", params: { sealed_by: "owner", target_event_id: target.id,
         attribution: { from: target.actor, to: evidence.actor, evidence: [evidence.id] } } } });
 
+    const { classifyOwnerLogin } = await import("@retrace-dev/core");
+    const clock = Date.now(), readHead = (await store.head(f.project))!;
+    const measured = await classifyOwnerLogin({ store, input: f.input, policy: f.policy, canonicalR: f.repo,
+      readHead, deadline: clock + 5000, now: () => clock });
+    const captureHookFault = await classifyOwnerLogin({ store, input: f.input, policy: f.policy, canonicalR: f.repo,
+      readHead, deadline: clock + 5000, now: () => clock, amendmentsTimingCapture: () => { throw new Error("capture fault"); } });
+    assert.equal(measured.kind, "decision"); assert.equal(captureHookFault.kind, "decision");
+    if (measured.kind !== "decision" || captureHookFault.kind !== "decision") throw new Error("fixture");
+    const measuredDecision = structuredClone(ownerLoginRecord(measured.input)!.decision);
+    const captureHookFaultDecision = structuredClone(ownerLoginRecord(captureHookFault.input)!.decision);
+    const calls = measuredDecision.timing.amendments_calls!;
+    assert.deepEqual(calls.map((entry) => entry.call), ["amendment_rows", "dependencies", "capture_targets"]);
+    for (const entry of calls) {
+      assert.ok(entry.body_chars > 0, JSON.stringify(entry));
+      assert.ok(typeof entry.sql_ms === "number" && entry.sql_ms >= 0, JSON.stringify(entry));
+      assert.equal(entry.statements, 1, JSON.stringify(entry));
+      assert.equal(entry.outcome, "ok");
+    }
+    assert.equal(captureHookFaultDecision.timing.amendments_calls, undefined);
+    delete measuredDecision.timing.amendments_calls;
+    assert.equal(JSON.stringify(measuredDecision), JSON.stringify(captureHookFaultDecision),
+      "after removing the observation field, instrumentation must leave byte-identical decision JSON");
+
     const captureReads: { query: ArtifactIndexQuery; result: Awaited<ReturnType<D1Store["eventsReferencingArtifacts"]>> }[] = [];
     const read = store.eventsReferencingArtifacts.bind(store);
     store.eventsReferencingArtifacts = async (query, now) => {

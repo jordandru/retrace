@@ -3,9 +3,9 @@ import { DatabaseSync } from "node:sqlite";
 import {
   InsertExtras, OwnerLoginConsumption, readOwnerLoginConsumption, ArtifactIndexQuery, ArtifactIndexResult, BACKFILL_ARTIFACT_INDEX_SQL, ChainHead, Event, EventStore, HeadMovedError,
   HistoryQuery, HistoryPage, PendingDelivery, SCHEMA_PENDING_EVENT_COLUMNS_SQL, SCHEMA_PENDING_LEASE_COLUMNS_SQL, SCHEMA_PENDING_ROUTE_COLUMNS_SQL, SCHEMA_SQL, Share, artifactIndexRows, clampHistoryLimit,
-  ArtifactIndexHit, runArtifactIndexStatements, historyPageFromNewestFirst, likeContains,
+  ArtifactIndexHit, runArtifactIndexStatements, historyPageFromNewestFirst, likeContains, parseEventBodyRows,
 } from "@retrace-dev/core";
-import type { BreakerRow, ClassificationContextRow, PolicyRouteRow, PolicySnapshot, PolicySnapshotBudget, PolicyWrite } from "@retrace-dev/core";
+import type { BreakerRow, ClassificationContextRow, PolicyRouteRow, PolicySnapshot, PolicySnapshotBudget, PolicyWrite, StoreReadMetricsSink } from "@retrace-dev/core";
 import { assertRouteWriteConsistent, policyDocumentFromRow, policySnapshotFromIndex, sameBreaker } from "@retrace-dev/core";
 
 export class SqliteStore implements EventStore {
@@ -121,17 +121,17 @@ export class SqliteStore implements EventStore {
     return row ? (JSON.parse(row.body) as Event) : null;
   }
 
-  async get(id: string) {
+  async get(id: string, metrics?: StoreReadMetricsSink) {
     const row = this.db.prepare("SELECT body FROM events WHERE id = ?").get(id) as { body: string } | undefined;
-    return row ? (JSON.parse(row.body) as Event) : null;
+    return row ? parseEventBodyRows([row], metrics, null, 0)[0]! : (parseEventBodyRows([], metrics, null, 0), null);
   }
 
-  async getMany(ids: string[]) {
-    if (!ids.length) return [];
+  async getMany(ids: string[], metrics?: StoreReadMetricsSink) {
+    if (!ids.length) return parseEventBodyRows([], metrics, null, 0);
     const rows = this.db.prepare(
       "SELECT body FROM events WHERE id IN (SELECT value FROM json_each(?))",
     ).all(JSON.stringify([...new Set(ids)])) as { body: string }[];
-    return rows.map((r) => JSON.parse(r.body) as Event);
+    return parseEventBodyRows(rows, metrics, null, 0);
   }
 
   async all(project: string) {
@@ -139,7 +139,7 @@ export class SqliteStore implements EventStore {
     return rows.map((r) => JSON.parse(r.body) as Event);
   }
 
-  async amendmentEventsUpTo(project: string, throughSeq: number, limit: number) {
+  async amendmentEventsUpTo(project: string, throughSeq: number, limit: number, metrics?: StoreReadMetricsSink) {
     const rows = this.db.prepare(
       `SELECT body FROM events
        WHERE project = ? AND seq <= ? AND action = 'other'
@@ -150,7 +150,7 @@ export class SqliteStore implements EventStore {
          )
        ORDER BY seq ASC LIMIT ?`,
     ).all(project, throughSeq, limit) as { body: string }[];
-    return rows.map((r) => JSON.parse(r.body) as Event);
+    return parseEventBodyRows(rows, metrics, null, 0);
   }
 
   async projects() {
@@ -180,9 +180,9 @@ export class SqliteStore implements EventStore {
     return historyPageFromNewestFirst(rows.map((r) => JSON.parse(r.body) as Event), limit);
   }
 
-  async eventsReferencingArtifacts(q: ArtifactIndexQuery, now: () => number = Date.now): Promise<ArtifactIndexResult> {
+  async eventsReferencingArtifacts(q: ArtifactIndexQuery, now: () => number = Date.now, metrics?: StoreReadMetricsSink): Promise<ArtifactIndexResult> {
     return runArtifactIndexStatements(q, now, async ({ sql, params }) =>
-      this.db.prepare(sql).all(...params) as unknown as ArtifactIndexHit[]);
+      this.db.prepare(sql).all(...params) as unknown as ArtifactIndexHit[], metrics);
   }
 
   async insertPendingDelivery(row: PendingDelivery) {

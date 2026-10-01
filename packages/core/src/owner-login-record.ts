@@ -8,6 +8,23 @@ export const OWNER_LOGIN_WINDOW_MS = 30 * 60_000;
 export type OwnerLoginKind = "comment" | "review" | "pr_open" | "pr_edit" | "push" | "merge";
 export type OwnerLoginStatus = "declared_by_seat" | "conflicting" | "unresolved" | "unavailable" | "identity_mapped";
 export type OwnerLoginFailure = "store_error" | "budget" | "deadline";
+export const OWNER_LOGIN_AMENDMENTS_CALL_LIMIT = 16;
+export type OwnerLoginAmendmentsCall =
+  | "amendment_rows"
+  | "dependencies"
+  | "capture_targets"
+  | "capture_commits";
+export interface OwnerLoginAmendmentsCallTiming {
+  call: OwnerLoginAmendmentsCall;
+  /** Deployed Workers advance timers only at I/O: this covers the call's I/O plus CPU since the previous I/O,
+   * and excludes the call's own CPU after its last I/O (including parsing). Node/local workerd use elapsed time. */
+  wall_ms: number;
+  rows: { statement_rows: number; distinct_events: number };
+  body_chars: number;
+  sql_ms: number | null;
+  statements: number;
+  outcome: "ok" | OwnerLoginFailure;
+}
 export type GithubPayload = Record<string, unknown> & { login?: string; ingress_at?: string };
 export interface OwnerLoginRecord {
   policy: "owner-login/1";
@@ -42,13 +59,17 @@ export interface OwnerLoginRecord {
       candidates_rows: number | null;
       budget_rows_remaining: number | null;
       deadline_ms: number;
+      amendments_calls?: OwnerLoginAmendmentsCallTiming[];
+      amendments_calls_truncated?: true;
     };
     allocation?: { attempts: 2; read_head_seq: number; consumed_by: string | null };
   };
 }
 export type OwnerLoginResult = { kind: "not_applicable" } | { kind: "decision"; input: EventInput; consume: string[] };
 export type OwnerLoginArgs = { store: EventStore; input: EventInput; policy: PolicyDocument; canonicalR: string;
-  readHead: ChainHead; deadline: number; preMs?: number; now?: () => number };
+  readHead: ChainHead; deadline: number; preMs?: number; now?: () => number;
+  /** Optional observation sink; an exception omits that entry without affecting classification. */
+  amendmentsTimingCapture?: (entry: OwnerLoginAmendmentsCallTiming) => void };
 
 const object = (value: unknown): Record<string, unknown> | undefined => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
 export function ownerLoginRecord(input: Pick<EventInput, "method">): OwnerLoginRecord | undefined {
