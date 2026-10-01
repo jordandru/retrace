@@ -27,7 +27,7 @@ import { makeStore } from "./index.js";
 import { RemoteStore } from "./remote-store.js";
 import { ensureSigningKey, loadSigningKey } from "./keys.js";
 import { defaultProducerKeyPath, ensureProducerKey } from "./producer-key.js";
-import { witnessCheckpoint, verifyWitness, parseWitnessLog, witnessFor, fetchRekorPublicKey, DEFAULT_REKOR_URL } from "./witness.js";
+import { witnessCheckpoint, verifyWitness, parseWitnessLog, witnessFor, fetchRekorPublicKey, DEFAULT_REKOR_URL, WitnessRecord } from "./witness.js";
 import { isMainModule } from "./is-main.js";
 import { amendAttributionMain, attributionOptionsForRepo } from "./attribution.js";
 import { collectAttributionAmendments, attributionSummary, renderTimeline } from "@retrace-dev/core";
@@ -120,6 +120,52 @@ export async function checkpointCommand(
   } else mkdirSync(dirname(out), { recursive: true });
   appendFileSync(out, JSON.stringify(cp) + "\n");
   log(`appended head #${cp.seq} ${cp.head_hash.slice(0, 12)}… (${cp.total_events} events, issuer kid ${(cp.source as any).issuer_kid ?? "unsigned"}, signer kid ${cp.signer?.kid}) to ${out}\ncommit and push ${out} — that commit is the witness a later verify --checkpoint compares against`);
+}
+
+export async function requireValidWitnessForAppend(rec: WitnessRecord, cp: Parameters<typeof verifyWitness>[1], pem: string): Promise<void> {
+  const verdict = await verifyWitness(rec, cp, pem);
+  if (!verdict.ok) throw new Error(`refusing to append a witness that does not verify: ${verdict.problems.join("; ")}`);
+}
+
+export async function witnessCommand(
+  project: string,
+  flags: Record<string, string | boolean>,
+  options: {
+    witness?: typeof witnessCheckpoint;
+    fetchPublicKey?: typeof fetchRekorPublicKey;
+    rekorPublicKeyPem?: string;
+    log?: (message: string) => void;
+  } = {},
+): Promise<void> {
+  const log = options.log ?? console.log;
+  const cpsPath = String(flags.checkpoints ?? ".retrace/checkpoints.jsonl");
+  const wPath = String(flags.witnesses ?? ".retrace/witnesses.jsonl");
+  const rekorUrl = String(flags.rekor ?? DEFAULT_REKOR_URL);
+  const cp = latestCheckpoint(parseCheckpointLog(readFileSync(cpsPath, "utf8")), project);
+  if (!cp) throw new Error(`no checkpoint for project ${project} in ${cpsPath} — run \`retrace-export checkpoint ${project}\` first`);
+  const existing = existsSync(wPath) ? parseWitnessLog(readFileSync(wPath, "utf8")) : [];
+  if (witnessFor(existing, cp)) {
+    log(`unchanged — ${wPath} already witnesses checkpoint #${cp.seq} for ${project}`);
+    return;
+  }
+  const key = parseSigningKey(process.env.RETRACE_SIGNING_KEY) ?? loadSigningKey();
+  if (!key) throw new Error("no signing key: set RETRACE_SIGNING_KEY (the checkpoint key) — the Rekor entry must be signed by the checkpoint's signer");
+  const rec = await (options.witness ?? witnessCheckpoint)(cp, key, { rekorUrl });
+  const committedPemPath = ".retrace/rekor-public.pem";
+  let pem = options.rekorPublicKeyPem;
+  if (!pem) {
+    try { pem = readFileSync(committedPemPath, "utf8"); }
+    catch { pem = await (options.fetchPublicKey ?? fetchRekorPublicKey)(rekorUrl); }
+  }
+  await requireValidWitnessForAppend(rec, cp, pem);
+  mkdirSync(dirname(wPath), { recursive: true });
+  const pemPath = dirname(wPath) + "/rekor-public.pem";
+  if (!existsSync(pemPath)) {
+    writeFileSync(pemPath, pem);
+    log(`wrote ${pemPath} — Rekor's public key, committed so SETs verify offline`);
+  }
+  appendFileSync(wPath, JSON.stringify(rec) + "\n");
+  log(`witnessed checkpoint #${cp.seq} ${cp.head_hash.slice(0, 12)}… in the Rekor transparency log: index ${rec.log_index}, ${new Date(rec.integrated_time * 1000).toISOString()}\nappended to ${wPath} — commit and push it with ${cpsPath}; verify with: retrace-export verify <bundle> --checkpoint ${cpsPath} --witnesses ${wPath}`);
 }
 
 async function main() {
@@ -269,21 +315,7 @@ async function main() {
   }
   if (cmd === "witness") {
     const project = pos[1]; if (!project) throw new Error("usage: retrace-export witness <project> [--checkpoints .retrace/checkpoints.jsonl] [--witnesses .retrace/witnesses.jsonl] [--rekor url]");
-    const cpsPath = String(flags.checkpoints ?? ".retrace/checkpoints.jsonl");
-    const wPath = String(flags.witnesses ?? ".retrace/witnesses.jsonl");
-    const rekorUrl = String(flags.rekor ?? DEFAULT_REKOR_URL);
-    const cp = latestCheckpoint(parseCheckpointLog(readFileSync(cpsPath, "utf8")), project);
-    if (!cp) throw new Error(`no checkpoint for project ${project} in ${cpsPath} — run \`retrace-export checkpoint ${project}\` first`);
-    const existing = existsSync(wPath) ? parseWitnessLog(readFileSync(wPath, "utf8")) : [];
-    if (witnessFor(existing, cp)) { console.log(`unchanged — ${wPath} already witnesses checkpoint #${cp.seq} for ${project}`); return; }
-    const key = parseSigningKey(process.env.RETRACE_SIGNING_KEY) ?? loadSigningKey();
-    if (!key) throw new Error("no signing key: set RETRACE_SIGNING_KEY (the checkpoint key) — the Rekor entry must be signed by the checkpoint's signer");
-    const rec = await witnessCheckpoint(cp, key, { rekorUrl });
-    mkdirSync(dirname(wPath), { recursive: true });
-    appendFileSync(wPath, JSON.stringify(rec) + "\n");
-    const pemPath = dirname(wPath) + "/rekor-public.pem";
-    if (!existsSync(pemPath)) { writeFileSync(pemPath, await fetchRekorPublicKey(rekorUrl)); console.log(`wrote ${pemPath} — Rekor's public key, committed so SETs verify offline`); }
-    console.log(`witnessed checkpoint #${cp.seq} ${cp.head_hash.slice(0, 12)}… in the Rekor transparency log: index ${rec.log_index}, ${new Date(rec.integrated_time * 1000).toISOString()}\nappended to ${wPath} — commit and push it with ${cpsPath}; verify with: retrace-export verify <bundle> --checkpoint ${cpsPath} --witnesses ${wPath}`);
+    await witnessCommand(project, flags);
     return;
   }
   if (cmd === "reconcile") { process.exitCode = await reconcileMain(flags, pos); return; } // exitCode, not exit(): let a large --json flush

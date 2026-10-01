@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { generateKeyPairSync } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -8,8 +9,9 @@ import { fileURLToPath } from "node:url";
 import { appendEvent, buildExportBundle, checkpointFromBundle, createHandler, generateSigningKey, keyId, signProducer, PRODUCER_SIG_FORMAT_V2, CLAIM_DECISION_PARAM, PRODUCER_HOOK_SYSTEM_ACTOR, SEALED_BY_PARAM, POLICY_PROFILE } from "@retrace-dev/core";
 import { SqliteStore } from "./sqlite-store.js";
 import { trustedHookStampsFor, producerVerifyOptsFor } from "./hook-stamps.js";
-import { checkpointCommand } from "./export-cli.js";
+import { checkpointCommand, witnessCommand } from "./export-cli.js";
 import { RemoteStore } from "./remote-store.js";
+import { WITNESS_FORMAT, type WitnessRecord } from "./witness.js";
 
 const bin = fileURLToPath(new URL("./export-cli.js", import.meta.url));
 const HOST_VARS = /^(RETRACE_|ORCA_|CLAUDE_CODE_SESSION_ID$|GROK_SESSION_ID$)/;
@@ -145,6 +147,47 @@ test("checkpoint --bundle prints age and is exempt from the server bundle limit"
     assert.match(messages[0]!, new RegExp(`generated_at ${fixture.bundle.generated_at}; age 24\\.00 hours`));
     assert.match(messages[0]!, /explicit operator choice, age limit exempt/);
     assert.equal(existsSync(out), true);
+  } finally {
+    if (previous === undefined) delete process.env.RETRACE_SIGNING_KEY;
+    else process.env.RETRACE_SIGNING_KEY = previous;
+    rmSync(fixture.dir, { recursive: true, force: true });
+  }
+});
+
+test("witness command refuses to append a record that fails verifyWitness", async () => {
+  const fixture = await checkpointFixture(new Date("2026-10-01T16:00:00.000Z"));
+  const cp = await checkpointFromBundle(fixture.bundle, { signingKey: fixture.checkpointSigner.privateKey });
+  const checkpoints = join(fixture.dir, "checkpoints.jsonl");
+  const witnesses = join(fixture.dir, "witnesses.jsonl");
+  writeFileSync(checkpoints, JSON.stringify(cp) + "\n");
+  const invalid: WitnessRecord = {
+    format: WITNESS_FORMAT,
+    kind: "rekor",
+    rekor_url: "https://rekor.example",
+    checkpoint: { project: cp.project, seq: cp.seq, head_hash: cp.head_hash },
+    checkpoint_sha256: "0".repeat(64),
+    signer_kid: cp.signer?.kid,
+    uuid: "a".repeat(64),
+    log_index: 1,
+    log_id: "bad",
+    integrated_time: 1,
+    body: Buffer.from("{}").toString("base64"),
+    set: Buffer.from("invalid").toString("base64"),
+  };
+  const { publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
+  const pem = publicKey.export({ type: "spki", format: "pem" }).toString();
+  const previous = process.env.RETRACE_SIGNING_KEY;
+  process.env.RETRACE_SIGNING_KEY = JSON.stringify(fixture.checkpointSigner.privateKey);
+  try {
+    await assert.rejects(
+      witnessCommand("p", { checkpoints, witnesses, rekor: "https://rekor.example" }, {
+        witness: async () => invalid,
+        rekorPublicKeyPem: pem,
+        log() {},
+      }),
+      /refusing to append a witness that does not verify/,
+    );
+    assert.equal(existsSync(witnesses), false, "verification failure must happen before append");
   } finally {
     if (previous === undefined) delete process.env.RETRACE_SIGNING_KEY;
     else process.env.RETRACE_SIGNING_KEY = previous;
