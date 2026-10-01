@@ -1,13 +1,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { appendEvent, buildExportBundle, checkpointFromBundle, createHandler, generateSigningKey, keyId, signProducer, PRODUCER_SIG_FORMAT_V2, CLAIM_DECISION_PARAM, PRODUCER_HOOK_SYSTEM_ACTOR, SEALED_BY_PARAM, POLICY_PROFILE } from "@retrace-dev/core";
 import { SqliteStore } from "./sqlite-store.js";
 import { trustedHookStampsFor, producerVerifyOptsFor } from "./hook-stamps.js";
+import { checkpointCommand } from "./export-cli.js";
+import { RemoteStore } from "./remote-store.js";
 
 const bin = fileURLToPath(new URL("./export-cli.js", import.meta.url));
 const HOST_VARS = /^(RETRACE_|ORCA_|CLAUDE_CODE_SESSION_ID$|GROK_SESSION_ID$)/;
@@ -30,6 +32,125 @@ async function putPolicy(store: SqliteStore, project: string, stamps: string[]) 
 function runVerify(args: string[]) {
   return spawnSync(process.execPath, [bin, "verify", ...args], { encoding: "utf8", env: baseEnv, cwd: args[0] ? dirname(args[0]) : undefined });
 }
+
+class CheckpointRemoteStore extends RemoteStore {
+  exportOptions: Array<{ fresh?: boolean; cached?: boolean }> = [];
+  constructor(private bundle: Awaited<ReturnType<typeof buildExportBundle>>, private liveHead: { seq: number; hash: string }) {
+    super("https://retrace.example", "test-token");
+  }
+  async export(_scope: { project: string; artifact_id?: string }, options: { fresh?: boolean; cached?: boolean } = {}) {
+    this.exportOptions.push(options);
+    return this.bundle;
+  }
+  async head() {
+    return this.liveHead;
+  }
+}
+
+async function checkpointFixture(generatedAt: Date) {
+  const dir = mkdtempSync(join(tmpdir(), "retrace-checkpoint-age-"));
+  const store = new SqliteStore(join(dir, "ledger.db"));
+  await appendEvent(store, {
+    project: "p",
+    actor: { type: "human", id: "jordan@example.com" },
+    action: "created",
+    artifacts: [{ id: "artifact:a", role: "generated" }],
+  });
+  const issuer = await generateSigningKey();
+  const checkpointSigner = await generateSigningKey();
+  const bundle = await buildExportBundle(store, { project: "p" }, { signingKey: issuer.privateKey, now: generatedAt });
+  const pubkey = join(dir, "issuer-public.jwk");
+  writeFileSync(pubkey, JSON.stringify(issuer.publicKey));
+  return { dir, bundle, pubkey, checkpointSigner };
+}
+
+test("checkpoint refuses a four-hour-old server bundle with live-head and status diagnostics", async () => {
+  const now = new Date("2026-10-01T16:00:00.000Z");
+  const fixture = await checkpointFixture(new Date(now.getTime() - 4 * 3_600_000));
+  const liveHead = { seq: 17, hash: "f".repeat(64) };
+  const remote = new CheckpointRemoteStore(fixture.bundle, liveHead);
+  try {
+    await assert.rejects(
+      checkpointCommand("p", { pubkey: fixture.pubkey, out: join(fixture.dir, "checkpoints.jsonl") }, { store: remote, now }),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, new RegExp(`generated_at ${fixture.bundle.generated_at}`));
+        assert.match(error.message, /age 4\.00 hours exceeds --max-bundle-age-hours 3/);
+        assert.match(error.message, new RegExp(`live head #17 ${liveHead.hash}`));
+        assert.match(error.message, /\/projects\/p\/status export_cache/);
+        return true;
+      },
+    );
+    assert.equal(existsSync(join(fixture.dir, "checkpoints.jsonl")), false);
+  } finally {
+    rmSync(fixture.dir, { recursive: true, force: true });
+  }
+});
+
+test("checkpoint appends a fresh server bundle and --fresh reaches RemoteStore.export", async () => {
+  const now = new Date("2026-10-01T16:00:00.000Z");
+  const fixture = await checkpointFixture(new Date(now.getTime() - 30 * 60_000));
+  const remote = new CheckpointRemoteStore(fixture.bundle, { seq: 0, hash: fixture.bundle.chain.head_hash! });
+  const out = join(fixture.dir, "checkpoints.jsonl");
+  const previous = process.env.RETRACE_SIGNING_KEY;
+  process.env.RETRACE_SIGNING_KEY = JSON.stringify(fixture.checkpointSigner.privateKey);
+  try {
+    await checkpointCommand("p", { pubkey: fixture.pubkey, out, fresh: true }, { store: remote, now, log() {} });
+    assert.deepEqual(remote.exportOptions, [{ fresh: true }]);
+    assert.equal(readFileSync(out, "utf8").trim().split("\n").length, 1);
+  } finally {
+    if (previous === undefined) delete process.env.RETRACE_SIGNING_KEY;
+    else process.env.RETRACE_SIGNING_KEY = previous;
+    rmSync(fixture.dir, { recursive: true, force: true });
+  }
+});
+
+test("checkpoint --max-bundle-age-hours overrides the default server limit", async () => {
+  const now = new Date("2026-10-01T16:00:00.000Z");
+  const fixture = await checkpointFixture(new Date(now.getTime() - 4 * 3_600_000));
+  const remote = new CheckpointRemoteStore(fixture.bundle, { seq: 0, hash: fixture.bundle.chain.head_hash! });
+  const out = join(fixture.dir, "checkpoints.jsonl");
+  const previous = process.env.RETRACE_SIGNING_KEY;
+  process.env.RETRACE_SIGNING_KEY = JSON.stringify(fixture.checkpointSigner.privateKey);
+  try {
+    await checkpointCommand("p", {
+      pubkey: fixture.pubkey,
+      out,
+      "max-bundle-age-hours": "5",
+    }, { store: remote, now, log() {} });
+    assert.equal(existsSync(out), true);
+  } finally {
+    if (previous === undefined) delete process.env.RETRACE_SIGNING_KEY;
+    else process.env.RETRACE_SIGNING_KEY = previous;
+    rmSync(fixture.dir, { recursive: true, force: true });
+  }
+});
+
+test("checkpoint --bundle prints age and is exempt from the server bundle limit", async () => {
+  const now = new Date("2026-10-01T16:00:00.000Z");
+  const fixture = await checkpointFixture(new Date(now.getTime() - 24 * 3_600_000));
+  const bundleFile = join(fixture.dir, "bundle.json");
+  const out = join(fixture.dir, "checkpoints.jsonl");
+  writeFileSync(bundleFile, JSON.stringify(fixture.bundle));
+  const messages: string[] = [];
+  const previous = process.env.RETRACE_SIGNING_KEY;
+  process.env.RETRACE_SIGNING_KEY = JSON.stringify(fixture.checkpointSigner.privateKey);
+  try {
+    await checkpointCommand("p", {
+      bundle: bundleFile,
+      pubkey: fixture.pubkey,
+      out,
+      "max-bundle-age-hours": "1",
+    }, { now, log: (message) => messages.push(message) });
+    assert.match(messages[0]!, new RegExp(`generated_at ${fixture.bundle.generated_at}; age 24\\.00 hours`));
+    assert.match(messages[0]!, /explicit operator choice, age limit exempt/);
+    assert.equal(existsSync(out), true);
+  } finally {
+    if (previous === undefined) delete process.env.RETRACE_SIGNING_KEY;
+    else process.env.RETRACE_SIGNING_KEY = previous;
+    rmSync(fixture.dir, { recursive: true, force: true });
+  }
+});
 
 test("verify --checkpoint fails closed unless a matching checkpoint has a trusted valid signature", async () => {
   const dir = mkdtempSync(join(tmpdir(), "retrace-checkpoint-verify-"));
