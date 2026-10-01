@@ -24,9 +24,13 @@ export interface CachedExport {
   bundle_json: string;
 }
 
+export type CachedExportMeta = Omit<CachedExport, "bundle_json">;
+
 export interface ExportCacheStore {
   get(project: string): Promise<CachedExport | null>;
   put(entry: CachedExport): Promise<void>;
+  meta?(project: string): Promise<CachedExportMeta | null>;
+  delete?(project: string): Promise<boolean>;
 }
 
 /** Absent cache is null; a torn/inconsistent chunk set must throw this instead of looking like a miss. */
@@ -43,6 +47,60 @@ export interface RefreshResult {
   action: "unchanged" | "refreshed" | "skipped" | "failed";
   head_seq?: number;
   error?: string;
+}
+
+export interface ExportCacheLastRefresh {
+  attempted_at: string;
+  result: RefreshResult["action"];
+  error?: string;
+  last_ok_at?: string;
+}
+
+export interface ExportCacheStatus {
+  state: "hit" | "stale" | "miss" | "unavailable";
+  cached_head_seq?: number;
+  cached_generated_at?: string;
+  age_seconds?: number;
+  live_head_seq?: number;
+  last_refresh?: ExportCacheLastRefresh;
+}
+
+export async function readExportCacheStatus(
+  project: string,
+  liveHead: { seq: number; hash: string } | null,
+  cache: ExportCacheStore,
+  readLastRefresh: ((project: string) => Promise<ExportCacheLastRefresh | null>) | undefined,
+  now = new Date(),
+): Promise<ExportCacheStatus> {
+  const live = liveHead ? { live_head_seq: liveHead.seq } : {};
+  try {
+    if (!readLastRefresh) throw new Error("export cache refresh status reader is not configured");
+    const [cached, lastRefresh] = await Promise.all([
+      cache.meta
+        ? cache.meta(project)
+        : cache.get(project).then((entry) => entry && ({
+          project: entry.project,
+          head_seq: entry.head_seq,
+          head_hash: entry.head_hash,
+          generated_at: entry.generated_at,
+        })),
+      readLastRefresh(project),
+    ]);
+    const refresh = lastRefresh ? { last_refresh: lastRefresh } : {};
+    if (!cached) return { state: "miss", ...live, ...refresh };
+    const generatedAt = Date.parse(cached.generated_at);
+    if (!Number.isFinite(generatedAt)) throw new Error("export cache generated_at is invalid");
+    return {
+      state: liveHead && liveHead.seq === cached.head_seq && liveHead.hash === cached.head_hash ? "hit" : "stale",
+      cached_head_seq: cached.head_seq,
+      cached_generated_at: cached.generated_at,
+      age_seconds: Math.max(0, Math.floor((now.getTime() - generatedAt) / 1000)),
+      ...live,
+      ...refresh,
+    };
+  } catch {
+    return { state: "unavailable", ...live };
+  }
 }
 
 /**

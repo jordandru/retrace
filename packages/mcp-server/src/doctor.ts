@@ -893,6 +893,20 @@ function loadCredential(cfg: RepoConfig, env: NodeJS.ProcessEnv, gate = false): 
   }
 }
 
+/** Export-cache health from GET /projects/:p/status. Older Workers omit the field and are skipped. */
+export function exportCacheFindingsFromStatus(status: Pick<ProjectStatus, "export_cache">): Finding[] {
+  const cache = status.export_cache;
+  if (!cache) return [];
+  const staleTooLong = cache.state === "stale" && (cache.age_seconds ?? 0) > 7_200;
+  const refreshFailed = cache.last_refresh?.result === "failed";
+  if (!staleTooLong && !refreshFailed) return [];
+  const reasons = [
+    ...(staleTooLong ? [`stale for ${cache.age_seconds}s`] : []),
+    ...(refreshFailed ? [`last refresh failed at ${cache.last_refresh!.attempted_at}`] : []),
+  ];
+  return [result("warn", "export-cache", reasons.join("; "))];
+}
+
 async function main() {
   const argv = process.argv.slice(2);
   const args = parseDoctorArgs(argv);
@@ -962,7 +976,8 @@ async function main() {
     try {
       const res = await fetch(`${url}/projects/${encodeURIComponent(project)}/status`, { headers });
       if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
-      findings.push(...issuanceFindingsFromStatus(await res.json() as ProjectStatus));
+      const status = await res.json() as ProjectStatus;
+      findings.push(...issuanceFindingsFromStatus(status), ...exportCacheFindingsFromStatus(status));
     } catch (e: any) {
       findings.push(result(gate ? "fail" : "warn", "issuance", `${e.message}; /status not checked`));
     }

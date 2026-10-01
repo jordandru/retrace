@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createHandler, parseCredentials, Credential, EventStore, Event, Share, appendEvent, EventInput, verifyProject, ChainHead, HeadMovedError, schemaSurface, Location, MethodParams, Action, tokenEquals, parseGithubRepoProjects, resolveGithubProject, pageHistoryNewest, generateSigningKey, MemoryEventStore, signProducer } from "./index.js";
+import { createHandler, parseCredentials, Credential, EventStore, Event, Share, appendEvent, EventInput, verifyProject, ChainHead, HeadMovedError, schemaSurface, Location, MethodParams, Action, tokenEquals, parseGithubRepoProjects, resolveGithubProject, pageHistoryNewest, generateSigningKey, MemoryEventStore, signProducer, ExportCacheStore } from "./index.js";
 
 const MemStore = MemoryEventStore;
 
@@ -41,6 +41,56 @@ test("GET /projects/:p/status exposes the canonical transparency model", async (
   assert.equal(body.capture.attribution, "unavailable: no_git_context");
   assert.equal("attribution_amendments" in body.capture, false);
   assert.equal("issuance" in body, false, "no credential list → issuance omitted");
+  assert.equal("export_cache" in body, false, "no export cache → health field omitted");
+});
+
+test("GET /projects/:p/status reports export-cache hit, stale, miss and unavailable", async () => {
+  const store = new MemStore();
+  await appendEvent(store, ev({ project: "p" }));
+  const first = (await store.all("p"))[0]!;
+  await appendEvent(store, ev({ project: "p", artifacts: [{ id: "b" }] }));
+  const head = (await store.head("p"))!;
+  const generated_at = new Date(Date.now() - 4_000).toISOString();
+  const lastRefresh = async () => ({
+    attempted_at: "2026-10-01T15:07:00.000Z",
+    result: "failed" as const,
+    error: "BROKEN fetch failed and timed out",
+    last_ok_at: "2026-10-01T14:07:00.000Z",
+  });
+  const cache = (meta: ExportCacheStore["meta"]): ExportCacheStore => ({
+    async get() { return null; },
+    async put() {},
+    meta,
+  });
+  const request = async (exportCache: ExportCacheStore) => {
+    const response = await get(createHandler(store, {
+      token: "tok",
+      exportCache,
+      exportCacheLastRefresh: lastRefresh,
+    }), "/projects/p/status", "tok");
+    assert.equal(response.status, 200);
+    return (await response.json()).export_cache;
+  };
+
+  const hit = await request(cache(async () => ({ project: "p", head_seq: head.seq, head_hash: head.hash, generated_at })));
+  assert.equal(hit.state, "hit");
+  assert.equal(hit.cached_head_seq, head.seq);
+  assert.equal(hit.live_head_seq, head.seq);
+  assert.ok(hit.age_seconds >= 4);
+  assert.equal(hit.last_refresh.error, "BROKEN fetch failed and timed out");
+
+  const stale = await request(cache(async () => ({ project: "p", head_seq: first.seq, head_hash: first.hash, generated_at })));
+  assert.equal(stale.state, "stale");
+  assert.equal(stale.cached_head_seq, first.seq);
+  assert.equal(stale.live_head_seq, head.seq);
+
+  const miss = await request(cache(async () => null));
+  assert.equal(miss.state, "miss");
+  assert.equal(miss.live_head_seq, head.seq);
+  assert.equal(miss.last_refresh.result, "failed");
+
+  const unavailable = await request(cache(async () => { throw new Error("R2 unavailable"); }));
+  assert.deepEqual(unavailable, { state: "unavailable", live_head_seq: head.seq });
 });
 
 test("status without Git context counts attribution attempts without claiming effective counters", async () => {
@@ -118,7 +168,7 @@ test("DELETE /projects/:p happy path: per-table counts, other projects intact, a
   const body = await res.json();
   assert.equal(body.ok, true);
   assert.equal(body.project, "junk");
-  assert.deepEqual(body.deleted, { events: 2, event_artifacts: 3, shares: 1 });
+  assert.deepEqual(body.deleted, { events: 2, event_artifacts: 3, shares: 1, export_cache_r2: "absent" });
   assert.equal(store.events.filter((e) => e.project === "junk").length, 0);
   assert.equal(store.events.filter((e) => e.project === "keep").length, 1); // untouched
   assert.equal(store.shares.size, 0);
@@ -129,6 +179,28 @@ test("DELETE /projects/:p happy path: per-table counts, other projects intact, a
   assert.equal(audit.action, "deleted");
   assert.equal(audit.artifacts[0].id, "project:junk");
   assert.equal(audit.intent, "project deleted via DELETE route");
+});
+
+test("DELETE /projects/:p reports R2 export-cache deletion success and failure", async () => {
+  const deleted: string[] = [];
+  const goodCache: ExportCacheStore = {
+    async get() { return null; },
+    async put() {},
+    async delete(project) { deleted.push(project); return true; },
+  };
+  const good = await del(createHandler(await seeded(), { token: "tok", opsProject: "ops", exportCache: goodCache }), "/projects/junk?confirm=junk", AUTH);
+  assert.equal(good.status, 200);
+  assert.deepEqual(deleted, ["junk"]);
+  assert.equal((await good.json()).deleted.export_cache_r2, "deleted");
+
+  const failedCache: ExportCacheStore = {
+    async get() { return null; },
+    async put() {},
+    async delete() { throw new Error("R2 delete unavailable"); },
+  };
+  const failed = await del(createHandler(await seeded(), { token: "tok", opsProject: "ops", exportCache: failedCache }), "/projects/junk?confirm=junk", AUTH);
+  assert.equal(failed.status, 200);
+  assert.equal((await failed.json()).deleted.export_cache_r2, "failed: R2 delete unavailable");
 });
 
 test("DELETE /projects/:p defaults ops project to 'retrace' and 501s on stores without deleteProject", async () => {

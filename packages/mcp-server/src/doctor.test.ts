@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Credential, Event, EventInput, EventStore, HistoryQuery, Share, appendEvent, buildExportBundle, generateSigningKey, pageHistoryNewest, schemaSurface, signCanonical } from "@retrace-dev/core";
-import { attributionFinding, cliVersionGap, credentialAuthorization, doctorHistoryEvents, gateRemoteAuthorization, headDelivery, instructRootFinding, issuanceFindingsFromStatus, loadReviewEffortEvents, loadRoutingModels, missingSchema, modelClaimAbsentFinding, advisoryUnsignedFindings, parseDoctorArgs, pendingSealsFinding, pinSessionFinding, remoteCaptureCoverage, REVIEW_EFFORT_RECENT_LIMIT, REVIEW_EFFORT_ROUTING_PAGE, resolveRoutingModel, reviewEffortFindings, sealedCommitEvent, sealedLooksAgent } from "./doctor.js";
+import { attributionFinding, cliVersionGap, credentialAuthorization, doctorHistoryEvents, exportCacheFindingsFromStatus, gateRemoteAuthorization, headDelivery, instructRootFinding, issuanceFindingsFromStatus, loadReviewEffortEvents, loadRoutingModels, missingSchema, modelClaimAbsentFinding, advisoryUnsignedFindings, parseDoctorArgs, pendingSealsFinding, pinSessionFinding, remoteCaptureCoverage, REVIEW_EFFORT_RECENT_LIMIT, REVIEW_EFFORT_ROUTING_PAGE, resolveRoutingModel, reviewEffortFindings, sealedCommitEvent, sealedLooksAgent } from "./doctor.js";
 import { RemoteStore } from "./remote-store.js";
 import { SqliteStore } from "./sqlite-store.js";
 
@@ -879,6 +879,25 @@ test("issuanceFindingsFromStatus: T21 shared_actor_id fails; missing principal w
   assert.equal(hidden.find((f) => f.label === "shared_actor_id")?.level, "pass");
   assert.equal(hidden.find((f) => f.label === "principal_conflicts")?.level, "fail");
   assert.match(hidden.find((f) => f.label === "principal_conflicts")!.detail, /still live/);
+});
+
+test("exportCacheFindingsFromStatus warns only for an old stale cache or a failed refresh", () => {
+  assert.deepEqual(exportCacheFindingsFromStatus({}), [], "older Worker is skipped");
+  assert.deepEqual(exportCacheFindingsFromStatus({ export_cache: { state: "hit", age_seconds: 30 } }), []);
+  assert.deepEqual(exportCacheFindingsFromStatus({ export_cache: { state: "stale", age_seconds: 7_200 } }), []);
+  const stale = exportCacheFindingsFromStatus({ export_cache: { state: "stale", age_seconds: 7_201 } });
+  assert.equal(stale[0]?.level, "warn");
+  assert.equal(stale[0]?.label, "export-cache");
+  assert.match(stale[0]!.detail, /stale for 7201s/);
+  const failed = exportCacheFindingsFromStatus({
+    export_cache: {
+      state: "hit",
+      last_refresh: { attempted_at: "2026-10-01T15:07:00.000Z", result: "failed", error: "secret backend detail" },
+    },
+  });
+  assert.equal(failed[0]?.level, "warn");
+  assert.match(failed[0]!.detail, /last refresh failed at 2026-10-01T15:07:00.000Z/);
+  assert.doesNotMatch(failed[0]!.detail, /secret backend detail/);
 });
 
 class DoctorMemStore implements EventStore {

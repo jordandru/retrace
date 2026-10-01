@@ -79,7 +79,7 @@ const event: Event = {
   hash: "b".repeat(64),
 };
 
-test("deleteProject deletes checkpoint, export-cache, artifact index and pending delivery rows in the guarded atomic batch", async () => {
+test("deleteProject deletes checkpoint, export-cache refresh, artifact index and pending delivery rows in the guarded atomic batch", async () => {
   const db = new FakeD1();
   const store = new D1Store(db as unknown as D1Database);
   const project = "project-being-deleted";
@@ -101,14 +101,14 @@ test("deleteProject deletes checkpoint, export-cache, artifact index and pending
 
   assert.deepEqual(
     deletes.map((statement) => statement.sql.match(/^DELETE FROM (\w+)/)?.[1]),
-    ["owner_login_consumption", "events", "event_artifacts", "event_artifact_index", "pending_deliveries", "shares", "checkpoints", "export_cache", "project_policies", "classification_contexts", "classification_path_lowers", "classification_breakers"],
+    ["owner_login_consumption", "events", "event_artifacts", "event_artifact_index", "pending_deliveries", "shares", "checkpoints", "export_cache", "export_cache_refresh", "project_policies", "classification_contexts", "classification_path_lowers", "classification_breakers"],
   );
   for (const statement of deletes) {
     assert.match(statement.sql, /EXISTS \(SELECT 1 FROM events WHERE id = \?\)$/);
     assert.deepEqual(statement.params, [project, audit.id]);
   }
   assert.deepEqual(deleted, {
-    owner_login_consumption: 1, events: 1, event_artifacts: 1, event_artifact_index: 1, pending_deliveries: 1, shares: 1, checkpoints: 1, export_cache: 1, project_policies: 1, classification_contexts: 1, classification_path_lowers: 1, classification_breakers: 1,
+    owner_login_consumption: 1, events: 1, event_artifacts: 1, event_artifact_index: 1, pending_deliveries: 1, shares: 1, checkpoints: 1, export_cache: 1, export_cache_refresh: 1, project_policies: 1, classification_contexts: 1, classification_path_lowers: 1, classification_breakers: 1,
   });
 });
 

@@ -41,7 +41,7 @@ import {
 } from "./policy.js";
 import { sealEvent, sha256Hex } from "./chain.js";
 import { buildExportBundle, verifyExportBundle } from "./export.js";
-import { ExportCacheStore } from "./export-cache.js";
+import { ExportCacheLastRefresh, ExportCacheStore, readExportCacheStatus } from "./export-cache.js";
 import {
   CLAIM_DECISION_PARAM, PRODUCER_SIGNED_ACTOR_PARAM, PRODUCER_SIG_FORMAT, PRODUCER_SIG_FORMAT_V2,
   PRODUCER_SIG_V2_MIN_CLI_VERSION, PRODUCER_SIG_VERDICT_PARAM, ProducerKey, ProducerSigVerdict,
@@ -228,6 +228,8 @@ export interface RouterOptions {
    *  since the last cron pass (the cached bundle is still a complete signed export as of its own generated_at).
    *  `?fresh=1` forces the live build. Scoped exports (artifact_id) always build live. */
   exportCache?: ExportCacheStore;
+  /** Reads the persisted outcome of the latest scheduled refresh. Required for export-cache health in /status. */
+  exportCacheLastRefresh?: (project: string) => Promise<ExportCacheLastRefresh | null>;
   /** RETRACE_TRAILER_POLICY: off (default) | shadow | enforce. Step 1 uses this only for /1 commit-seal ingress. */
   trailerPolicy?: TrailerPolicy;
 }
@@ -460,6 +462,18 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
         : null;
     }
     const hit = head.seq === cached.head_seq && head.hash === cached.head_hash;
+    if (!hit) {
+      const atCachedHead = await store.history({ project, before_seq: cached.head_seq + 1, limit: 1 });
+      if (atCachedHead.events[0]?.seq !== cached.head_seq || atCachedHead.events[0]?.hash !== cached.head_hash) {
+        return cacheOnly
+          ? json(
+            { error: `cached export for project "${project}" is not a prefix of the live ledger` },
+            503,
+            { ...extra, "x-retrace-export-cache": "stale" },
+          )
+          : null;
+      }
+    }
     return new Response(cached.bundle_json, {
       status: 200,
       headers: {
@@ -957,9 +971,22 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
             });
           }
           if (sub === "verify") return json(await verifyProject(store, project));
-          if (sub === "status") return json(await buildProjectStatus(store, project, new Date(), undefined, opts.credentials, {
-            githubRepoProjects: opts.githubRepoProjects,
-          }));
+          if (sub === "status") {
+            const now = new Date();
+            const status = await buildProjectStatus(store, project, now, undefined, opts.credentials, {
+              githubRepoProjects: opts.githubRepoProjects,
+            });
+            if (opts.exportCache) {
+              status.export_cache = await readExportCacheStatus(
+                project,
+                await store.head(project),
+                opts.exportCache,
+                opts.exportCacheLastRefresh,
+                now,
+              );
+            }
+            return json(status);
+          }
           if (sub === "policy") {
             if (!store.getPolicy) return json({ error: "policy store not available" }, 501);
             if (parts[3] === "history") {
@@ -1109,7 +1136,15 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
             const audit = await sealEvent(auditInput, await store.head(opsProject));
             try {
               const deleted = await store.deleteProject(project, audit, head);
-              return json({ ok: true, project, deleted, ops_event: audit.id });
+              let exportCacheR2: "deleted" | "absent" | `failed: ${string}` = "absent";
+              if (opts.exportCache?.delete) {
+                try {
+                  exportCacheR2 = await opts.exportCache.delete(project) ? "deleted" : "absent";
+                } catch (error: any) {
+                  exportCacheR2 = `failed: ${String(error?.message ?? error)}`;
+                }
+              }
+              return json({ ok: true, project, deleted: { ...deleted, export_cache_r2: exportCacheR2 }, ops_event: audit.id });
             } catch (e: any) {
               // Either a concurrent ops-project write took our seq (UNIQUE) or the target project was written to
               // (HeadMovedError): the whole transaction rolled back, so re-read both heads, re-seal and retry.
