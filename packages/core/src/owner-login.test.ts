@@ -246,6 +246,92 @@ test("T-A1 T-A4 stage timings and pre-read timing distinguish direct and append 
   assert.equal(measured.pre_ms, 18); assert.equal(measured.deadline_ms, 82);
 });
 
+test("amendments per-call timing records MemoryEventStore calls in order with bounded transfer counts", async () => {
+  const { appendEvent } = await import("./store.js");
+  const { ownerLoginScenario } = await import("./owner-login-fixture.js");
+  const store = new MemoryEventStore(), f = await ownerLoginScenario(store);
+  const root = (await appendEvent(store, { project: f.project, actor: { type: "human", id: "owner" },
+    action: "instructed", artifacts: [{ id: "task:timing", role: "used" }] })).event;
+  const file = `repo:${f.repo}#src/timing.ts`, sha = "1".repeat(40);
+  await appendEvent(store, { project: f.project, actor: { type: "agent", id: "other" }, action: "committed",
+    caused_by: root.id, artifacts: [{ id: `commit:${f.repo}@${sha}`, role: "generated" }, { id: file, role: "generated" }],
+    method: { tool: "git", params: { sha, sealed_by: "owner" } } });
+  const evidence = (await appendEvent(store, { project: f.project, actor: { type: "agent", id: "other" },
+    action: "edited", caused_by: root.id, artifacts: [{ id: file, role: "generated" }] })).event;
+  const target = (await appendEvent(store, { project: f.project, actor: { type: "agent", id: "codex" },
+    action: "edited", caused_by: root.id, artifacts: [{ id: file, role: "generated" }] })).event;
+  await appendEvent(store, { project: f.project, actor: root.actor, action: "other", action_detail: "amended",
+    tags: ["amendment", "attribution"], caused_by: root.id,
+    artifacts: [{ id: `event:${target.id}`, role: "used" }, { id: `event:${evidence.id}`, role: "used" }],
+    method: { tool: "retrace_amend", params: { sealed_by: "owner", target_event_id: target.id,
+      attribution: { from: target.actor, to: evidence.actor, evidence: [evidence.id] } } } });
+  const result = await classifyOwnerLogin({ store, input: f.input, policy: f.policy, canonicalR: f.repo,
+    readHead: (await store.head(f.project))!, deadline: Date.now() + 1000 });
+  assert.equal(result.kind, "decision"); if (result.kind !== "decision") throw new Error("fixture");
+  const record = ownerLoginRecord(result.input)!;
+  const calls = record.decision.timing.amendments_calls!;
+  assert.deepEqual(calls.map((entry) => entry.call), ["amendment_rows", "dependencies", "capture_targets", "capture_commits"]);
+  assert.deepEqual(calls.map((entry) => entry.rows), [
+    { statement_rows: 1, distinct_events: 1 },
+    { statement_rows: 3, distinct_events: 3 },
+    { statement_rows: 3, distinct_events: 3 },
+    { statement_rows: 1, distinct_events: 1 },
+  ]);
+  for (const entry of calls) {
+    assert.ok(entry.wall_ms >= 0);
+    assert.equal(entry.body_chars, 0);
+    assert.equal(entry.parse_ms, 0);
+    assert.equal(entry.sql_ms, null);
+    assert.equal(entry.statements, 0);
+    assert.equal(entry.outcome, "ok");
+  }
+  assert.equal(record.decision.timing.amendments_calls_truncated, undefined);
+});
+
+test("amendments timing capture faults are omitted without changing the decision", async () => {
+  const { ownerLoginScenario } = await import("./owner-login-fixture.js");
+  const store = new MemoryEventStore(), f = await ownerLoginScenario(store);
+  const readHead = (await store.head(f.project))!, clock = Date.now();
+  const observed = await classifyOwnerLogin({ store, input: f.input, policy: f.policy, canonicalR: f.repo,
+    readHead, deadline: clock + 1000, now: () => clock });
+  const faulted = await classifyOwnerLogin({ store, input: f.input, policy: f.policy, canonicalR: f.repo,
+    readHead, deadline: clock + 1000, now: () => clock, amendmentsTimingCapture: () => { throw new Error("timing fault"); } });
+  assert.equal(observed.kind, "decision"); assert.equal(faulted.kind, "decision");
+  if (observed.kind !== "decision" || faulted.kind !== "decision") throw new Error("fixture");
+  const observedDecision = structuredClone(ownerLoginRecord(observed.input)!.decision);
+  const faultedDecision = structuredClone(ownerLoginRecord(faulted.input)!.decision);
+  assert.ok(observedDecision.timing.amendments_calls?.length);
+  assert.equal(faultedDecision.timing.amendments_calls, undefined);
+  delete observedDecision.timing.amendments_calls;
+  assert.deepEqual(faultedDecision, observedDecision);
+});
+
+test("amendments per-call timing is capped at 16 entries and marks truncation", async () => {
+  const base = await declaration();
+  const root: Event = { ...base, id: "root", seq: 1, actor: { type: "human", id: "owner" },
+    action: "instructed", artifacts: [{ id: "task:root", role: "used" }], method: undefined, caused_by: undefined };
+  const chain: Event[] = [];
+  let parent = root;
+  for (let i = 0; i < 20; i++) {
+    const event: Event = { ...base, id: `chain-${i}`, seq: i + 2, action: "read",
+      artifacts: [{ id: `task:chain-${i}`, role: "used" }], method: undefined, caused_by: parent.id };
+    chain.push(event); parent = event;
+  }
+  const target: Event = { ...base, id: "target", seq: 22, action: "edited", artifacts: [{ id: "task:target", role: "generated" }] };
+  const evidence: Event = { ...base, id: "evidence", seq: 23, actor: { type: "agent", id: "other" },
+    action: "edited", artifacts: [{ id: "task:target", role: "generated" }] };
+  const amendment: Event = { ...base, id: "amendment", seq: 24, actor: root.actor, action: "other", action_detail: "amended",
+    tags: ["amendment", "attribution"], caused_by: parent.id,
+    artifacts: [{ id: `event:${target.id}`, role: "used" }, { id: `event:${evidence.id}`, role: "used" }],
+    method: { tool: "retrace_amend", params: { sealed_by: "owner", target_event_id: target.id,
+      attribution: { from: target.actor, to: evidence.actor, evidence: [evidence.id] } } } };
+  const record = await classify(storeOf([base, root, ...chain, target, evidence, amendment]));
+  assert.equal(record.decision.timing.amendments_calls?.length, 16);
+  assert.equal(record.decision.timing.amendments_calls?.[0]?.call, "amendment_rows");
+  assert.ok(record.decision.timing.amendments_calls?.slice(1).every((entry) => entry.call === "dependencies"));
+  assert.equal(record.decision.timing.amendments_calls_truncated, true);
+});
+
 for (const [operation, stage] of [["eventsReferencingArtifacts", "candidates"],
   ["ownerLoginConsumptionUpTo", "consumption"], ["amendmentEventsUpTo", "amendments"]] as const) {
   test(`T-A2 T-A3 memory stalled ${stage} reports elapsed time at deadline`, async () => {
@@ -263,6 +349,11 @@ for (const [operation, stage] of [["eventsReferencingArtifacts", "candidates"],
         (stage === "amendments" ? d.timing.consumption_ms! : 0);
       assert.ok(d.timing[`${stage}_ms`]! >= d.timing.deadline_ms - earlierMs - 10, JSON.stringify(d.timing));
     assert.equal(d.timing.budget_rows_remaining, stage === "candidates" ? 2000 : 1999);
+    if (stage === "amendments") {
+      assert.equal(d.timing.amendments_calls?.length, 1);
+      assert.equal(d.timing.amendments_calls?.[0]?.call, "amendment_rows");
+      assert.equal(d.timing.amendments_calls?.[0]?.outcome, "deadline");
+    }
   });
 }
 

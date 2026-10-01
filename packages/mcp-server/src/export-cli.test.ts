@@ -524,3 +524,31 @@ test("T-A5 T-A6 observed timing, legacy seals, replay prefix and stderr progress
       assert.notEqual(run(["--limit-seq", invalid]).status, 0);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test("owner-login replay preserves sealed amendments call timing verbatim", async () => {
+  const { MemoryEventStore, classifyOwnerLogin, ownerLoginRecord } = await import("@retrace-dev/core");
+  const { ownerLoginScenario } = await import("../../core/dist/owner-login-fixture.js");
+  const { recomputeOwnerLogin } = await import("./owner-login-replay.js");
+  const store = new MemoryEventStore(), f = await ownerLoginScenario(store);
+  const handler = createHandler(store, { token: "owner-token", ownerPrincipal: { type: "human", id: "owner" } });
+  const put = await handler(new Request(`http://test/projects/${f.project}/policy`, { method: "PUT",
+    headers: { authorization: "Bearer owner-token", "content-type": "application/json", "if-match": "none" }, body: JSON.stringify(f.policy.body) }));
+  assert.equal(put.status, 201, await put.text());
+  const policy = (await store.getPolicy(f.project, { current: true }))!;
+  const result = await classifyOwnerLogin({ store, input: f.input, policy, canonicalR: f.repo,
+    readHead: (await store.head(f.project))!, deadline: Date.now() + 1000 });
+  assert.equal(result.kind, "decision"); if (result.kind !== "decision") throw new Error("fixture");
+  const timing = ownerLoginRecord(result.input)!.decision.timing;
+  timing.amendments_calls = [{
+    call: "capture_targets", wall_ms: 91.25, rows: { statement_rows: 17, distinct_events: 4 },
+    body_chars: 123456, parse_ms: 7.5, sql_ms: 42.75, statements: 3, outcome: "ok",
+  }];
+  timing.amendments_calls_truncated = true;
+  await appendEvent(store, result.input);
+  const bundle = await buildExportBundle(store, { project: f.project });
+  const replay = await recomputeOwnerLogin(bundle);
+  assert.equal(replay.ok, true, JSON.stringify(replay));
+  assert.deepEqual(ownerLoginRecord(bundle.events.at(-1)!)!.decision.timing.amendments_calls, timing.amendments_calls);
+  assert.equal(ownerLoginRecord(bundle.events.at(-1)!)!.decision.timing.amendments_calls_truncated, true);
+  assert.ok(replay.results[0]?.preserved.includes("timing"));
+});

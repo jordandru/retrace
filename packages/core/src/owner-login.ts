@@ -1,13 +1,13 @@
 /** Content-bound testimony for shared GitHub accounts (owner-login/1). */
 import { Actor, Event, EventInput, GENESIS_HASH, assertEventArtifactIds } from "./schema.js";
 import { PolicyDocument, POLICY_PROFILE_V2 } from "./policy.js";
-import { ArtifactIndexQuery, ChainHead, EventStore, appendEvent, appendReadWithinDeadline, artifactIndexRows } from "./store.js";
+import { ArtifactIndexQuery, ChainHead, EventStore, StoreReadMetricsSink, appendEvent, appendReadWithinDeadline, artifactIndexRows } from "./store.js";
 import { evaluateAmendmentsAtU, OWNER_LOGIN_DEADLINE_MS } from "./classify.js";
 import { sameArtifact } from "./capture.js";
 
 export * from "./owner-login-record.js";
-import { OWNER_LOGIN_DECISION_PARAM, OWNER_LOGIN_ROW_CAP, OWNER_LOGIN_WINDOW_MS, OwnerLoginKind, OwnerLoginFailure,
-  GithubPayload, OwnerLoginRecord, OwnerLoginArgs, OwnerLoginResult, ownerLoginRecord } from "./owner-login-record.js";
+import { OWNER_LOGIN_AMENDMENTS_CALL_LIMIT, OWNER_LOGIN_DECISION_PARAM, OWNER_LOGIN_ROW_CAP, OWNER_LOGIN_WINDOW_MS, OwnerLoginKind, OwnerLoginFailure,
+  GithubPayload, OwnerLoginRecord, OwnerLoginArgs, OwnerLoginResult, OwnerLoginAmendmentsCallTiming, ownerLoginRecord } from "./owner-login-record.js";
 const object = (value: unknown): Record<string, unknown> | undefined => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
 export function ownerLoginKind(input: EventInput): OwnerLoginKind | null {
   if (input.method?.tool === "github-review") return "review";
@@ -89,23 +89,34 @@ class EvidenceBudget {
       this.check(); return result;
     } finally { if (timer !== undefined) clearTimeout(timer); }
   }
+  async storeRead<T>(metrics: StoreReadMetricsSink | undefined, operation: () => Promise<T>): Promise<T> {
+    return this.read(async () => {
+      metrics?.storeCallStarted?.();
+      try { return await operation(); }
+      finally { metrics?.storeCallFinished?.(); }
+    });
+  }
   indexedRows(events: Event[], q: ArtifactIndexQuery): number {
     return events.reduce((n, e) => n + artifactIndexRows(e).filter(row => q.artifact_keys.some(key => sameArtifact(key, row.artifact_key)) || q.artifact_prefixes?.some(prefix => row.artifact_key.startsWith(prefix))).length, 0);
   }
   /** Wrap the existing bounded amendment evaluator, retaining its full semantics and failing closed. */
   wrap(store: EventStore): EventStore {
     return new Proxy(store, { get: (target, property) => {
-      if (property === "amendmentEventsUpTo" && target.amendmentEventsUpTo) return async (p: string, u: number, limit: number) => {
-        const rows = await this.read(() => target.amendmentEventsUpTo!(p, u, Math.min(limit, this.remaining + 1)));
+      if (property === "amendmentEventsUpTo" && target.amendmentEventsUpTo) return async (p: string, u: number, limit: number, metrics?: StoreReadMetricsSink) => {
+        const rows = await this.storeRead(metrics,
+          () => target.amendmentEventsUpTo!(p, u, Math.min(limit, this.remaining + 1), metrics));
         this.take(rows.length); return rows;
       };
-      if (property === "getMany" && target.getMany) return async (ids: string[]) => {
-        this.take(ids.length); return this.read(() => target.getMany!(ids));
+      if (property === "getMany" && target.getMany) return async (ids: string[], metrics?: StoreReadMetricsSink) => {
+        this.take(ids.length); return this.storeRead(metrics, () => target.getMany!(ids, metrics));
       };
-      if (property === "get") return async (id: string) => { this.take(1); return this.read(() => target.get(id)); };
-      if (property === "eventsReferencingArtifacts" && target.eventsReferencingArtifacts) return async (q: ArtifactIndexQuery) => {
+      if (property === "get") return async (id: string, metrics?: StoreReadMetricsSink) => {
+        this.take(1); return this.storeRead(metrics, () => target.get(id, metrics));
+      };
+      if (property === "eventsReferencingArtifacts" && target.eventsReferencingArtifacts) return async (q: ArtifactIndexQuery, _now?: () => number, metrics?: StoreReadMetricsSink) => {
         if (this.remaining < 1) this.fail("budget");
-        const rows = await this.read(() => target.eventsReferencingArtifacts!({ ...q, row_cap: Math.min(q.row_cap, this.remaining), deadline: Math.min(q.deadline, this.deadline) }, this.now));
+        const rows = await this.storeRead(metrics,
+          () => target.eventsReferencingArtifacts!({ ...q, row_cap: Math.min(q.row_cap, this.remaining), deadline: Math.min(q.deadline, this.deadline) }, this.now, metrics));
         if (!rows.ok) this.fail(rows.reason);
         this.take(this.indexedRows(rows.events, q)); return rows;
       };
@@ -145,6 +156,18 @@ export async function classifyOwnerLogin(args: OwnerLoginArgs): Promise<OwnerLog
   if (!kind) return finish();
   const budget: EvidenceBudget = new EvidenceBudget(args.deadline, now);
   const timing = record.decision.timing;
+  const amendmentCalls = new Map<number, OwnerLoginAmendmentsCallTiming>();
+  const captureAmendmentsCall = (entry: OwnerLoginAmendmentsCallTiming, order: number) => {
+    try { args.amendmentsTimingCapture?.(entry); } catch { return; }
+    try {
+      if (order < OWNER_LOGIN_AMENDMENTS_CALL_LIMIT) {
+        amendmentCalls.set(order, entry);
+        timing.amendments_calls = [...amendmentCalls.entries()].sort(([a], [b]) => a - b).map(([, value]) => value);
+      } else {
+        timing.amendments_calls_truncated = true;
+      }
+    } catch { /* Timing capture is observational. */ }
+  };
   type Stage = NonNullable<typeof timing.stage_failed>;
   type TimedStage = Exclude<Stage, "setup" | "final_check">;
   let stage: Stage = "setup";
@@ -182,7 +205,7 @@ export async function classifyOwnerLogin(args: OwnerLoginArgs): Promise<OwnerLog
     beginStage("amendments");
     const amended = await evaluateAmendmentsAtU({ store, project: args.input.project, U: args.readHead.seq, headHash: args.readHead.hash,
       policy: args.policy.body, policyDigest: args.policy.digest, canonicalRepo: args.canonicalR, captureEvents: candidates.events,
-      coveredArtifactKeys: keys, deadline: args.deadline, now });
+      coveredArtifactKeys: keys, deadline: args.deadline, now, onStoreCall: captureAmendmentsCall });
     if (!amended.ok) budget.fail(budget.failure ?? amended.reason);
     endStage();
     beginStage("filter");
