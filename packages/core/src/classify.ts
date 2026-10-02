@@ -23,7 +23,6 @@ import {
 } from "./capture.js";
 import {
   ARTIFACT_INDEX_DEFAULT_ROW_CAP, ArtifactIndexResult, CausedByProblem, EventStore, StoreReadMetrics, StoreReadMetricsSink,
-  artifactIndexRows,
   SEALED_BY_GITHUB_WEBHOOK, SEALED_BY_PARAM, causedByProblem,
 } from "./store.js";
 import type { OwnerLoginAmendmentsCall, OwnerLoginAmendmentsCallTiming, OwnerLoginFailure } from "./owner-login-record.js";
@@ -336,21 +335,23 @@ function classifierCaptureSeals(
   events: Event[],
   policy: PolicyBody,
   canonicalRepo: string,
+  firstStamped?: number,
 ): { ok: true; seals: CaptureSeal[] } | { ok: false } {
   const capturePolicy: CapturePolicy = {
     repoName: canonicalRepo,
     aliases: policy.repositories.find((r) => r.name === canonicalRepo)?.aliases,
     hookSealedBy: policy.trusted_hook_stamps,
     ownerSeals: true,
+    firstStampedSeq: firstStamped,
   };
   // Strict full-OID resolution (round 4) guards the seals the classifier will trust. It applies to exactly the events
   // captureSeals would accept: an event without a trusted stamp is not a seal and cannot become one, so its reference
   // neither resolves nor vetoes. The live ledger holds such events (an MCP-logged correction naming `commit:…@9c3156b`
   // with no sha, evt_728c78b0); vetoing on them made every classification unavailable (2026-09-15, evt_2a4dfb78).
-  const firstStamped = firstStampedSeq(events, capturePolicy);
+  const boundary = firstStampedSeq(events, capturePolicy);
   const resolutions = new Map<string, string>();
   for (const event of events) {
-    if (!captureSealEligible(event, capturePolicy, firstStamped)) continue;
+    if (!captureSealEligible(event, capturePolicy, boundary)) continue;
     const ref = event.artifacts.find((a) => a.id.startsWith("commit:"))?.id;
     if (!ref) continue;
     const match = /^commit:([^@]+)@/.exec(ref);
@@ -593,9 +594,10 @@ async function amendmentCaptureDependencies(opts: {
 }): Promise<CaptureDependencyRead> {
   const events = new Map(opts.baseEvents.map((e) => [e.id, e]));
   let rowsRead = opts.baseEvents.length;
+  let boundary = firstStampedSeq(opts.baseEvents, { repoName: opts.canonicalRepo });
   const read = async (call: Extract<OwnerLoginAmendmentsCall, "capture_targets" | "capture_commits">, artifactKeys: string[], artifactPrefixes: string[] = []): Promise<CaptureDependencyRead | null> => {
     if (!artifactKeys.length && !artifactPrefixes.length) return null;
-    if (!opts.store.eventsReferencingArtifacts) return { ok: false, reason: "store_error" };
+    if (!opts.store.captureIndexRows) return { ok: false, reason: "store_error" };
     const remaining = CLASSIFY_ROW_CAP - rowsRead;
     if (remaining < 1) return { ok: false, reason: "budget" };
     const query = {
@@ -608,19 +610,19 @@ async function amendmentCaptureDependencies(opts: {
       deadline: opts.deadline,
     };
     const result = await opts.measure(call,
-      (metrics) => opts.store.eventsReferencingArtifacts!(query, opts.now, metrics),
+      (metrics) => opts.store.captureIndexRows!(query, opts.now, metrics),
       (value) => {
         if (!value.ok) return emptyReadMetrics();
-        const rows = value.events.reduce((count, event) => count + artifactIndexRows(event).filter((row) =>
-          query.artifact_keys.some((key) => sameArtifact(key, row.artifact_key))
-          || query.artifact_prefixes.some((prefix) => row.artifact_key.startsWith(prefix))).length, 0);
-        return emptyReadMetrics(rows, value.events.length);
+        return emptyReadMetrics(value.rows.reduce((count, row) => count + row.keys.length, 0), value.rows.length);
       },
       (value) => value.ok ? "ok" : value.reason);
     if (!result.ok) return result;
-    rowsRead += result.events.length;
+    rowsRead += result.rows.length;
     if (rowsRead > CLASSIFY_ROW_CAP) return { ok: false, reason: "budget" };
-    for (const event of result.events) events.set(event.id, event);
+    for (const row of result.rows) {
+      if (row.stamped) boundary = Math.min(boundary, row.seq);
+      if (row.event) events.set(row.event.id, row.event);
+    }
     return null;
   };
 
@@ -650,7 +652,7 @@ async function amendmentCaptureDependencies(opts: {
   if (targetRead) return targetRead;
   if (opts.now() >= opts.deadline) return { ok: false, reason: "deadline" };
 
-  const preliminary = classifierCaptureSeals([...events.values()], opts.policy, opts.canonicalRepo);
+  const preliminary = classifierCaptureSeals([...events.values()], opts.policy, opts.canonicalRepo, boundary);
   if (!preliminary.ok) return { ok: false, reason: "store_error" };
   const commitPrefixes = new Set<string>();
   for (const seal of preliminary.seals) {
@@ -665,7 +667,7 @@ async function amendmentCaptureDependencies(opts: {
   const groupRead = await read("capture_commits", [], [...commitPrefixes]);
   if (groupRead) return groupRead;
   if (opts.now() >= opts.deadline) return { ok: false, reason: "deadline" };
-  const complete = classifierCaptureSeals([...events.values()], opts.policy, opts.canonicalRepo);
+  const complete = classifierCaptureSeals([...events.values()], opts.policy, opts.canonicalRepo, boundary);
   return complete.ok ? complete : { ok: false, reason: "store_error" };
 }
 

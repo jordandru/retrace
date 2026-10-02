@@ -113,7 +113,9 @@ SELECT
   e.actor_type,
   e.actor_id,
   json_extract(a.value, '$.role'),
-  json_extract(e.body, '$.method.params.sealed_by')
+  CASE WHEN instr(e.body, '\u0000') = 0 AND json_valid(e.body) THEN
+    CASE WHEN json_type(e.body, '$.method.params.sealed_by') = 'text' THEN json_extract(e.body, '$.method.params.sealed_by') END
+  END
 FROM events e, json_each(COALESCE(json_extract(e.body, '$.artifacts'), '[]')) AS a
 WHERE json_extract(a.value, '$.id') IS NOT NULL;
 

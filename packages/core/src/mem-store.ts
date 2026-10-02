@@ -4,7 +4,7 @@
  */
 import { Event } from "./schema.js";
 import {
-  InsertExtras, OwnerLoginConsumption, readOwnerLoginConsumption, ArtifactIndexQuery, ArtifactIndexResult, ChainHead, EventStore, HeadMovedError, HistoryQuery, HistoryPage,
+  CaptureIndexResult, captureIndexRowsFromEvents, InsertExtras, OwnerLoginConsumption, readOwnerLoginConsumption, ArtifactIndexQuery, ArtifactIndexResult, ChainHead, EventStore, HeadMovedError, HistoryQuery, HistoryPage,
   PendingDelivery, Share, eventsReferencingArtifactKeys, pageHistoryNewest,
 } from "./store.js";
 import { PolicyDocument, PolicyRouteRow, PolicySnapshot, PolicySnapshotBudget, PolicyWrite, assertRouteWriteConsistent, policySnapshotFromIndex } from "./policy.js";
@@ -82,6 +82,9 @@ export class MemoryEventStore implements EventStore {
   }
   async eventsReferencingArtifacts(q: ArtifactIndexQuery, now: () => number = Date.now): Promise<ArtifactIndexResult> {
     return eventsReferencingArtifactKeys(this.events, q, now());
+  }
+  async captureIndexRows(q: ArtifactIndexQuery, now: () => number = Date.now): Promise<CaptureIndexResult> {
+    return captureIndexRowsFromEvents(this.events, q, now());
   }
   async insertPendingDelivery(row: PendingDelivery) {
     if (this.pending.some((p) => p.delivery_id === row.delivery_id)) return;

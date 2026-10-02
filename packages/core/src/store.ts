@@ -2,7 +2,7 @@
  * Storage interface — implemented by SQLite (MCP server) and D1 (Worker).
  * SQL schema shared by both lives in SCHEMA_SQL.
  */
-import { Event, EventInput } from "./schema.js";
+import { Action, Event, EventInput } from "./schema.js";
 import { sealEvent, verifyChain, VerifyResult } from "./chain.js";
 import { markUntrustedText } from "./explain.js";
 import { artifactKey, artifactLookup, sameArtifact } from "./capture.js";
@@ -160,6 +160,8 @@ export interface EventStore {
   deleteProject?(project: string, audit: Event, expectedHead: ChainHead): Promise<Record<string, number>>;
   /** Bounded artifact-index read (§3.5). Over budget / deadline / store error is a typed result, never a throw. */
   eventsReferencingArtifacts?(q: ArtifactIndexQuery, now?: () => number, metrics?: StoreReadMetricsSink): Promise<ArtifactIndexResult>;
+  /** Capture-only projection; counts every matched key, returning bodies only for seals or unknown stamps. */
+  captureIndexRows?(q: ArtifactIndexQuery, now?: () => number, metrics?: StoreReadMetricsSink): Promise<CaptureIndexResult>;
   ownerLoginConsumptionUpTo?(project: string, declaration_ids: string[], throughSeq: number, budget: { deadline: number; row_cap: number }): Promise<OwnerLoginConsumptionResult>;
   ownerLoginConsumptionRow?(project: string, declaration_event_id: string): Promise<OwnerLoginConsumption | null>;
   insertPendingDelivery?(row: PendingDelivery): Promise<void>;
@@ -225,6 +227,18 @@ export const ARTIFACT_INDEX_DEFAULT_ROW_CAP = 20_000;
 export type ArtifactIndexResult =
   | { ok: true; events: Event[] }
   | { ok: false; reason: "budget" | "deadline" | "store_error" };
+
+export interface CaptureIndexRow {
+  seq: number;
+  keys: string[];
+  stamped: boolean;
+  event?: Event;
+}
+export type CaptureIndexResult =
+  | { ok: true; rows: CaptureIndexRow[] }
+  | { ok: false; reason: "budget" | "deadline" | "store_error" };
+/** Untrusted SQL values are checked by the runner, including the action needed to check body presence. */
+export interface CaptureIndexHit { seq: number; keys: string; action: string; stamped: 0 | 1 | null; body: string | null }
 
 export interface PendingDelivery {
   /** NULL identifies a pre-upgrade row, drained as push. */
@@ -435,6 +449,18 @@ export function eventsReferencingArtifactsStatements(
   q: ArtifactIndexQuery,
   limits: { maxTerms?: number } = {},
 ): ArtifactIndexStatement[] {
+  return artifactIndexStatements(q, limits, false);
+}
+
+export function captureIndexStatements(q: ArtifactIndexQuery, limits: { maxTerms?: number } = {}): ArtifactIndexStatement[] {
+  return artifactIndexStatements(q, limits, true);
+}
+
+function artifactIndexStatements(
+  q: ArtifactIndexQuery,
+  limits: { maxTerms?: number },
+  capture: boolean,
+): ArtifactIndexStatement[] {
   const maxTerms = Math.max(1, limits.maxTerms ?? ARTIFACT_INDEX_MAX_TERMS);
   const equals = new Set<string>();
   const suffixes = new Set<string>();
@@ -479,7 +505,9 @@ export function eventsReferencingArtifactsStatements(
     params.push(q.project, q.row_cap + 1);
     if (members.length > D1_MAX_COMPOUND_SELECT_TERMS) throw new Error(`eventsReferencingArtifactsStatements: ${members.length} compound terms exceed D1's ${D1_MAX_COMPOUND_SELECT_TERMS}`);
     statements.push({
-      sql: `WITH w(project, after_seq, through_seq) AS (SELECT ?, ?, ?) SELECT e.body, m.seq, m.artifact_key FROM (${members.join(" UNION ")}) m CROSS JOIN events e ON e.project = ? AND e.seq = m.seq ORDER BY m.seq ASC, m.artifact_key ASC LIMIT ?`,
+      sql: capture
+        ? `WITH w(project, after_seq, through_seq) AS (SELECT ?, ?, ?), m AS (${members.join(" UNION ")}), f AS (SELECT m.seq, json_group_array(m.artifact_key) AS keys FROM m GROUP BY m.seq), g AS (SELECT f.seq, f.keys, e.action, e.body, CASE WHEN instr(e.body, '\\u0000') = 0 AND json_valid(e.body) THEN json_type(e.body, '$.method.params.sealed_by') IS 'text' END AS stamped FROM f CROSS JOIN events e ON e.project = ? AND e.seq = f.seq) SELECT seq, keys, action, stamped, CASE WHEN action IN ('committed','merged') OR stamped IS NULL THEN body END AS body FROM g ORDER BY seq ASC LIMIT ?`
+        : `WITH w(project, after_seq, through_seq) AS (SELECT ?, ?, ?) SELECT e.body, m.seq, m.artifact_key FROM (${members.join(" UNION ")}) m CROSS JOIN events e ON e.project = ? AND e.seq = m.seq ORDER BY m.seq ASC, m.artifact_key ASC LIMIT ?`,
       params,
     });
   }
@@ -550,6 +578,82 @@ export async function runArtifactIndexStatements(
   return { ok: true, events: [...bySeq.entries()].sort((a, b) => a[0] - b[0]).map(([, e]) => e) };
 }
 
+/** Capture runner: grouped limits are safe because every group contains at least one raw pair. */
+export async function runCaptureIndexStatements(
+  q: ArtifactIndexQuery,
+  now: () => number,
+  exec: (statement: ArtifactIndexStatement) => Promise<CaptureIndexHit[]>,
+  metrics?: StoreReadMetricsSink,
+  sqlDuration?: () => number | null,
+): Promise<CaptureIndexResult> {
+  let statement_rows = 0, body_chars = 0, statements = 0;
+  const bySeq = new Map<number, CaptureIndexRow>();
+  const seenPairs = new Set<string>();
+  const distinctEvents = new Set<number>();
+  try {
+    if (now() >= q.deadline) return { ok: false, reason: "deadline" };
+    for (const statement of captureIndexStatements(q)) {
+      if (now() >= q.deadline) return { ok: false, reason: "deadline" };
+      statements++;
+      const hits = await exec(statement);
+      if (now() >= q.deadline) return { ok: false, reason: "deadline" };
+      const validated = hits.map(hit => {
+        if (!hit || !Number.isSafeInteger(hit.seq) || typeof hit.keys !== "string"
+          || ![0, 1, null].includes(hit.stamped) || !Action.options.includes(hit.action as Event["action"])) throw new Error("capture row shape");
+        const keys: unknown = JSON.parse(hit.keys);
+        if (!Array.isArray(keys) || !keys.length || keys.some(key => typeof key !== "string")
+          || new Set(keys).size !== keys.length) throw new Error("capture row keys");
+        const needsBody = hit.action === "committed" || hit.action === "merged" || hit.stamped === null;
+        if (needsBody ? typeof hit.body !== "string" : hit.body !== null) throw new Error("capture row body");
+        const event = needsBody ? JSON.parse(hit.body!) as Event : undefined;
+        if (event && (event.seq !== hit.seq || event.project !== q.project || event.action !== hit.action
+          || typeof event.id !== "string" || !Array.isArray(event.artifacts))) throw new Error("capture event shape");
+        if (needsBody && (!event || typeof event !== "object")) throw new Error("capture event missing");
+        const stamped = hit.stamped === null ? typeof event?.method?.params?.sealed_by === "string" : hit.stamped === 1;
+        if (event && stamped !== (typeof event.method?.params?.sealed_by === "string")) throw new Error("capture stamp mismatch");
+        statement_rows += keys.length;
+        distinctEvents.add(hit.seq);
+        if (hit.body !== null) body_chars += hit.body.length;
+        return { seq: hit.seq, keys: keys as string[], stamped, ...(event ? { event } : {}) };
+      });
+      for (const row of validated) {
+        const previous = bySeq.get(row.seq);
+        if (previous && (previous.stamped !== row.stamped || !!previous.event !== !!row.event)) throw new Error("inconsistent capture row");
+        const merged = previous ?? { ...row, keys: [] };
+        for (const key of row.keys) {
+          const pair = JSON.stringify([row.seq, key]);
+          if (seenPairs.has(pair)) continue;
+          seenPairs.add(pair);
+          if (seenPairs.size > q.row_cap) return { ok: false, reason: "budget" };
+          merged.keys.push(key);
+        }
+        bySeq.set(row.seq, merged);
+      }
+    }
+    return { ok: true, rows: [...bySeq.values()].sort((a, b) => a.seq - b.seq) };
+  } catch {
+    return { ok: false, reason: "store_error" };
+  } finally {
+    let sql_ms: number | null = null;
+    try { sql_ms = sqlDuration?.() ?? null; } catch { /* Observation only. */ }
+    emitStoreReadMetrics(metrics, { statement_rows, distinct_events: distinctEvents.size, body_chars, sql_ms,
+      statements: sqlDuration ? statements : 0 });
+  }
+}
+
+/** Memory keeps its existing semantic matched set (SQL's first-# over-match is intentionally store-specific). */
+export function captureIndexRowsFromEvents(events: Event[], q: ArtifactIndexQuery, nowMs: number): CaptureIndexResult {
+  const result = eventsReferencingArtifactKeys(events, q, nowMs);
+  if (!result.ok) return result;
+  return { ok: true, rows: result.events.map(event => ({
+    seq: event.seq,
+    keys: artifactIndexRows(event).filter(row => q.artifact_keys.some(key => sameArtifact(key, row.artifact_key))
+      || q.artifact_prefixes?.some(prefix => row.artifact_key.startsWith(prefix))).map(row => row.artifact_key),
+    stamped: typeof event.method?.params?.sealed_by === "string",
+    ...(event.action === "committed" || event.action === "merged" ? { event } : {}),
+  })) };
+}
+
 /** One-time D1 backfill. `artifact_key` is the stored artifact id (`artifactKey` is that identity). Idempotent. */
 export const BACKFILL_ARTIFACT_INDEX_SQL = `
 INSERT OR IGNORE INTO event_artifact_index (project, artifact_key, seq, actor_type, actor_id, role, sealed_by)
@@ -560,7 +664,9 @@ SELECT
   e.actor_type,
   e.actor_id,
   json_extract(a.value, '$.role'),
-  json_extract(e.body, '$.method.params.sealed_by')
+  CASE WHEN instr(e.body, '\\u0000') = 0 AND json_valid(e.body) THEN
+    CASE WHEN json_type(e.body, '$.method.params.sealed_by') = 'text' THEN json_extract(e.body, '$.method.params.sealed_by') END
+  END
 FROM events e, json_each(COALESCE(json_extract(e.body, '$.artifacts'), '[]')) AS a
 WHERE json_extract(a.value, '$.id') IS NOT NULL;
 `;
