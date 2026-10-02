@@ -183,6 +183,11 @@ closing the file channel.
   real directory, and `PATH` is inherited by child processes, which weakens the concern. Only installing the
   hook and committing settles it (measurement 1).
 
+*2026-10-02: measurements 1, 2 and 4 ran on bare metal: a new PC, Omarchy 4.0.4, `@retrace-dev/cli@0.2.0`. Measurement
+5's rule table was filled there too; see `omarchy-bare-metal-2026-10-02.md`. On that box the standing hypothesis above
+is settled: `node` is on `PATH` in a non-interactive shell, and the hook sealed. The list above is left as written
+(agent-rules 10).*
+
 ## Resuming
 
 The guest's disk persists (TryOmarchy keeps it under `%LOCALAPPDATA%\TryOmarchy`), so the guest relaunches with
