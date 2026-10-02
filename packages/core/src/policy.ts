@@ -507,6 +507,20 @@ export function looksLikePolicyActivation(e: Event): boolean {
   return arts.length === 1 && arts[0]!.id.startsWith(`policy:${e.project}@`);
 }
 
+export function matchesPolicyActivationClausesOneToThree(e: Event): boolean {
+  const key = e.idempotency_key ?? "";
+  const params = asParams(e);
+  const arts = e.artifacts.filter((a) => typeof a.id === "string" && a.id.startsWith("policy:"));
+  return (
+    key.startsWith(POLICY_IDEMPOTENCY_PREFIX) &&
+    params.sealed_by === SEALED_BY_OWNER &&
+    e.action === "created" &&
+    e.method?.tool === "retrace-api" &&
+    arts.length === 1 &&
+    arts[0]!.id.startsWith(`policy:${e.project}@`)
+  );
+}
+
 /**
  * Authoritative activation predicate (§6). Same rule online and offline.
  *
@@ -518,17 +532,10 @@ export function evaluateActivation(
   documents: ReadonlyMap<string, PolicyDocument>,
   earlierEligibleVersions: number[],
 ): PolicySelection | { status: "ignored"; reason?: "policy_audit_mismatch" } | { status: "eligible"; digest: string; version: number; seq: number; document: PolicyDocument } {
-  const key = e.idempotency_key ?? "";
+  if (!matchesPolicyActivationClausesOneToThree(e)) return { status: "ignored" };
+
   const params = asParams(e);
   const arts = e.artifacts.filter((a) => typeof a.id === "string" && a.id.startsWith("policy:"));
-  const looks =
-    key.startsWith(POLICY_IDEMPOTENCY_PREFIX) &&
-    params.sealed_by === SEALED_BY_OWNER &&
-    e.action === "created" &&
-    e.method?.tool === "retrace-api" &&
-    arts.length === 1 &&
-    arts[0]!.id.startsWith(`policy:${e.project}@`);
-  if (!looks) return { status: "ignored" };
 
   const digest = arts[0]!.id.slice(`policy:${e.project}@`.length);
   const doc = documents.get(documentMapKey(e.project, digest)) ?? documents.get(digest);
@@ -620,6 +627,7 @@ export function selectPolicyForContext(
   // Newest-first: a present activation whose document is absent fails closed (builder note 1).
   // Clause 5 uses only older eligible versions so a copy of v1 after v2 cannot win.
   for (const e of activations) {
+    if (!matchesPolicyActivationClausesOneToThree(e)) continue;
     const ev = evaluateActivation(e, documents, olderEligibleVersions(e.seq));
     if (ev.status === "incomplete") return ev;
     if (ev.status === "eligible") {
