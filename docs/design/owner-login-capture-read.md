@@ -1,6 +1,6 @@
 # Owner-login amendments stage: read less from the capture index (design note v1)
 
-**Status:** v1.5, 2026-10-02, by claude-code (coordinator and spec author, `claude-opus-5-5`, harness-runtime). Not built.
+**Status:** v1.6, 2026-10-02, by claude-code (coordinator and spec author, `claude-opus-5-5`, harness-runtime). Not built.
 - v1 opened PR 148.
 - v1.1, before review: adds the second live sample (seq 10626) to §1, and a rough budget inference to §4.
 - v1.2, before review: R3 now covers all three budget counters, not only the runner's.
@@ -26,6 +26,15 @@
   - Codex's build obligations, which are not findings: each budget counter keeps its own predicate, plus a row contract and the grouped limit
     (R3); more fixtures, a per-store replay of outcomes and counters, and what the success test records (§5).
   - §2's veto also covers an eligible same-repository reference that does not resolve. §1's small-call range is 85–102 ms (Codex: 85.27–101.96).
+- v1.6, after Codex's round 2 (`evt_6ab2114cafff435a970d6c4c3fa13e11`: rejected; F1 re-raised and F4 new, both Medium; F2 and F3 resolved), on
+  Jordan's go `evt_fd9029a00a094c2ba6ed3f369bff1bdb`:
+  - **F1, re-raised.** SQLite's JSON path lookup treats a `method.params` key with a NUL right after `sealed_by` as if it were `sealed_by`. So
+    v1.5's flag could hide a real stamp or show a decoy.
+  - **F4.** SQLite's JSON parser rejects bodies nested past 1,000 levels, so v1.5's flag could fail a read that works today.
+  - **The guard.** SQL decides the flag only for a body that contains no `\u0000` escape and that SQLite's JSON parser accepts. Any other body is
+    marked unknown, returned, and decided in JavaScript by today's rule (R1–R4).
+  - **Measured as P3e (§6):** no measurable SQL cost. On production, 1 matched event of 503 is unknown, and the boundary is unchanged.
+  - **A correction.** v1.5 said SQL and JavaScript "see the same value" for any stringified body. That was wrong; R3 now says what is checked.
 - Go: `evt_af819387f1784392891f33a5c46a61a4` (Jordan, "let's go w/ 1": finish this note with the measured split).
 - Earlier draft: `~/.retrace/ops-2026-09-30/design-capture-read-volume-draft.md` v0.1, written on go `evt_5642b1dfda3e4cf79574c09dda2d3094`, Jordan's
   option (c) part (b) (`evt_df7212b9526a415baf0bed46687c939d`).
@@ -34,14 +43,15 @@
 
 ## 0. Decisions this note asks the gate to confirm
 1. **Build step 1 only:** in the two capture reads, return event bodies only for commit seals (option i), once per event (option ii).
-   - Every matched event still returns one small row: its keys, and whether its own body carries a string stamp (v1.5). So counts and the
-     boundary, and therefore decisions, do not change (§4).
+   - Every matched event still returns one small row: its keys, and whether its own body carries a string stamp (v1.5). When SQL cannot decide
+     that exactly, the row says "unknown", carries the body, and JavaScript decides (v1.6). So counts and the boundary, and therefore
+     decisions, do not change (§4).
 2. **Keep every budget's meaning.** All three budget counters still count the unfiltered matched set (pairs or events, as each does today), not
    only the rows the filter keeps (§4, R3).
 3. **Step 2 only if step 1 is measured not to fit.** That is the cached amendment closure, option iv. It adds cached state to a WHO path, so it
    gets its own note.
-4. **The probes are done** (§6), including P3d for v1.5's stamped flag. The build brief can be written on Jordan's go, using the measured
-   statement shape (R4).
+4. **The probes are done** (§6), including P3d for v1.5's stamped flag and P3e for v1.6's guard. The build brief can be written on Jordan's
+   go, using the measured statement shape (R4).
 
 ## 1. The problem, measured
 Owner-login deliveries on the live Worker seal `unavailable / deadline`, failing closed: the seal names the account and attributes no seat. The
@@ -135,10 +145,11 @@ These are code facts at `82a56d14`.
 ## 4. Requirements for step 1 (options i + ii)
 - **R1. Bodies only for seals.** Each capture read returns an event's body only when `events.action` is `committed` or `merged`. That is a
   strict superset of `captureSealEligible`. JavaScript still applies the exact predicate, so only bodies that can never be seals are withheld.
+  - *v1.6:* the read also returns the body of any event whose stamped flag is unknown (R3), so JavaScript can decide it.
   - *v1.4:* v1–v1.3 filtered the rows themselves. That lost the counts and boundary of a read whose matched events hold no seal (R3).
 - **R2. One row per matched event.** Each statement returns exactly one row for every matched event, filtered or not. The row carries the
-  event's `seq`, its matched artifact keys (`json_group_array`), a stamped flag (R3), and the body or NULL (R1). The runner still sees every
-  matched (seq, key) pair.
+  event's `seq`, its matched artifact keys (`json_group_array`), a stamped flag of 1, 0 or unknown (R3), and the body or NULL (R1). The runner
+  still sees every matched (seq, key) pair.
 - **R3. Counts and boundary, exactly as today.** The runner computes everything from the rows of every statement in the read, deduplicating
   across statements as it does today (`seenRows`, `store.ts:529-533`):
   - distinct (seq, key) pairs from the keys
@@ -164,8 +175,9 @@ These are code facts at `82a56d14`.
   `repo:x#/retrace#a.ts` as one raw pair that `EvidenceBudget` counts as 0. No counter is derived from another's total.
 
   **The row contract and the limit (v1.5, from Codex's round 1).**
-  - The runner validates every returned row. It needs an integer `seq`; a non-empty, untruncated array of string keys; a stamped flag of 0 or 1;
-    and a body exactly when the event is `committed` or `merged`.
+  - The runner validates every returned row. It needs an integer `seq`; a non-empty, untruncated array of string keys; a stamped flag of 0, 1
+    or NULL (unknown, v1.6); and a body exactly when the event is `committed` or `merged`, or its flag is unknown.
+  - For an unknown flag, the runner parses the body with `JSON.parse` and applies today's rule (R3).
   - Any statement, parse or shape failure is a store error, so the decision is `unavailable`.
   - `LIMIT row_cap + 1` stays on the grouped statement. Every grouped row carries at least one pair, so `row_cap + 1` rows already prove more
     than `row_cap` pairs. Under the limit, every key of every returned event is present.
@@ -183,14 +195,37 @@ These are code facts at `82a56d14`.
   - Each call passes its value as `CapturePolicy.firstStampedSeq`. That is the existing pin; `capture.ts` does not change.
   - This matches today's semantics: today `preliminary` sees only the pool as it stands before the commit read.
 
-  And which events count as stamped (v1.5, Codex F1):
-  - **The rule.** The stamped flag is `json_type(e.body, '$.method.params.sealed_by') IS 'text'`, computed in SQL from the event's own body.
-    - The `events` row is already joined by (project, seq) for the body.
-    - This is exactly today's rule: `firstStampedSeq` counts an event whose `method.params.sealed_by` is a string (`capture.ts:66–68`).
-    - Both sides read the same stored text. Both stores write `body` as `JSON.stringify(e)` (`apps/worker/src/d1-store.ts:29`,
-      `packages/mcp-server/src/sqlite-store.ts:59`) and read it back with `JSON.parse`. A stringified object has no duplicate keys, so SQLite's
-      `json_type` and JavaScript's `typeof` see the same value.
-    - So it holds on every store, whatever that store's index holds.
+  And which events count as stamped (v1.5, Codex F1; guarded in v1.6, Codex r2 F1 and F4):
+  - **The rule (v1.6).** The flag comes from the event's own body, joined by (project, seq) like the body column:
+    `CASE WHEN instr(e.body, '\u0000') = 0 AND json_valid(e.body) THEN json_type(e.body, '$.method.params.sealed_by') IS 'text' END`.
+    - `1` or `0` is SQL's answer.
+    - `NULL` means unknown. The row then carries the body (R1), and JavaScript applies today's rule to `JSON.parse(body)`: `firstStampedSeq`
+      counts an event whose `method.params.sealed_by` is a string (`capture.ts:66–68`).
+    - The `'\u0000'` in the SQL is the six characters of the JSON escape. SQLite does not process backslashes in string literals. Both stores
+      write `body` as `JSON.stringify(e)` (`apps/worker/src/d1-store.ts:29`, `packages/mcp-server/src/sqlite-store.ts:59`), which writes a NUL
+      character as that escape.
+  - **Why the guard (Codex round 2).**
+    - **F1.** SQLite's JSON path lookup treats a `method.params` key with a NUL right after `sealed_by` as if it were `sealed_by`. With
+      `{"sealed_by\u0000x":42,"sealed_by":"owner"}` it reads not-stamped where JavaScript reads stamped. With `{"sealed_by\u0000x":"decoy"}` it
+      reads stamped where JavaScript reads not-stamped.
+    - `MethodParams` keeps such keys (`schema.ts:218–223`, `.catchall(z.unknown())`), and `JSON.stringify` keeps them. `Method` and
+      `EventInput` strip unknown keys (`schema.ts:226`, `:237`), so the same trick on an ancestor key cannot be stored (correction
+      `evt_c387e2c9cbf549e7a96a81135df19f06`).
+    - **F4.** SQLite's JSON parser rejects nesting deeper than 1,000 levels, which JavaScript accepts. `json_type` then throws, and a read that
+      works today would fail.
+  - **What the guard rests on.** JavaScript decides every body SQL leaves unknown. SQL answers only for bodies that SQLite's JSON parser accepts
+    and that contain no `\u0000` escape.
+    - On those bodies the agreement is checked, not proven. The coordinator tried 12 key variants: control characters, tab, newline, a lone
+      surrogate, backslash, quote, Unicode, a NUL-suffixed key and others. Only the NUL-suffixed key disagreed (`evt_c387e2c9…`).
+    - Codex's round 2 found 23 ordinary combinations, and a 1.5-million-character string, in agreement.
+    - The build's fixtures and per-store replay (§5) are required.
+  - **The guard is conservative.** Any `\u0000` text, including an escaped backslash followed by `u0000` inside a string, falls back.
+    - On production, 1 matched event of 503 falls back: seq 5142, a review that quotes `"acme/a\u0000pp"`.
+    - JavaScript decides it stamped, and the boundary stays 970 (P3e, §6).
+    - Each fallback costs one extra body in the read.
+  - *v1.5 said:* "a stringified object has no duplicate keys, so SQLite's `json_type` and JavaScript's `typeof` see the same value". That was
+    wrong for NUL-suffixed keys and for bodies nested past 1,000 levels (Codex round 2). The guard replaces the claim.
+  - So the flag holds on every store, whatever that store's index holds.
   - **Why not the index (v1.3–v1.4).** `sealed_by IS NOT NULL` on `event_artifact_index` matches the body rule only where the insert path wrote
     every index row. That path stores strings only (`store.ts:252`).
     - Both backfills copy `json_extract(body, '$.method.params.sealed_by')` with no string guard (`store.ts:554–566`, `apps/worker/schema.sql`).
@@ -198,11 +233,12 @@ These are code facts at `82a56d14`.
     - A number, boolean or object stamp is then stored as TEXT, and the boundary moves with no error to fail closed on.
     - Codex reproduced it. P3d's local fixture reproduces it in SQL: the index put the boundary at 10, and the body rule at 13 (§6).
     - P2 had checked one project on one store.
-  - **Measured.** P3d measured the body flag on production D1: results identical to v1.4's and no measurable SQL cost (§6, R4).
-    - On that read the two flags also agree on all 503 matched events (0 mismatches), which confirms P2 for this project.
-    - v1.5 does not depend on that agreement.
-  - **The backfills.** The build also makes both backfills string-safe (§5 (a′)). That does not rewrite indexes already backfilled, and the
-    boundary no longer depends on them.
+  - **Measured.** P3d measured v1.5's body flag on production D1: results identical to v1.4's and no measurable SQL cost (§6, R4).
+    - On that read the index and body flags also agree on all 503 matched events (0 mismatches), which confirms P2 for this project.
+    - v1.5 and v1.6 do not depend on that agreement.
+    - P3e measured v1.6's guarded flag: no measurable SQL cost, and 1 unknown event, decided in JavaScript (§6, R4).
+  - **The backfills.** The build also makes both backfills string-safe, with the same guard (§5 (a′)). That does not rewrite indexes already
+    backfilled, and the boundary no longer depends on them.
 - **R4. The statement shape (measured; v1.4).**
   - **Matched set unchanged.** The matched-set members stay exactly as today: `SELECT DISTINCT i.seq, i.artifact_key` only. Adding any other
     index column to the member select moves the suffix member off `idx_eai_project_key_seq` onto a seq-range scan of the whole project index.
@@ -212,8 +248,19 @@ These are code facts at `82a56d14`.
       (`sqlite_autoindex_event_artifact_index_1`).
     - v1.5 drops that lookup (F1).
   - **The stamped flag and the body**, both from the `events` row joined by (project, seq):
-    - stamped = `json_type(e.body, '$.method.params.sealed_by') IS 'text'` (v1.5);
-    - body = `CASE WHEN e.action IN ('committed','merged') THEN e.body END`.
+    - stamped = the guarded expression in R3 (v1.6; v1.5 had `json_type(e.body, '$.method.params.sealed_by') IS 'text'` alone);
+    - body = `CASE WHEN e.action IN ('committed','merged') OR stamped IS NULL THEN e.body END` (v1.6).
+    - Probe 25 names `stamped` once in an inner select, and SQLite flattens it; the plan below is unchanged.
+  - **Measured on D1 (step 25, P3e, same rounds; v1.6):**
+    - v1.6: SQL 147–163 ms (3 runs), `rows_read` 164,064
+    - v1.5's shape: 131–316 ms, `rows_read` 164,064
+    - today's statement: 148–180 ms (2 runs; the first failed with Cloudflare API error 7403), `rows_read` 164,004
+
+    v1.6 returned 503 rows, 176 bodies, 710,384 body characters, 946 pairs and 503 events. The SQL boundary was 970, with 1 unknown event, the
+    176th body. Decided in JavaScript, that event is stamped and above 970, so the boundary stays 970 and 465 events are stamped, as v1.5 and
+    today's rule give.
+  - **Plan (step 25, v1.6):** the same as step 24's below. Both members seek `idx_eai_project_key_seq`, combined by MERGE (UNION); `e` is found
+    through `sqlite_autoindex_events_2`.
   - **Measured on D1 (step 24, P3d, same rounds; v1.5):**
     - v1.5: SQL 153–200 ms (3 runs), `rows_read` 163,558
     - v1.4's shape: 167–264 ms, `rows_read` 164,504
@@ -238,12 +285,13 @@ These are code facts at `82a56d14`.
 - **R6. Instrumentation.** Each capture call's `amendments_calls` entry still reports `rows.statement_rows` (matched pairs), `distinct_events`
   (matched events), `body_chars` (returned bodies) and `sql_ms`.
 
-**Effect on the read (measured in SQL, steps 22 and 24):**
-- Returned rows: 946 → 503 (one per matched event), of which 175 carry a body.
-- Body characters: 3,584,145 → 698,902 (5.1× fewer).
+**Effect on the read (measured in SQL, steps 22, 24 and 25):**
+- Returned rows: 946 → 503 (one per matched event), of which 175 carry a body. In v1.6 on production there are 176: one unknown event.
+- Body characters: 3,584,145 → 698,902 (5.1× fewer). v1.6 returns 710,384 characters (5.0× fewer).
 - SQL time: no worse than today's statement in the same run.
   - Step 22, v1.4: 129–138 ms against 164–173 ms.
   - Step 24, v1.5: 153–200 ms against 182–210 ms.
+  - Step 25, v1.6: 147–163 ms against 148–180 ms.
 
 **Effect on the Worker: not measured.**
 - The suffix scan (about 140 ms of SQL) and the per-call round trip stay.
@@ -257,7 +305,7 @@ These are code facts at `82a56d14`.
   - The success test decides.
 
 ## 5. Build plan, proof and success test
-1. **Probes P1–P3, P3b, P3c and P3d are done** (§6).
+1. **Probes P1–P3, P3b, P3c, P3d and P3e are done** (§6).
 2. **Build (class S),** in one pull request with:
    - **(a) Unit tests** on `MemoryEventStore` and `SqliteStore`, with fixtures for each boundary case:
      - a stamped non-seal before the first stamped seal
@@ -273,8 +321,16 @@ These are code facts at `82a56d14`.
        the v1.4 index flag would not (F1).
      - *v1.5:* the `EvidenceBudget` over-match case (R3) at an aggregate-budget boundary; stamps only on base events; distinct `preliminary` and
        `complete` boundaries; a malformed or missing row field, which gives `unavailable`; and a grouped read truncated at `row_cap + 1`.
-   - **(a′) String-safe backfills (v1.5, F1).** `BACKFILL_ARTIFACT_INDEX_SQL` (`store.ts:554–566`) and the backfill in `apps/worker/schema.sql`
-     store `sealed_by` only when `json_type(body, '$.method.params.sealed_by') = 'text'`, with a test.
+     - *v1.6:* Codex round 2's fixtures, written through `EventInput.parse` and `appendEvent` in every store:
+       - a NUL-suffixed `sealed_by` key that hides a real stamp;
+       - a NUL-suffixed decoy;
+       - a `method.params` value nested past 1,000 levels.
+
+       Each asserts the boundary, the eligible seals and the veto against today's code, and that the unknown rows carry their bodies. The local
+       validation of P3e (§6) shows the SQL half of these: boundary 3 by today's rule and by v1.6, 5 by v1.5, and v1.5 throws on the deep body.
+   - **(a′) String-safe backfills (v1.5, F1; guard v1.6).** `BACKFILL_ARTIFACT_INDEX_SQL` (`store.ts:554–566`) and the backfill in
+     `apps/worker/schema.sql` store `sealed_by` only when the body passes R3's guard and `json_type(body, '$.method.params.sealed_by') = 'text'`.
+     They store NULL otherwise, including for a body the guard leaves unknown. There is a test.
      - The boundary no longer depends on the column (R3). This keeps the column honest for any other reader.
      - Indexes already backfilled are not rewritten.
    - **(b) A workerd test** on the `5d7290f` fixture (production schema), asserting the same seals and decision as before.
@@ -282,6 +338,7 @@ These are code facts at `82a56d14`.
      recompute with the old and the new read and require identical results. Record the counts in the pull request.
      - *v1.5, from Codex's round 1:* compare, per store, the capture seals, the available or unavailable outcome with its reason, and the three
        budget counters, not only successful seal arrays.
+     - *v1.6:* also record how many rows were unknown and decided in JavaScript.
      - Run `MemoryEventStore` and `SqliteStore` separately: they already differ on the over-match.
 3. **Gate (class S):** Grok first at high, NOOA, then the last seat. **Deploy** on its own go.
 4. **Success test after deploy.** On the next 6 owner-login deliveries:
@@ -301,7 +358,7 @@ These are code facts at `82a56d14`.
 
 ## 6. Probes before the build brief (read-only, production D1; done)
 How they were run:
-- Steps 20, 21, 22 and 24 were run by Jordan in a plain terminal, with SQL files hashed in each script.
+- Steps 20, 21, 22, 24 and 25 were run by Jordan in a plain terminal, with SQL files hashed in each script.
 - The SQL was validated on an empty local schema and a fixture first.
 - Same keys and window as steps 17 and 18b: amendment seq 2543's 11 files, through seq 10402.
 - Results:
@@ -309,6 +366,7 @@ How they were run:
   - step 21: `evt_e3bc896dafa84edc8f8efa8dd8498191`
   - step 22: `evt_e1be75bfee144d2480e4a6baa198e8a7` (Jordan's verbatim output)
   - step 24: `evt_32e2617cbdd543e5b4cb5bbee05f001b` (Jordan's verbatim output), read in `evt_7e309e25ff614d12a6a842e3ff84f679`
+  - step 25: `evt_70ecb0f62a594a2aba7e3a256975217d` (Jordan's verbatim output), read in `evt_5819fbd4250943a3bcd0a3a6036355a7`
 
 The probes:
 - **P1, the filter's effect.** `action IN ('committed','merged')` keeps 391 of 946 rows, across 175 of 503 events: 1,789,352 characters as rows,
@@ -337,6 +395,20 @@ The probes:
   - Parity over the matched set: 465 events stamped by the index, 465 by the body, 0 mismatches, and the first stamped event is 970 either way.
   - Local validation came first (`evt_b7ef8fed3ef54e159358ced611fff56b`). The index was built by the unguarded backfill from bodies stamped
     `42`, `{"x":1}` and `true`, on the D1 schema. The index flag put the boundary at 10; the body flag put it at 13, which is today's JS rule.
+- **P3e, v1.6's guarded flag** (R3, R4; step 25). The stamped flag is NULL (unknown) for a body that contains a `\u0000` escape or that SQLite's
+  JSON parser rejects; such a row carries its body for JavaScript.
+  - 503 rows, 176 bodies, 710,384 body characters, 946 pairs, 503 events, SQL boundary 970, **1 unknown event**.
+  - SQL 147–163 ms (3 runs), against 131–316 ms for v1.5's shape and 148–180 ms for today's statement in the same rounds. One control run
+    failed with Cloudflare API error 7403.
+  - `rows_read` 164,064, against 164,064 and 164,004.
+  - **The unknown event**, found offline in the 14:07Z export: seq 5142, `evt_daaf08bb29df4364b29a72e21fb1e820`, a review of 11,482 characters.
+    - That equals the 176th body's characters.
+    - It quotes `"acme/a\u0000pp"` as an escaped backslash followed by `u0000`, not as an actual NUL.
+    - JavaScript decides it stamped. It is above 970, so the boundary stays 970, and 465 events are stamped, as today's rule gives.
+  - **Local validation first** (`evt_10551a62e000487c9a8ce37f0a80c6a5`, node:sqlite 3.51.3, D1 schema):
+    - With a NUL-suffixed key hiding a real stamp at seq 3 and a NUL-suffixed decoy at seq 5, today's rule gives boundary 3, v1.5 gives 5, and
+      v1.6 gives 3.
+    - With a body nested 1,001 deep added, v1.5's statement throws "malformed JSON" and v1.6 gives 3.
 
 ## 7. The other options (not proposed for step 1)
 - **(iii) Exact owner-qualified keys instead of the suffix scan.** Saves about 140 ms of SQL (28–49 ms against 170–188 ms). But the extra suffix
@@ -357,6 +429,9 @@ The probes:
 - The row reduction is measured on one amendment's keys and on today's ledger (§6), not proven for every future read. The equality proof in §5
   is still required.
   - Since v1.5 the stamped flag does not depend on the index's `sealed_by` parity (F1).
+- The guard's agreement on the bodies SQL decides is checked, not proven (R3). The checks are 12 key variants and 23 ordinary combinations. The
+  fixtures and the per-store replay in §5 are required.
+- The share of unknown events is measured on one read: 1 of 503. Bodies that quote escape sequences raise it, at one extra body each.
 - The 85–102 ms per small call is a reading of two samples on I/O-gated timers, not a network measurement.
 - Owner-login stays fail-closed throughout. Until a fix is live and measured, no GitHub delivery attributes a seat.
 
@@ -379,3 +454,7 @@ The probes:
 | Codex round 1 at `648ac447`: rejected (F1 Medium, F2 and F3 Low); gate check | `evt_aabdb3cf98984d64b33e5086eb0a102a`, `evt_3ab171e1e8cb4ff1a07ef63021df569c` |
 | Go for v1.5 | `evt_9ca021b8a82d4863af540f167ebb6e7e` |
 | Probe P3d (step 24): kit and local validation, output, reading | `evt_b7ef8fed3ef54e159358ced611fff56b`, `evt_32e2617cbdd543e5b4cb5bbee05f001b`, `evt_7e309e25ff614d12a6a842e3ff84f679` |
+| Codex round 2 at `5f7d9fe7`: rejected (F1 re-raised, F4 new; F2, F3 resolved); gate check; correction | `evt_6ab2114cafff435a970d6c4c3fa13e11`, `evt_496846f25820400398bdd0d590109a9b`, `evt_c387e2c9cbf549e7a96a81135df19f06` |
+| Grok round 4 at `5f7d9fe7`: approved (0 findings); gate check | `evt_a5b6ee6de75b425793ec8eedfa6553ee`, `evt_89f89202ec76496899384985882644ae` |
+| Go for v1.6 | `evt_fd9029a00a094c2ba6ed3f369bff1bdb` |
+| Probe P3e (step 25): kit and local validation, output, reading | `evt_10551a62e000487c9a8ce37f0a80c6a5`, `evt_70ecb0f62a594a2aba7e3a256975217d`, `evt_5819fbd4250943a3bcd0a3a6036355a7` |
