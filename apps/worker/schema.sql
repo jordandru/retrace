@@ -94,6 +94,15 @@ CREATE TABLE IF NOT EXISTS export_cache (
   PRIMARY KEY (project, chunk)
 );
 
+CREATE TABLE IF NOT EXISTS export_cache_refresh (
+  project TEXT PRIMARY KEY,
+  attempted_at TEXT NOT NULL,
+  result TEXT NOT NULL,
+  head_seq INTEGER,
+  error TEXT,
+  last_ok_at TEXT
+);
+
 -- One-time backfill of event_artifact_index from existing events. Idempotent (INSERT OR IGNORE).
 -- artifact_key is the event's artifact id, which is core artifactKey() (sameArtifact's comparison identity).
 INSERT OR IGNORE INTO event_artifact_index (project, artifact_key, seq, actor_type, actor_id, role, sealed_by)

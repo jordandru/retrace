@@ -8,6 +8,11 @@ binding = "DB"
 database_name = "retrace-db"
 database_id = "ae8ebc52-9784-4109-b421-f63676972dfe"
 
+# #132: the signed full-export cache outgrew D1's per-RPC serialization limit.
+[[r2_buckets]]
+binding = "EXPORT_CACHE"
+bucket_name = "retrace-export-cache"
+
 # Set with: wrangler secret put RETRACE_TOKEN
 # [vars]
 # RETRACE_TOKEN = "dev-only-token"

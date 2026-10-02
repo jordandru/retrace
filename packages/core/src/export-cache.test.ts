@@ -70,6 +70,12 @@ test("router: full export serves cached bytes (hit), labels stale, and ?fresh=1 
   const cache = new MemCache();
   await refreshExportCache(store, cache, ["p"], exportBuilder(store, { signingKey: key.privateKey }));
   const cachedJson = cache.entries.get("p")!.bundle_json;
+  let historyReads = 0;
+  const history = store.history.bind(store);
+  store.history = async (query) => {
+    historyReads++;
+    return history(query);
+  };
 
   const token = "owner-token-owner-token-owner-ok";
   const handle = createHandler(store, { token, signingKey: key.privateKey, exportCache: cache });
@@ -79,6 +85,7 @@ test("router: full export serves cached bytes (hit), labels stale, and ?fresh=1 
   assert.equal(hit.status, 200);
   assert.equal(hit.headers.get("x-retrace-export-cache"), "hit");
   assert.equal(await hit.text(), cachedJson, "exact stored bytes are served");
+  assert.equal(historyReads, 0, "a cache hit adds no history read");
 
   // fresh=1 bypasses the cache: a live rebuild has a different generated_at
   const fresh = await get("/projects/p/export?fresh=1");
@@ -93,11 +100,13 @@ test("router: full export serves cached bytes (hit), labels stale, and ?fresh=1 
 
   // head moves → the cached bundle is served but labeled stale, with both heads named
   await appendEvent(store, ev("p"));
+  const historyReadsBeforeStale = historyReads;
   const stale = await get("/projects/p/export");
   assert.equal(stale.headers.get("x-retrace-export-cache"), "stale");
   assert.equal(stale.headers.get("x-retrace-export-cached-head"), "1");
   assert.equal(stale.headers.get("x-retrace-export-live-head"), "2");
   assert.equal(await stale.text(), cachedJson);
+  assert.equal(historyReads, historyReadsBeforeStale + 1, "a stale entry is checked against the live chain once");
   const staleVerdict = await verifyExportBundle(JSON.parse(cachedJson), key.publicKey);
   assert.equal(staleVerdict.coverage.complete, true, "stale bundle stays a complete export against its own claim");
 
@@ -156,6 +165,17 @@ test("router: full export serves cached bytes (hit), labels stale, and ?fresh=1 
   const ordinaryAfterTorn = await torn(new Request("http://x/projects/p/export?token=" + encodeURIComponent(token)));
   assert.equal(ordinaryAfterTorn.status, 200);
   assert.equal(JSON.parse(await ordinaryAfterTorn.text()).chain.total_events, 3);
+
+  cache.entries.set("p", { ...savedEntry, head_hash: "f".repeat(64) });
+  const notPrefixOnly = await get("/projects/p/export?cached=1");
+  assert.equal(notPrefixOnly.status, 503);
+  assert.equal(notPrefixOnly.headers.get("x-retrace-export-cache"), "stale");
+  assert.match((await notPrefixOnly.json()).error, /not a prefix of the live ledger/);
+  const notPrefixFallback = await get("/projects/p/export");
+  assert.equal(notPrefixFallback.status, 200);
+  assert.equal(notPrefixFallback.headers.get("x-retrace-export-cache"), null);
+  assert.equal(JSON.parse(await notPrefixFallback.text()).chain.total_events, 3);
+  cache.entries.set("p", savedEntry);
 
   cache.entries.set("ghost", {
     project: "ghost",

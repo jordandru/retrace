@@ -12,7 +12,8 @@ import { recomputeOwnerLogin } from "./owner-login-replay.js";
  *       Checkpoints require their own trusted key from --checkpoint-pubkey or RETRACE_CHECKPOINT_PUBKEY; the production
  *       checkpoint signer is intentionally separate from the export issuer. A committed
  *       .retrace/checkpoint-public.jwk is the final repository-local fallback.
- *   retrace-export checkpoint <project> [--bundle file.json] [--out .retrace/checkpoints.jsonl]   append a signed head checkpoint; commit the file
+ *   retrace-export checkpoint <project> [--bundle file.json] [--fresh] [--max-bundle-age-hours 3] [--out .retrace/checkpoints.jsonl]
+ *       append a signed head checkpoint; server-fetched bundles older than the age limit are refused
  *   retrace-export witness <project> [--checkpoints f.jsonl] [--witnesses f.jsonl] [--rekor url]   submit the newest checkpoint to the Rekor transparency log; commit both files
  *       verify --checkpoint also takes [--witnesses f.jsonl] [--rekor-pubkey pem] to require the checkpointed head be witnessed by Rekor (offline SET check).
  *   retrace-export reconcile [--repo .] [--since <ref>] [--limit N] [--uncovered warn|fail|info] [--json] [--gate]   git history vs the ledger: capture windows, mis-attributed and missing commits (docs/reconciliation-plan.md)
@@ -26,7 +27,7 @@ import { makeStore } from "./index.js";
 import { RemoteStore } from "./remote-store.js";
 import { ensureSigningKey, loadSigningKey } from "./keys.js";
 import { defaultProducerKeyPath, ensureProducerKey } from "./producer-key.js";
-import { witnessCheckpoint, verifyWitness, parseWitnessLog, witnessFor, fetchRekorPublicKey, DEFAULT_REKOR_URL } from "./witness.js";
+import { witnessCheckpoint, verifyWitness, parseWitnessLog, witnessFor, fetchRekorPublicKey, DEFAULT_REKOR_URL, WitnessRecord } from "./witness.js";
 import { isMainModule } from "./is-main.js";
 import { amendAttributionMain, attributionOptionsForRepo } from "./attribution.js";
 import { collectAttributionAmendments, attributionSummary, renderTimeline } from "@retrace-dev/core";
@@ -55,6 +56,116 @@ function bundleVerifyOpts(flags: Record<string, string | boolean>, bundle: Expor
     project: bundle.scope.project,
     ...(producers ? { producers } : {}),
   };
+}
+
+type CheckpointStore = ReturnType<typeof makeStore>;
+
+export async function checkpointCommand(
+  project: string,
+  flags: Record<string, string | boolean>,
+  options: { store?: CheckpointStore; now?: Date; log?: (message: string) => void } = {},
+): Promise<void> {
+  const now = options.now ?? new Date();
+  const log = options.log ?? console.log;
+  let bundle: ExportBundle;
+  if (flags.bundle) {
+    bundle = parseExportBundle(readFileSync(String(flags.bundle), "utf8"));
+    const generatedAt = Date.parse(bundle.generated_at);
+    const ageHours = Math.max(0, (now.getTime() - generatedAt) / 3_600_000);
+    log(`bundle ${flags.bundle} generated_at ${bundle.generated_at}; age ${ageHours.toFixed(2)} hours (--bundle is an explicit operator choice, age limit exempt)`);
+  } else {
+    const store = options.store ?? makeStore();
+    if (store instanceof RemoteStore) {
+      bundle = await store.export({ project }, { fresh: flags.fresh === true });
+      const rawLimit = flags["max-bundle-age-hours"] ?? "3";
+      const maxAgeHours = typeof rawLimit === "string" ? Number(rawLimit) : NaN;
+      if (!Number.isFinite(maxAgeHours) || maxAgeHours <= 0)
+        throw new Error("--max-bundle-age-hours must be a positive number");
+      const generatedAt = Date.parse(bundle.generated_at);
+      const ageHours = Math.max(0, (now.getTime() - generatedAt) / 3_600_000);
+      if (ageHours > maxAgeHours) {
+        const liveHead = await store.head(project);
+        throw new Error(
+          `refusing server bundle generated_at ${bundle.generated_at}: age ${ageHours.toFixed(2)} hours exceeds ` +
+          `--max-bundle-age-hours ${maxAgeHours}; live head ${liveHead ? `#${liveHead.seq} ${liveHead.hash}` : "is absent"}; ` +
+          `inspect /projects/${encodeURIComponent(project)}/status export_cache`,
+        );
+      }
+    } else {
+      bundle = await buildExportBundle(store, { project }, {
+        signingKey: parseSigningKey(process.env.RETRACE_SIGNING_KEY) ?? (await ensureSigningKey()).privateKey,
+        issuerName: process.env.RETRACE_ISSUER,
+      });
+    }
+  }
+  // A checkpoint attests a head; it must never be derived from a bundle whose issuer could not be established.
+  const trusted = await resolveTrustedKey(flags.pubkey);
+  if (!trusted) throw new Error("no trusted issuer key: pass --pubkey <jwk.json|https-url>, set RETRACE_PUBKEY, or set RETRACE_URL to an https Retrace server (its /.well-known/retrace-pubkey is used)");
+  const v = await verifyExportBundle(bundle, trusted.key, bundleVerifyOpts(flags, bundle));
+  if (!exportVerdictOk(v)) {
+    for (const problem of v.problems) console.error("  - " + problem);
+    throw new Error("refusing to checkpoint a bundle that does not verify as a complete full export signed by the trusted key");
+  }
+  if (v.legacy_hash_events) console.error(`  note: ${v.legacy_hash_events} event(s) are under the legacy hash rule (received_at not provably covered)`);
+  const key = parseSigningKey(process.env.RETRACE_SIGNING_KEY) ?? (await ensureSigningKey()).privateKey;
+  const cp = await checkpointFromBundle(bundle, { signingKey: key, signerName: process.env.RETRACE_ISSUER });
+  const out = String(flags.out ?? ".retrace/checkpoints.jsonl");
+  if (existsSync(out)) {
+    const prev = latestCheckpoint(parseCheckpointLog(readFileSync(out, "utf8")), project);
+    if (prev && prev.seq === cp.seq && prev.head_hash === cp.head_hash) {
+      log(`unchanged — ${out} already has head #${cp.seq} ${cp.head_hash.slice(0, 12)}… for ${project}`);
+      return;
+    }
+    if (prev && prev.seq > cp.seq) throw new Error(`${out} already records #${prev.seq} for ${project}; this bundle stops at #${cp.seq} — the ledger shrank, investigate before checkpointing`);
+  } else mkdirSync(dirname(out), { recursive: true });
+  appendFileSync(out, JSON.stringify(cp) + "\n");
+  log(`appended head #${cp.seq} ${cp.head_hash.slice(0, 12)}… (${cp.total_events} events, issuer kid ${(cp.source as any).issuer_kid ?? "unsigned"}, signer kid ${cp.signer?.kid}) to ${out}\ncommit and push ${out} — that commit is the witness a later verify --checkpoint compares against`);
+}
+
+export async function requireValidWitnessForAppend(rec: WitnessRecord, cp: Parameters<typeof verifyWitness>[1], pem: string): Promise<void> {
+  const verdict = await verifyWitness(rec, cp, pem);
+  if (!verdict.ok) throw new Error(`refusing to append a witness that does not verify: ${verdict.problems.join("; ")}`);
+}
+
+export async function witnessCommand(
+  project: string,
+  flags: Record<string, string | boolean>,
+  options: {
+    witness?: typeof witnessCheckpoint;
+    fetchPublicKey?: typeof fetchRekorPublicKey;
+    rekorPublicKeyPem?: string;
+    log?: (message: string) => void;
+  } = {},
+): Promise<void> {
+  const log = options.log ?? console.log;
+  const cpsPath = String(flags.checkpoints ?? ".retrace/checkpoints.jsonl");
+  const wPath = String(flags.witnesses ?? ".retrace/witnesses.jsonl");
+  const rekorUrl = String(flags.rekor ?? DEFAULT_REKOR_URL);
+  const cp = latestCheckpoint(parseCheckpointLog(readFileSync(cpsPath, "utf8")), project);
+  if (!cp) throw new Error(`no checkpoint for project ${project} in ${cpsPath} — run \`retrace-export checkpoint ${project}\` first`);
+  const existing = existsSync(wPath) ? parseWitnessLog(readFileSync(wPath, "utf8")) : [];
+  if (witnessFor(existing, cp)) {
+    log(`unchanged — ${wPath} already witnesses checkpoint #${cp.seq} for ${project}`);
+    return;
+  }
+  const key = parseSigningKey(process.env.RETRACE_SIGNING_KEY) ?? loadSigningKey();
+  if (!key) throw new Error("no signing key: set RETRACE_SIGNING_KEY (the checkpoint key) — the Rekor entry must be signed by the checkpoint's signer");
+  const rec = await (options.witness ?? witnessCheckpoint)(cp, key, { rekorUrl });
+  const committedPemPath = ".retrace/rekor-public.pem";
+  let pem = options.rekorPublicKeyPem;
+  if (!pem) {
+    try { pem = readFileSync(committedPemPath, "utf8"); }
+    catch { pem = await (options.fetchPublicKey ?? fetchRekorPublicKey)(rekorUrl); }
+  }
+  await requireValidWitnessForAppend(rec, cp, pem);
+  mkdirSync(dirname(wPath), { recursive: true });
+  const pemPath = dirname(wPath) + "/rekor-public.pem";
+  if (!existsSync(pemPath)) {
+    writeFileSync(pemPath, pem);
+    log(`wrote ${pemPath} — Rekor's public key, committed so SETs verify offline`);
+  }
+  appendFileSync(wPath, JSON.stringify(rec) + "\n");
+  log(`witnessed checkpoint #${cp.seq} ${cp.head_hash.slice(0, 12)}… in the Rekor transparency log: index ${rec.log_index}, ${new Date(rec.integrated_time * 1000).toISOString()}\nappended to ${wPath} — commit and push it with ${cpsPath}; verify with: retrace-export verify <bundle> --checkpoint ${cpsPath} --witnesses ${wPath}`);
 }
 
 async function main() {
@@ -198,49 +309,13 @@ async function main() {
     process.exit(ok ? 0 : 2);
   }
   if (cmd === "checkpoint") {
-    const project = pos[1]; if (!project) throw new Error("usage: retrace-export checkpoint <project> [--bundle file.json] [--out .retrace/checkpoints.jsonl]");
-    let bundle: ExportBundle;
-    if (flags.bundle) bundle = parseExportBundle(readFileSync(String(flags.bundle), "utf8"));
-    else {
-      const store = makeStore();
-      if (store instanceof RemoteStore) bundle = await store.export({ project });
-      else bundle = await buildExportBundle(store, { project }, { signingKey: parseSigningKey(process.env.RETRACE_SIGNING_KEY) ?? (await ensureSigningKey()).privateKey, issuerName: process.env.RETRACE_ISSUER });
-    }
-    // A checkpoint attests a head; it must never be derived from a bundle whose issuer could not be established.
-    const trusted = await resolveTrustedKey(flags.pubkey);
-    if (!trusted) throw new Error("no trusted issuer key: pass --pubkey <jwk.json|https-url>, set RETRACE_PUBKEY, or set RETRACE_URL to an https Retrace server (its /.well-known/retrace-pubkey is used)");
-    const v = await verifyExportBundle(bundle, trusted.key, bundleVerifyOpts(flags, bundle));
-    if (!exportVerdictOk(v)) { for (const p of v.problems) console.error("  - " + p); throw new Error("refusing to checkpoint a bundle that does not verify as a complete full export signed by the trusted key"); }
-    if (v.legacy_hash_events) console.error(`  note: ${v.legacy_hash_events} event(s) are under the legacy hash rule (received_at not provably covered)`);
-    const key = parseSigningKey(process.env.RETRACE_SIGNING_KEY) ?? (await ensureSigningKey()).privateKey;
-    const cp = await checkpointFromBundle(bundle, { signingKey: key, signerName: process.env.RETRACE_ISSUER });
-    const out = String(flags.out ?? ".retrace/checkpoints.jsonl");
-    if (existsSync(out)) {
-      const prev = latestCheckpoint(parseCheckpointLog(readFileSync(out, "utf8")), project);
-      if (prev && prev.seq === cp.seq && prev.head_hash === cp.head_hash) { console.log(`unchanged — ${out} already has head #${cp.seq} ${cp.head_hash.slice(0, 12)}… for ${project}`); return; }
-      if (prev && prev.seq > cp.seq) throw new Error(`${out} already records #${prev.seq} for ${project}; this bundle stops at #${cp.seq} — the ledger shrank, investigate before checkpointing`);
-    } else mkdirSync(dirname(out), { recursive: true });
-    appendFileSync(out, JSON.stringify(cp) + "\n");
-    console.log(`appended head #${cp.seq} ${cp.head_hash.slice(0, 12)}… (${cp.total_events} events, issuer kid ${(cp.source as any).issuer_kid ?? "unsigned"}, signer kid ${cp.signer?.kid}) to ${out}\ncommit and push ${out} — that commit is the witness a later verify --checkpoint compares against`);
+    const project = pos[1]; if (!project) throw new Error("usage: retrace-export checkpoint <project> [--bundle file.json] [--fresh] [--max-bundle-age-hours 3] [--out .retrace/checkpoints.jsonl]");
+    await checkpointCommand(project, flags);
     return;
   }
   if (cmd === "witness") {
     const project = pos[1]; if (!project) throw new Error("usage: retrace-export witness <project> [--checkpoints .retrace/checkpoints.jsonl] [--witnesses .retrace/witnesses.jsonl] [--rekor url]");
-    const cpsPath = String(flags.checkpoints ?? ".retrace/checkpoints.jsonl");
-    const wPath = String(flags.witnesses ?? ".retrace/witnesses.jsonl");
-    const rekorUrl = String(flags.rekor ?? DEFAULT_REKOR_URL);
-    const cp = latestCheckpoint(parseCheckpointLog(readFileSync(cpsPath, "utf8")), project);
-    if (!cp) throw new Error(`no checkpoint for project ${project} in ${cpsPath} — run \`retrace-export checkpoint ${project}\` first`);
-    const existing = existsSync(wPath) ? parseWitnessLog(readFileSync(wPath, "utf8")) : [];
-    if (witnessFor(existing, cp)) { console.log(`unchanged — ${wPath} already witnesses checkpoint #${cp.seq} for ${project}`); return; }
-    const key = parseSigningKey(process.env.RETRACE_SIGNING_KEY) ?? loadSigningKey();
-    if (!key) throw new Error("no signing key: set RETRACE_SIGNING_KEY (the checkpoint key) — the Rekor entry must be signed by the checkpoint's signer");
-    const rec = await witnessCheckpoint(cp, key, { rekorUrl });
-    mkdirSync(dirname(wPath), { recursive: true });
-    appendFileSync(wPath, JSON.stringify(rec) + "\n");
-    const pemPath = dirname(wPath) + "/rekor-public.pem";
-    if (!existsSync(pemPath)) { writeFileSync(pemPath, await fetchRekorPublicKey(rekorUrl)); console.log(`wrote ${pemPath} — Rekor's public key, committed so SETs verify offline`); }
-    console.log(`witnessed checkpoint #${cp.seq} ${cp.head_hash.slice(0, 12)}… in the Rekor transparency log: index ${rec.log_index}, ${new Date(rec.integrated_time * 1000).toISOString()}\nappended to ${wPath} — commit and push it with ${cpsPath}; verify with: retrace-export verify <bundle> --checkpoint ${cpsPath} --witnesses ${wPath}`);
+    await witnessCommand(project, flags);
     return;
   }
   if (cmd === "reconcile") { process.exitCode = await reconcileMain(flags, pos); return; } // exitCode, not exit(): let a large --json flush
@@ -255,6 +330,6 @@ async function main() {
     console.log(`${base}/s/${id}\nreport: ${base}/s/${id}/report`);
     return;
   }
-  console.log("retrace-export <amend-attribution|render <bundle.json>|keygen|producer-keygen|export <project>|verify <bundle.json>|checkpoint <project>|witness <project>|reconcile|share <project>> [--artifact id] [--out f] [--report f.html] [--pubkey jwk|https-url] [--allow-self-attested] [--checkpoint f.jsonl] [--checkpoint-pubkey jwk|https-url] [--bundle f.json] [--label s] [--days n] [--actor id]");
+  console.log("retrace-export <amend-attribution|render <bundle.json>|keygen|producer-keygen|export <project>|verify <bundle.json>|checkpoint <project>|witness <project>|reconcile|share <project>> [--artifact id] [--out f] [--report f.html] [--pubkey jwk|https-url] [--allow-self-attested] [--checkpoint f.jsonl] [--checkpoint-pubkey jwk|https-url] [--bundle f.json] [--fresh] [--max-bundle-age-hours n] [--label s] [--days n] [--actor id]");
 }
 if (isMainModule(import.meta.url)) main().catch((e) => { console.error("retrace-export:", e.message ?? e); process.exit(1); });

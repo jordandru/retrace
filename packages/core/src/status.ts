@@ -10,6 +10,7 @@ import { markUntrustedText } from "./explain.js";
 import { causalRootState, type RootState } from "./causality.js";
 import { projectIssuanceStatus, type IssuanceCredential, type ProjectIssuanceStatus } from "./credential-status.js";
 import { canonicalGithubRepo, routeGithubDelivery } from "./policy.js";
+import type { ExportCacheStatus } from "./export-cache.js";
 export { causalRootState } from "./causality.js";
 
 /** Empty-string `model` is absent, matching the schema pairing rule. */
@@ -81,6 +82,7 @@ export type ProjectStatus = {
   /** §8: none | env_fallback when the project has no document; document + digest when it does. */
   policy?: { mode: "none" | "env_fallback" | "document"; digest?: string; version?: number };
   routing?: { repo: string; source: "policy" | "env_fallback" | "revoked" | "unresolved" }[];
+  export_cache?: ExportCacheStatus;
 };
 
 export async function buildProjectStatus(
@@ -242,6 +244,15 @@ export function projectStatusForModel(status: ProjectStatus): ProjectStatus {
       ...integration,
       system: markUntrustedText(integration.system),
     })),
+    export_cache: status.export_cache && {
+      ...status.export_cache,
+      last_refresh: status.export_cache.last_refresh && {
+        ...status.export_cache.last_refresh,
+        ...(status.export_cache.last_refresh.error !== undefined
+          ? { error: markUntrustedText(status.export_cache.last_refresh.error) }
+          : {}),
+      },
+    },
     issuance: status.issuance && {
       shared_actor_id: status.issuance.shared_actor_id.map((row) => ({ ...row, id: markUntrustedText(row.id) })),
       principals: status.issuance.principals.map((row) => ({
@@ -269,6 +280,17 @@ export function renderProjectStatus(s: ProjectStatus): string {
   const sourceParts = MODEL_SOURCE_ORDER
     .filter((key) => (s.capture.agent_events_by_model_source[key] ?? 0) > 0)
     .map((key) => `${key} ${s.capture.agent_events_by_model_source[key]}`);
+  const exportCache = s.export_cache
+    ? `export cache: ${[
+      s.export_cache.state,
+      ...(s.export_cache.cached_head_seq === undefined ? [] : [`cached head ${s.export_cache.cached_head_seq}`]),
+      ...(s.export_cache.age_seconds === undefined ? [] : [`age ${s.export_cache.age_seconds}s`]),
+      ...(s.export_cache.live_head_seq === undefined ? [] : [`live head ${s.export_cache.live_head_seq}`]),
+      ...(s.export_cache.last_refresh
+        ? [`last refresh ${s.export_cache.last_refresh.result} at ${s.export_cache.last_refresh.attempted_at}`]
+        : []),
+    ].join(" · ")}\n`
+    : "";
   return `${markUntrustedText(s.project)} — ${health}\n` +
     `${s.events.total} events · ${s.causality.coverage_pct}% causal coverage · ${s.capture.unlinked_commits}/${s.capture.commits} unlinked commits · ${s.capture.unverified_links} unverified links · ${s.capture.legacy_client} legacy-client seals\n` +
     `${s.capture.agent_events_without_model}/${s.capture.agent_events} agent events missing model (${byCause.source_none} declared none · ${byCause.no_source_recorded} no source recorded) · ${s.capture.instructions_without_followup}/${s.capture.instructions} instructions without follow-up · ${s.capture.artifact_refs_without_role}/${s.capture.artifact_refs} artifact refs missing role\n` +
@@ -277,6 +299,7 @@ export function renderProjectStatus(s: ProjectStatus): string {
     (s.capture.owner_login_events ? `GitHub owner-login events: ${s.capture.owner_login_events.sealed_as_human} sealed human · read-time: ${s.capture.owner_login_events.read_time_labels.declared_by_seat} declared-by-seat · ${s.capture.owner_login_events.read_time_labels.conflicting} conflicting · ${s.capture.owner_login_events.read_time_labels.unresolved} unresolved (computed at read, not sealed) · ${s.capture.owner_login_events.legacy_unknown_login} legacy unknown login · identity-mapped ${s.capture.owner_login_events.by_status.identity_mapped} (current policy identities, separate scope)\n` : "") +
     `sealed by: ${s.capture.sealed_by.pinned} pinned · ${s.capture.sealed_by.assert} assert · ${s.capture.sealed_by.webhook} webhook · ${s.capture.sealed_by.owner} owner-asserted · ${s.capture.sealed_by.unauthenticated} unauthenticated · ${s.capture.sealed_by.unstamped} unstamped; ${s.capture.agent_events_not_pinned}/${s.capture.agent_events} agent events not pinned\n` +
     (s.capture.attribution_unavailable ? `attribution evaluation unavailable: ${s.capture.attribution_unavailable} (${s.capture.attribution_attempts ?? 0} attempts)\n` : `attribution amendments: ${s.capture.attribution_amendments ?? 0} effective · ${s.capture.superseded_attribution_amendments ?? 0} superseded · ${s.capture.partially_amended_events ?? 0} partially amended events\n`) +
+    exportCache +
     `actors: ${s.actors.map((a) => `${a.type}/${markUntrustedText(a.id)} (${a.events})`).join(", ") || "none"}\n` +
     (s.issuance?.shared_actor_id.length
       ? `shared_actor_id: ${s.issuance.shared_actor_id.map((r) => `${r.type}/${markUntrustedText(r.id)} ×${r.count}`).join(", ")}\n`

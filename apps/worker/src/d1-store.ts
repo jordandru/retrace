@@ -60,9 +60,9 @@ export class D1Store implements EventStore {
    *  on that audit row existing. If a write raced the delete, the batch is a no-op and we throw HeadMovedError. */
   async deleteProject(project: string, audit: Event, expectedHead: ChainHead) {
     if (audit.project === project) throw new Error("audit event must not live in the project being deleted");
-    // Keep every project-owned row in this guarded transaction. In particular, leaving export_cache behind would
-    // retain the deleted ledger bytes and could serve them as a stale bundle if the project name were recreated.
-    const tables = ["owner_login_consumption", "events", "event_artifacts", "event_artifact_index", "pending_deliveries", "shares", "checkpoints", "export_cache", "project_policies", "classification_contexts", "classification_path_lowers", "classification_breakers"];
+    // Keep every D1-owned project row in this guarded transaction. The R2 cache is deleted after this succeeds; if
+    // that deletion fails, the router's prefix check prevents a recreated project from serving the old ledger bytes.
+    const tables = ["owner_login_consumption", "events", "event_artifacts", "event_artifact_index", "pending_deliveries", "shares", "checkpoints", "export_cache", "export_cache_refresh", "project_policies", "classification_contexts", "classification_path_lowers", "classification_breakers"];
     const headMatches = {
       sql: "EXISTS (SELECT 1 FROM events WHERE project = ? AND seq = ? AND hash = ?) AND NOT EXISTS (SELECT 1 FROM events WHERE project = ? AND seq > ?)",
       params: [project, expectedHead.seq, expectedHead.hash, project, expectedHead.seq],

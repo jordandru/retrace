@@ -72,6 +72,33 @@ function canonJson(v: unknown): string {
 }
 
 export type FetchLike = (url: string, init?: { method?: string; headers?: Record<string, string>; body?: string }) => Promise<{ ok: boolean; status: number; text(): Promise<string> }>;
+type RekorEntry = { body: string; integratedTime: number; logID: string; logIndex: number; verification?: { signedEntryTimestamp?: string } };
+
+function recordFromEntry(cp: Checkpoint, artifact: Buffer, rekorUrl: string, uuid: string, entry: RekorEntry): WitnessRecord {
+  if (!entry.verification?.signedEntryTimestamp) throw new Error("Rekor response missing entry/SET");
+  return {
+    format: WITNESS_FORMAT,
+    kind: "rekor",
+    rekor_url: rekorUrl,
+    checkpoint: { project: cp.project, seq: cp.seq, head_hash: cp.head_hash },
+    checkpoint_sha256: sha256HexSync(artifact),
+    signer_kid: cp.signer?.kid,
+    uuid,
+    log_index: entry.logIndex,
+    log_id: entry.logID,
+    integrated_time: entry.integratedTime,
+    body: entry.body,
+    set: entry.verification.signedEntryTimestamp,
+  };
+}
+
+function parseEntryMap(text: string): { uuid: string; entry: RekorEntry } {
+  const parsed = JSON.parse(text) as Record<string, RekorEntry>;
+  const uuid = Object.keys(parsed)[0];
+  const entry = uuid ? parsed[uuid] : undefined;
+  if (!uuid || !entry?.verification?.signedEntryTimestamp) throw new Error(`Rekor response missing entry/SET: ${text.slice(0, 200)}`);
+  return { uuid, entry };
+}
 
 /**
  * Submit a signed checkpoint to Rekor. Needs the checkpoint's PRIVATE key (the entry signature must be freshly made
@@ -105,26 +132,24 @@ export async function witnessCheckpoint(
   const res = await f(`${rekorUrl}/api/v1/log/entries`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(entry) });
   const text = await res.text();
   if (!res.ok && res.status !== 409) throw new Error(`Rekor ${res.status}: ${text.slice(0, 200)}`);
-  // 409 = entry already exists; Rekor sends the location header, but re-witnessing the same bytes is idempotent enough
-  // that we just parse whichever body came back (409 responses also include the entry map on rekor.sigstore.dev).
-  const parsed = JSON.parse(text) as Record<string, { body: string; integratedTime: number; logID: string; logIndex: number; verification?: { signedEntryTimestamp?: string } }>;
-  const uuid = Object.keys(parsed)[0];
-  const e = uuid ? parsed[uuid] : undefined;
-  if (!uuid || !e?.verification?.signedEntryTimestamp) throw new Error(`Rekor response missing entry/SET: ${text.slice(0, 200)}`);
-  return {
-    format: WITNESS_FORMAT,
-    kind: "rekor",
-    rekor_url: rekorUrl,
-    checkpoint: { project: cp.project, seq: cp.seq, head_hash: cp.head_hash },
-    checkpoint_sha256: sha256HexSync(artifact),
-    signer_kid: cp.signer.kid,
-    uuid,
-    log_index: e.logIndex,
-    log_id: e.logID,
-    integrated_time: e.integratedTime,
-    body: e.body,
-    set: e.verification.signedEntryTimestamp,
-  };
+  if (res.status === 409) {
+    let message = text;
+    try {
+      const parsed = JSON.parse(text) as { message?: unknown };
+      if (typeof parsed.message === "string") message = parsed.message;
+    } catch {}
+    const uuid = message.match(/\b(?:[0-9a-fA-F]{64}|[0-9a-fA-F]{80})\b/)?.[0];
+    if (!uuid) throw new Error(`Rekor 409 response missing existing entry UUID: ${message.slice(0, 200)}`);
+    const existing = await f(`${rekorUrl}/api/v1/log/entries/${uuid}`, { method: "GET" });
+    const existingText = await existing.text();
+    if (!existing.ok) throw new Error(`Rekor entry ${uuid} → ${existing.status}: ${existingText.slice(0, 200)}`);
+    const fetched = parseEntryMap(existingText);
+    if (fetched.uuid.toLowerCase() !== uuid.toLowerCase())
+      throw new Error(`Rekor entry lookup returned UUID ${fetched.uuid}, expected ${uuid}`);
+    return recordFromEntry(cp, artifact, rekorUrl, fetched.uuid, fetched.entry);
+  }
+  const created = parseEntryMap(text);
+  return recordFromEntry(cp, artifact, rekorUrl, created.uuid, created.entry);
 }
 
 function strip(jwk: JsonWebKey): JsonWebKey { const { alg: _a, ...rest } = jwk as JsonWebKey & { alg?: string }; return rest; }

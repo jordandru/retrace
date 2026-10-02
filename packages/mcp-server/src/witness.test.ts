@@ -18,22 +18,36 @@ class MemStore implements EventStore {
 }
 
 /** A fake Rekor: verifies nothing, but signs SETs with its own P-256 key exactly like the real one. */
-function fakeRekor() {
+function fakeRekor(options: { conflict?: boolean; differentArtifact?: boolean } = {}) {
   const kp = generateKeyPairSync("ec", { namedCurve: "P-256" });
   const pem = kp.publicKey.export({ type: "spki", format: "pem" }).toString();
   let logIndex = 1000;
+  const uuid = "a".repeat(64);
+  let stored: Record<string, unknown> | undefined;
+  const requests: string[] = [];
   const canon = (v: unknown): string => Array.isArray(v) ? "[" + v.map(canon).join(",") + "]" : v && typeof v === "object" ? "{" + Object.keys(v as object).sort().map((k) => JSON.stringify(k) + ":" + canon((v as any)[k])).join(",") + "}" : JSON.stringify(v);
   const fetchImpl: FetchLike = async (url, init) => {
+    requests.push(url);
     if (url.endsWith("/api/v1/log/publicKey")) return { ok: true, status: 200, text: async () => pem };
+    if (url.endsWith(`/api/v1/log/entries/${uuid}`)) return { ok: true, status: 200, text: async () => JSON.stringify({ [uuid]: stored }) };
     const entry = JSON.parse(init!.body!);
+    if (options.differentArtifact) entry.spec.data.content = Buffer.from("different checkpoint").toString("base64");
     const body = Buffer.from(JSON.stringify(entry)).toString("base64");
     const e = { body, integratedTime: 1_790_000_000, logID: "fakelog", logIndex: ++logIndex, verification: { signedEntryTimestamp: "" } };
     const s = createSign("SHA256");
     s.update(Buffer.from(canon({ body: e.body, integratedTime: e.integratedTime, logID: e.logID, logIndex: e.logIndex })));
     e.verification.signedEntryTimestamp = s.sign(kp.privateKey).toString("base64");
-    return { ok: true, status: 201, text: async () => JSON.stringify({ ["uuid" + e.logIndex]: e }) };
+    stored = e;
+    if (options.conflict) {
+      return {
+        ok: false,
+        status: 409,
+        text: async () => JSON.stringify({ code: 409, message: `an equivalent entry already exists in the transparency log with UUID ${uuid}` }),
+      };
+    }
+    return { ok: true, status: 201, text: async () => JSON.stringify({ [uuid]: e }) };
   };
-  return { fetchImpl, pem };
+  return { fetchImpl, pem, uuid, requests };
 }
 
 const ev = (over: Partial<EventInput> = {}): EventInput => ({ project: "p", actor: { type: "agent", id: "claude" }, action: "edited", artifacts: [{ id: "a" }], ...over });
@@ -103,6 +117,48 @@ test("witness refusals: unsigned checkpoint; key that is not the signer; Rekor e
   await assert.rejects(() => witnessCheckpoint(cp, stranger.privateKey, { fetchImpl: rekor.fetchImpl }), /does not match the checkpoint's signer/);
   const failing: FetchLike = async () => ({ ok: false, status: 500, text: async () => "boom" });
   await assert.rejects(() => witnessCheckpoint(cp, signer.privateKey, { fetchImpl: failing }), /Rekor 500/);
+});
+
+test("witness: Rekor 409 UUID is re-fetched and produces a record that verifies", async () => {
+  const store = new MemStore();
+  await appendEvent(store, ev());
+  const signer = await generateSigningKey();
+  const cp = await checkpointFromStore(store, "p", { signingKey: signer.privateKey });
+  const rekor = fakeRekor({ conflict: true });
+  const rec = await witnessCheckpoint(cp, signer.privateKey, { rekorUrl: "https://rekor.example", fetchImpl: rekor.fetchImpl });
+  assert.equal(rec.uuid, rekor.uuid);
+  assert.ok(rekor.requests.some((url) => url.endsWith(`/api/v1/log/entries/${rekor.uuid}`)));
+  const verdict = await verifyWitness(rec, cp, rekor.pem);
+  assert.equal(verdict.ok, true, verdict.problems.join(" | "));
+});
+
+test("witness: Rekor 409 without a UUID throws and quotes the message", async () => {
+  const store = new MemStore();
+  await appendEvent(store, ev());
+  const signer = await generateSigningKey();
+  const cp = await checkpointFromStore(store, "p", { signingKey: signer.privateKey });
+  const message = "equivalent entry exists but no identifier was returned";
+  const conflict: FetchLike = async () => ({
+    ok: false,
+    status: 409,
+    text: async () => JSON.stringify({ code: 409, message }),
+  });
+  await assert.rejects(
+    () => witnessCheckpoint(cp, signer.privateKey, { fetchImpl: conflict }),
+    new RegExp(`missing existing entry UUID: ${message}`),
+  );
+});
+
+test("witness: a 409 re-fetch containing a different artifact fails verification", async () => {
+  const store = new MemStore();
+  await appendEvent(store, ev());
+  const signer = await generateSigningKey();
+  const cp = await checkpointFromStore(store, "p", { signingKey: signer.privateKey });
+  const rekor = fakeRekor({ conflict: true, differentArtifact: true });
+  const rec = await witnessCheckpoint(cp, signer.privateKey, { fetchImpl: rekor.fetchImpl });
+  const verdict = await verifyWitness(rec, cp, rekor.pem);
+  assert.equal(verdict.ok, false);
+  assert.ok(verdict.problems.some((problem) => /logged entry content is not this checkpoint/.test(problem)));
 });
 
 test("verifyWitness ties the logged signer to the checkpoint signer", async () => {

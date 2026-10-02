@@ -14,11 +14,13 @@
 import { createHandler, parseCheckpointProjectAllowlist, parseCredentials, parseGithubRepoProjects, parseOwnerPrincipal, parseSigningKey, parseTrailerPolicy, runCheckpointCron, refreshExportCache, exportBuilder, keyId, drainPendingGithubDeliveries } from "@retrace-dev/core";
 import { D1Store } from "./d1-store.js";
 import { D1CheckpointLog } from "./checkpoint-log.js";
-import { D1ExportCache } from "./export-cache-d1.js";
+import { R2ExportCache } from "./export-cache-r2.js";
+import { readExportCacheLastRefresh, recordExportCacheRefreshResults } from "./export-cache-refresh.js";
 import { handleRemoteMcp } from "./mcp.js";
 
 export interface Env {
   DB: D1Database;
+  EXPORT_CACHE: R2Bucket;
   RETRACE_TOKEN?: string;
   /** `wrangler secret put RETRACE_CREDENTIALS` — JSON array of per-actor credentials (see @retrace-dev/core Credential) */
   RETRACE_CREDENTIALS?: string;
@@ -64,6 +66,7 @@ export function allCredentials(env: Env) {
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     const store = new D1Store(env.DB);
+    const exportCache = new R2ExportCache(env.EXPORT_CACHE);
     const api = createHandler(store, {
       // Cloud deployments have no safe implicit-open mode: missing secrets must make the service unavailable rather
       // than granting anonymous read, append, share, and delete access. Local RETRACE_OPEN remains explicit in serve.ts.
@@ -79,7 +82,8 @@ export default {
       opsProject: env.RETRACE_OPS_PROJECT,
       ownerActor: env.RETRACE_OWNER ? { type: "human", id: env.RETRACE_OWNER } : undefined,
       ownerPrincipal: parseOwnerPrincipal(env.RETRACE_OWNER),
-      exportCache: new D1ExportCache(env.DB),
+      exportCache,
+      exportCacheLastRefresh: (project) => readExportCacheLastRefresh(env.DB, project),
       trailerPolicy: parseTrailerPolicy(env.RETRACE_TRAILER_POLICY),
     });
     if (new URL(req.url).pathname === "/mcp") return handleRemoteMcp(req, env, store, api);
@@ -91,6 +95,7 @@ export default {
    *  configured → the run is skipped (an unsigned scheduled checkpoint asserts nothing worth storing). */
   async scheduled(controller: { cron?: string }, env: Env, ctx: { waitUntil(p: Promise<unknown>): void }): Promise<void> {
     const store = new D1Store(env.DB);
+    const exportCache = new R2ExportCache(env.EXPORT_CACHE);
     const trailerPolicy = parseTrailerPolicy(env.RETRACE_TRAILER_POLICY);
     ctx.waitUntil(
       drainPendingGithubDeliveries(store, { trailerPolicy }).then(
@@ -119,7 +124,12 @@ export default {
           (e) => console.error("checkpoint cron failed:", String((e as Error)?.message ?? e)),
         )
         // Export cache refresh runs after checkpoints so one project's bundle build cannot starve the witnesses.
-        .then(() => refreshExportCache(store, new D1ExportCache(env.DB), projects, exportBuilder(store, { signingKey, issuerName: env.RETRACE_ISSUER, producers })))
+        .then(async () => {
+          const attemptedAt = new Date().toISOString();
+          const results = await refreshExportCache(store, exportCache, projects, exportBuilder(store, { signingKey, issuerName: env.RETRACE_ISSUER, producers }));
+          await recordExportCacheRefreshResults(env.DB, results, attemptedAt);
+          return results;
+        })
         .then(
           (results) => console.log("export cache:", JSON.stringify(results)),
           (e) => console.error("export cache refresh failed:", String((e as Error)?.message ?? e)),
