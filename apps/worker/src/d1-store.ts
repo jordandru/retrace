@@ -1,4 +1,4 @@
-import { InsertExtras, OwnerLoginConsumption, readOwnerLoginConsumption, ArtifactIndexQuery, ArtifactIndexResult, ChainHead, Event, EventStore, HeadMovedError, HistoryQuery, HistoryPage, PendingDelivery, Share, artifactIndexRows, clampHistoryLimit, runArtifactIndexStatements, ArtifactIndexHit, historyPageFromNewestFirst, likeContains, policyDocumentFromRow, policySnapshotFromIndex, assertRouteWriteConsistent, RouteConflictError, parseEventBodyRows } from "@retrace-dev/core";
+import { CaptureIndexHit, CaptureIndexResult, runCaptureIndexStatements, InsertExtras, OwnerLoginConsumption, readOwnerLoginConsumption, ArtifactIndexQuery, ArtifactIndexResult, ChainHead, Event, EventStore, HeadMovedError, HistoryQuery, HistoryPage, PendingDelivery, Share, artifactIndexRows, clampHistoryLimit, runArtifactIndexStatements, ArtifactIndexHit, historyPageFromNewestFirst, likeContains, policyDocumentFromRow, policySnapshotFromIndex, assertRouteWriteConsistent, RouteConflictError, parseEventBodyRows } from "@retrace-dev/core";
 import type { StoreReadMetricsSink } from "@retrace-dev/core";
 import type { BreakerRow, ClassificationContextRow, PolicyRouteRow, PolicySnapshot, PolicySnapshotBudget, PolicyWrite } from "@retrace-dev/core";
 
@@ -158,6 +158,17 @@ export class D1Store implements EventStore {
     let sql_ms = 0, durationAvailable = true;
     return runArtifactIndexStatements(q, now, async ({ sql, params }) => {
       const result = await this.db.prepare(sql).bind(...params).all<ArtifactIndexHit>();
+      const duration = d1Duration(result);
+      if (duration === null) durationAvailable = false;
+      else sql_ms += duration;
+      return result.results;
+    }, metrics, () => durationAvailable ? sql_ms : null);
+  }
+
+  async captureIndexRows(q: ArtifactIndexQuery, now: () => number = Date.now, metrics?: StoreReadMetricsSink): Promise<CaptureIndexResult> {
+    let sql_ms = 0, durationAvailable = true;
+    return runCaptureIndexStatements(q, now, async ({ sql, params }) => {
+      const result = await this.db.prepare(sql).bind(...params).all<CaptureIndexHit>();
       const duration = d1Duration(result);
       if (duration === null) durationAvailable = false;
       else sql_ms += duration;

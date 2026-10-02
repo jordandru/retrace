@@ -3,7 +3,7 @@ import { DatabaseSync } from "node:sqlite";
 import {
   InsertExtras, OwnerLoginConsumption, readOwnerLoginConsumption, ArtifactIndexQuery, ArtifactIndexResult, BACKFILL_ARTIFACT_INDEX_SQL, ChainHead, Event, EventStore, HeadMovedError,
   HistoryQuery, HistoryPage, PendingDelivery, SCHEMA_PENDING_EVENT_COLUMNS_SQL, SCHEMA_PENDING_LEASE_COLUMNS_SQL, SCHEMA_PENDING_ROUTE_COLUMNS_SQL, SCHEMA_SQL, Share, artifactIndexRows, clampHistoryLimit,
-  ArtifactIndexHit, runArtifactIndexStatements, historyPageFromNewestFirst, likeContains, parseEventBodyRows,
+  CaptureIndexHit, CaptureIndexResult, runCaptureIndexStatements, ArtifactIndexHit, runArtifactIndexStatements, historyPageFromNewestFirst, likeContains, parseEventBodyRows,
 } from "@retrace-dev/core";
 import type { BreakerRow, ClassificationContextRow, PolicyRouteRow, PolicySnapshot, PolicySnapshotBudget, PolicyWrite, StoreReadMetricsSink } from "@retrace-dev/core";
 import { assertRouteWriteConsistent, policyDocumentFromRow, policySnapshotFromIndex, sameBreaker } from "@retrace-dev/core";
@@ -183,6 +183,11 @@ export class SqliteStore implements EventStore {
   async eventsReferencingArtifacts(q: ArtifactIndexQuery, now: () => number = Date.now, metrics?: StoreReadMetricsSink): Promise<ArtifactIndexResult> {
     return runArtifactIndexStatements(q, now, async ({ sql, params }) =>
       this.db.prepare(sql).all(...params) as unknown as ArtifactIndexHit[], metrics);
+  }
+
+  async captureIndexRows(q: ArtifactIndexQuery, now: () => number = Date.now, metrics?: StoreReadMetricsSink): Promise<CaptureIndexResult> {
+    return runCaptureIndexStatements(q, now, async ({ sql, params }) =>
+      this.db.prepare(sql).all(...params) as unknown as CaptureIndexHit[], metrics);
   }
 
   async insertPendingDelivery(row: PendingDelivery) {
