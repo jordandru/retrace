@@ -65,7 +65,7 @@ test("reviews, comments, workflow_run, bots, push opt-in", async () => {
   assert.deepEqual(p[0].artifacts.map((x) => x.role), ["generated", "generated"]);
 });
 
-test("push agent-address/1 resolves a user sender as the authenticated principal", async () => {
+test("T8 push agent-address/1 resolves a user sender as the authenticated principal", async () => {
   const payload = {
     repository: repo,
     ref: "refs/heads/main",

@@ -1513,7 +1513,7 @@ test("F18: bare-only and file-only evidence remains diagnostic, never a witness"
   }
 });
 
-test("agent-address/1 decision records use only producer-authenticated principals", async () => {
+test("T16 agent-address/1 decision records use only producer-authenticated principals", async () => {
   const makeInput = (principalRule?: string): EventInput => ({
     project: "p",
     actor: { type: "agent", id: "claude-code", on_behalf_of: "github:jordan" },

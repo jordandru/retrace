@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { Event } from "./schema.js";
 import { reconcile as reconcileCore, artifactPath, renderReconcileReport, CommitFacts } from "./reconcile.js";
-import { effectiveBoundary, restrictedSealEligibility, webhookSealsFromEvents } from "./capture.js";
+import { effectiveBoundary } from "./capture.js";
 /** every test names this repo's hook credential explicitly, as .retrace.json would */
 const HOOK = "assert:retrace-git";
 const reconcile: typeof reconcileCore = (c, e, o) => reconcileCore(c, e, { hookSealedBy: [HOOK], ...o });
@@ -39,31 +39,60 @@ const restricted = (seq: number, c: string, actor: any, files: string[], extra: 
     ...extra,
   });
 
-test("T3 restricted eligibility enforces identity, webhook actor, and path intersection", () => {
+test("T3 reconcile consumes every restricted eligibility outcome and reports dropped paths", () => {
   const webhook = pushed(20, "c", cloud, ["x.ts", "y.ts"]);
-  const policy = { repoName: REPO, restrictedStamps: restrictedPolicy };
-  const webhooks = webhookSealsFromEvents([webhook]);
-  const good = restrictedSealEligibility(restricted(10, "c", cloud, ["x.ts", "z.ts"]), policy, webhooks);
-  assert.deepEqual(good, { eligible: true, paths: [`repo:${REPO}#x.ts`], dropped: [`repo:${REPO}#z.ts`], sha12: sha("c").slice(0, 12) });
-  const cases: [Event, string][] = [
-    [{ ...restricted(10, "c", cloud, ["x.ts"]), idempotency_key: undefined }, "no_key"],
-    [{ ...restricted(10, "c", cloud, ["x.ts"]), idempotency_key: `git:${sha("d")}` }, "key_mismatch"],
-    [{ ...restricted(10, "c", cloud, ["x.ts"]), artifacts: [restricted(10, "c", cloud, []).artifacts[0], { id: cid("d") }] }, "commit_mismatch"],
-    [restricted(10, "d", cloud, ["x.ts"]), "no_webhook"],
+  const options = { repoName: REPO, restrictedStamps: restrictedPolicy };
+  const goodEvent = restricted(10, "c", cloud, ["x.ts", "z.ts"]);
+  const good = reconcileCore([commit("c", ["x.ts", "y.ts"])], [goodEvent, webhook], options);
+  assert.deepEqual(good.commits[0].coverage["x.ts"].window, { after: -1, before: 10 });
+  assert.deepEqual(good.commits[0].coverage["y.ts"].window, { after: -1, before: 20 });
+  assert.equal("z.ts" in good.commits[0].coverage, false);
+  assert.deepEqual(good.restricted_hook_stamps, [{
+    event_id: goodEvent.id, seq: 10, eligible: true,
+    paths: [`repo:${REPO}#x.ts`], dropped: [`repo:${REPO}#z.ts`],
+  }]);
+
+  const twoCommits = restricted(10, "c", cloud, ["x.ts"]);
+  twoCommits.artifacts.push({ id: cid("d") });
+  const cases: { event: Event; webhooks: Event[]; reason: string }[] = [
+    { event: { ...restricted(10, "c", cloud, ["x.ts"]), idempotency_key: undefined }, webhooks: [webhook], reason: "no_key" },
+    { event: { ...restricted(10, "c", cloud, ["x.ts"]), idempotency_key: `git:${sha("d")}` }, webhooks: [webhook], reason: "key_mismatch" },
+    { event: twoCommits, webhooks: [webhook], reason: "commit_mismatch" },
+    { event: restricted(10, "c", cloud, ["x.ts"]), webhooks: [], reason: "no_webhook" },
+    { event: restricted(10, "c", cloud, ["x.ts"]), webhooks: [pushed(20, "c", codex, ["x.ts"])], reason: "actor_mismatch" },
   ];
-  for (const [event, reason] of cases) assert.deepEqual(restrictedSealEligibility(event, policy, webhooks), { eligible: false, reason });
-  const otherWebhook = webhookSealsFromEvents([pushed(20, "c", codex, ["x.ts"])]);
-  assert.deepEqual(restrictedSealEligibility(restricted(10, "c", cloud, ["x.ts"]), policy, otherWebhook), { eligible: false, reason: "actor_mismatch" });
+  for (const { event, webhooks, reason } of cases) {
+    const report = reconcileCore([commit("c", ["x.ts"])], [event, ...webhooks], options);
+    assert.deepEqual(report.restricted_hook_stamps, [{ event_id: event.id, seq: 10, eligible: false, reason }], reason);
+    if (webhooks.length) assert.deepEqual(report.commits[0].coverage["x.ts"].window, { after: -1, before: 20 }, reason);
+  }
 });
 
-test("T4 and T7 ineligible restricted claims move no boundary and do not clear dual witness", () => {
-  const edit = ev(15, codex, "edited", [`repo:${REPO}#x.ts`]);
-  const noKey = { ...restricted(10, "c", cloud, ["x.ts"]), idempotency_key: undefined };
-  const webhook = pushed(20, "c", cloud, ["x.ts"]);
-  const report = reconcileCore([commit("c", ["x.ts"])], [noKey, edit, webhook], { repoName: REPO, restrictedStamps: restrictedPolicy });
-  assert.deepEqual(report.commits[0].coverage["x.ts"].window, { after: -1, before: 20 });
-  assert.deepEqual(report.commits[0].findings.map((finding) => `${finding.kind}:${finding.level}`), ["producer_disagreement:fail", "misattributed:fail"]);
+test("T4 reconcile keeps Codex's poisoned B boundary out for no-key and keyed actor-mismatch variants", () => {
+  const run = (candidate: Event, reason: "no_key" | "actor_mismatch") => {
+    const events = [
+      ev(5, codex, "edited", [`repo:${REPO}#x.ts`]),
+      sealed(10, "b", codex, ["y.ts"]),
+      pushed(11, "b", codex, ["y.ts"]),
+      candidate,
+      sealed(20, "a", claude, ["x.ts"]),
+      pushed(21, "a", claude, ["x.ts"]),
+    ];
+    const report = reconcileCore([commit("b", ["y.ts"]), commit("a", ["x.ts"])], events, {
+      repoName: REPO, hookSealedBy: [HOOK], restrictedStamps: restrictedPolicy,
+    });
+    const target = report.commits.find((item) => item.sha === sha("a"))!;
+    assert.deepEqual(target.coverage["x.ts"].window, { after: -1, before: 20 }, reason);
+    assert.ok(target.findings.some((finding) => finding.kind === "misattributed" && finding.level === "fail"), reason);
+    assert.equal(report.ok, false, reason);
+    assert.deepEqual(report.restricted_hook_stamps, [{ event_id: candidate.id, seq: 12, eligible: false, reason }]);
+  };
 
+  run({ ...restricted(12, "b", cloud, ["x.ts"]), idempotency_key: undefined }, "no_key");
+  run(restricted(12, "b", cloud, ["x.ts"]), "actor_mismatch");
+});
+
+test("T7 a restricted seal without a webhook remains a claim", () => {
   const noWebhook = reconcileCore([commit("c", ["x.ts"])], [restricted(10, "c", cloud, ["x.ts"])], { repoName: REPO, restrictedStamps: restrictedPolicy });
   assert.equal(noWebhook.commits[0].sealed, undefined);
   assert.match(noWebhook.commits[0].findings[0].detail, /restricted witness ineligible: no_webhook/);
@@ -95,8 +124,9 @@ test("T12 a stamp in both general and restricted lists is a configuration error"
 });
 
 test("T14 restricted lower bounds survive a later webhook and keep intervening edits visible", () => {
+  const restrictedEvent = restricted(10, "c", cloud, ["x.ts"]);
   const events = [
-    restricted(10, "c", cloud, ["x.ts"]),
+    restrictedEvent,
     ev(15, codex, "edited", [`repo:${REPO}#x.ts`]),
     pushed(20, "c", cloud, ["x.ts", "w.ts"]),
     ev(22, codex, "edited", [`repo:${REPO}#w.ts`]),
@@ -107,6 +137,15 @@ test("T14 restricted lower bounds survive a later webhook and keep intervening e
   assert.deepEqual(report.commits[0].coverage["x.ts"].window, { after: 10, before: 25 });
   assert.deepEqual(report.commits[0].coverage["w.ts"].window, { after: 20, before: 25 });
   assert.deepEqual(report.commits[0].findings.map((finding) => `${finding.kind}:${finding.level}`), ["misattributed:fail"]);
+
+  const withoutRestricted = events.filter((event) => event !== restrictedEvent);
+  const baseline = reconcileCore([commit("a", ["x.ts", "w.ts"])], withoutRestricted, { repoName: REPO, hookSealedBy: [HOOK] });
+  const configuredButAbsent = reconcileCore([commit("a", ["x.ts", "w.ts"])], withoutRestricted, {
+    repoName: REPO, hookSealedBy: [HOOK], restrictedStamps: restrictedPolicy,
+  });
+  assert.deepEqual(configuredButAbsent, baseline, "no restricted witness preserves the existing report");
+  assert.deepEqual(baseline.commits[0].coverage["x.ts"].window, { after: 20, before: 25 });
+  assert.ok(baseline.commits[0].findings.some((finding) => finding.kind === "misattributed" && finding.level === "warn"));
 });
 
 test("T15 restricted upper bounds are per path, including a rename source", () => {

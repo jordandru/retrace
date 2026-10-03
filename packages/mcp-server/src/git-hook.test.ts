@@ -67,7 +67,7 @@ test("live hook duration includes startup before the hook module loads", async (
   assert.ok(commit.duration_ms! >= 100, `process-start duration omitted startup: ${commit.duration_ms}ms`);
 });
 
-test("git adapter: install hook, human commit, agent commit with trailers, backfill idempotent", async () => {
+test("T8 git adapter runs the actual hook for a known agent author address", async () => {
   const dir = mkdtempSync(join(tmpdir(), "retrace-git-"));
   const db = join(dir, "ledger.db");
   const env = { RETRACE_DB: db, RETRACE_PROJECT: "rpg" };
@@ -90,7 +90,11 @@ test("git adapter: install hook, human commit, agent commit with trailers, backf
   writeFileSync(join(dir, "fight.ts"), "export const jab = () => 1;\n");
   sh(dir, "git", ["add", "."]);
   const root = await seedInstruct(db);
-  sh(dir, "git", ["commit", "-qm", `add jab\n\nRetrace-Actor: claude-code\nRetrace-Model: claude-fable-5\nRetrace-Caused-By: ${root}\nCo-Authored-By: Claude <noreply@anthropic.com>`], env);
+  sh(dir, "git", ["commit", "-qm", `add jab\n\nRetrace-Actor: claude-code\nRetrace-Model: claude-fable-5\nRetrace-Caused-By: ${root}\nCo-Authored-By: Claude <noreply@anthropic.com>`], {
+    ...env,
+    GIT_AUTHOR_NAME: "Claude",
+    GIT_AUTHOR_EMAIL: "noreply@anthropic.com",
+  });
 
   const store = new SqliteStore(db);
   let events = await store.all("rpg");
@@ -116,10 +120,11 @@ test("git adapter: install hook, human commit, agent commit with trailers, backf
   assert.equal(agent.actor.type, "agent");
   assert.equal(agent.actor.id, "claude-code");
   assert.equal(agent.actor.model, "claude-fable-5");
-  assert.equal(agent.actor.on_behalf_of, "jordan@slcwitit.com");
+  assert.equal(agent.actor.on_behalf_of, undefined);
   assert.equal(agent.caused_by, root);
   assert.equal(agent.intent, "add jab");
   assert.equal(agent.method?.automated, true);
+  assert.equal(agent.method?.params?.principal_rule, "agent-address/1");
 
   // backfill picks up the initial commit only; re-running dedupes everything
   const bf = sh(dir, "node", [bin, "backfill", "--repo", dir], env);

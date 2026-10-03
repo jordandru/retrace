@@ -175,7 +175,7 @@ test("resolveCommitActor: Retrace-Model-Source trailer, Decision A, Decision B",
   assert.equal(coauthorFamilyOnly.modelClaim, "absent");
 });
 
-test("agent-address/1 treats known agent author addresses as transport metadata", () => {
+test("T8 agent-address/1 treats known agent author addresses as transport metadata", () => {
   const message = "change\n\nRetrace-Actor: claude-code\n";
   const legacy = resolveCommitActor({
     message, authorName: "Claude", authorEmail: "noreply@anthropic.com",
