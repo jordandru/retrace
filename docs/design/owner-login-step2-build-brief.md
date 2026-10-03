@@ -1,7 +1,9 @@
 # Owner-login step 2 — builder brief (the cached capture closure: schema, fill, one logical read, delivery, invalidation, replay, status, doctor)
 
-**Status:** v1, 2026-10-03, by claude-code (coordinator and spec author, `claude-fable-5-1`, model source harness-runtime), on Jordan's
-signed go `evt_69acbdf91fdf46ed8a2452429fc12636` ("Go on s2 build brief"). **Not built.** Builds `docs/design/owner-login-capture-closure.md`
+**Status:** v2, 2026-10-03, by claude-code (coordinator and spec author, `claude-fable-5-1`, model source harness-runtime), on Jordan's
+signed go `evt_69acbdf91fdf46ed8a2452429fc12636` ("Go on s2 build brief"); v2 is the fix round on his go `evt_0cf2173b1cdc4c7383dc145b4bdc0ac4`
+after Codex round 1 (`evt_0e22d9ebbd8f43b6861d192788033d4a`, PR 168 at `c2b8c270`: F1, F2, F3 Medium; NOOA approved
+`evt_36c2b5d87f51409d8533bb0cf2864bc2`; gate check `evt_b24923c365364612905bb5fd8b5ff387`). **Not built.** Builds `docs/design/owner-login-capture-closure.md`
 **v3** (merged `fdeb3b1d`, PR 165; cited below as **N§**), whose §7 probes are done: P4 `evt_520a8909cfca46c689bf1c9857d9f66d`,
 P5 `evt_2b970cedfc574580bbeedf2e734c70b9` and `evt_294041feee804f13a874c2cb3c9f37ac`, P6 `evt_820b5d8ce8404a69b416396a2906b72c`. The note's
 text wins over this brief wherever they differ, **except the extensions this brief lists as its own** (§1.1's table shapes and the refresh
@@ -22,7 +24,27 @@ so the higher gate applies (agent-rules 12): Codex first, NOOA and Grok, then th
 | P6 | the §4.4 design, as a store proxy under the unchanged classifier, reproduced the uncached decision and counters for **215 of 215** owner-login decisions on SQLite (stale closure extended), 22 of 22 at an exact-head fill, 215 of 215 above-head fallbacks, and 54 of 54 on a memory sample; every §5 (a) fixture passed on both stores; thin seal records matched full events |
 
 What P6 did not cover, and this build must: the `CLASSIFY_ROW_CAP` trip, the `EvidenceBudget` remaining counter under synthetic trips,
-the fill statement's SQL form, workerd and D1 limits, and concurrency.
+the fill statement's SQL form, workerd and D1 limits, concurrency, and **more than one amendment target** (P6's seal deduplication was
+wrong for a seal shared by two targets, Codex round 1 F1; §1.3 fixes the rule).
+
+**v2, the fix round for Codex round 1.** What changed:
+- **F1 (Medium), a seal shared by two targets.** The P6 prototype, which v1 made the reference for §1.3, deduplicated seal facts by seq
+  (`sealBySeq.set`), so a seal present in two targets' closures kept only the last target's path cut and lost a real previous touch; Codex
+  reproduced an amendment accepted that the uncached path rejects. v2 (§1.3, "Selection") requires the **union of a seal's cuts across every
+  closure used**, keeping one capture record per seal id; T6 gains the same-repository shared-seal fixture. P6's 215-of-215 result stands only
+  because this ledger has one amendment target; the header says so.
+- **F2 (Medium), migration order.** v1 seeded `capture_index_epoch` before the migration that creates it. v2 (§1.5) gives `migrate.mjs` a
+  **bootstrap phase**: the three tables' DDL first (idempotent), then the epoch rows and `begin`, then the rest of `schema.sql`, then `end`;
+  T17 runs first-install, upgrade and rerun orderings on a scratch store.
+- **F3 (Medium), the SQLite constructor's backfill.** `SqliteStore` runs `backfillArtifactIndexOnce` on construction
+  (`packages/mcp-server/src/sqlite-store.ts:29`, `:33–38`), an index mutation outside the fence. v2 (§1.5) puts it inside the protocol:
+  the constructor brackets the backfill with `begin`/`end` for every project it touches, and refuses to backfill while any epoch is odd;
+  a reopen fixture (T17) checks that closures filled before the reopen are stale after it.
+- **Codex's refinements applied:** the logical read's pieces call the store's raw `captureIndexRows`, never the budget proxy (§1.3); the
+  publish guard distinguishes an absent epoch row from an explicit 0 and decides success explicitly, including a zero-closure fill (§1.2);
+  document-shape validation is separate from the hash check (§1.4); the thin record carries the encoded eligibility bit (§1.4); T8 reaches
+  `CLASSIFY_ROW_CAP` through `evaluateAmendmentsAtU` and the owner budget through `classifyOwnerLogin`; T15's subset oracle runs on a small
+  adversarial fixture, not the live term set (§2). §6 records Codex's agreement with all six positions.
 
 ## 0. What step 2 is, and is not
 
@@ -99,8 +121,12 @@ capture_closure_refresh (project TEXT PRIMARY KEY, attempted_at TEXT NOT NULL, r
 5. Stop at `budgetMs` (default **10,000 ms**, §6 (a)): if any target is unfinished, return `incomplete` and publish nothing.
 6. Read the epoch again; if it is not `e` → `failed` with reason `epoch_moved`, publish nothing.
 7. **Publish all or none** in one D1 batch: delete the project's rows and insert the new ones, every statement conditioned in SQL on the
-   epoch still being `e` (`… WHERE (SELECT epoch FROM capture_index_epoch WHERE project = ?) IS ? …`; a project with no epoch row conditions
-   on `IS NULL` for `e = 0`). The batch is atomic (D1 `batch`; SQLite a transaction). If the condition fails, `failed` with `epoch_moved`.
+   epoch still being `e`. **The guard distinguishes an absent row from an explicit 0:** when the fill read no row, the condition is
+   `NOT EXISTS (SELECT 1 FROM capture_index_epoch WHERE project = ?)`; when it read `e`, the condition is `(SELECT epoch FROM
+   capture_index_epoch WHERE project = ?) = ?` (never a single `IS NULL` comparison for both cases). The batch is atomic (D1 `batch`; SQLite
+   a transaction). **Success is decided explicitly**, as `deleteProject` decides it (`d1-store.ts`, the `auditLanded` guard): the batch
+   includes a guard write whose `changes` count says whether the condition held; zero deleted rows alone never means the epoch moved, and a
+   project with zero closures publishes an empty set the same way. If the guard did not land, `failed` with `epoch_moved`.
 8. Write the `capture_closure_refresh` row (`last_ok_at` moves on `refreshed` or `unchanged` only; a failed write is logged and never throws
    out of the cron chain), like `recordExportCacheRefreshResults` (`apps/worker/src/export-cache-refresh.ts`).
 
@@ -115,10 +141,14 @@ with one shared implementation `runClosureCaptureRead` that every store calls wi
 the §4.4 algorithm as P6 ran it (`~/.retrace/ops-2026-10-03/step2-probes/p6/p6-prototype.mjs`, `closureProxy`):
 
 - **Selection:** pairs whose term is one of `q.artifact_keys` (as `key:` terms) or `q.artifact_prefixes` present in the closure (as `prefix:`
-  terms), with `seq <= q.through_seq`; rows by seq with the closure's stamped flag; seal facts as **capture records** (§1.4).
+  terms), with `seq <= q.through_seq`; rows by seq with the closure's stamped flag; seal facts as **capture records** (§1.4). **A seal that
+  appears in more than one closure used by the delivery is one record whose paths are the union of its cuts across those closures** (each
+  closure cut the paths to its own target's units; the delivery needs every unit of every candidate target). Never keep only one closure's
+  cut (Codex round 1 F1; T6).
 - **Pieces at the original caps** (N§ R7): the extension over `(through_seq, q.through_seq]` for the cached terms, and one full read over
-  `(-1, q.through_seq]` for prefixes the closure lacks, each a native `captureIndexRows` call with `q.row_cap` and `q.deadline` unchanged. A
-  piece that returns `budget`, `deadline` or `store_error` ends the logical read with that reason.
+  `(-1, q.through_seq]` for prefixes the closure lacks, each a call on the **store's raw `captureIndexRows`**, never on the budget-wrapped
+  proxy (a piece routed through `EvidenceBudget` would be charged twice), with `q.row_cap` and `q.deadline` unchanged. A piece that returns
+  `budget`, `deadline` or `store_error` ends the logical read with that reason.
 - **Union and dedup** by `(seq, key)` and by seq; **`budget` iff the deduplicated pairs exceed `q.row_cap`**; rows sorted by seq, each with
   its merged keys, stamped flag, and the event (a piece's full event when it returned one, else the capture record).
 - A key term the closure lacks is not a fallback here: the caller (§1.4) decides before calling.
@@ -134,12 +164,15 @@ the §4.4 algorithm as P6 ran it (`~/.retrace/ops-2026-10-03/step2-probes/p6/p6-
 - **Validation, every N§ R6 condition**, in this order, each producing a `cache` value for R8: no row → `miss`; profile not
   `capture-closure/3` → `malformed`; policy digest ≠ the delivery's → `stale`; epoch odd → `dirty`; epoch ≠ a closure's → `stale`; closures
   at different `through_seq` → `stale`; `through_seq > U` → `above_head`; anchor hash ≠ `events.hash` at `through_seq` → `stale`;
-  `facts_sha256` ≠ sha256 of `facts_json` → `malformed`; a target key the closures lack → `malformed`. Any of these: today's uncached path for
+  `facts_sha256` ≠ sha256 of `facts_json` → `malformed`; **the document fails shape validation** (version string, array shapes, index
+  bounds, integer seqs, stamped flags in {0, 1}, the seal tuple's arity and types) → `malformed`, checked separately from and after the
+  hash, because a matching hash proves integrity, not shape; a target key the closures lack → `malformed`. Any of these: today's uncached path for
   both reads, unchanged. Otherwise `hit`, and both reads go through §1.3 with the delivery's own terms (`uncovered` keys, then the
   preliminary seals' prefixes). The boundary, eligibility, veto and prefixes are computed as today over the returned rows (N§ R2).
 - **R5, capture records never shadow full events.** A capture record is the thin event of N§4.1 (`id`, `project`, `seq`, `action`, `actor`
-  {type, id}, `caused_by`, the `commit:` artifact and the cut paths as artifacts, `method.tool`, `method.params.sealed_by` and `.sha`, `tags`
-  push). Change the two map constructions so a full event always wins: `classify.ts:733` builds `contextEvents` from
+  {type, id}, `caused_by`, the `commit:` artifact and the unioned cut paths as artifacts, `method.tool`, `method.params.sealed_by` and
+  `.sha`, `tags` push, and the encoded eligibility bit: `ik_git01 = 0` reconstructs a non-`git:` `idempotency_key` so `captureSealEligible`'s
+  shape test fails as it would on the full event, as P6's `thinEvent` does). Change the two map constructions so a full event always wins: `classify.ts:733` builds `contextEvents` from
   `[...captureEvents, ...dependencies.events, ...candidates]`, and the call at `:737` passes `[...captureEvents, ...dependencies.events]`
   (later entries overwrite earlier ones in both maps, `attribution.ts:149`). T9 asserts the order.
 - **R8 metrics** on the `amendments_calls` entries (`owner-login-record.ts`, `OwnerLoginAmendmentsCallTiming`): `cache`, `through_seq`,
@@ -154,10 +187,19 @@ the §4.4 algorithm as P6 ran it (`~/.retrace/ops-2026-10-03/step2-probes/p6/p6-
 - Helpers on the stores: `beginIndexMaintenance(project, reason)` moves an even epoch `e` to `e + 1` in one statement conditioned on
   `epoch % 2 = 0` and **throws if the epoch is already odd**; `endIndexMaintenance(project)` moves `e + 1` to `e + 2`, conditioned on odd.
   Both write `changed_at` and `reason`.
-- **`migrate.mjs`** wraps the schema statements: before the first statement it inserts an epoch row at 0 for every project in `events`
-  (`INSERT OR IGNORE … SELECT DISTINCT project, 0 …`) and runs `begin` for every project (the `INSERT OR IGNORE` backfill in `schema.sql`
-  inserts index rows at or below the head, so every migrate is maintenance); after the last statement it runs `end` for every project. A
-  migrate that stops midway leaves the epoch odd, which is the intended fail-closed state until the operator runs `end` after finishing.
+- **`migrate.mjs`** runs in **three phases** (Codex round 1 F2): (1) **bootstrap**: the three tables' `CREATE TABLE IF NOT EXISTS`
+  statements of §1.1, idempotent, so they exist on a fresh database and on the current one; (2) **seed and begin**: insert an epoch row at 0
+  for every project in `events` (`INSERT OR IGNORE … SELECT DISTINCT project, 0 FROM events`; on a fresh database `events` is created in
+  phase 1's DDL set too, or the seed is skipped when it does not exist) and run `begin` for every project, because the `INSERT OR IGNORE`
+  backfill in `schema.sql` inserts index rows at or below the head and so every migrate is maintenance; (3) the rest of `schema.sql`, then
+  `end` for every project. A migrate that stops midway leaves the epoch odd, the intended fail-closed state until the operator finishes and
+  runs `end`. T17 runs the three orderings a real deployment meets: a fresh database, the current production schema, and a rerun.
+- **`SqliteStore`'s automatic backfill joins the protocol** (Codex round 1 F3). The constructor calls `backfillArtifactIndexOnce`
+  (`packages/mcp-server/src/sqlite-store.ts:29`, body `:33–38`), which runs `BACKFILL_ARTIFACT_INDEX_SQL` whenever events exist and the
+  index is empty: an index mutation at an unchanged epoch, so a local store reopened after a fenced index removal would restore membership
+  under closures that still validate. The constructor therefore **brackets the backfill with `begin` and `end` for every project it
+  touches**, in the same transaction as the backfill, and **refuses to backfill while any project's epoch is odd** (it throws with the
+  runbook's instruction instead of mutating). The memory store has no persistent index and needs nothing. T17 covers the reopen.
 - **The runbook** `docs/runbooks/capture-index-maintenance.md` (class a): one operation at a time; `begin` before the first change to
   `event_artifact_index` or `events` bodies at or below the head, `end` after the last; what to do when `begin` refuses (an operation is in
   progress or was abandoned: finish or roll it back, then `end`); restores run the protocol (N§4.3); manual D1 writes outside it are the
@@ -191,18 +233,18 @@ not decide.
 | T3 | same | a late webhook seal naming an old commit with a new path, and a new commit with a new prefix, after the fill: equal; one full read |
 | T4 | same | the surplus-prefix veto (Codex's PR 165 r1 fixture, eight events): uncached `store_error`; closure at `H = U + 1` → `above_head`, uncached path, `store_error`; closure at `H = U` → selection by term, `store_error`; `failure_origin: veto` |
 | T5 | same | two deliveries at one head with different base events: each equals its uncached run |
-| T6 | same | two targets in two repositories with an alias, overlapping keys, and a covered key: equal (the union and dedup of N§4.4 step 3) |
+| T6 | same | two targets in two repositories with an alias, overlapping keys, and a covered key: equal (the union and dedup of N§4.4 step 3); and **Codex's shared-seal fixture**: one owner-stamped seal touching `a.ts` and `b.ts`, two targets in the same repository (one per path), one amendment per target citing the earlier evidence: uncached rejects both as `uncorroborated`, and the closure path must too (a single-closure cut would accept one) |
 | T7 | same | every R6 condition from §1.4, one at a time: `cache` names it, the uncached path runs, the decision equals uncached |
-| T8 | same | the three budget boundaries, each tripped by one row in the uncached path and the closure path alike: the runner's `row_cap` on the extension, `CLASSIFY_ROW_CAP` (build a ledger that reaches it), `OWNER_LOGIN_ROW_CAP`; and Codex's PR 165 r2 cases: exact-cap empty tail (succeeds), failed logical read (remaining counter equal), overlapping alias prefixes `app` / `app@aaaaaaa` (counted once) |
+| T8 | same | the three budget boundaries, each tripped by one row in the uncached path and the closure path alike: the runner's `row_cap` on the extension; `CLASSIFY_ROW_CAP` through `evaluateAmendmentsAtU` directly (no owner budget, cumulative base rows and reads so the stage's remaining allowance is what trips); `OWNER_LOGIN_ROW_CAP` through `classifyOwnerLogin`; and Codex's PR 165 r2 cases: exact-cap empty tail (succeeds), failed logical read (remaining counter equal), overlapping alias prefixes `app` / `app@aaaaaaa` (counted once) |
 | T9 | same | an evidence id, a cause id and a traversed ancestor that are each also a capture record: the full event wins in both maps; a full dependency whose id is also a capture candidate |
 | T10 | same | a seal with an empty cut whose own-key seq sets `before`; a missing full OID; conflicting resolutions of one reference |
 | T11 | same | per-store over-match: `repo:x#/retrace#a.ts` against key `repo:retrace#a.ts` counts one pair on SQLite and none in memory; each store equals its own uncached run |
 | T12 | same | the generation fence: a fill wholly inside maintenance publishes nothing (`dirty`); a fill that straddles the opening move fails with `epoch_moved`; a delivery reading an odd epoch takes the uncached path; closures under `e` are stale after `e + 2`; `begin` refuses when odd; `end` refuses when even |
 | T13 | same | anchor mismatch (a rolled-back ledger), hash-invalid closure, policy-digest mismatch, mixed heads, missing term: uncached path, equal |
 | T14 | same | a well-formed tampered closure (stamped flag flipped, hash recomputed) decides differently in band and is reported `semantic` by the replay of §1.6; a hash-invalid tamper falls back |
-| T15 | `d1-store.workerd.test.ts` | the closure batch fetch, the fill statement and the extension under D1 limits: ≤ 100 bound parameters, ≤ 5 compound members, no LIKE or GLOB over 50 bytes; the fill statement's membership equals the capture statement's for every subset of its terms, on fixtures with `eq`, `prefix`, `unbounded` and `suffix` members |
+| T15 | `d1-store.workerd.test.ts` | the closure batch fetch, the fill statement and the extension under D1 limits: ≤ 100 bound parameters, ≤ 5 compound members, no LIKE or GLOB over 50 bytes; the fill statement's membership equals the capture statement's for every subset of the terms of a **small adversarial fixture** (overlapping and shared lookup terms; `eq`, `prefix`, `unbounded` and `suffix` members), not the live 236-term input |
 | T16 | `d1-store.workerd.test.ts` | the publish batch is atomic and conditioned: a changed epoch leaves the previous rows; `deleteProject` removes all three tables' rows |
-| T17 | `capture-closure.test.ts` | `migrate`-style wrapping: begin, schema, end on a scratch SQLite store; an abandoned operation leaves the epoch odd and the fill `dirty` |
+| T17 | `capture-closure.test.ts`, `sqlite-store.test.ts` | the three-phase migrate on a fresh database, on the current production schema and as a rerun (bootstrap, seed and begin, schema, end; each ends even); an abandoned operation leaves the epoch odd and the fill `dirty`; **reopen**: fill at an even epoch, remove the index rows under `begin`/`end`, close and reopen the store: the constructor's backfill runs bracketed, the epoch moves, and the earlier closures are `stale`; reopening while an epoch is odd throws and mutates nothing |
 | T18 | `export-cli.test.ts` | the replay's `mismatch_class` on fixtures: a sealed `unavailable/deadline` → `operational`; a sealed completed decision whose recomputation differs → `semantic`; a historical `unavailable/store_error` without a marker → `unknown` |
 | T19 | `router.test.ts`, `doctor.test.ts` | the `capture_closure` status block in each state; the rendered line's forbidden words; the doctor warning in each condition; an older Worker skipped |
 | T20 | `capture-closure.test.ts` | operational: a real deadline inside the logical read ends `unavailable/deadline` with `failure_origin: deadline`; a store error on the closure fetch falls back; a `budget` or veto outcome is never retried uncached |
@@ -244,6 +286,10 @@ entries then, and the result goes on the note as a dated correction. If 2 or mor
 
 ## 6. Open items the gate should settle (each with the coordinator's position)
 
+Codex round 1 agreed with each position below (`evt_0e22d9eb`), with riders applied in v2: (a) is a wall-time bound, not a CPU proof;
+(b) subject to T15; (c) read the anchors from the fetched closures' heads in SQL; (d) Codex builds and does not review its own code; (e)
+markerless `unavailable` records classify as `unknown`; (f) includes F3's local automatic path.
+
 - **(a) The fill budget.** Position: 10,000 ms with `incomplete` on overrun (P5 measured 0.42 s per target offline; the Worker's cron
   has a 30 s CPU budget shared with the export refresh). Resume policy for many targets is deferred until a second amendment exists.
 - **(b) The fill statement.** Position: the `withTerm` member projection (one round trip per read) rather than P5's per-term reads
@@ -275,3 +321,8 @@ entries then, and the result goes on the note as a dated correction. If 2 or mor
 | P5 offline and kit; D1 result | `evt_2b970cedfc574580bbeedf2e734c70b9`; `evt_294041feee804f13a874c2cb3c9f37ac` |
 | P6 result | `evt_820b5d8ce8404a69b416396a2906b72c` |
 | Go for this brief | `evt_69acbdf91fdf46ed8a2452429fc12636` |
+| v1 as PR 168 at `c2b8c270` | hook `evt_7aa1007c676c4899b84e6f3f6375d3da`, outcome `evt_a428e43741f24d62994db5eede8e87a3` |
+| Codex round 1: rejected (F1, F2, F3 Medium) | `evt_0e22d9ebbd8f43b6861d192788033d4a` |
+| NOOA round 1: approved | `evt_36c2b5d87f51409d8533bb0cf2864bc2` |
+| Gate check round 1 | `evt_b24923c365364612905bb5fd8b5ff387` |
+| Go for the v2 fix round | `evt_0cf2173b1cdc4c7383dc145b4bdc0ac4` |
