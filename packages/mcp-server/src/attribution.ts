@@ -117,7 +117,10 @@ export async function amendAttributionMain(flags: Record<string,string|boolean>)
   const preview=()=> {
     const diagnostics=options.context!.diagnostics;
     const by_reason:Record<string,number>={};
-    for(const diagnostic of diagnostics)by_reason[diagnostic.reason]=(by_reason[diagnostic.reason]??0)+1;
+    for(const diagnostic of diagnostics) {
+      const reason=diagnostic.reason ?? (diagnostic.status==="restricted" && diagnostic.eligible ? "restricted_eligible" : "unknown");
+      by_reason[reason]=(by_reason[reason]??0)+1;
+    }
     return {recorded:false,advisory:true,head:options.snapshot!.head,policy_digest:options.context!.policy_digest,git_facts_digest:options.context!.git_facts_digest,diagnostics_summary:{total:diagnostics.length,by_reason},...(flags.verbose?{diagnostics}:{}),result:preflight.result,affected:preflight.affected,input:preflight.input};
   };
   if(flags["dry-run"]){console.log(JSON.stringify(preview(),null,2));return preflight.result.ok?0:1;}

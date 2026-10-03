@@ -4,7 +4,7 @@ import {
   generateSigningKey, appendEvent, buildExportBundle, EventStore, Event, Share, EventInput,
   pageHistoryNewest, keyId, publicFromPrivate, signCanonical, verifyExportBundle, GENESIS_HASH,
 } from "@retrace-dev/core";
-import { parseNameStatus, verifiedExportEvents } from "./reconcile.js";
+import { parseNameStatus, parseRestrictedHookStamps, reconcileOptionsFrom, verifiedExportEvents } from "./reconcile.js";
 import { fetchVerifiedRemoteEvents, historyTail } from "./verified-events.js";
 import { RemoteStore } from "./remote-store.js";
 
@@ -41,6 +41,27 @@ test("parseNameStatus: modify, add, delete, rename with source", () => {
   assert.deepEqual(parseNameStatus("M\ta.ts\nA\tb.ts\nD\tc.ts\nR095\told.ts\tnew.ts\nC100\tsrc.ts\tdst.ts\n"), [
     { path: "a.ts", status: "M" }, { path: "b.ts", status: "A" }, { path: "c.ts", status: "D" }, { path: "new.ts", status: "R", from: "old.ts" }, { path: "dst.ts", status: "C", from: "src.ts" },
   ]);
+});
+
+test("T10 restricted hook stamp flags parse, merge, override file entries, and reject malformed values", () => {
+  assert.deepEqual(parseRestrictedHookStamps("pinned:cloud=claude-code-cloud\npinned:other=codex"), [
+    { stamp: "pinned:cloud", actor: { type: "agent", id: "claude-code-cloud" } },
+    { stamp: "pinned:other", actor: { type: "agent", id: "codex" } },
+  ]);
+  const cfg = { reconcile: { restricted_hook_stamps: [
+    { stamp: "pinned:cloud", actor: { type: "agent", id: "old-cloud" } },
+    { stamp: "pinned:file", actor: { type: "agent", id: "grok" } },
+  ] } };
+  assert.deepEqual(reconcileOptionsFrom(cfg, { restrictedStamps: parseRestrictedHookStamps("pinned:cloud=claude-code-cloud") }).restrictedStamps, [
+    { stamp: "pinned:cloud", actor: { type: "agent", id: "claude-code-cloud" } },
+    { stamp: "pinned:file", actor: { type: "agent", id: "grok" } },
+  ]);
+  assert.deepEqual(reconcileOptionsFrom({ reconcile: {} }, { restrictedStamps: parseRestrictedHookStamps("pinned:cloud=claude-code-cloud") }).restrictedStamps, [
+    { stamp: "pinned:cloud", actor: { type: "agent", id: "claude-code-cloud" } },
+  ]);
+  for (const bad of ["missing-equals", "=actor", "stamp=", "stamp=not valid"]) {
+    assert.throws(() => parseRestrictedHookStamps(bad), /--restricted-hook-stamp/);
+  }
 });
 
 test("verifiedExportEvents fails closed: no trusted key, wrong key, tampered events, self-attested; passes only a valid signed full export", async () => {

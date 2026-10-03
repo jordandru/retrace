@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Event } from "./schema.js";
 import { reconcile as reconcileCore, artifactPath, renderReconcileReport, CommitFacts } from "./reconcile.js";
+import { effectiveBoundary, restrictedSealEligibility, webhookSealsFromEvents } from "./capture.js";
 /** every test names this repo's hook credential explicitly, as .retrace.json would */
 const HOOK = "assert:retrace-git";
 const reconcile: typeof reconcileCore = (c, e, o) => reconcileCore(c, e, { hookSealedBy: [HOOK], ...o });
@@ -21,6 +22,116 @@ const commit = (c: string, files: (string | { path: string; status: "R"; from: s
 /** stamp: the server's sealed_by; "" = unstamped (an explicit `undefined` would select the default) */
 const sealed = (seq: number, c: string, actor: any, files: string[], action: Event["action"] = "committed", stamp: string = HOOK) =>
   ev(seq, actor, action, [cid(c), ...files.map((f) => `repo:${REPO}#${f}`)], { method: { tool: "git", automated: true, params: stamp ? { sealed_by: stamp } : {} }, idempotency_key: `git:${sha(c)}` });
+const RESTRICTED = "pinned:claude-code-cloud";
+const restrictedPolicy = [{ stamp: RESTRICTED, actor: { type: "agent", id: "claude-code-cloud" } }];
+const cloud = { type: "agent" as const, id: "claude-code-cloud" };
+const pushed = (seq: number, c: string, actor: any, files: string[]) =>
+  ev(seq, actor, "committed", [cid(c), ...files.map((f) => `repo:${REPO}#${f}`)], {
+    tags: ["github", "push"],
+    method: { tool: "git", params: { producer: "github-push", sealed_by: "webhook:github", sha: sha(c) } },
+    idempotency_key: `gh:push:${REPO}:${sha(c)}`,
+  });
+const restricted = (seq: number, c: string, actor: any, files: string[], extra: Partial<Event> = {}) =>
+  ev(seq, actor, "committed", [cid(c), ...files.map((f) => `repo:${REPO}#${f}`)], {
+    method: { tool: "git", params: { sealed_by: RESTRICTED, sha: sha(c) } },
+    idempotency_key: `git:${sha(c)}`,
+    ...extra,
+  });
+
+test("T3 restricted eligibility enforces identity, webhook actor, and path intersection", () => {
+  const webhook = pushed(20, "c", cloud, ["x.ts", "y.ts"]);
+  const policy = { repoName: REPO, restrictedStamps: restrictedPolicy };
+  const webhooks = webhookSealsFromEvents([webhook]);
+  const good = restrictedSealEligibility(restricted(10, "c", cloud, ["x.ts", "z.ts"]), policy, webhooks);
+  assert.deepEqual(good, { eligible: true, paths: [`repo:${REPO}#x.ts`], dropped: [`repo:${REPO}#z.ts`], sha12: sha("c").slice(0, 12) });
+  const cases: [Event, string][] = [
+    [{ ...restricted(10, "c", cloud, ["x.ts"]), idempotency_key: undefined }, "no_key"],
+    [{ ...restricted(10, "c", cloud, ["x.ts"]), idempotency_key: `git:${sha("d")}` }, "key_mismatch"],
+    [{ ...restricted(10, "c", cloud, ["x.ts"]), artifacts: [restricted(10, "c", cloud, []).artifacts[0], { id: cid("d") }] }, "commit_mismatch"],
+    [restricted(10, "d", cloud, ["x.ts"]), "no_webhook"],
+  ];
+  for (const [event, reason] of cases) assert.deepEqual(restrictedSealEligibility(event, policy, webhooks), { eligible: false, reason });
+  const otherWebhook = webhookSealsFromEvents([pushed(20, "c", codex, ["x.ts"])]);
+  assert.deepEqual(restrictedSealEligibility(restricted(10, "c", cloud, ["x.ts"]), policy, otherWebhook), { eligible: false, reason: "actor_mismatch" });
+});
+
+test("T4 and T7 ineligible restricted claims move no boundary and do not clear dual witness", () => {
+  const edit = ev(15, codex, "edited", [`repo:${REPO}#x.ts`]);
+  const noKey = { ...restricted(10, "c", cloud, ["x.ts"]), idempotency_key: undefined };
+  const webhook = pushed(20, "c", cloud, ["x.ts"]);
+  const report = reconcileCore([commit("c", ["x.ts"])], [noKey, edit, webhook], { repoName: REPO, restrictedStamps: restrictedPolicy });
+  assert.deepEqual(report.commits[0].coverage["x.ts"].window, { after: -1, before: 20 });
+  assert.deepEqual(report.commits[0].findings.map((finding) => `${finding.kind}:${finding.level}`), ["producer_disagreement:fail", "misattributed:fail"]);
+
+  const noWebhook = reconcileCore([commit("c", ["x.ts"])], [restricted(10, "c", cloud, ["x.ts"])], { repoName: REPO, restrictedStamps: restrictedPolicy });
+  assert.equal(noWebhook.commits[0].sealed, undefined);
+  assert.match(noWebhook.commits[0].findings[0].detail, /restricted witness ineligible: no_webhook/);
+});
+
+test("T5 restricted paths lower only their own boundary and dropped paths never enter the window", () => {
+  const events = [
+    ev(5, codex, "edited", [`repo:${REPO}#x.ts`]),
+    restricted(10, "c", cloud, ["x.ts", "z.ts"]),
+    ev(15, codex, "edited", [`repo:${REPO}#y.ts`]),
+    pushed(20, "c", cloud, ["x.ts", "y.ts"]),
+  ];
+  const report = reconcileCore([commit("c", ["x.ts", "y.ts"])], events, { repoName: REPO, restrictedStamps: restrictedPolicy });
+  assert.deepEqual(report.commits[0].coverage["x.ts"].window, { after: -1, before: 10 });
+  assert.deepEqual(report.commits[0].coverage["y.ts"].window, { after: -1, before: 20 });
+  assert.equal("z.ts" in report.commits[0].coverage, false);
+  assert.equal(report.commits[0].sealed?.seq, 20, "the webhook remains the genuine coverage witness");
+  assert.deepEqual(report.restricted_hook_stamps, [{
+    event_id: events[1].id, seq: 10, eligible: true,
+    paths: [`repo:${REPO}#x.ts`], dropped: [`repo:${REPO}#z.ts`],
+  }]);
+});
+
+test("T12 a stamp in both general and restricted lists is a configuration error", () => {
+  assert.throws(
+    () => reconcileCore([], [], { repoName: REPO, hookSealedBy: [RESTRICTED], restrictedStamps: restrictedPolicy }),
+    /context_conflict: stamp is both general and restricted/,
+  );
+});
+
+test("T14 restricted lower bounds survive a later webhook and keep intervening edits visible", () => {
+  const events = [
+    restricted(10, "c", cloud, ["x.ts"]),
+    ev(15, codex, "edited", [`repo:${REPO}#x.ts`]),
+    pushed(20, "c", cloud, ["x.ts", "w.ts"]),
+    ev(22, codex, "edited", [`repo:${REPO}#w.ts`]),
+    sealed(25, "a", cloud, ["x.ts", "w.ts"]),
+    pushed(26, "a", cloud, ["x.ts", "w.ts"]),
+  ];
+  const report = reconcileCore([commit("a", ["x.ts", "w.ts"])], events, { repoName: REPO, hookSealedBy: [HOOK], restrictedStamps: restrictedPolicy });
+  assert.deepEqual(report.commits[0].coverage["x.ts"].window, { after: 10, before: 25 });
+  assert.deepEqual(report.commits[0].coverage["w.ts"].window, { after: 20, before: 25 });
+  assert.deepEqual(report.commits[0].findings.map((finding) => `${finding.kind}:${finding.level}`), ["misattributed:fail"]);
+});
+
+test("T15 restricted upper bounds are per path, including a rename source", () => {
+  const events = [
+    ev(5, codex, "edited", [`repo:${REPO}#x.ts`]),
+    restricted(10, "c", cloud, ["x.ts"]),
+    ev(15, codex, "edited", [`repo:${REPO}#y.ts`, `repo:${REPO}#old.ts`]),
+    pushed(20, "c", cloud, ["x.ts", "y.ts", "old.ts", "new.ts"]),
+  ];
+  const facts = [commit("c", ["x.ts", "y.ts", { path: "new.ts", status: "R", from: "old.ts" }])];
+  const report = reconcileCore(facts, events, { repoName: REPO, restrictedStamps: restrictedPolicy });
+  assert.deepEqual(report.commits[0].coverage["x.ts"].window, { after: -1, before: 10 });
+  assert.deepEqual(report.commits[0].coverage["y.ts"].window, { after: -1, before: 20 });
+  assert.deepEqual(report.commits[0].coverage["new.ts"].window, { after: -1, before: 20 });
+  assert.equal(report.ok, false);
+  assert.ok(report.commits[0].findings.some((finding) => finding.kind === "misattributed" && finding.level === "fail"));
+});
+
+test("T17 no restricted witness preserves genuine boundaries and report bytes", () => {
+  assert.equal(effectiveBoundary({ seq: 7, paths: new Set(["x.ts"]) }, "x.ts"), 7);
+  assert.equal(effectiveBoundary({ seq: 7, paths: new Set(["x.ts"]) }, "y.ts"), undefined);
+  const events = [ev(5, codex, "edited", [`repo:${REPO}#x.ts`]), sealed(10, "c", codex, ["x.ts"]), pushed(20, "c", codex, ["x.ts"])];
+  const base = reconcileCore([commit("c", ["x.ts"])], events, { repoName: REPO, hookSealedBy: [HOOK] });
+  const configured = reconcileCore([commit("c", ["x.ts"])], events, { repoName: REPO, hookSealedBy: [HOOK], restrictedStamps: restrictedPolicy });
+  assert.equal(JSON.stringify(configured), JSON.stringify(base));
+});
 
 test("artifactPath maps hook, alias, file: and bare ids; ignores foreign schemes", () => {
   const o = { repoNames: new Set([REPO, "retrace"]), repoPath: "/home/u/retrace" };

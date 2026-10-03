@@ -24,7 +24,12 @@ export * from "./producer-sig.js";
 export * from "./attribution.js";
 export * from "./attribution-context.js";
 
-export { generatesArtifact, artifactKey, artifactLookup, escapeGlobLiteral } from "./capture.js";
+export {
+  generatesArtifact, artifactKey, artifactLookup, escapeGlobLiteral,
+  effectiveBoundary, previousCaptureTouch, captureSealEligible, captureSeals,
+  restrictedSealEligibility, validateCapturePolicy, webhookSealsFromEvents,
+} from "./capture.js";
+export type { CapturePolicy, CaptureSeal, CaptureTouch, RestrictedStamp, RestrictedTouch, WebhookSeal, RestrictedSealEligibility } from "./capture.js";
 
 export * from "./owner-login.js";
 
