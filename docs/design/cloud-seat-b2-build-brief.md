@@ -1,7 +1,9 @@
 # Cloud seat B2 — builder brief (hook proxy mode, issuance, restricted capture, principal rule, one-run stamp flag, cloud scripts, push guard)
 
-**Status:** v1, 2026-10-03, by claude-code (coordinator and spec author, `claude-fable-5-1`, model source harness-runtime), on
-Jordan's signed go `evt_a7881da7f61140f2a542461f95bf4e0c` ("Go on B2"). **Not built.** Builds `docs/design/cloud-seat.md` **v2**
+**Status:** v2, 2026-10-03, by claude-code (coordinator and spec author, `claude-fable-5-1`, model source harness-runtime), on
+Jordan's signed go `evt_a7881da7f61140f2a542461f95bf4e0c` ("Go on B2"); v2 is the fix round on his go `evt_fba49868de4a49e4adb213c6891da163`
+after Codex round 1 (`evt_b2751d69ea9e4a3d884b60f0e7854d9a`, PR 167 at `ee0766b8`: F1 High, F2 High, F3 Medium; NOOA approved
+`evt_eaeba2e57f0a4bf688b2aa656f68e21d`; gate check `evt_0a033de4`). **Not built.** Builds `docs/design/cloud-seat.md` **v2**
 (merged `3354b3ed`, PR 159; cited below as **N§**) §2.2, §3.1–§3.5, §4, §5, §6 and §8 row B2. The note's text wins over this
 brief wherever they differ, **except the extensions this brief lists as its own** (§1.3's per-path touch model, §1.3's rule 0 from
 Grok G-L1 and issue #166, §1.4's known-address constant, §1.6's committed `.mcp.json` shape, §6's gate items); those go in the
@@ -16,6 +18,24 @@ the higher gate applies (agent-rules 12): the full code order with Codex first, 
 **Companions:** the note (N§); `docs/design/commit-trailer-consistency.md` §4 (the decision table D2 does not change);
 `docs/design/project-policy-document.md` (the frozen policy form B2 does not change, §6 item b); `docs/agent-rules.md` 7, 13, 15;
 `docs/agent-ops.md` 16, 18, 19; `docs/owner-protocol.md` §5, §8; issue #166.
+
+**v2, the fix round for Codex round 1.** What changed:
+- **F1 (High), one effective boundary per commit and path.** v1 made an eligible restricted event a separate touch beside the commit's
+  grouped seal, so `previousCaptureTouch` took the later webhook seal's seq for the same path and a delayed webhook erased an intervening
+  edit. v2 (§1.3, "Boundaries") keeps today's genuine model byte for byte and lets a restricted witness only *lower* the boundary of the
+  paths it names: the effective boundary of a commit for a path is the minimum over the witnesses that name that path, where genuine
+  witnesses contribute the commit's one seq to the whole genuine union as today and a restricted witness contributes its seq to its
+  intersected paths only. A later genuine observation of the same commit never advances a path's boundary.
+- **F2 (High), the per-path upper bound.** reconcile's one `cutoff` per sha (`reconcile.ts:335`) and the capture context's one `before` per
+  target (`classify.ts:398`, `attribution-context.ts:132`) become per path, from the same effective-boundary function, so a restricted
+  witness's seq never bounds a path it did not name. Dual-witness *selection* (which event is the hook witness) is separated from window
+  *selection* (which seq bounds which path).
+- **F3 (Medium), the classifier.** §1.4 adds `deriveCommitClaim` (`classify.ts:246–251`) and the `claim_decision.signed_actor` annotation
+  (`:1193–1195`): under the discriminator the classifier applies the same rule and records the producer-authenticated principal, never
+  the author address; signed-actor equality is unchanged.
+- Codex's notes applied: T1 exercises ambient dummy token and key settings; T2's human rejection uses an ordinary write; T9 exercises an
+  unknown discriminator on a withheld fixture; T3's eligibility cases run through both consumers; three new regressions (T14–T16); §1.6
+  states what B2 does not establish (Q4, Node proxy behaviour). §6 records Codex's agreement with all six positions.
 
 ## 0. What B2 is, and is not
 
@@ -98,12 +118,36 @@ that returns `{ eligible: true, paths: string[] }` or `{ eligible: false, reason
 3. **paths:** `paths` = the event's `repo:` artifact ids whose canonical path is in the webhook seal's file list; paths outside the
    list are dropped and returned as `dropped` for reporting.
 
-**Boundary, per path (N§3.5 rule 4; Codex PR 159 r2).** An eligible restricted event **never joins a commit key's grouped seal**:
-`captureSeals` (`capture.ts:84–98`) keeps grouping genuine seals by key as today, and returns restricted events as separate entries
-`{ key, seq, event, paths: <intersected>, restricted: true }`. Consumers build touches from entries, so a restricted entry is one touch
-`{ seq, paths }` that bounds only its intersected paths, and a key's grouped `seq` (the minimum over genuine seals, used for `before`
-at `classify.ts:398` and `attribution-context.ts:132`) never takes a restricted event's seq. The first-eligible-event-per-key rule and
-the paths union per key apply to genuine seals only.
+**Boundaries, per commit and path (N§3.5 rule 4; Codex PR 159 r2; Codex PR 167 r1 F1 and F2).** Today both consumers keep one
+boundary per commit with a union of paths: reconcile's `commitTouches`, one per key from `captureSeals` at the group's minimum seq with
+the union of its paths (`reconcile.ts:272–276`; its per-sha witness index `seqTouches` at `:236–240` keeps `hook` / `webhook` / `legacy`
+seqs), and the capture context's `seals` map per key
+(`classify.ts:379–388`; `attribution-context.ts:110–122`: minimum seq over the key's eligible events, union of paths). A later webhook
+copy of the same commit never moves a path's boundary past the hook's seq, which is what protects an edit made between the commit and
+GitHub's delivery. v2 keeps that model unchanged for genuine witnesses and adds one function both consumers use:
+
+- `effectiveBoundary(commit, path)` = the minimum over the witnesses of that commit that name `path`, where a **genuine** witness
+  (hook, legacy, webhook) contributes the commit's one genuine seq (the earliest genuine witness, as today) to every path in the genuine
+  union, and an **eligible restricted** witness contributes its own seq to its intersected paths only. A path named by no witness has no
+  boundary from that commit. With no restricted witness the function returns today's value for every path, so an existing ledger
+  reconciles byte-identically (T17).
+- **Lower bounds** (`after`): `previousCaptureTouch` takes, over the other commits, the maximum of `effectiveBoundary(commit, path)` that
+  is below the upper bound. A restricted witness therefore only lowers a later commit's `after` for the paths it names, and only when it
+  is earlier than the genuine witness; it never raises it, because the later genuine seq is not a second entry but the same commit's
+  value, taken by minimum. Codex's F1 sequence (eligible restricted C at #10 on x; an edit of x at #15; GitHub's seal of C at #20 on x; A at
+  #25 on x) gives A's window for x the lower bound #10, so the #15 edit is inside it and `misattributed:fail` stands (T14).
+- **Upper bounds** (`before`, reconcile's `cutoff`): per path, `min(sealedEvent.seq, effectiveBoundary(ownCommit, path))`, where
+  `sealedEvent` is the **genuine** witness used for coverage (the webhook seal when the hook witness is restricted). reconcile's one
+  `cutoff` per sha (`:335`) becomes a per-file value inside the loop at `:337–341`; the capture context's `before` (`classify.ts:398`,
+  `attribution-context.ts:132`) is computed per unit. Rename and copy names take the same per-path value. Codex's F2 sequence (edits of x at
+  #5 and y at #15; eligible restricted C at #10 naming x only; GitHub's seal of C at #20 naming x and y) gives x the upper bound #10 and
+  y #20, so the #15 edit on y is inside C's window and `misattributed:fail` stands (T15).
+- **Dual witness versus windows.** An eligible restricted event is the hook witness for the *comparison* (sha, actor) that clears
+  `producer_disagreement` (`reconcile.ts:316–326`); it is never `sealedEvent` for coverage and never the commit's genuine seq. Every
+  `sealedEvent.seq`, `commitTouches.find(...).seq` and first-entry lookup that feeds a window is audited in B2 and listed in the pull
+  request body with its replacement.
+- **Grouping.** Genuine seals group by key as today, including the first-eligible-event rule and the paths union. A restricted witness is
+  recorded on the group as `restricted: [{ seq, paths }]`, never merged into `seq` or `paths`, and `effectiveBoundary` reads both.
 
 **Rule 0, the ineligible event (this brief's extension; Grok G-L1 `evt_79a8ed07`; issue #166).** An event that is not an eligible seal,
 restricted or general, **contributes no paths to any seal's union and no touch**. In `prepareAttributionContext` the union at
@@ -136,6 +180,16 @@ event is not a seal there (§6 item b states the consequence).
 - **The webhook** (`github.ts:146–165`, the push mapping) sets `principal_rule: "agent-address/1"` in `method.params` and, when the
   resolved actor is an agent with `on_behalf_of` absent and `payload.sender.type === "User"`, records `on_behalf_of: "github:<sender.login>"`
   (the form `githubActor` uses, `:42`). The webhook's copy is server-stamped like the rest of the seal.
+- **The classifier** (`classify.ts`; Codex PR 167 r1 F3). `deriveCommitClaim` (`:240–262`) calls `resolveCommitActor` with the option when
+  `input.method.params.principal_rule` is `"agent-address/1"`, so the derived claim carries no agent address as principal; `submittedDiffers`
+  keeps comparing type and id only. The `claim_decision.signed_actor` annotation (`:1193–1195`) is, in order: `opts.signedActor` when the
+  route verified a producer signature (the hook); otherwise, under the discriminator, the type and id of the derived claim with
+  `on_behalf_of` taken from the **producer-authenticated principal** the route stamped on the input (the webhook route maps
+  `github:<sender.login>` server-side in `mapGithubWebhook` before `classifyCommitClaim`, `router.ts:653–658`; it is not a client
+  assertion), or absent when the producer stamped none; otherwise, legacy, today's derivation. An unknown discriminator value records no
+  `on_behalf_of` and is reported, as in the verifier. Signed-actor equality (`sameSignedActor`) and the rest of the decision table are
+  unchanged; this does not touch `classifierCaptureSeals` or the frozen policy. T16 runs a webhook-shaped push through `classifyCommitClaim`
+  end to end, not only `mapGithubWebhook`.
 - **The verifier contract** (`producer-sig.ts`): `rederiveCommitClaim` (`:182–196`) reads `method.params.principal_rule` from the signed
   payload (`producerSignedPayload`, `:128–133`, already signs `method`): value `"agent-address/1"` → re-derive with the option; absent →
   legacy re-derivation, unchanged; **any other value → no substitution**, verification proceeds against the stored actor and the result is
@@ -161,6 +215,8 @@ exists so N§7 Q6 can run before B6 makes the configuration permanent.
 - **`.mcp.json`** at the repository root with one entry `retrace-cloud`, **path A** (this brief's extension: the note leaves the choice
   to P3; committing A first means P3's Q5 edits one line to try B): `{"type": "http", "url": "<RETRACE_URL>/mcp"}` with no headers.
   Laptop sessions see this entry; their own `retrace` server is local-scoped and wins on its name (N§5); disabling it locally is B6.
+- **What B2 does not establish:** the order of the clone and the setup script (Q4), whether Node's fetch in the VM uses the proxy (Q2), and
+  the published CLI version the setup script pins (B3). Path B must launch with no token or key material of any kind.
 
 ### 1.7 The `PreToolUse` push guard (`.claude/settings.json`, `scripts/cloud/guard-push-main.sh`)
 
@@ -173,22 +229,22 @@ It is a bypassable policy control, and the brief and the script's header say so 
 ## 2. Tests — every test lands, each named in a `test(...)` title with its id
 
 - **T1** hook proxy mode: with `RETRACE_AUTH=proxy`, `RETRACE_URL` set and `.retrace.json` naming `retrace-git` with no credentials file
-  present, the hook builds the event, sends it with no `authorization` header and no `producer_sig`, and the sealed body carries
+  present, and again with ambient dummy `RETRACE_TOKEN`, `RETRACE_HOOK_TOKEN` and `RETRACE_HOOK_KEY_FILE` set (all ignored), the hook builds the event, sends it with no `authorization` header and no `producer_sig`, and the sealed body carries
   `location.environment` and `location.device` from `RETRACE_ENV` / `RETRACE_DEVICE`. Unset `RETRACE_AUTH` → today's path (token
   resolved, header sent). `RETRACE_AUTH=anything-else` → error, nothing sent. Proxy mode with `RETRACE_URL` unset → error.
 - **T2** issuance: `add-agent … --harness claude-code-cloud` writes a credential with `trust: pinned`, agent `claude-code-cloud`,
   `on_behalf_of` the member, no `public_key`, no `require_signature`, no key file on disk; the onboarding text contains no
   43-character base64url run; and the router accepts an **unsigned** `POST /events` on that credential (stamped `pinned:…`, verdict
-  `none`) while rejecting a human actor on it.
-- **T3** restricted eligibility, each rule: no key; key for another sha; two commit artifacts; no webhook seal; webhook resolves another
-  actor; paths outside the webhook list dropped and reported; the all-pass case.
+  `none`) while rejecting a human actor on it with an ordinary write (the instructed-root carve-out stays).
+- **T3** restricted eligibility, each rule, through `reconcile` **and** `prepareAttributionContext`: no key; key for another sha; two commit
+  artifacts; no webhook seal; webhook resolves another actor; paths outside the webhook list dropped and reported; the all-pass case.
 - **T4** Codex's sequence (N§3.5), through `reconcile` **and** `prepareAttributionContext`: Codex edits x; genuine hook and webhook seals
   for B by Codex touch y; a restricted-stamped event names B and x with no key; genuine seals for A by claude-code touch x. Expected:
   A `misattributed:fail`, `reconcile.ok` false, the restricted event moves no boundary. Variant with `idempotency_key: git:<B>`: still
   ineligible (webhook resolves B to Codex).
 - **T5** per-path boundary: a cloud commit C the webhook attributes to `claude-code-cloud`, restricted seal listing x and an extra z;
-  expected eligible, x bounded by C's seq, z dropped and reported, and C's grouped key seq taken from the webhook seal, not the
-  restricted event.
+  expected eligible, x's boundary the restricted seq, z dropped and reported, and C's genuine seq taken from the webhook seal, not the
+  restricted event; a webhook-only path keeps the webhook's seq.
 - **T6** rule 0 (issue #166): an ineligible `committed` event from an ordinary pinned credential naming B and x adds no path to B's union
   in `prepareAttributionContext`; two eligible genuine seals of one key still union their paths.
 - **T7** a restricted seal with no webhook seal: reported as a claim; dual witness unchanged.
@@ -197,21 +253,33 @@ It is a bypassable policy control, and the brief and the script's header say so 
   sender and nothing for a non-`User` sender.
 - **T9** the verifier contract: an old withheld `/2`-signed seal with author `noreply@anthropic.com` and no discriminator verifies with
   legacy re-derivation and the original `on_behalf_of` (N§4.2's compatibility fixture, built from a sealed event's recorded shape); a
-  new seal with `agent-address/1` verifies with the new rule; an unknown value yields no substitution and a reported mismatch.
+  new seal with `agent-address/1` verifies with the new rule; an unknown value on a **withheld** fixture yields no substitution and a
+  reported mismatch, while an ordinary event whose stored actor was signed still verifies.
 - **T10** the one-run flag: parses, merges with the file list, flags win on a duplicate stamp, malformed value is a usage error; Q6's
   shape runs with the flag and an empty file list.
 - **T11** the push guard: refuses the four `main` forms under `CLAUDE_CODE_REMOTE=true`; allows a feature-branch push; is inert without
   the variable. Run the script directly with synthetic stdin.
 - **T12** the stamp-in-both-lists error, in reconcile and attribution-context.
 - **T13** the setup script is self-describing: it prints its own sha256 and contains no 43-character base64url run (the Q3 shape).
+- **T14** (Codex F1) edit between hook and webhook: eligible restricted C at #10 on x; an edit of x at #15; GitHub's seal of C at #20 on x
+  and on a webhook-only path w; A at #25 on x and w. Expected, through both consumers: x's lower bound for A is #10, w's is #20; A reports
+  `misattributed:fail`; a variant with the restricted event omitted reproduces today's result exactly.
+- **T15** (Codex F2) partial path: edits of x at #5 and y at #15; eligible restricted C at #10 naming x; GitHub's seal of C at #20 naming x
+  and y. Expected: C's upper bound is #10 for x and #20 for y; the #15 edit on y is inside C's window; `misattributed:fail`; `reconcile.ok`
+  false. A rename variant gives the `from` name the same per-path bound.
+- **T16** (Codex F3) a webhook-shaped push with `principal_rule: agent-address/1`, author `noreply@anthropic.com`, sender a `User`, through
+  `classifyCommitClaim` with an in-memory policy store: `claim_decision.signed_actor.on_behalf_of` is `github:<login>`, never the author
+  address; the same input without the discriminator records today's annotation; a signed hook seal keeps `opts.signedActor`.
+- **T17** no restricted witness: `effectiveBoundary` returns today's value for every path, and `reconcile` over a fixture ledger with only
+  genuine seals produces a byte-identical report before and after B2.
 
 ## 3. Acceptance, in order
 
 1. `npm run build`, then the **full** suite with the scratch environment inline on every run: `RETRACE_DB=<tmp> RETRACE_URL= RETRACE_TOKEN= npm test`
    (and the worker suite after `rm -rf apps/worker/.test-dist`, issue #161).
 2. Doctor READY from the worktree (`node <primary>/packages/mcp-server/dist/doctor.js doctor`), retried to READY on a transient fetch failure.
-3. The pull request body states: class S and (a); the ledger count of §1.4; the sha256 of `scripts/cloud/setup.sh`; the answer to §6's
-   items the builder had to decide; every T id and its file.
+3. The pull request body states: class S and (a); the ledger count of §1.4; the sha256 of `scripts/cloud/setup.sh`; the audit of every
+   window lookup §1.3 names, with its replacement; the answer to §6's items the builder had to decide; every T id and its file.
 4. Commits carry the builder seat's trailers in one final paragraph; every changed file is logged as an edit before its commit (agent-rules 3, 9).
 
 ## 4. What the builder must not do
@@ -233,6 +301,10 @@ the Worker with the new resolver and reads the version back) → B4 (minting and
 the question goes back to Jordan (N§8).
 
 ## 6. Open items the gate should settle (each with the coordinator's position)
+
+Codex round 1 agreed with each of the six positions below (`evt_b2751d69`), with these riders: on (b), F3's classifier annotation is a
+separate principal path and is in B2 (§1.4); on (c), the availability statements are the coordinator's, not measured; on (d), subject to
+P3 and B6; on (f), stamp before signing and keep legacy decoding for absent values.
 
 - **(a) Issue #166 inside B2.** Position: yes. The union loop at `attribution-context.ts:119–120` is the loop B2 must change for
   restricted events anyway; one change, one gate, one test (T6). Against: it widens a class (a) build. If the gate says no, T6 and
@@ -263,3 +335,8 @@ last review (not merge-readiness: the coordinator did not author the code). Publ
 | Gate check and G-L1 disposition | `evt_ad155d96c96e4059b5366861bd5a3243` |
 | Issue #166 filed | `evt_8ea284e1cc1149c8a2cae5f52e27205b` |
 | Go for this brief | `evt_a7881da7f61140f2a542461f95bf4e0c` |
+| v1 as PR 167 at `ee0766b8` | hook `evt_0e73e998ff4d4e0190563b66f85d01c9`, outcome `evt_3e508ae10cb94d708e446d95909957b4` |
+| Codex round 1: rejected (F1, F2 High; F3 Medium) | `evt_b2751d69ea9e4a3d884b60f0e7854d9a` |
+| NOOA round 1: approved | `evt_eaeba2e57f0a4bf688b2aa656f68e21d` |
+| Gate check round 1 | `evt_0a033de41c6940448393a041fa65b5b3` |
+| Go for the v2 fix round | `evt_fba49868de4a49e4adb213c6891da163` |
