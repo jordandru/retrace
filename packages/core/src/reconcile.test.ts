@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { Event } from "./schema.js";
 import { reconcile as reconcileCore, artifactPath, renderReconcileReport, CommitFacts } from "./reconcile.js";
 import { effectiveBoundary, restrictedSealEligibility, webhookSealsFromEvents } from "./capture.js";
@@ -124,13 +125,41 @@ test("T15 restricted upper bounds are per path, including a rename source", () =
   assert.ok(report.commits[0].findings.some((finding) => finding.kind === "misattributed" && finding.level === "fail"));
 });
 
-test("T17 no restricted witness preserves genuine boundaries and report bytes", () => {
+test("T17 no restricted witness matches the 28c7e854 genuine-only golden report byte for byte", () => {
   assert.equal(effectiveBoundary({ seq: 7, paths: new Set(["x.ts"]) }, "x.ts"), 7);
   assert.equal(effectiveBoundary({ seq: 7, paths: new Set(["x.ts"]) }, "y.ts"), undefined);
-  const events = [ev(5, codex, "edited", [`repo:${REPO}#x.ts`]), sealed(10, "c", codex, ["x.ts"]), pushed(20, "c", codex, ["x.ts"])];
-  const base = reconcileCore([commit("c", ["x.ts"])], events, { repoName: REPO, hookSealedBy: [HOOK] });
-  const configured = reconcileCore([commit("c", ["x.ts"])], events, { repoName: REPO, hookSealedBy: [HOOK], restrictedStamps: restrictedPolicy });
-  assert.equal(JSON.stringify(configured), JSON.stringify(base));
+  const legacySha = "c".repeat(40);
+  const aeabSha = "aeab15b93887" + "a".repeat(28);
+  const ffSha = "ff9e29712b2d" + "b".repeat(28);
+  const ref = (fullSha: string) => `commit:${REPO}@${fullSha.slice(0,12)}`;
+  const fixed = (seq: number, action: Event["action"], ids: string[], extra: Partial<Event> = {}) =>
+    ev(seq,codex,action,ids,{id:`evt_${String(seq).padStart(32,"0")}`,...extra});
+  const edit = (seq: number, path: string) => fixed(seq,"edited",[`repo:${REPO}#${path}`]);
+  const legacy = (seq: number, fullSha: string, path: string) => fixed(seq,"committed",[ref(fullSha),`repo:${REPO}#${path}`],{
+    method:{tool:"git",params:{}},idempotency_key:`git:${fullSha}`,
+  });
+  const hook = (seq: number, fullSha: string, path: string) => fixed(seq,"committed",[ref(fullSha),`repo:${REPO}#${path}`],{
+    method:{tool:"git",params:{sealed_by:HOOK}},idempotency_key:`git:${fullSha}`,
+  });
+  const webhook = (seq: number, fullSha: string, path: string) => fixed(seq,"committed",[ref(fullSha),`repo:${REPO}#${path}`],{
+    tags:["github","push"],method:{tool:"git",params:{sealed_by:"webhook:github",producer:"github-push"}},
+    idempotency_key:`gh:push:${REPO}:${fullSha}`,
+  });
+  const facts: CommitFacts[] = [
+    {sha:legacySha,parents:["parent"],files:[{path:"legacy.ts",status:"M"}],author:{email:"who@example.com"},time:"2026-09-01T00:00:00.000Z"},
+    {sha:aeabSha,parents:["parent"],files:[{path:"aeab.ts",status:"M"}],author:{email:"who@example.com"},time:"2026-09-01T00:00:00.000Z"},
+    {sha:ffSha,parents:["parent"],files:[{path:"ff.ts",status:"M"}],author:{email:"who@example.com"},time:"2026-09-01T00:00:00.000Z"},
+  ];
+  const events = [
+    edit(90,"legacy.ts"),legacy(100,legacySha,"legacy.ts"),legacy(110,legacySha,"legacy.ts"),
+    edit(2800,"aeab.ts"),webhook(2839,aeabSha,"aeab.ts"),hook(2918,aeabSha,"aeab.ts"),
+    edit(3100,"ff.ts"),webhook(3122,ffSha,"ff.ts"),hook(3311,ffSha,"ff.ts"),
+  ];
+  const expected = JSON.parse(readFileSync(new URL("./fixtures/reconcile-genuine-baseline.json",import.meta.url),"utf8"));
+  const actual = reconcileCore(facts,events,{
+    repoName:REPO,hookSealedBy:[HOOK],allowUnstampedSeals:true,restrictedStamps:restrictedPolicy,
+  });
+  assert.deepEqual(actual,expected);
 });
 
 test("artifactPath maps hook, alias, file: and bare ids; ignores foreign schemes", () => {

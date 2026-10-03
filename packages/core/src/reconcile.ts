@@ -210,6 +210,9 @@ export function reconcile(commits: CommitFacts[], events: Event[], opts: Reconci
     if (stamp === "owner") return opts.ownerSeals === true;
     return hookStamps.has(stamp);
   };
+  // Preserve the pre-B2 producer-preferred sequence used by the public report and shallow-history horizon.
+  // The capture index below is a separate per-path boundary model and must not rewrite these outward seqs.
+  const seqTouches = new Map<string, { hook?: number; webhook?: number; legacy?: number }>();
   // The server has stamped sealed_by on every write since this seq. An UNSTAMPED commit event before it is a legacy
   // seal: evidence a commit happened (a window boundary) but not a trusted seal of the commit under test — nothing can
   // produce unstamped events on the server any more, so an attacker cannot plant such a boundary. An unstamped commit
@@ -247,6 +250,11 @@ export function reconcile(commits: CommitFacts[], events: Event[], opts: Reconci
       } else if (sha) {
         if (isHookSeal(e)) { producer = "hook"; if (!hookBySha.has(sha)) hookBySha.set(sha, e); }
         else if (!claimedBySha.has(sha)) claimedBySha.set(sha, e);
+      }
+      if (sha && producer) {
+        const touch = seqTouches.get(sha) ?? {};
+        touch[producer] = e.seq;
+        seqTouches.set(sha,touch);
       }
       if (e.action === "merged" && sealedByOf(e)?.startsWith("webhook:")) {
         const head = (e.method?.params as Record<string, unknown> | undefined)?.head_sha;
@@ -445,7 +453,9 @@ export function reconcile(commits: CommitFacts[], events: Event[], opts: Reconci
     verdicts.push({ sha, short: sha, sealed: { seq: e.seq, id: e.id, action: e.action, actor: e.actor, producer }, coverage: {}, findings: [{ kind: "unreachable_seal", level: "warn", sha, detail: `${sha} was sealed by the ${producer === "hook" ? "git hook" : "GitHub push webhook"} #${e.seq} as ${e.actor.type} ${e.actor.id} but no longer exists in this repository — amended or rebased after it was sealed; its replacement must be sealed by both producers` }] });
     summary.unreachable_seal++;
   }
-  const seals = captureIndex.map((seal) => ({ sha12:seal.key.slice(-12),seq:seal.seq })).sort((a,b)=>a.seq-b.seq);
+  const seals = [...seqTouches.entries()]
+    .map(([sha12,touch]) => ({ sha12,seq:touch.hook ?? touch.legacy ?? touch.webhook! }))
+    .sort((a,b)=>a.seq-b.seq);
   const ok = !verdicts.some((v) => v.findings.some((f) => f.level === "fail"));
   return { format: "retrace-reconcile/1", repo_name: opts.repoName, range: { commits: commits.length, first_seq: firstSeq, last_seq: lastSeq, head_seq: headSeq }, commits: verdicts, orphans, pending: [...pendingMap.values()], seals, ...(restrictedDiagnostics.length ? {restricted_hook_stamps:restrictedDiagnostics}:{}) , summary, ok };
 }
