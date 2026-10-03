@@ -15,7 +15,7 @@
  * Pure and portable: no git, no fetch. The CLI supplies CommitFacts from git and events from a full export.
  */
 import { Event } from "./schema.js";
-import { captureSeals, effectiveBoundary, previousCaptureTouch, restrictedSealEligibility, sameActor, actorKey, validateCapturePolicy, webhookSealsFromEvents, type CaptureTouch, type RestrictedStamp } from "./capture.js";
+import { captureSeals, effectiveBoundary, firstStampedSeq as captureFirstStampedSeq, previousCaptureTouch, restrictedSealEligibility, sameActor, actorKey, validateCapturePolicy, webhookSealsFromEvents, type CaptureTouch, type RestrictedStamp } from "./capture.js";
 import { collectAttributionAmendments, type AttributionOptions } from "./attribution.js";
 
 export type CommitFileStatus = "A" | "M" | "D" | "R" | "C" | "T" | "U" | "X";
@@ -214,8 +214,7 @@ export function reconcile(commits: CommitFacts[], events: Event[], opts: Reconci
   // seal: evidence a commit happened (a window boundary) but not a trusted seal of the commit under test — nothing can
   // produce unstamped events on the server any more, so an attacker cannot plant such a boundary. An unstamped commit
   // event after it is a client claim and bounds nothing (a planted "commit" could otherwise hide a swept edit).
-  let firstStampedSeq = Infinity;
-  for (const e of evs) if (sealedByOf(e) !== undefined) { firstStampedSeq = e.seq; break; }
+  const firstStampedSeq = captureFirstStampedSeq(evs, opts);
   // every commit event's touched paths, in seq order — the "previous touch" index
   const commitTouches: (CaptureTouch & { key?:string })[] = [];
   // edit events with the repo paths they touch

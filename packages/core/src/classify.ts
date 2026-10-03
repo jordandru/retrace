@@ -18,7 +18,7 @@ import {
   type ModelClaimCompleteness,
 } from "./commit-actor.js";
 import {
-  actorKey, captureSealEligible, captureSeals, firstStampedSeq, generatesArtifact, previousCaptureTouch, sameArtifact,
+  actorKey, captureSealEligible, captureSeals, effectiveBoundary, firstStampedSeq, generatesArtifact, previousCaptureTouch, sameArtifact,
   type CapturePolicy, type CaptureSeal,
 } from "./capture.js";
 import {
@@ -378,14 +378,22 @@ async function classifierLedgerAttributionContext(
   const canonicalArtifact = (id: string, _seq: number) => classifierCanonicalArtifact(policy, id);
   const domains = new Map<string, AttributionDomain>();
   const byId = new Map(events.map((e) => [e.id, e]));
-  const seals = new Map<string, { key: string; seq: number; paths: Set<string> }>();
+  const seals = new Map<string, CaptureSeal>();
   for (const seal of captureFacts) {
     const existing = seals.get(seal.key);
-    const value = existing ?? { key: seal.key, seq: seal.seq, paths: new Set<string>() };
+    const value = existing ?? { ...seal, paths: new Set<string>(), restricted: [] };
     value.seq = Math.min(value.seq, seal.seq);
     for (const artifactId of seal.paths) {
       const id = canonicalArtifact(artifactId, seal.seq);
       if (id) value.paths.add(id);
+    }
+    for (const touch of seal.restricted) {
+      const paths = new Set<string>();
+      for (const artifactId of touch.paths) {
+        const id = canonicalArtifact(artifactId, touch.seq);
+        if (id) paths.add(id);
+      }
+      value.restricted.push({ ...touch, paths });
     }
     seals.set(seal.key, value);
   }
@@ -397,7 +405,7 @@ async function classifierLedgerAttributionContext(
     if (ownCommit && (target.action === "committed" || target.action === "merged") && !ownKey) {
       throw new Error("context_missing: target commit identity");
     }
-    const before = Math.min(target.seq, ownKey ? seals.get(ownKey)?.seq ?? target.seq : target.seq);
+    const ownSeal = ownKey ? seals.get(ownKey) : undefined;
     const units: AttributionUnit[] = [];
     target.artifacts.forEach((a, index) => {
       if (/^(commit|event|actor):/.test(a.id) || ["commit", "event", "actor"].includes(a.kind ?? "")) return;
@@ -410,6 +418,7 @@ async function classifierLedgerAttributionContext(
       const existing = units.find((u) => u.id === id);
       if (existing) existing.refs.push(index);
       else {
+        const before = Math.min(target.seq, ownSeal ? effectiveBoundary(ownSeal, id) ?? target.seq : target.seq);
         const touches = [...seals.values()].filter((seal) => seal.key !== ownKey);
         units.push({ id, refs: [index], names: [id], after: previousCaptureTouch(touches, id, before), before });
       }

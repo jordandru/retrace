@@ -1,7 +1,7 @@
 import type { Event } from "./schema.js";
 import { GENESIS_HASH } from "./schema.js";
 import { canonicalize, verifyChain, sha256Hex } from "./chain.js";
-import { captureSeals, effectiveBoundary, previousCaptureTouch, restrictedSealEligibility, webhookSealsFromEvents, type CaptureTouch } from "./capture.js";
+import { captureSeals, effectiveBoundary, firstStampedSeq, previousCaptureTouch, restrictedSealEligibility, webhookSealsFromEvents, type CaptureTouch } from "./capture.js";
 
 export const isAttributionAmendment = (e: Event): boolean => e.action === "other" && e.action_detail === "amended" && (e.method?.params?.attribution !== undefined || e.tags?.includes("attribution") === true);
 
@@ -114,13 +114,14 @@ export async function prepareAttributionContext(snapshot: AttributionSnapshot, p
   const webhookSeals = webhookSealsFromEvents(snapshot.events);
   for (const p of policy.repositories) {
     const events = snapshot.events.filter(e => isCommitEvent(e) && inInterval(p,e.seq) && e.artifacts.some(a => a.id.startsWith("commit:") && facts.resolutions[a.id]?.repo === p.name));
-    const capturePolicy = { repoName:p.name, hookSealedBy:p.hook_sealed_by, restrictedStamps:p.restricted_hook_stamps, webhookSeals, ownerSeals:p.owner_seals, allowUnstampedSeals:p.allow_unstamped_seals, unreachableShas:facts.excluded,firstStampedSeq:snapshot.events.find(e=>typeof e.method?.params?.sealed_by==="string")?.seq ?? Infinity };
+    const capturePolicy = { repoName:p.name, hookSealedBy:p.hook_sealed_by, restrictedStamps:p.restricted_hook_stamps, webhookSeals, ownerSeals:p.owner_seals, allowUnstampedSeals:p.allow_unstamped_seals, unreachableShas:facts.excluded };
+    const boundedPolicy = { ...capturePolicy, firstStampedSeq:firstStampedSeq(snapshot.events,capturePolicy) };
     for (const event of events) {
-      const restricted = restrictedSealEligibility(event,capturePolicy,webhookSeals);
+      const restricted = restrictedSealEligibility(event,boundedPolicy,webhookSeals);
       if (restricted.eligible) diagnostics.push({event_id:event.id,seq:event.seq,status:"restricted",eligible:true,paths:restricted.paths,dropped:restricted.dropped});
       else if (restricted.reason !== "not_restricted") diagnostics.push({event_id:event.id,seq:event.seq,status:"restricted",eligible:false,reason:restricted.reason});
     }
-    const index = captureSeals(events, capturePolicy, resolve);
+    const index = captureSeals(events, boundedPolicy, resolve);
     for (const t of index) {
       const old = seals.get(t.key);
       const value = old ?? { key:t.key, seq:t.seq, paths:new Set<string>(), restricted:[] };

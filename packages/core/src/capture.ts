@@ -146,7 +146,12 @@ export function webhookSealsFromEvents(events: Event[]): Map<string, WebhookSeal
 /** Shared commit boundary classification. The adapter supplies full OID resolution for authoritative attribution. */
 /** The seq before which an unstamped git seal counts as legacy: the first stamped seal in `events`, unless the policy pins it. */
 export function firstStampedSeq(events: Event[], policy: CapturePolicy): number {
-  return policy.firstStampedSeq ?? [...events].sort((a,b) => a.seq - b.seq).find(e => typeof e.method?.params?.sealed_by === "string")?.seq ?? Infinity;
+  if (policy.firstStampedSeq !== undefined) return policy.firstStampedSeq;
+  let first = Infinity;
+  for (const event of events) {
+    if (typeof event.method?.params?.sealed_by === "string") first = Math.min(first,event.seq);
+  }
+  return first;
 }
 
 /** Whether `e` is a capture seal this policy trusts: a legacy unstamped git seal, a git seal stamped by a trusted hook
