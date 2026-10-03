@@ -42,6 +42,7 @@ test("reviews, comments, workflow_run, bots, push opt-in", async () => {
   assert.equal(p.length, 1); assert.equal(p[0].idempotency_key, "gh:push:slcwitit/rpg:abcdef1234567890"); // its OWN key: a second producer, never deduped against the hook's git:<sha>
   assert.deepEqual(p[0].actor, { type: "human", id: "j@x", display_name: "J" });
   assert.equal(p[0].method?.params?.producer, "github-push");
+  assert.equal(p[0].method?.params?.principal_rule, "agent-address/1");
   // an agent commit resolves the same actor the hook would, from the trailers in the pushed message
   const [ag] = await mapGithubWebhook("push", { repository: repo, commits: [{ id: "0123456789abcdef", message: "Fix\n\nRetrace-Actor: codex\nRetrace-Model: gpt-5\nRetrace-Caused-By: evt_" + "a".repeat(32), timestamp: "2026-08-16T14:00:00Z", author: { email: "j@x", name: "J" }, added: [], modified: ["b.ts"], removed: [] }] }, { includePush: true });
   assert.deepEqual(ag.actor, { type: "agent", id: "codex", model: "gpt-5", on_behalf_of: "j@x" });
@@ -62,6 +63,32 @@ test("reviews, comments, workflow_run, bots, push opt-in", async () => {
   assert.equal(a.artifacts[0].role, "used"); assert.equal(r.artifacts[0].role, "used"); assert.equal(cm.artifacts[0].role, "used");
   assert.deepEqual(w.artifacts.map((x) => [x.kind, x.role]), [["workflow_run", "generated"], ["pr", "used"], ["commit", "used"]]);
   assert.deepEqual(p[0].artifacts.map((x) => x.role), ["generated", "generated"]);
+});
+
+test("T8 push agent-address/1 resolves a user sender as the authenticated principal", async () => {
+  const payload = {
+    repository: repo,
+    ref: "refs/heads/main",
+    sender: { login: "jordan", type: "User" },
+    commits: [{
+      id: "abc123",
+      message: "change\n\nRetrace-Actor: claude-code\n",
+      timestamp: "2026-09-01T00:00:00Z",
+      author: { name: "Claude", email: "noreply@anthropic.com" },
+      modified: ["a.ts"],
+      parents: [],
+    }],
+  };
+  const [event] = await mapGithubWebhook("push", payload, { includePush: true });
+  assert.equal(event.actor.id, "claude-code");
+  assert.equal(event.actor.on_behalf_of, "github:jordan");
+
+  const [nonUser] = await mapGithubWebhook("push", {
+    ...payload,
+    sender: { login: "deploy-bot", type: "Bot" },
+  }, { includePush: true });
+  assert.equal(nonUser.actor.id, "claude-code");
+  assert.equal(nonUser.actor.on_behalf_of, undefined);
 });
 
 test("REST backfill mapping orders events and signature verifies", async () => {

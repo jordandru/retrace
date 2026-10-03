@@ -8,13 +8,13 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
-import { isAttributionAmendment, CommitFacts, CommitFile, CommitFileStatus, Event, ReconcileLevel, ReconcileOptions, ReconcileReport, reconcile, renderReconcileReport } from "@retrace-dev/core";
+import { isAttributionAmendment, CommitFacts, CommitFile, CommitFileStatus, Event, ReconcileLevel, ReconcileOptions, ReconcileReport, RestrictedStamp, reconcile, renderReconcileReport } from "@retrace-dev/core";
 import { Cfg, remoteName } from "./git-hook.js";
 import { makeStore } from "./index.js";
 import { RemoteStore } from "./remote-store.js";
 import { fetchVerifiedRemoteEvents, verifiedExportEvents } from "./verified-events.js";
 
-export type ReconcileCfg = Cfg & { reconcile?: { uncovered?: ReconcileLevel; ack_actors?: string[]; /** exact `assert:<credential name>` stamps of this repo's git hook credential */ hook_sealed_by?: string[]; owner_seals?: boolean; dual_witness?: "fail" | "warn" } };
+export type ReconcileCfg = Cfg & { reconcile?: { uncovered?: ReconcileLevel; ack_actors?: string[]; /** exact `assert:<credential name>` stamps of this repo's git hook credential */ hook_sealed_by?: string[]; restricted_hook_stamps?: RestrictedStamp[]; owner_seals?: boolean; dual_witness?: "fail" | "warn" } };
 export { verifiedExportEvents } from "./verified-events.js";
 
 const git = (repo: string, args: string[]) => execFileSync("git", ["-C", repo, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
@@ -82,9 +82,24 @@ export function reconcileWithGit(repo: string, commits: CommitFacts[], events: E
   return gone.length ? reconcile(commits, events, { ...options, unreachableShas: gone }) : first;
 }
 
-/** Options from .retrace.json `reconcile` plus CLI flags; flags win. */
-export function reconcileOptionsFrom(cfg: ReconcileCfg, flags: { uncovered?: ReconcileLevel; dualWitness?: "fail" | "warn"; allowUnstampedSeals?: boolean; hookSealedBy?: string[] } = {}): Pick<ReconcileOptions, "uncovered" | "ackActors" | "hookSealedBy" | "ownerSeals" | "dualWitness" | "allowUnstampedSeals"> {
-  return { uncovered: flags.uncovered ?? cfg.reconcile?.uncovered, ackActors: cfg.reconcile?.ack_actors, hookSealedBy: flags.hookSealedBy ?? cfg.reconcile?.hook_sealed_by, ownerSeals: cfg.reconcile?.owner_seals === true, dualWitness: flags.dualWitness ?? cfg.reconcile?.dual_witness, allowUnstampedSeals: flags.allowUnstampedSeals };
+export function parseRestrictedHookStamps(value: unknown): RestrictedStamp[] {
+  if (value === undefined) return [];
+  const values = Array.isArray(value) ? value.map(String) : String(value).split("\n");
+  return values.filter(Boolean).map((raw) => {
+    const split = raw.indexOf("=");
+    if (split <= 0 || split === raw.length - 1) throw new Error('--restricted-hook-stamp must be "<stamp>=<actor id>"');
+    const stamp = raw.slice(0, split);
+    const id = raw.slice(split + 1);
+    if (!/^[a-z][a-z0-9_-]{0,63}$/i.test(id)) throw new Error(`--restricted-hook-stamp actor id is invalid: ${id}`);
+    return { stamp, actor: { type: "agent", id } };
+  });
+}
+
+/** Options from .retrace.json `reconcile` plus CLI flags; flags win per restricted stamp. */
+export function reconcileOptionsFrom(cfg: ReconcileCfg, flags: { uncovered?: ReconcileLevel; dualWitness?: "fail" | "warn"; allowUnstampedSeals?: boolean; hookSealedBy?: string[]; restrictedStamps?: RestrictedStamp[] } = {}): Pick<ReconcileOptions, "uncovered" | "ackActors" | "hookSealedBy" | "restrictedStamps" | "ownerSeals" | "dualWitness" | "allowUnstampedSeals"> {
+  const restricted = new Map((cfg.reconcile?.restricted_hook_stamps ?? []).map((entry) => [entry.stamp, entry]));
+  for (const entry of flags.restrictedStamps ?? []) restricted.set(entry.stamp, entry);
+  return { uncovered: flags.uncovered ?? cfg.reconcile?.uncovered, ackActors: cfg.reconcile?.ack_actors, hookSealedBy: flags.hookSealedBy ?? cfg.reconcile?.hook_sealed_by, restrictedStamps:[...restricted.values()], ownerSeals: cfg.reconcile?.owner_seals === true, dualWitness: flags.dualWitness ?? cfg.reconcile?.dual_witness, allowUnstampedSeals: flags.allowUnstampedSeals };
 }
 
 export function readRepoConfig(repo: string): ReconcileCfg {
@@ -101,7 +116,7 @@ async function fetchEvents(project: string, pubkeyFlag: unknown | undefined, rep
   return { events, note: `${events.length} events from the local store` };
 }
 
-export async function reconcileRepo(repo: string, opts: { since?: string; limit?: number; uncovered?: ReconcileLevel; refs?: string[]; pubkey?: unknown; dualWitness?: "fail" | "warn"; allowUnstampedSeals?: boolean; hookSealedBy?: string[] }): Promise<{ report: ReconcileReport; note: string }> {
+export async function reconcileRepo(repo: string, opts: { since?: string; limit?: number; uncovered?: ReconcileLevel; refs?: string[]; pubkey?: unknown; dualWitness?: "fail" | "warn"; allowUnstampedSeals?: boolean; hookSealedBy?: string[]; restrictedStamps?: RestrictedStamp[] }): Promise<{ report: ReconcileReport; note: string }> {
   const cfg = readRepoConfig(repo);
   const project = process.env.RETRACE_PROJECT ?? cfg.project ?? basename(repo);
   const shas = opts.refs ?? listCommits(repo, { since: opts.since, limit: opts.since ? opts.limit : opts.limit ?? 50 });
@@ -124,7 +139,8 @@ export async function reconcileMain(flags: Record<string, string | boolean>, _po
   if (uncovered && !["warn", "fail", "info"].includes(uncovered)) throw new Error("--uncovered must be warn, fail or info");
   const dualWitness = flags["dual-witness"] ? (String(flags["dual-witness"]) as "fail" | "warn") : undefined;
   if (dualWitness && !["fail", "warn"].includes(dualWitness)) throw new Error("--dual-witness must be fail or warn");
-  const { report, note } = await reconcileRepo(repo, { since: flags.since ? String(flags.since) : undefined, limit: flags.limit ? Number(flags.limit) : undefined, uncovered, pubkey: flags.pubkey, dualWitness, allowUnstampedSeals: flags["allow-unstamped-seals"] === true, hookSealedBy: flags["hook-sealed-by"] ? [String(flags["hook-sealed-by"])] : undefined });
+  const restrictedStamps = parseRestrictedHookStamps(flags["restricted-hook-stamp"]);
+  const { report, note } = await reconcileRepo(repo, { since: flags.since ? String(flags.since) : undefined, limit: flags.limit ? Number(flags.limit) : undefined, uncovered, pubkey: flags.pubkey, dualWitness, allowUnstampedSeals: flags["allow-unstamped-seals"] === true, hookSealedBy: flags["hook-sealed-by"] ? [String(flags["hook-sealed-by"])] : undefined, restrictedStamps });
   if (flags.json) console.log(JSON.stringify(report, null, 2));
   else { console.log(renderReconcileReport(report)); console.log(`  (${note})`); }
   return flags.gate && !report.ok ? 1 : 0;

@@ -528,3 +528,93 @@ test("finding 4: /1 ingress preserves claim_decision and producer_signed_actor",
     }
   }
 });
+
+test("T9 withheld /2 reconstruction versions the agent-address principal rule from recorded seal shape", async () => {
+  const key = await generateSigningKey();
+  // Recorded-shape source: verified hook seal evt_4e55b577c3c5414f94eb43ee1e8ce507 for 45309af946d2.
+  // The known-address author tuple is recorded by webhook seal evt_f8166fccc1e441f2ba6838f9c4767adb.
+  const fullSha = "45309af946d2581590bdd706839dcef54aa54d88";
+  const rawMessage = `docs(design): Claude Code cloud seat v1, a CLAUDE.md clause for cloud sessions (class a)
+
+Design note docs/design/cloud-seat.md v1, not built, on Jordan's signed go
+evt_8e27cbf5b429419fa9b0fa7546e0ddfb: D1, a git hook inside the cloud VM sealing with a new pinned
+credential claude-code-cloud that Anthropic's agent proxy attaches; D2, an
+agent author address is never recorded as on_behalf_of.
+
+Retrace-Actor: claude-code
+Retrace-Model: claude-opus-5-5
+Retrace-Model-Source: harness-runtime
+Retrace-Caused-By: evt_8e27cbf5b429419fa9b0fa7546e0ddfb
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+`;
+  const legacyActor = {
+    type: "agent" as const, id: "claude-code", model: "claude-opus-5-5",
+    model_source: "harness-runtime" as const, on_behalf_of: "noreply@anthropic.com",
+  };
+  const recordedInput = (actor: EventInput["actor"], principalRule?: string): EventInput => ({
+    project: "retrace",
+    actor,
+    action: "committed",
+    artifacts: [
+      { id: "commit:jordandru/retrace@45309af946d2", kind: "commit", role: "generated" },
+      { id: "repo:jordandru/retrace#CLAUDE.md", kind: "file", role: "generated" },
+      { id: "repo:jordandru/retrace#docs/design/cloud-seat.md", kind: "file", role: "generated" },
+    ],
+    timestamp: "2026-10-03T02:14:55.000Z",
+    location: { system: "git", path: "/home/jordandrumiler/orca/workspaces/retrace/cloud-seat-design", environment: "local" },
+    intent: "docs(design): Claude Code cloud seat v1, a CLAUDE.md clause for cloud sessions (class a)",
+    caused_by: "evt_8e27cbf5b429419fa9b0fa7546e0ddfb",
+    change: { summary: "2 files, +303 −0" },
+    method: {
+      tool: "git",
+      automated: true,
+      params: {
+        branch: "jordandru/cloud-seat-design",
+        parents: ["07c3276ba7377f5aab31eccdfc2a661e78510caf"],
+        files: 2,
+        insertions: 303,
+        deletions: 0,
+        sha: fullSha,
+        raw_message: rawMessage,
+        author: { name: "Claude", email: "noreply@anthropic.com" },
+        model_claim: "complete",
+        ...(principalRule === undefined ? {} : { principal_rule: principalRule }),
+      },
+    },
+    idempotency_key: `git:${fullSha}`,
+    tags: ["git"],
+  });
+  const recordedTrust = { trustedHookStamps: PROJECT_HOOK_STAMPS, project: "retrace" };
+  const legacy = await signProducer(recordedInput(legacyActor), key.privateKey, { format: PRODUCER_SIG_FORMAT_V2 });
+  const legacyResult = await verifyProducerSigResult(asWithheld(legacy, {
+    claimDecision: withheldClaim({
+      signed_actor: legacyActor,
+      claim: { type: "agent", id: "claude-code" },
+    }),
+  }), key.publicKey, recordedTrust);
+  assert.equal(legacyResult.ok, true);
+  assert.equal(legacyResult.signed_actor?.on_behalf_of, "noreply@anthropic.com");
+
+  const versionedActor = {
+    type: "agent" as const, id: "claude-code", model: "claude-opus-5-5",
+    model_source: "harness-runtime" as const,
+  };
+  const versioned = await signProducer(recordedInput(versionedActor, "agent-address/1"), key.privateKey, { format: PRODUCER_SIG_FORMAT_V2 });
+  const versionedResult = await verifyProducerSigResult(asWithheld(versioned, {
+    claimDecision: withheldClaim({
+      signed_actor: versionedActor,
+      claim: { type: "agent", id: "claude-code" },
+    }),
+  }), key.publicKey, recordedTrust);
+  assert.equal(versionedResult.ok, true);
+  assert.equal(versionedResult.signed_actor?.on_behalf_of, undefined);
+
+  const unknown = await signProducer(recordedInput(legacyActor, "agent-address/2"), key.privateKey, { format: PRODUCER_SIG_FORMAT_V2 });
+  assert.equal((await verifyProducerSigResult(asWithheld(unknown, {
+    claimDecision: withheldClaim({
+      signed_actor: legacyActor,
+      claim: { type: "agent", id: "claude-code" },
+    }),
+  }), key.publicKey, recordedTrust)).ok, false);
+  assert.equal((await verifyProducerSigResult(unknown, key.publicKey)).ok, true);
+});

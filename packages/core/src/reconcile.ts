@@ -15,7 +15,7 @@
  * Pure and portable: no git, no fetch. The CLI supplies CommitFacts from git and events from a full export.
  */
 import { Event } from "./schema.js";
-import { captureSeals, previousCaptureTouch, sameActor, actorKey } from "./capture.js";
+import { captureSeals, effectiveBoundary, firstStampedSeq as captureFirstStampedSeq, previousCaptureTouch, restrictedSealEligibility, sameActor, actorKey, validateCapturePolicy, webhookSealsFromEvents, type CaptureTouch, type RestrictedStamp } from "./capture.js";
 import { collectAttributionAmendments, type AttributionOptions } from "./attribution.js";
 
 export type CommitFileStatus = "A" | "M" | "D" | "R" | "C" | "T" | "U" | "X";
@@ -82,6 +82,9 @@ export interface ReconcileReport {
   /** every sealed sha the ledger knows in this export (hook, webhook or legacy) with its seq — the caller checks
    *  these against git REF REACHABILITY and passes the vanished ones back as opts.unreachableShas */
   seals: { sha12: string; seq: number }[];
+  /** Restricted-stamp eligibility and path intersection diagnostics. Absent when no restricted stamp was observed,
+   * preserving the report bytes of ledgers that predate the feature. */
+  restricted_hook_stamps?: { event_id: string; seq: number; eligible: boolean; reason?: string; paths?: string[]; dropped?: string[] }[];
   summary: Record<ReconcileFindingKind | "commits" | "sealed" | "acknowledged", number> & {amended?:number};
   /** no unacknowledged fail-level finding */
   ok: boolean;
@@ -107,6 +110,9 @@ export interface ReconcileOptions {
    *  agent credential likewise makes a claim, never a seal. Unset → no hook seal is trusted (fail closed; the finding
    *  says what to configure). */
   hookSealedBy?: string[];
+  /** Pinned agent stamps that are accepted only as restricted hook witnesses after matching an authenticated GitHub
+   * push seal for the same full commit, actor and paths. */
+  restrictedStamps?: RestrictedStamp[];
   /** Accept `sealed_by: owner` (the operator token) as a hook seal. Off by default: the owner is an operator override
    *  and not an independent machine witness — document it when you turn it on. */
   ownerSeals?: boolean;
@@ -186,11 +192,16 @@ export function reconcile(commits: CommitFacts[], events: Event[], opts: Reconci
   // webhook = the GitHub push webhook (key gh:push:…, tag "push"), counted ONLY when the server stamped the seal as
   // webhook:github — a push-shaped event without that stamp is something a credentialed client sent, not GitHub.
   const hookBySha = new Map<string, Event>();
+  const restrictedHookBySha = new Map<string, Event>();
   const webhookBySha = new Map<string, Event>();
   // committed-shaped events that are neither: a client's claim (pinned credential, unauthenticated, unstamped) — reported
   const claimedBySha = new Map<string, Event>();
+  const claimReasons = new Map<string, string>();
+  const restrictedDiagnostics: NonNullable<ReconcileReport["restricted_hook_stamps"]> = [];
   let webhookSince: number | null = null; // the push webhook is known to be enabled from this seq on
   const hookStamps = new Set(opts.hookSealedBy ?? []);
+  validateCapturePolicy(opts);
+  const webhookSeals = webhookSealsFromEvents(evs);
   const isHookSeal = (e: Event): boolean => {
     const stamp = sealedByOf(e);
     const shape = e.method?.tool === "git" && (e.idempotency_key === undefined || e.idempotency_key.startsWith("git:"));
@@ -199,15 +210,16 @@ export function reconcile(commits: CommitFacts[], events: Event[], opts: Reconci
     if (stamp === "owner") return opts.ownerSeals === true;
     return hookStamps.has(stamp);
   };
-  const seqTouches = new Map<string, { hook?: number; webhook?: number; legacy?: number; paths: Set<string> }>(); // per sha: one boundary
+  // Preserve the pre-B2 producer-preferred sequence used by the public report and shallow-history horizon.
+  // The capture index below is a separate per-path boundary model and must not rewrite these outward seqs.
+  const seqTouches = new Map<string, { hook?: number; webhook?: number; legacy?: number }>();
   // The server has stamped sealed_by on every write since this seq. An UNSTAMPED commit event before it is a legacy
   // seal: evidence a commit happened (a window boundary) but not a trusted seal of the commit under test — nothing can
   // produce unstamped events on the server any more, so an attacker cannot plant such a boundary. An unstamped commit
   // event after it is a client claim and bounds nothing (a planted "commit" could otherwise hide a swept edit).
-  let firstStampedSeq = Infinity;
-  for (const e of evs) if (sealedByOf(e) !== undefined) { firstStampedSeq = e.seq; break; }
+  const firstStampedSeq = captureFirstStampedSeq(evs, opts);
   // every commit event's touched paths, in seq order — the "previous touch" index
-  const commitTouches: { key?:string; seq: number; paths: Set<string> }[] = [];
+  const commitTouches: (CaptureTouch & { key?:string })[] = [];
   // edit events with the repo paths they touch
   const edits: { e: Event; paths: { path: string; loose: boolean }[] }[] = [];
   // acknowledgements: correction events → the commit shas they reference (validated per commit in ackFor)
@@ -220,7 +232,15 @@ export function reconcile(commits: CommitFacts[], events: Event[], opts: Reconci
       const id = commitIdOf(e); const sha = id && commitSha12(id);
       const isPush = e.tags?.includes("push") === true;
       let producer: "hook" | "webhook" | "legacy" | undefined;
-      if (sha && !isPush && sealedByOf(e) === undefined && e.seq < firstStampedSeq && e.method?.tool === "git") {
+      const restricted = restrictedSealEligibility(e, opts, webhookSeals);
+      if (sha && restricted.eligible) {
+        if (!restrictedHookBySha.has(sha)) restrictedHookBySha.set(sha, e);
+        restrictedDiagnostics.push({ event_id:e.id,seq:e.seq,eligible:true,paths:restricted.paths,dropped:restricted.dropped });
+      } else if (sha && !restricted.eligible && restricted.reason !== "not_restricted") {
+        if (!claimedBySha.has(sha)) claimedBySha.set(sha, e);
+        claimReasons.set(sha, restricted.reason);
+        restrictedDiagnostics.push({ event_id:e.id,seq:e.seq,eligible:false,reason:restricted.reason });
+      } else if (sha && !isPush && sealedByOf(e) === undefined && e.seq < firstStampedSeq && e.method?.tool === "git") {
         producer = "legacy";
         if (isHookSeal(e)) { if (!hookBySha.has(sha)) hookBySha.set(sha, e); }
         else if (!claimedBySha.has(sha)) claimedBySha.set(sha, e);
@@ -231,12 +251,10 @@ export function reconcile(commits: CommitFacts[], events: Event[], opts: Reconci
         if (isHookSeal(e)) { producer = "hook"; if (!hookBySha.has(sha)) hookBySha.set(sha, e); }
         else if (!claimedBySha.has(sha)) claimedBySha.set(sha, e);
       }
-      // Window boundaries: one per sha, at the hook's seq when the hook sealed it (the webhook's copy lands later and
-      // must not push a file's window past edits that preceded the real commit). Claims are not boundaries.
       if (sha && producer) {
-        const t = seqTouches.get(sha) ?? { paths: new Set<string>() };
-        for (const a of e.artifacts) { const p = artifactPath(a.id, { repoNames, repoPath: opts.repoPath }); if (p) t.paths.add(p.path); }
-        t[producer] = e.seq; seqTouches.set(sha, t);
+        const touch = seqTouches.get(sha) ?? {};
+        touch[producer] = e.seq;
+        seqTouches.set(sha,touch);
       }
       if (e.action === "merged" && sealedByOf(e)?.startsWith("webhook:")) {
         const head = (e.method?.params as Record<string, unknown> | undefined)?.head_sha;
@@ -269,12 +287,20 @@ export function reconcile(commits: CommitFacts[], events: Event[], opts: Reconci
   // Boundaries come from commits that still exist. A seal for a sha git no longer has (amended / rebased after the
   // hook ran) must not swallow the edits its replacement carried.
   const unreachable = new Set((opts.unreachableShas ?? []).map((x) => x.toLowerCase().slice(0, 12)));
-  for (const seal of captureSeals(evs,opts)) {
+  const captureIndex = captureSeals(evs,{...opts,webhookSeals});
+  for (const seal of captureIndex) {
     const paths = new Set<string>();
     for (const id of seal.paths) { const p = artifactPath(id,{repoNames,repoPath:opts.repoPath}); if (p) paths.add(p.path); }
-    commitTouches.push({key:seal.key,seq:seal.seq,paths});
+    const restricted = seal.restricted.map((touch) => {
+      const restrictedPaths = new Set<string>();
+      for (const id of touch.paths) {
+        const p = artifactPath(id,{repoNames,repoPath:opts.repoPath});
+        if (p) restrictedPaths.add(p.path);
+      }
+      return { seq:touch.seq,paths:restrictedPaths,event:touch.event,dropped:touch.dropped };
+    });
+    commitTouches.push({key:seal.key,seq:seal.seq,paths,restricted});
   }
-  const prevTouchSeq = (path: string, beforeSeq: number | null) => previousCaptureTouch(commitTouches,path,beforeSeq);
   const attribution = collectAttributionAmendments(evs, opts.attribution);
 
 
@@ -284,6 +310,8 @@ export function reconcile(commits: CommitFacts[], events: Event[], opts: Reconci
   for (const c of commits) {
     const short = c.sha.slice(0, 12);
     const hookEvent = hookBySha.get(short);
+    const restrictedHookEvent = restrictedHookBySha.get(short);
+    const hookWitness = hookEvent ?? restrictedHookEvent;
     const webhookEvent = webhookBySha.get(short);
     const sealedEvent = hookEvent ?? webhookEvent;
     const v: CommitVerdict = { sha: c.sha, short, coverage: {}, findings: [] };
@@ -301,8 +329,9 @@ export function reconcile(commits: CommitFacts[], events: Event[], opts: Reconci
       const who = `${c.author?.email ?? c.author?.name ?? "unknown author"}, ${c.time ?? "?"}`;
       if (claim) {
         const stamp = sealedByOf(claim);
+        const restrictedReason = claimReasons.get(short);
         const hint = stamp === undefined && !claim.tags?.includes("push") ? " (pass --allow-unstamped-seals for pre-stamp history)" : stamp === "owner" ? " (owner seals are an operator override: reconcile.owner_seals)" : hookStamps.size === 0 ? ` (no hook credential is configured: set reconcile.hook_sealed_by to ["${stamp}"] in .retrace.json if that IS the git hook)` : "";
-        add("missing_commit", "fail", `${short} (${who}) has a committed event #${claim.seq} sealed as ${stamp ?? "unstamped"} by ${claim.actor.type} ${claim.actor.id} — not this repo's git hook credential and not the GitHub webhook; nothing authenticated this commit${hint}`);
+        add("missing_commit", "fail", `${short} (${who}) has a committed event #${claim.seq} sealed as ${stamp ?? "unstamped"} by ${claim.actor.type} ${claim.actor.id} — not this repo's git hook credential and not the GitHub webhook; nothing authenticated this commit${restrictedReason ? ` (restricted witness ineligible: ${restrictedReason})` : ""}${hint}`);
       }
       else if (mergedIn !== undefined) add("missing_commit", "warn", `${short} (${who}) has no committed event, but it is the head of a pull request whose merge #${mergedIn} was sealed by the GitHub webhook — made where no hook runs; enable the push webhook (RETRACE_GITHUB_PUSH=1) to seal it`);
       else add("missing_commit", "fail", `${short} (${who}) has no committed/merged event — the git hook or webhook missed it`);
@@ -314,16 +343,16 @@ export function reconcile(commits: CommitFacts[], events: Event[], opts: Reconci
     // Two producers for one fact (phase B). They resolve the actor from the same commit message with the same code, so
     // a difference means the commit was rewritten after the hook ran, or one of the events is not what it claims.
     const who = (a: Event["actor"]) => `${a.type} ${a.id}`;
-    if (hookEvent && webhookEvent && who(hookEvent.actor) !== who(webhookEvent.actor)) {
-      add("producer_disagreement", "fail", `git hook #${hookEvent.seq} sealed ${short} as ${who(hookEvent.actor)}; the GitHub push webhook #${webhookEvent.seq} resolved ${who(webhookEvent.actor)} from the pushed commit`);
-    } else if (!hookEvent && webhookEvent) {
+    if (hookWitness && webhookEvent && who(hookWitness.actor) !== who(webhookEvent.actor)) {
+      add("producer_disagreement", "fail", `git hook #${hookWitness.seq} sealed ${short} as ${who(hookWitness.actor)}; the GitHub push webhook #${webhookEvent.seq} resolved ${who(webhookEvent.actor)} from the pushed commit`);
+    } else if (!hookWitness && webhookEvent) {
       // Dual witness policy: an agent commit only GitHub saw is what an amend or rebase after the hook ran looks like
       // (the hook's seal stays behind on the old sha — see sealed_not_in_range). Fail unless the run opts into warn.
       const lone = sealedEvent.actor.type === "agent" ? (opts.dualWitness ?? "fail") : "warn";
       add("producer_disagreement", lone, `${short} was sealed only by the GitHub push webhook #${webhookEvent.seq}; the git hook never sealed this sha — the hook did not run on the committing machine, or the commit was amended/rebased after it ran`);
-    } else if (hookEvent && !webhookEvent && webhookSince !== null && hookEvent.seq > webhookSince) {
+    } else if (hookWitness && !webhookEvent && webhookSince !== null && hookWitness.seq > webhookSince) {
       const lone = sealedEvent.actor.type === "agent" ? (opts.dualWitness ?? "fail") : "warn";
-      add("producer_disagreement", lone, `${short} was sealed by the git hook #${hookEvent.seq} but never seen by the GitHub push webhook (enabled since #${webhookSince}) — not pushed, or pushed outside the webhook`);
+      add("producer_disagreement", lone, `${short} was sealed by the git hook #${hookWitness.seq} but never seen by the GitHub push webhook (enabled since #${webhookSince}) — not pushed, or pushed outside the webhook`);
     }
     const isMerge = sealedEvent.action === "merged" || c.parents.length > 1;
     if (isMerge) { verdicts.push(v); continue; }
@@ -332,10 +361,11 @@ export function reconcile(commits: CommitFacts[], events: Event[], opts: Reconci
       verdicts.push(v); continue;
     }
     const actorId = sealedEvent.actor.id;
-    const cutoff=Math.min(sealedEvent.seq,commitTouches.find(t=>t.key===short)?.seq ?? sealedEvent.seq);
+    const ownTouch=commitTouches.find(t=>t.key===short);
     const coveringActors = new Set<string>();
     for (const f of c.files) {
       const names = new Set([f.path, ...(f.from ? [f.from] : [])]);
+      const cutoff=Math.min(sealedEvent.seq,...[...names].map((name)=>ownTouch ? effectiveBoundary(ownTouch,name) ?? sealedEvent.seq : sealedEvent.seq));
       const after = Math.max(...[...names].map((n) => previousCaptureTouch(commitTouches.filter(t=>t.key!==short), n, cutoff)));
       const actors = new Set<string>(); const pairs = new Map<string, Event["actor"]>(); let n = 0; let allLoose = true;
       for (const ed of edits) {
@@ -348,7 +378,7 @@ export function reconcile(commits: CommitFacts[], events: Event[], opts: Reconci
       const cov: FileCoverage = { actors: [...actors], actor_refs:[...pairs.values()].map(({type,id}) => ({type,id})), events: n, loose: n > 0 && allLoose, window: { after, before: cutoff } };
       v.coverage[f.path] = cov;
       for (const a of cov.actor_refs ?? []) coveringActors.add(actorKey(a));
-      if (n === 0) add("uncovered", uncoveredLevel, `${f.path}: no edit event between #${after < 0 ? "start" : after} and #${sealedEvent.seq}`, f.path);
+      if (n === 0) add("uncovered", uncoveredLevel, `${f.path}: no edit event between #${after < 0 ? "start" : after} and #${cutoff}`, f.path);
       else if (cov.loose) add("loose_match", "info", `${f.path}: covered only by loosely-identified refs (file:/bare path or another repo name)`, f.path);
     }
     const files = Object.entries(v.coverage);
@@ -423,9 +453,11 @@ export function reconcile(commits: CommitFacts[], events: Event[], opts: Reconci
     verdicts.push({ sha, short: sha, sealed: { seq: e.seq, id: e.id, action: e.action, actor: e.actor, producer }, coverage: {}, findings: [{ kind: "unreachable_seal", level: "warn", sha, detail: `${sha} was sealed by the ${producer === "hook" ? "git hook" : "GitHub push webhook"} #${e.seq} as ${e.actor.type} ${e.actor.id} but no longer exists in this repository — amended or rebased after it was sealed; its replacement must be sealed by both producers` }] });
     summary.unreachable_seal++;
   }
-  const seals = [...seqTouches.entries()].map(([sha12, t]) => ({ sha12, seq: t.hook ?? t.legacy ?? t.webhook! })).sort((a, b) => a.seq - b.seq);
+  const seals = [...seqTouches.entries()]
+    .map(([sha12,touch]) => ({ sha12,seq:touch.hook ?? touch.legacy ?? touch.webhook! }))
+    .sort((a,b)=>a.seq-b.seq);
   const ok = !verdicts.some((v) => v.findings.some((f) => f.level === "fail"));
-  return { format: "retrace-reconcile/1", repo_name: opts.repoName, range: { commits: commits.length, first_seq: firstSeq, last_seq: lastSeq, head_seq: headSeq }, commits: verdicts, orphans, pending: [...pendingMap.values()], seals, summary, ok };
+  return { format: "retrace-reconcile/1", repo_name: opts.repoName, range: { commits: commits.length, first_seq: firstSeq, last_seq: lastSeq, head_seq: headSeq }, commits: verdicts, orphans, pending: [...pendingMap.values()], seals, ...(restrictedDiagnostics.length ? {restricted_hook_stamps:restrictedDiagnostics}:{}) , summary, ok };
 }
 
 /** One-line-per-finding text rendering shared by the CLI and the workflow PR body. */
@@ -437,5 +469,8 @@ export function renderReconcileReport(r: ReconcileReport): string {
     lines.push(`  ${f.amended ? "AMND" : f.acknowledged ? "ACK " : f.level.toUpperCase().padEnd(4)} ${f.kind.padEnd(14)} ${f.detail}${f.amended && "to" in f.amended ? ` (attribution amended to ${f.amended.to.type}/${f.amended.to.id} by #${f.amended.seq}, ${f.amended.id})` : ""}${f.acknowledged ? ` (corrected by #${f.acknowledged.seq}, ${f.acknowledged.actor})` : ""}`);
   }
   for (const o of r.orphans) lines.push(`  INFO orphan_edit    ${o.path}: ${o.events} edit${o.events === 1 ? "" : "s"} by ${o.actors.join(", ")} (last #${o.last_seq}) not carried by any commit in range`);
+  for (const restricted of r.restricted_hook_stamps ?? []) {
+    lines.push(`  INFO restricted_hook #${restricted.seq} ${restricted.event_id}: ${restricted.eligible ? `eligible${restricted.dropped?.length ? `; dropped ${restricted.dropped.join(", ")}` : ""}` : `ineligible: ${restricted.reason}`}`);
+  }
   return lines.join("\n");
 }

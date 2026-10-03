@@ -1,0 +1,106 @@
+{
+  "format": "retrace-reconcile/1",
+  "repo_name": "jordandru/retrace",
+  "range": {
+    "commits": 3,
+    "first_seq": 100,
+    "last_seq": 3311,
+    "head_seq": 3311
+  },
+  "commits": [
+    {
+      "sha": "cccccccccccccccccccccccccccccccccccccccc",
+      "short": "cccccccccccc",
+      "coverage": {
+        "legacy.ts": {
+          "actors": ["codex"],
+          "actor_refs": [{"type": "agent", "id": "codex"}],
+          "events": 1,
+          "loose": false,
+          "window": {"after": -1, "before": 100}
+        }
+      },
+      "findings": [],
+      "sealed": {
+        "seq": 100,
+        "id": "evt_00000000000000000000000000000100",
+        "action": "committed",
+        "actor": {"type": "agent", "id": "codex"},
+        "producer": "hook"
+      }
+    },
+    {
+      "sha": "aeab15b93887aaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "short": "aeab15b93887",
+      "coverage": {
+        "aeab.ts": {
+          "actors": ["codex"],
+          "actor_refs": [{"type": "agent", "id": "codex"}],
+          "events": 1,
+          "loose": false,
+          "window": {"after": -1, "before": 2839}
+        }
+      },
+      "findings": [],
+      "sealed": {
+        "seq": 2918,
+        "id": "evt_00000000000000000000000000002918",
+        "action": "committed",
+        "actor": {"type": "agent", "id": "codex"},
+        "producer": "hook"
+      },
+      "webhook": {
+        "seq": 2839,
+        "id": "evt_00000000000000000000000000002839",
+        "actor": {"type": "agent", "id": "codex"}
+      }
+    },
+    {
+      "sha": "ff9e29712b2dbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "short": "ff9e29712b2d",
+      "coverage": {
+        "ff.ts": {
+          "actors": ["codex"],
+          "actor_refs": [{"type": "agent", "id": "codex"}],
+          "events": 1,
+          "loose": false,
+          "window": {"after": -1, "before": 3122}
+        }
+      },
+      "findings": [],
+      "sealed": {
+        "seq": 3311,
+        "id": "evt_00000000000000000000000000003311",
+        "action": "committed",
+        "actor": {"type": "agent", "id": "codex"},
+        "producer": "hook"
+      },
+      "webhook": {
+        "seq": 3122,
+        "id": "evt_00000000000000000000000000003122",
+        "actor": {"type": "agent", "id": "codex"}
+      }
+    }
+  ],
+  "orphans": [],
+  "pending": [],
+  "seals": [
+    {"sha12": "cccccccccccc", "seq": 110},
+    {"sha12": "aeab15b93887", "seq": 2918},
+    {"sha12": "ff9e29712b2d", "seq": 3311}
+  ],
+  "summary": {
+    "commits": 3,
+    "sealed": 3,
+    "acknowledged": 0,
+    "missing_commit": 0,
+    "misattributed": 0,
+    "uncovered": 0,
+    "loose_match": 0,
+    "orphan_edit": 0,
+    "non_agent": 0,
+    "producer_disagreement": 0,
+    "unreachable_seal": 0
+  },
+  "ok": true
+}

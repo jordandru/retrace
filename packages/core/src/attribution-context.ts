@@ -1,7 +1,7 @@
 import type { Event } from "./schema.js";
 import { GENESIS_HASH } from "./schema.js";
 import { canonicalize, verifyChain, sha256Hex } from "./chain.js";
-import { captureSeals, previousCaptureTouch } from "./capture.js";
+import { captureSeals, effectiveBoundary, firstStampedSeq, previousCaptureTouch, restrictedSealEligibility, webhookSealsFromEvents, type CaptureTouch } from "./capture.js";
 
 export const isAttributionAmendment = (e: Event): boolean => e.action === "other" && e.action_detail === "amended" && (e.method?.params?.attribution !== undefined || e.tags?.includes("attribution") === true);
 
@@ -44,13 +44,16 @@ export interface AttributionCaptureContext {
   policy_digest: string; git_facts_digest: string;
   domains: Map<string, AttributionDomain>;
   /** Non-seal commit references that cannot supply a capture identity. Raw events remain unchanged. */
-  diagnostics: { event_id: string; seq: number; artifact_id: string; status: "ignored"; reason: "malformed_commit_ref" | "unavailable_commit_ref" }[];
+  diagnostics: (
+    | { event_id: string; seq: number; artifact_id: string; status: "ignored"; reason: "malformed_commit_ref" | "unavailable_commit_ref" }
+    | { event_id: string; seq: number; status: "restricted"; eligible: boolean; reason?: string; paths?: string[]; dropped?: string[] }
+  )[];
   canonicalArtifact: (id: string, seq: number) => string | undefined;
 }
 
 export interface AttributionPolicy {
   profile: "retrace-attribution/1";
-  repositories: { name: string; aliases: string[]; from_seq: number; through_seq?: number; hook_sealed_by: string[]; owner_seals?: boolean; allow_unstamped_seals?: boolean }[];
+  repositories: { name: string; aliases: string[]; from_seq: number; through_seq?: number; hook_sealed_by: string[]; restricted_hook_stamps?: { stamp: string; actor: { type: string; id: string } }[]; owner_seals?: boolean; allow_unstamped_seals?: boolean }[];
   non_git: { scheme: string; from_seq: number; through_seq?: number; capture_stamps: string[] }[];
 }
 export interface AttributionGitFacts {
@@ -107,17 +110,35 @@ export async function prepareAttributionContext(snapshot: AttributionSnapshot, p
     const declared=policy.repositories.filter(p=>[p.name,...p.aliases].includes(repo));
     if (declared.length && !declared.some(p=>inInterval(p,e.seq))) throw new Error(`context_missing: historical mapping at #${e.seq}`);
   }
-  const seals = new Map<string, { key: string; seq: number; paths: Set<string> }>();
+  const seals = new Map<string, CaptureTouch & { key: string }>();
+  const webhookSeals = webhookSealsFromEvents(snapshot.events);
   for (const p of policy.repositories) {
     const events = snapshot.events.filter(e => isCommitEvent(e) && inInterval(p,e.seq) && e.artifacts.some(a => a.id.startsWith("commit:") && facts.resolutions[a.id]?.repo === p.name));
-    const index = captureSeals(events, { repoName:p.name, hookSealedBy:p.hook_sealed_by, ownerSeals:p.owner_seals, allowUnstampedSeals:p.allow_unstamped_seals, unreachableShas:facts.excluded,firstStampedSeq:snapshot.events.find(e=>typeof e.method?.params?.sealed_by==="string")?.seq ?? Infinity }, resolve);
+    const capturePolicy = { repoName:p.name, hookSealedBy:p.hook_sealed_by, restrictedStamps:p.restricted_hook_stamps, webhookSeals, ownerSeals:p.owner_seals, allowUnstampedSeals:p.allow_unstamped_seals, unreachableShas:facts.excluded };
+    const boundedPolicy = { ...capturePolicy, firstStampedSeq:firstStampedSeq(snapshot.events,capturePolicy) };
+    for (const event of events) {
+      const restricted = restrictedSealEligibility(event,boundedPolicy,webhookSeals);
+      if (restricted.eligible) diagnostics.push({event_id:event.id,seq:event.seq,status:"restricted",eligible:true,paths:restricted.paths,dropped:restricted.dropped});
+      else if (restricted.reason !== "not_restricted") diagnostics.push({event_id:event.id,seq:event.seq,status:"restricted",eligible:false,reason:restricted.reason});
+    }
+    const index = captureSeals(events, boundedPolicy, resolve);
     for (const t of index) {
       const old = seals.get(t.key);
-      const value = old ?? { key:t.key, seq:t.seq, paths:new Set<string>() };
+      const value = old ?? { key:t.key, seq:t.seq, paths:new Set<string>(), restricted:[] };
       value.seq = Math.min(value.seq,t.seq);
       // Preserve historical mappings on each raw reference rather than applying today's alias map.
-      for (const e of events) if (e.artifacts.some(a => a.id.startsWith("commit:") && resolve(a.id) === t.key))
-        for (const a of e.artifacts) { const id = canonicalArtifact(a.id,e.seq); if (id) value.paths.add(id); }
+      for (const source of t.pathSources) {
+        const id = canonicalArtifact(source.id,source.seq);
+        if (id) value.paths.add(id);
+      }
+      for (const restricted of t.restricted) {
+        const paths = new Set<string>();
+        for (const raw of restricted.paths) {
+          const id = canonicalArtifact(raw,restricted.seq);
+          if (id) paths.add(id);
+        }
+        value.restricted!.push({ seq:restricted.seq, paths });
+      }
       seals.set(t.key,value);
     }
   }
@@ -132,7 +153,7 @@ export async function prepareAttributionContext(snapshot: AttributionSnapshot, p
     if (resolved && !diff) throw new Error(`context_missing: target diff ${target.id}`);
     if (diff && (diff.diff_profile !== "first-parent-M-C/1" || diff.files.some(f => !safePath(f.path) || f.from !== undefined && !safePath(f.from) || ["R","C"].includes(f.status) && !f.from))) throw new Error("context_conflict: diff profile or paths");
     const ownKey = commitRef ? resolve(commitRef) : undefined;
-    const before = Math.min(target.seq, ownKey ? seals.get(ownKey)?.seq ?? target.seq : target.seq);
+    const ownSeal = ownKey ? seals.get(ownKey) : undefined;
     const units = new Map<string, AttributionUnit>();
     target.artifacts.forEach((a,index) => {
       if (/^(commit|event|actor):/.test(a.id) || ["commit","event","actor"].includes(a.kind ?? "")) return;
@@ -143,6 +164,7 @@ export async function prepareAttributionContext(snapshot: AttributionSnapshot, p
       const f = diff?.files.find(f => id === `repo:${diff.repo}#${f.path}`);
       if (diff && !f) return;
       const names = [id, ...(f?.from ? [`repo:${diff!.repo}#${f.from}`] : [])];
+      const before = Math.min(target.seq, ...names.map((name) => ownSeal ? effectiveBoundary(ownSeal,name) ?? target.seq : target.seq));
       let touches = [...seals.values()].filter(t => t.key !== ownKey);
       if (!id.startsWith("repo:")) {
         const configured = policy.non_git.filter(p => p.scheme === id.split(":")[0]);

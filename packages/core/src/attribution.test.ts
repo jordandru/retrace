@@ -53,6 +53,161 @@ test("capture context ignores non-seal commit refs and never imports a push repo
   assert.deepEqual(r.events[3].artifacts,push.artifacts,"keep the recorded references intact");
 });
 
+test("T3 prepareAttributionContext consumes every restricted eligibility outcome and reports dropped paths",async()=>{
+  const cloud=actor("claude-code-cloud"),codex=actor("codex"),restrictedStamp="pinned:claude-code-cloud";
+  const oidC="c".repeat(40),oidD="d".repeat(40),oidT="e".repeat(40);
+  const cidC=`commit:org/r@${oidC.slice(0,12)}`,cidD=`commit:org/r@${oidD.slice(0,12)}`,cidT=`commit:org/r@${oidT.slice(0,12)}`;
+  const restricted=()=>({...ev("RC",cloud,ids(cidC,"repo:org/r#x","repo:org/r#z"),"committed"),idempotency_key:`git:${oidC}`,method:{tool:"git",params:{sealed_by:restrictedStamp,sha:oidC}}});
+  const webhook=(who=cloud)=>({...ev("W",who,ids(cidC,"repo:org/r#x","repo:org/r#y"),"committed"),idempotency_key:`gh:push:org/r:${oidC}`,tags:["github","push"],method:{tool:"git",params:{sealed_by:"webhook:github",sha:oidC}}});
+  const target={...ev("T",cloud,ids(cidT,"repo:org/r#x","repo:org/r#y"),"committed"),idempotency_key:`git:${oidT}`,method:{tool:"git",params:{sealed_by:"assert:hook",sha:oidT}}};
+  const p:AttributionPolicy={profile:"retrace-attribution/1",repositories:[{name:"org/r",aliases:[],from_seq:0,hook_sealed_by:["assert:hook"],restricted_hook_stamps:[{stamp:restrictedStamp,actor:cloud}]}],non_git:[]};
+  const facts:AttributionGitFacts={...noGit(),resolutions:{[cidC]:{repo:"org/r",oid:oidC},[cidD]:{repo:"org/r",oid:oidD},[cidT]:{repo:"org/r",oid:oidT}},commits:[
+    {repo:"org/r",oid:oidC,parents:[],diff_profile:"first-parent-M-C/1",files:[{path:"x",status:"M"},{path:"y",status:"M"}]},
+    {repo:"org/r",oid:oidD,parents:[],diff_profile:"first-parent-M-C/1",files:[]},
+    {repo:"org/r",oid:oidT,parents:[],diff_profile:"first-parent-M-C/1",files:[{path:"x",status:"M"},{path:"y",status:"M"}]},
+  ]};
+  const run=async(candidate:Event,webhooks:Event[])=>prepare([root(),candidate,...webhooks,target],facts,p);
+
+  const goodEvent=restricted();
+  const good=await run(goodEvent,[webhook()]);
+  assert.deepEqual(good.options.context!.diagnostics.find(d=>d.event_id==="RC"),{
+    event_id:"RC",seq:1,status:"restricted",eligible:true,paths:["repo:org/r#x"],dropped:["repo:org/r#z"],
+  });
+  const goodUnits=Object.fromEntries(good.options.context!.domains.get("T")!.units.map(unit=>[unit.id,unit]));
+  assert.equal(goodUnits["repo:org/r#x"].after,1);
+  assert.equal(goodUnits["repo:org/r#y"].after,2);
+
+  const twoCommits=restricted();
+  twoCommits.artifacts.push({id:cidD,role:"generated"});
+  const cases:{event:Event;webhooks:Event[];reason:string;after:number}[]=[
+    {event:{...restricted(),idempotency_key:undefined},webhooks:[webhook()],reason:"no_key",after:2},
+    {event:{...restricted(),idempotency_key:`git:${oidD}`},webhooks:[webhook()],reason:"key_mismatch",after:2},
+    {event:twoCommits,webhooks:[webhook()],reason:"commit_mismatch",after:2},
+    {event:restricted(),webhooks:[],reason:"no_webhook",after:-1},
+    {event:restricted(),webhooks:[webhook(codex)],reason:"actor_mismatch",after:2},
+  ];
+  for(const entry of cases){
+    const result=await run(entry.event,entry.webhooks);
+    assert.deepEqual(result.options.context!.diagnostics.find(d=>d.event_id==="RC"),{
+      event_id:"RC",seq:1,status:"restricted",eligible:false,reason:entry.reason,
+    },entry.reason);
+    assert.equal(result.options.context!.domains.get("T")!.units.find(unit=>unit.id==="repo:org/r#x")!.after,entry.after,entry.reason);
+  }
+});
+
+test("T5 T6 restricted capture boundaries and ordinary committed exclusions flow through prepareAttributionContext",async()=>{
+  const cloud=actor("claude-code-cloud"),restrictedStamp="pinned:claude-code-cloud";
+  const oidC="c".repeat(40),oidT="d".repeat(40),cidC=`commit:org/r@${oidC.slice(0,12)}`,cidT=`commit:org/r@${oidT.slice(0,12)}`;
+  const restricted={...ev("restricted",cloud,ids(cidC,"repo:org/r#x","repo:org/r#z"),"committed"),idempotency_key:`git:${oidC}`,method:{tool:"git",params:{sealed_by:restrictedStamp,sha:oidC}}};
+  const webhook={...ev("webhook",cloud,ids(cidC,"repo:org/r#x","repo:org/r#y"),"committed"),idempotency_key:`gh:push:org/r:${oidC}`,tags:["github","push"],method:{tool:"git",params:{sealed_by:"webhook:github",sha:oidC}}};
+  const ordinary={...ev("ordinary",O,ids(cidC,"repo:org/r#w"),"committed"),idempotency_key:`git:${oidC}`,method:{tool:"git",params:{sealed_by:"pinned:ordinary",sha:oidC}}};
+  const target={...ev("T",cloud,ids(cidT,"repo:org/r#x","repo:org/r#y","repo:org/r#w"),"committed"),idempotency_key:`git:${oidT}`,method:{tool:"git",params:{sealed_by:"assert:hook",sha:oidT}}};
+  const p:AttributionPolicy={profile:"retrace-attribution/1",repositories:[{name:"org/r",aliases:["r"],from_seq:0,hook_sealed_by:["assert:hook"],restricted_hook_stamps:[{stamp:restrictedStamp,actor:cloud}]}],non_git:[]};
+  const facts:AttributionGitFacts={...noGit(),resolutions:{[cidC]:{repo:"org/r",oid:oidC},[cidT]:{repo:"org/r",oid:oidT}},commits:[
+    {repo:"org/r",oid:oidC,parents:[],diff_profile:"first-parent-M-C/1",files:[{path:"x",status:"M"},{path:"y",status:"M"}]},
+    {repo:"org/r",oid:oidT,parents:[],diff_profile:"first-parent-M-C/1",files:[{path:"x",status:"M"},{path:"y",status:"M"},{path:"w",status:"M"}]},
+  ]};
+  const r=await prepare([root(),restricted,webhook,ordinary,target],facts,p);
+  const units=Object.fromEntries(r.options.context!.domains.get("T")!.units.map(unit=>[unit.id,unit]));
+  assert.equal(units["repo:org/r#x"].after,1,"restricted x lowers the effective boundary");
+  assert.equal(units["repo:org/r#y"].after,2,"webhook-only y keeps the genuine boundary");
+  assert.equal(units["repo:org/r#w"].after,-1,"T6 an ineligible ordinary committed event contributes no path");
+  assert.deepEqual(r.options.context!.diagnostics.find(diagnostic=>diagnostic.status==="restricted"),{
+    event_id:"restricted",seq:1,status:"restricted",eligible:true,paths:["repo:org/r#x"],dropped:["repo:org/r#z"],
+  });
+
+  const noKey:Event={...structuredClone(restricted),idempotency_key:undefined};
+  const withoutBoundary=await prepare([root(),noKey,webhook,target],facts,p);
+  assert.equal(withoutBoundary.options.context!.domains.get("T")!.units.find(unit=>unit.id==="repo:org/r#x")!.after,2);
+});
+
+test("T4 attribution context keeps Codex's poisoned B boundary out for no-key and keyed actor-mismatch variants",async()=>{
+  const codex=actor("codex"),claude=actor("claude-code"),cloud=actor("claude-code-cloud"),stamp="pinned:claude-code-cloud";
+  const oidB="b".repeat(40),oidA="a".repeat(40),cidB=`commit:org/r@${oidB.slice(0,12)}`,cidA=`commit:org/r@${oidA.slice(0,12)}`;
+  const hookB={...ev("HB",codex,ids(cidB,"repo:org/r#y"),"committed"),idempotency_key:`git:${oidB}`,method:{tool:"git",params:{sealed_by:"assert:hook",sha:oidB}}};
+  const webhookB={...ev("WB",codex,ids(cidB,"repo:org/r#y"),"committed"),idempotency_key:`gh:push:org/r:${oidB}`,tags:["github","push"],method:{tool:"git",params:{sealed_by:"webhook:github",sha:oidB}}};
+  const restricted={...ev("RB",cloud,ids(cidB,"repo:org/r#x"),"committed"),idempotency_key:`git:${oidB}`,method:{tool:"git",params:{sealed_by:stamp,sha:oidB}}};
+  const target={...ev("T",claude,ids(cidA,"repo:org/r#x"),"committed"),idempotency_key:`git:${oidA}`,method:{tool:"git",params:{sealed_by:"assert:hook",sha:oidA}}};
+  const webhookA={...ev("WA",claude,ids(cidA,"repo:org/r#x"),"committed"),idempotency_key:`gh:push:org/r:${oidA}`,tags:["github","push"],method:{tool:"git",params:{sealed_by:"webhook:github",sha:oidA}}};
+  const p:AttributionPolicy={profile:"retrace-attribution/1",repositories:[{name:"org/r",aliases:[],from_seq:0,hook_sealed_by:["assert:hook"],restricted_hook_stamps:[{stamp,actor:cloud}]}],non_git:[]};
+  const facts:AttributionGitFacts={...noGit(),resolutions:{[cidB]:{repo:"org/r",oid:oidB},[cidA]:{repo:"org/r",oid:oidA}},commits:[
+    {repo:"org/r",oid:oidB,parents:[],diff_profile:"first-parent-M-C/1",files:[{path:"y",status:"M"}]},
+    {repo:"org/r",oid:oidA,parents:[],diff_profile:"first-parent-M-C/1",files:[{path:"x",status:"M"}]},
+  ]};
+  for(const [candidate,expected] of [[{...restricted,idempotency_key:undefined},"no_key"],[restricted,"actor_mismatch"]] as const){
+    const correction=amendment("AM","T",claude,codex,undefined,["EX"]);
+    const result=await prepare([root(),ev("EX",codex,ids("repo:org/r#x")),hookB,webhookB,candidate,target,webhookA,correction],facts,p);
+    const unit=result.options.context!.domains.get("T")!.units[0];
+    assert.deepEqual({after:unit.after,before:unit.before},{after:-1,before:5},expected);
+    assert.deepEqual(result.options.context!.diagnostics.find(d=>d.event_id==="RB"),{
+      event_id:"RB",seq:4,status:"restricted",eligible:false,reason:expected,
+    });
+    assert.equal(active(result,"T").length,1,expected);
+    assert.deepEqual(active(result,"T")[0].to,codex,expected);
+  }
+});
+
+test("T12 attribution context rejects a stamp configured as both general and restricted",async()=>{
+  const stamp="pinned:cloud",oid="a".repeat(40),cid=`commit:org/r@${oid.slice(0,12)}`;
+  const seal={...ev("S",actor("cloud"),ids(cid,"repo:org/r#x"),"committed"),idempotency_key:`git:${oid}`,method:{tool:"git",params:{sealed_by:stamp,sha:oid}}};
+  const facts:AttributionGitFacts={...noGit(),resolutions:{[cid]:{repo:"org/r",oid}}};
+  const p:AttributionPolicy={profile:"retrace-attribution/1",repositories:[{name:"org/r",aliases:[],from_seq:0,hook_sealed_by:[stamp],restricted_hook_stamps:[{stamp,actor:actor("cloud")}]}],non_git:[]};
+  await assert.rejects(()=>prepare([root(),seal],facts,p),/context_conflict: stamp is both general and restricted/);
+});
+
+test("T14 attribution uses the restricted lower bound for a complete misattribution and preserves the no-restricted baseline",async()=>{
+  const cloud=actor("claude-code-cloud"),stamp="pinned:claude-code-cloud";
+  const oidC="c".repeat(40),oidA="a".repeat(40),cidC=`commit:org/r@${oidC.slice(0,12)}`,cidA=`commit:org/r@${oidA.slice(0,12)}`;
+  const restricted={...ev("RC",cloud,ids(cidC,"repo:org/r#x"),"committed"),idempotency_key:`git:${oidC}`,method:{tool:"git",params:{sealed_by:stamp,sha:oidC}}};
+  const editX=ev("EX",B,ids("repo:org/r#x"));
+  const webhook={...ev("W",cloud,ids(cidC,"repo:org/r#x","repo:org/r#y","repo:org/r#w"),"committed"),idempotency_key:`gh:push:org/r:${oidC}`,tags:["github","push"],method:{tool:"git",params:{sealed_by:"webhook:github",sha:oidC}}};
+  const editW=ev("EW",B,ids("repo:org/r#w"));
+  const target={...ev("T",cloud,ids(cidA,"repo:org/r#x","repo:org/r#w"),"committed"),idempotency_key:`git:${oidA}`,method:{tool:"git",params:{sealed_by:"assert:hook",sha:oidA}}};
+  const p:AttributionPolicy={profile:"retrace-attribution/1",repositories:[{name:"org/r",aliases:[],from_seq:0,hook_sealed_by:["assert:hook"],restricted_hook_stamps:[{stamp,actor:cloud}]}],non_git:[]};
+  const facts:AttributionGitFacts={...noGit(),resolutions:{[cidC]:{repo:"org/r",oid:oidC},[cidA]:{repo:"org/r",oid:oidA}},commits:[
+    {repo:"org/r",oid:oidC,parents:[],diff_profile:"first-parent-M-C/1",files:[{path:"x",status:"M"},{path:"y",status:"M"},{path:"w",status:"M"}]},
+    {repo:"org/r",oid:oidA,parents:[],diff_profile:"first-parent-M-C/1",files:[{path:"x",status:"M"},{path:"w",status:"M"}]},
+  ]};
+  const correction=amendment("AM","T",cloud,B,undefined,["EX","EW"]);
+  const lower=await prepare([root(),restricted,editX,webhook,editW,target,correction],facts,p);
+  const lowerUnits=Object.fromEntries(lower.options.context!.domains.get("T")!.units.map(unit=>[unit.id,unit]));
+  assert.deepEqual([lowerUnits["repo:org/r#x"].after,lowerUnits["repo:org/r#w"].after],[1,3]);
+  assert.equal(active(lower,"T").length,1,"both conflicting edits are inside the restricted windows");
+
+  const baseline=await prepare([root(),editX,webhook,editW,target,correction],facts,p);
+  const baselineUnits=Object.fromEntries(baseline.options.context!.domains.get("T")!.units.map(unit=>[unit.id,unit]));
+  assert.deepEqual([baselineUnits["repo:org/r#x"].after,baselineUnits["repo:org/r#w"].after],[2,2]);
+  assert.equal(reason(baseline,"AM"),"partial_coverage","without the restricted witness the earlier x edit stays outside today's window");
+});
+
+test("T15 attribution uses per-path upper bounds, reports misattribution, and carries a rename source",async()=>{
+  const cloud=actor("claude-code-cloud"),stamp="pinned:claude-code-cloud";
+  const oidC="c".repeat(40),cidC=`commit:org/r@${oidC.slice(0,12)}`;
+  const restricted={...ev("RC",cloud,ids(cidC,"repo:org/r#x"),"committed"),idempotency_key:`git:${oidC}`,method:{tool:"git",params:{sealed_by:stamp,sha:oidC}}};
+  const webhook={...ev("T",cloud,ids(cidC,"repo:org/r#x","repo:org/r#y"),"committed"),idempotency_key:`gh:push:org/r:${oidC}`,tags:["github","push"],method:{tool:"git",params:{sealed_by:"webhook:github",sha:oidC}}};
+  const p:AttributionPolicy={profile:"retrace-attribution/1",repositories:[{name:"org/r",aliases:[],from_seq:0,hook_sealed_by:["assert:hook"],restricted_hook_stamps:[{stamp,actor:cloud}]}],non_git:[]};
+  const facts:AttributionGitFacts={...noGit(),resolutions:{[cidC]:{repo:"org/r",oid:oidC}},commits:[
+    {repo:"org/r",oid:oidC,parents:[],diff_profile:"first-parent-M-C/1",files:[{path:"x",status:"M"},{path:"y",status:"M"}]},
+  ]};
+  const correction=amendment("AM","T",cloud,B,undefined,["X","Y"]);
+  const upper=await prepare([root(),ev("X",B,ids("repo:org/r#x")),restricted,ev("Y",B,ids("repo:org/r#y")),webhook,correction],facts,p);
+  const upperUnits=Object.fromEntries(upper.options.context!.domains.get("T")!.units.map(unit=>[unit.id,unit]));
+  assert.equal(upperUnits["repo:org/r#x"].before,2);
+  assert.equal(upperUnits["repo:org/r#y"].before,4);
+  assert.equal(active(upper,"T").length,1,"both per-path edits corroborate the misattribution");
+
+  const renameTarget={...webhook,artifacts:ids(cidC,"repo:org/r#x","repo:org/r#new")};
+  const renameFacts:AttributionGitFacts={...facts,commits:[
+    {repo:"org/r",oid:oidC,parents:[],diff_profile:"first-parent-M-C/1",files:[{path:"x",status:"M"},{path:"new",status:"R",from:"old"}]},
+  ]};
+  const renameCorrection=amendment("AMR","T",cloud,B,["repo:org/r#new"],["OLD"]);
+  const renamed=await prepare([root(),ev("OLD",B,ids("repo:org/r#old")),restricted,renameTarget,renameCorrection],renameFacts,p);
+  const renameUnit=renamed.options.context!.domains.get("T")!.units.find(unit=>unit.id==="repo:org/r#new")!;
+  assert.deepEqual(renameUnit.names,["repo:org/r#new","repo:org/r#old"]);
+  assert.equal(renameUnit.before,3);
+  assert.equal(active(renamed,"T").length,1,"the rename source shares the target path's upper bound");
+});
+
 test("capture context fails closed for unresolved or malformed refs on commit and merge seals",async()=>{
   const oid="a".repeat(40),cid=`commit:org/r@${oid}`;
   const facts:AttributionGitFacts={...noGit(),resolutions:{[cid]:{repo:"org/r",oid}}};

@@ -185,12 +185,15 @@ export function rederiveCommitClaim(e: Signable): ProducerSignedActor | undefine
   const author = parseSignedAuthor(params);
   const raw = params.raw_message;
   if (!author || typeof raw !== "string") return undefined;
+  const principalRule = params.principal_rule;
+  if (principalRule !== undefined && principalRule !== "agent-address/1") return undefined;
   const parents = Array.isArray(params.parents) ? params.parents.filter((p): p is string => typeof p === "string") : [];
   const resolved = resolveCommitActor({
     message: raw,
     authorName: author.name,
     authorEmail: author.email,
     parents,
+    principalRule: principalRule === "agent-address/1" ? "agent-address/1" : undefined,
   });
   return compactActor(resolved.actor);
 }

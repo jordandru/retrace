@@ -67,7 +67,7 @@ test("live hook duration includes startup before the hook module loads", async (
   assert.ok(commit.duration_ms! >= 100, `process-start duration omitted startup: ${commit.duration_ms}ms`);
 });
 
-test("git adapter: install hook, human commit, agent commit with trailers, backfill idempotent", async () => {
+test("T8 git adapter runs the actual hook for a known agent author address", async () => {
   const dir = mkdtempSync(join(tmpdir(), "retrace-git-"));
   const db = join(dir, "ledger.db");
   const env = { RETRACE_DB: db, RETRACE_PROJECT: "rpg" };
@@ -90,7 +90,11 @@ test("git adapter: install hook, human commit, agent commit with trailers, backf
   writeFileSync(join(dir, "fight.ts"), "export const jab = () => 1;\n");
   sh(dir, "git", ["add", "."]);
   const root = await seedInstruct(db);
-  sh(dir, "git", ["commit", "-qm", `add jab\n\nRetrace-Actor: claude-code\nRetrace-Model: claude-fable-5\nRetrace-Caused-By: ${root}\nCo-Authored-By: Claude <noreply@anthropic.com>`], env);
+  sh(dir, "git", ["commit", "-qm", `add jab\n\nRetrace-Actor: claude-code\nRetrace-Model: claude-fable-5\nRetrace-Caused-By: ${root}\nCo-Authored-By: Claude <noreply@anthropic.com>`], {
+    ...env,
+    GIT_AUTHOR_NAME: "Claude",
+    GIT_AUTHOR_EMAIL: "noreply@anthropic.com",
+  });
 
   const store = new SqliteStore(db);
   let events = await store.all("rpg");
@@ -116,10 +120,11 @@ test("git adapter: install hook, human commit, agent commit with trailers, backf
   assert.equal(agent.actor.type, "agent");
   assert.equal(agent.actor.id, "claude-code");
   assert.equal(agent.actor.model, "claude-fable-5");
-  assert.equal(agent.actor.on_behalf_of, "jordan@slcwitit.com");
+  assert.equal(agent.actor.on_behalf_of, undefined);
   assert.equal(agent.caused_by, root);
   assert.equal(agent.intent, "add jab");
   assert.equal(agent.method?.automated, true);
+  assert.equal(agent.method?.params?.principal_rule, "agent-address/1");
 
   // backfill picks up the initial commit only; re-running dedupes everything
   const bf = sh(dir, "node", [bin, "backfill", "--repo", dir], env);
@@ -280,6 +285,68 @@ test("hook end to end: the named credential is the bearer the server sees; a rej
     await shAsync(dir, "git", ["commit", "-qam", "unresolvable credential"], env);
     assert.match(readFileSync(join(dir, ".git", "retrace-hook.log"), "utf8"), /NOT logged: credential "does-not-exist" not found/);
     assert.equal(seen.length, 3, "nothing was sent for the unresolvable credential");
+  } finally {
+    server.close();
+  }
+});
+
+test("T1 hook proxy mode omits authorization and signatures, ignores ambient credentials, and validates configuration", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "retrace-git-proxy-"));
+  const seen: { authorization?: string; body: EventInput }[] = [];
+  let status = 201;
+  const server = createServer((req, res) => {
+    let body = "";
+    req.on("data", (chunk) => (body += chunk));
+    req.on("end", () => {
+      seen.push({ authorization: req.headers.authorization, body: JSON.parse(body) });
+      res.writeHead(status, { "content-type": "application/json" });
+      if (status === 401) return res.end(JSON.stringify({ error: "unauthorized" }));
+      const input = seen.at(-1)!.body;
+      res.end(JSON.stringify({ event: { ...input, id: "evt_proxy", seq: 0, prev_hash: "0", hash: "0", received_at: new Date().toISOString() }, deduped: false }));
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    sh(dir, "git", ["init", "-q", "-b", "main"]);
+    sh(dir, "git", ["config", "core.hooksPath", "/dev/null"]);
+    writeFileSync(join(dir, "a.ts"), "1\n");
+    sh(dir, "git", ["add", "."]);
+    sh(dir, "git", ["commit", "-qm", "proxy fixture"]);
+    writeFileSync(join(dir, ".retrace.json"), JSON.stringify({ project: "rpg", credential: "retrace-git" }));
+    const proxyEnv = {
+      RETRACE_AUTH: "proxy",
+      RETRACE_URL: url,
+      RETRACE_TOKEN: "ambient-owner-token",
+      RETRACE_HOOK_TOKEN: "ambient-hook-token",
+      RETRACE_HOOK_KEY_FILE: join(dir, "missing-key.jwk"),
+      RETRACE_ENV: "claude-cloud",
+      RETRACE_DEVICE: "claude-cloud",
+      RETRACE_CREDENTIALS_FILE: join(dir, "missing-credentials.json"),
+    };
+    await shAsync(dir, "node", [bin, "commit", "--repo", dir], proxyEnv);
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0].authorization, undefined);
+    assert.equal(seen[0].body.producer_sig, undefined);
+    assert.equal(seen[0].body.location?.environment, "claude-cloud");
+    assert.equal(seen[0].body.location?.device, "claude-cloud");
+    assert.equal(seen[0].body.method?.params?.principal_rule, "agent-address/1");
+
+    await assert.rejects(
+      () => shAsync(dir, "node", [bin, "commit", "--repo", dir], { ...proxyEnv, RETRACE_AUTH: "other" }),
+      /RETRACE_AUTH must be unset or "proxy"/,
+    );
+    await assert.rejects(
+      () => shAsync(dir, "node", [bin, "commit", "--repo", dir], { ...proxyEnv, RETRACE_URL: "" }),
+      /RETRACE_AUTH=proxy requires RETRACE_URL/,
+    );
+    assert.equal(seen.length, 1, "invalid proxy configuration sends nothing");
+
+    status = 401;
+    await assert.rejects(() => shAsync(dir, "node", [bin, "commit", "--hook", "--repo", dir], proxyEnv));
+    const log = readFileSync(join(dir, ".git", "retrace-hook.log"), "utf8");
+    assert.match(log, /proxy mode: the egress proxy did not authenticate this host/);
+    assert.doesNotMatch(log, /ambient-owner-token|ambient-hook-token/);
   } finally {
     server.close();
   }

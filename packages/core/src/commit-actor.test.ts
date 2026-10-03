@@ -174,3 +174,23 @@ test("resolveCommitActor: Retrace-Model-Source trailer, Decision A, Decision B",
   assert.equal(coauthorFamilyOnly.actor.model, undefined);
   assert.equal(coauthorFamilyOnly.modelClaim, "absent");
 });
+
+test("T8 agent-address/1 treats known agent author addresses as transport metadata", () => {
+  const message = "change\n\nRetrace-Actor: claude-code\n";
+  const legacy = resolveCommitActor({
+    message, authorName: "Claude", authorEmail: "noreply@anthropic.com",
+  });
+  const versioned = resolveCommitActor({
+    message, authorName: "Claude", authorEmail: "noreply@anthropic.com",
+    principalRule: "agent-address/1",
+  });
+  assert.equal(legacy.actor.on_behalf_of, "noreply@anthropic.com");
+  assert.equal(versioned.actor.on_behalf_of, undefined);
+
+  const human = resolveCommitActor({
+    message: "change", authorName: "Claude", authorEmail: "noreply@anthropic.com",
+    principalRule: "agent-address/1",
+  });
+  assert.equal(human.actor.type, "human");
+  assert.equal(human.actor.id, "noreply@anthropic.com");
+});

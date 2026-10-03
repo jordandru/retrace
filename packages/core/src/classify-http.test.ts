@@ -192,6 +192,45 @@ test("T17 /2: signed commit also discards planted claim_decision", async () => {
   assert.equal(cd?.decision?.shadow, true);
 });
 
+test("F1: unsigned assert ingress cannot annotate a client-chosen principal", async () => {
+  const { store, h } = handler(new MemoryEventStore(), {
+    credentials: [{
+      token: HOOK,
+      trust: "assert",
+      actor: { type: "system", id: "retrace-git" },
+      projects: ["p"],
+      allowed_actors: [{ type: "agent", id: "claude-code" }],
+    }],
+  });
+  await putPolicy(h);
+  const input = commitBody({
+    actor: { type: "agent", id: "claude-code", on_behalf_of: "github:client-chosen-victim" },
+    method: {
+      tool: "git",
+      automated: true,
+      params: {
+        sha: SHA,
+        parents: [],
+        principal_rule: "agent-address/1",
+        raw_message: "work\n\nRetrace-Actor: claude-code\n",
+        author: { name: "Claude", email: "noreply@anthropic.com" },
+      },
+    },
+  });
+  const response = await h(new Request("http://test/events", {
+    method: "POST",
+    headers: { authorization: ["Bearer", HOOK].join(" "), "content-type": "application/json" },
+    body: JSON.stringify(input),
+  }));
+  assert.equal(response.status, 201, await response.clone().text());
+  const event = store.events.find((candidate) => candidate.action === "committed")!;
+  assert.equal(event.method?.params?.producer_sig_verdict, "none");
+  const decision = event.method?.params?.[CLAIM_DECISION_PARAM] as {
+    signed_actor?: { on_behalf_of?: string };
+  };
+  assert.equal(decision.signed_actor?.on_behalf_of, undefined);
+});
+
 test("P8 HTTP: shadow POST /events without policy is 503 queued loud", async () => {
   const { h } = handler();
   const res = await h(new Request("http://test/events", {
