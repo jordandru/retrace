@@ -243,11 +243,13 @@ export function deriveCommitClaim(input: EventInput): {
     ? params.author as { name?: unknown; email?: unknown }
     : undefined;
   const raw = typeof params.raw_message === "string" ? params.raw_message : "";
+  const principalRule = params.principal_rule === "agent-address/1" ? "agent-address/1" : undefined;
   const resolved = resolveCommitActor({
     message: raw,
     authorName: typeof author?.name === "string" ? author.name : undefined,
     authorEmail: typeof author?.email === "string" ? author.email : undefined,
     parents: extractParents(input),
+    principalRule,
   });
   const submittedDiffers = input.actor.type !== resolved.actor.type || input.actor.id !== resolved.actor.id;
   const source: ClaimSource = submittedDiffers && resolved.claimSource !== "malformed" ? "malformed" : resolved.claimSource;
@@ -1190,8 +1192,14 @@ async function classifyCommitClaimInner(opts: ClassifyOpts): Promise<ClassifyRes
   const mismatch = harnessMismatch(derived.claim.id, harness.marker, witnessClients);
   if (now() >= deadline) return { kind: "unavailable", reason: "deadline" };
 
+  const principalRule = opts.input.method?.params?.principal_rule;
+  const derivedPrincipal = principalRule === "agent-address/1"
+    ? opts.input.actor.on_behalf_of
+    : principalRule === undefined
+      ? derived.resolved.actor.on_behalf_of
+      : undefined;
   const signed = opts.signedActor ?? (derived.claim.type && derived.claim.id
-    ? { type: derived.claim.type, id: derived.claim.id, ...(derived.resolved.actor.on_behalf_of ? { on_behalf_of: derived.resolved.actor.on_behalf_of } : {}) }
+    ? { type: derived.claim.type, id: derived.claim.id, ...(derivedPrincipal ? { on_behalf_of: derivedPrincipal } : {}) }
     : undefined);
 
   const record: ClaimDecision = {

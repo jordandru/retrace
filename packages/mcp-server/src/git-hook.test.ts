@@ -325,6 +325,7 @@ test("T1 hook proxy mode omits authorization and signatures, ignores ambient cre
     assert.equal(seen[0].body.producer_sig, undefined);
     assert.equal(seen[0].body.location?.environment, "claude-cloud");
     assert.equal(seen[0].body.location?.device, "claude-cloud");
+    assert.equal(seen[0].body.method?.params?.principal_rule, "agent-address/1");
 
     await assert.rejects(
       () => shAsync(dir, "node", [bin, "commit", "--repo", dir], { ...proxyEnv, RETRACE_AUTH: "other" }),

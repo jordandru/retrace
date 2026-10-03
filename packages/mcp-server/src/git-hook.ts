@@ -186,7 +186,7 @@ export function commitToEvent(repo: string, sha: string, cfg: Cfg, live = false)
   const raw = git(repo, ["show", "-s", `--format=${fmt}`, sha]);
   const [fullSha, parents, an, ae, aI, subject, body, message] = raw.split("\x1f");
   const parentList = parents ? parents.split(" ") : [];
-  const resolved = resolveCommitActor({ message, authorName: an, authorEmail: ae, parents: parentList });
+  const resolved = resolveCommitActor({ message, authorName: an, authorEmail: ae, parents: parentList, principalRule: "agent-address/1" });
   const numstat = git(repo, ["show", "--numstat", "--format=", sha]).split("\n").filter(Boolean);
   let ins = 0, del = 0;
   const files = numstat.map((l) => {
@@ -230,7 +230,7 @@ export function commitToEvent(repo: string, sha: string, cfg: Cfg, live = false)
     },
     intent: resolved.intent, // prose "Key: value" lines survive (backlog #12)
     caused_by: causedBy,
-        method: { tool: "git", automated: actor.type !== "human", params: { branch, parents: parentList, files: files.length, insertions: ins, deletions: del, sha: fullSha, raw_message: message, author: { name: an, email: ae }, model_claim: resolved.modelClaim } },
+        method: { tool: "git", automated: actor.type !== "human", params: { branch, parents: parentList, files: files.length, insertions: ins, deletions: del, sha: fullSha, raw_message: message, author: { name: an, email: ae }, model_claim: resolved.modelClaim, principal_rule: "agent-address/1" } },
     idempotency_key: `git:${fullSha}`,
     tags: ["git", ...(isMerge ? ["merge"] : [])],
   };

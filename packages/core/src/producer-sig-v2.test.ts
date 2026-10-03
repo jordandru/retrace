@@ -528,3 +528,57 @@ test("finding 4: /1 ingress preserves claim_decision and producer_signed_actor",
     }
   }
 });
+
+test("withheld /2 commit reconstruction versions the agent-address principal rule", async () => {
+  const key = await generateSigningKey();
+  const legacyActor = { type: "agent" as const, id: "claude-code", on_behalf_of: "noreply@anthropic.com" };
+  const legacy = await signClaimed(key.privateKey, {
+    actor: legacyActor,
+    params: {
+      raw_message: "change\n\nRetrace-Actor: claude-code\n",
+      author: { name: "Claude", email: "noreply@anthropic.com" },
+    },
+  });
+  const legacyResult = await verifyProducerSigResult(asWithheld(legacy, {
+    claimDecision: withheldClaim({
+      signed_actor: legacyActor,
+      claim: { type: "agent", id: "claude-code" },
+    }),
+  }), key.publicKey, hookTrust);
+  assert.equal(legacyResult.ok, true);
+  assert.equal(legacyResult.signed_actor?.on_behalf_of, "noreply@anthropic.com");
+
+  const versionedActor = { type: "agent" as const, id: "claude-code" };
+  const versioned = await signClaimed(key.privateKey, {
+    actor: versionedActor,
+    params: {
+      raw_message: "change\n\nRetrace-Actor: claude-code\n",
+      author: { name: "Claude", email: "noreply@anthropic.com" },
+      principal_rule: "agent-address/1",
+    },
+  });
+  const versionedResult = await verifyProducerSigResult(asWithheld(versioned, {
+    claimDecision: withheldClaim({
+      signed_actor: versionedActor,
+      claim: { type: "agent", id: "claude-code" },
+    }),
+  }), key.publicKey, hookTrust);
+  assert.equal(versionedResult.ok, true);
+  assert.equal(versionedResult.signed_actor?.on_behalf_of, undefined);
+
+  const unknown = await signClaimed(key.privateKey, {
+    actor: legacyActor,
+    params: {
+      raw_message: "change\n\nRetrace-Actor: claude-code\n",
+      author: { name: "Claude", email: "noreply@anthropic.com" },
+      principal_rule: "agent-address/2",
+    },
+  });
+  assert.equal((await verifyProducerSigResult(asWithheld(unknown, {
+    claimDecision: withheldClaim({
+      signed_actor: legacyActor,
+      claim: { type: "agent", id: "claude-code" },
+    }),
+  }), key.publicKey, hookTrust)).ok, false);
+  assert.equal((await verifyProducerSigResult(unknown, key.publicKey)).ok, true);
+});

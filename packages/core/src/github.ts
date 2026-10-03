@@ -145,21 +145,24 @@ export async function mapGithubWebhook(event: string, payload: any, opts: Github
   }
   if (event === "push" && opts.includePush) {
     return (payload.commits ?? []).map((c: any) => {
-      const r = resolveCommitActor({ message: String(c.message ?? ""), authorName: c.author?.name, authorEmail: c.author?.email ?? (c.author?.username ? `github:${c.author.username}` : undefined) });
+      const r = resolveCommitActor({ message: String(c.message ?? ""), authorName: c.author?.name, authorEmail: c.author?.email ?? (c.author?.username ? `github:${c.author.username}` : undefined), principalRule: "agent-address/1" });
+      const actor = r.actor.type === "agent" && r.actor.on_behalf_of === undefined && payload.sender?.type === "User"
+        ? { ...r.actor, on_behalf_of: `github:${payload.sender.login}` }
+        : r.actor;
       const files: string[] = [...(c.added ?? []), ...(c.modified ?? []), ...(c.removed ?? [])];
       const parentsComplete = Array.isArray(c.parents);
       const parents: string[] = parentsComplete
         ? c.parents.filter((p: unknown): p is string => typeof p === "string")
         : [];
       return {
-        project, actor: r.actor, action: "committed" as const,
+        project, actor, action: "committed" as const,
         artifacts: [{ id: `commit:${repoFull}@${String(c.id).slice(0, 12)}`, kind: "commit", label: `${repoFull}@${String(c.id).slice(0, 7)}`, role: "generated" as const }, ...files.map((f) => ({ id: `repo:${repoFull}#${f}`, kind: "file", label: f, role: "generated" as const }))],
         timestamp: c.timestamp, location: where(c.url), intent: r.intent, caused_by: r.causedBy,
         change: { after_hash: c.id, summary: `${files.length} file${files.length === 1 ? "" : "s"} (pushed to ${String(payload.ref ?? "").replace(/^refs\/heads\//, "")})` },
-        method: { tool: "git", automated: r.actor.type !== "human", params: {
+        method: { tool: "git", automated: actor.type !== "human", params: {
           sha: c.id, producer: "github-push", ref: payload.ref, pusher: payload.pusher?.name,
           raw_message: String(c.message ?? ""), author: { name: c.author?.name, email: c.author?.email ?? (c.author?.username ? `github:${c.author.username}` : undefined) },
-          parents, parents_complete: parentsComplete, model_claim: r.modelClaim,
+          parents, parents_complete: parentsComplete, model_claim: r.modelClaim, principal_rule: "agent-address/1",
         } },
         idempotency_key: `gh:push:${repoFull}:${c.id}`, tags: ["github", "push"],
       };

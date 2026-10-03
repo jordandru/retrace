@@ -10,6 +10,8 @@ const AGENT_COAUTHOR = /claude|copilot|codex|cursor|devin|aider|gpt|gemini|grok|
 const AGENT_FAMILIES = ["claude", "copilot", "codex", "cursor", "devin", "aider", "gemini", "grok", "gpt"];
 /** Family substring → pinned MCP actor id. Copilot's Co-Authored-By name is "Copilot"/"GitHub Copilot"; the Worker pin is `github-copilot`. */
 const PINNED_FAMILY_IDS: Record<string, string> = { copilot: "github-copilot" };
+export const KNOWN_AGENT_AUTHOR_ADDRESSES = ["noreply@anthropic.com"] as const;
+export type PrincipalRule = "agent-address/1";
 const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
 /** Retrace-Caused-By must be a real event id; junk trailers are dropped rather than sealed (audit 2026-08-30). */
 export const CAUSED_BY_RE = /^evt_[0-9a-f]{32}$/i;
@@ -65,13 +67,18 @@ export function stripTrailers(body: string, n: number): string {
 
 /** Co-Authored-By agent → { id: family, model: slug of the full name when it says more than the family, display_name:
  *  name as written }. Keeps "Claude Fable 5" from minting actor id "claude-fable-5" (backlog #12). */
-export function coauthorActor(coauthor: string, ae: string): EventInput["actor"] {
+export function coauthorActor(coauthor: string, ae: string, principalRule?: PrincipalRule): EventInput["actor"] {
   const name = coauthor.replace(/<.*>/, "").trim();
   const family = AGENT_FAMILIES.find((f) => name.toLowerCase().includes(f));
   const full = slug(name);
   const id = (family && PINNED_FAMILY_IDS[family]) ?? family ?? full;
   const model = family && full !== family && full !== id ? full : undefined;
-  return { type: "agent", id, model, on_behalf_of: ae, display_name: name };
+  return {
+    type: "agent", id, model, display_name: name,
+    ...(principalRule === "agent-address/1" && (KNOWN_AGENT_AUTHOR_ADDRESSES as readonly string[]).includes(ae.toLowerCase())
+      ? {}
+      : { on_behalf_of: ae }),
+  };
 }
 
 
@@ -125,7 +132,7 @@ function applyModelSourceTrailers(
 }
 
 /** Same precedence as the hook: Retrace-Actor trailer → agent Co-Authored-By → [bot] author → human author. */
-export function resolveCommitActor(input: { message: string; authorName?: string; authorEmail?: string; parents?: string[] }): CommitActorResolution {
+export function resolveCommitActor(input: { message: string; authorName?: string; authorEmail?: string; parents?: string[]; principalRule?: PrincipalRule }): CommitActorResolution {
   const message = input.message ?? "";
   const { trailers, trailerText } = parseTrailers(message);
   const norm = message.replace(/\r\n?/g, "\n").trim();
@@ -142,8 +149,9 @@ export function resolveCommitActor(input: { message: string; authorName?: string
     !/[\r\n]/.test(message) &&
     /\\n(?:\\n)?(?:Retrace-Actor|Retrace-Model|Retrace-Caused-By|Co-Authored-By):\s*\S/i.test(message);
   let actor: EventInput["actor"];
-  if (agentId) actor = { type: "agent", id: agentId, model: trailers["retrace-model"]?.[0], on_behalf_of: ae || undefined };
-  else if (agentCo) actor = coauthorActor(agentCo, ae);
+  const agentAuthorAddress = input.principalRule === "agent-address/1" && (KNOWN_AGENT_AUTHOR_ADDRESSES as readonly string[]).includes(ae.toLowerCase());
+  if (agentId) actor = { type: "agent", id: agentId, model: trailers["retrace-model"]?.[0], ...(!agentAuthorAddress && ae ? { on_behalf_of: ae } : {}) };
+  else if (agentCo) actor = coauthorActor(agentCo, ae, input.principalRule);
   else if (isBot) actor = { type: "system", id: ae || an, display_name: an };
   else actor = { type: "human", id: ae || an, display_name: an };
   const claimSource: CommitActorResolution["claimSource"] =
