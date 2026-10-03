@@ -1540,7 +1540,7 @@ test("agent-address/1 decision records use only producer-authenticated principal
   await pinnedEdit(store, { actor: "claude-code", path: "a.ts" });
 
   const versioned = await classify(store, makeInput("agent-address/1"), {
-    producer: "github-webhook", sealedBy: "webhook:github",
+    producer: "github-webhook", sealedBy: "webhook:github", authenticatedPrincipal: "github:jordan",
   });
   assert.equal(versioned.kind, "decision");
   if (versioned.kind !== "decision") return;

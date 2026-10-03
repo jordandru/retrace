@@ -980,6 +980,8 @@ export interface ClassifyOpts {
   now?: () => number;
   deadline?: number;
   signedActor?: { type: Actor["type"]; id: string; on_behalf_of?: string };
+  /** Principal derived by an authenticated producer such as the HMAC-verified GitHub webhook. */
+  authenticatedPrincipal?: string;
 }
 
 async function classifyCommitClaimInner(opts: ClassifyOpts): Promise<ClassifyResult> {
@@ -1203,7 +1205,7 @@ async function classifyCommitClaimInner(opts: ClassifyOpts): Promise<ClassifyRes
 
   const principalRule = opts.input.method?.params?.principal_rule;
   const derivedPrincipal = principalRule === "agent-address/1"
-    ? opts.input.actor.on_behalf_of
+    ? opts.authenticatedPrincipal
     : principalRule === undefined
       ? derived.resolved.actor.on_behalf_of
       : undefined;
