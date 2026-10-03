@@ -25,10 +25,22 @@ test("T11 push guard refuses main forms only in cloud sessions", () => {
   const repo = mkdtempSync(resolve(tmpdir(), "retrace-cloud-guard-"));
   try {
     assert.equal(spawnSync("git", ["init", "-q", "-b", "main"], { cwd: repo }).status, 0);
+    assert.equal(spawnSync("git", [
+      "-c", "user.name=Cloud Guard Test",
+      "-c", "user.email=cloud-guard@example.test",
+      "commit", "--allow-empty", "-q", "-m", "initial",
+    ], { cwd: repo }).status, 0);
+
     for (const command of [
       "git push origin main",
       "git push origin HEAD:main",
       "git push origin refs/heads/main",
+      "git push --force origin main",
+      "git push -u origin main",
+      "git push origin +main",
+      "git push origin HEAD:refs/heads/main",
+      "git push origin :main",
+      "git push origin",
       "git push",
     ]) {
       const result = runGuard(repo, command);
@@ -36,9 +48,20 @@ test("T11 push guard refuses main forms only in cloud sessions", () => {
       assert.match(result.stderr, /refused: a cloud session never pushes main/);
     }
 
+    assert.equal(runGuard(repo, "gh pr merge").status, 0);
     assert.equal(runGuard(repo, "git push origin feature/cloud").status, 0);
     assert.equal(runGuard(repo, "git push origin main", false).status, 0);
-    assert.equal(spawnSync("git", ["checkout", "-q", "-b", "feature/cloud"], { cwd: repo }).status, 0);
+    assert.equal(spawnSync("git", ["checkout", "-q", "-b", "feature-cloud"], { cwd: repo }).status, 0);
+    assert.equal(spawnSync("git", ["config", "branch.feature-cloud.remote", "origin"], { cwd: repo }).status, 0);
+    assert.equal(spawnSync("git", ["config", "branch.feature-cloud.merge", "refs/heads/main"], { cwd: repo }).status, 0);
+    for (const mode of ["upstream", "simple"]) {
+      assert.equal(spawnSync("git", ["config", "push.default", mode], { cwd: repo }).status, 0);
+      const result = runGuard(repo, "git push");
+      assert.equal(result.status, 2, `push.default=${mode}`);
+      assert.match(result.stderr, /refused: a cloud session never pushes main/);
+    }
+
+    assert.equal(spawnSync("git", ["config", "push.default", "current"], { cwd: repo }).status, 0);
     assert.equal(runGuard(repo, "git push").status, 0);
   } finally {
     rmSync(repo, { recursive: true, force: true });
