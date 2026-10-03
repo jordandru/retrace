@@ -1,7 +1,7 @@
-# Owner-login amendments stage, step 2: a cached capture closure (design note v2)
+# Owner-login amendments stage, step 2: a cached capture closure (design note v3)
 
-**Status:** v2 draft, 2026-10-03, by claude-code (coordinator and spec author). v1 was written by session 27 (`claude-opus-5-5`,
-harness-runtime); v2 by session 28 (`claude-fable-5-1`, harness-runtime). **Not built.**
+**Status:** v3 draft, 2026-10-03, by claude-code (coordinator and spec author). v1 was written by session 27 (`claude-opus-5-5`,
+harness-runtime); v2 and v3 by session 28 (`claude-fable-5-1`, harness-runtime). **Not built.**
 - **Go.** Jordan's go `evt_be6f7cb96342473baebcc310865ee961` (item 3: "draft the step-2 note"). It came after step 1's success test failed
   (`evt_3a6c63fa7dac47acbecb399866e836ac`). The v2 fix round is Jordan's go `evt_c24e9ea03d2a452cb36cabf67c177952`.
 - **Parent.** `docs/design/owner-login-capture-read.md` v1.6:
@@ -36,6 +36,28 @@ harness-runtime); v2 by session 28 (`claude-fable-5-1`, harness-runtime). **Not 
 - Codex's remaining notes are applied: individual seal facts are kept before grouping; the own-key minimum seq is kept even when a seal's cut
   paths are empty; cause, target, evidence and traversed causal ancestors stay full events (R5); the policy key is the complete `PolicyDocument`
   digest; `ownerSeals` is noted as a classifier constant; the size estimate is relabelled (§4.1); P4–P6 and the fixtures are respecified (§5, §7).
+
+**v3, the fix round for round 2 at `70b30d42`: Codex `evt_ac47f32e60ba4e65b6256e956f839741` (rejected: F2 and F3 re-raised as Medium; F1
+resolved), Grok `evt_820abe53b0e54ca58e18069da3c1c8a4` (rejected: G-M1 Medium, the same interior-of-maintenance hole as F3, seen from the
+fill's side; F1 and F2 closed on its measurements), NOOA `evt_dd5838fe3ed24bedbff21c2be6e7b438` (approved).** What changed:
+- **F2, one logical read.** v2 charged the selected pairs and each physical piece (extension, full reads) separately through the existing
+  proxy, with each piece's cap reduced by what was already counted. Codex showed three cases where that differs from today's single read, on
+  both stores: an exact-cap selection with an empty extension fails `budget` before querying; a failed read leaves a different
+  `budget_rows_remaining` because the proxy debits only on success; and accepted aliases such as `app@aaaaaaa` make two prefix terms match
+  the same `(seq, key)` pair, so pieces are not disjoint and a reduced cap refuses pairs the union would have counted once. v3 defines **one
+  logical read per capture read** (R7): every physical piece runs at the original caps, the pairs and seqs are unioned and deduplicated across
+  the pieces, the caps are enforced once against that union, and the counters are debited once at the same success point as today, with the
+  same failure side effects. The disjointness claim is withdrawn.
+- **F3 and G-M1, a generation fence.** v2's two bumps did not fence a fill that starts, publishes and is used wholly between them (Codex), and
+  v2 never told fills to refuse an in-progress epoch (Grok). v3 makes the epoch a
+  **committed generation**: an even value is committed, an odd value is maintenance in progress. Maintenance is serialised, moves the value to
+  odd before its first change and to the next even after its last; fills and deliveries refuse an odd value; a fill publishes only under the
+  even value it read at its start, conditioned in SQL. Codex's interleaving is a fixture (§5 (a)).
+- **The veto is marked.** A full-OID veto and a store failure both end `unavailable / store_error` today. R8 adds `failure_origin` to `timing`
+  so the replay classification of §4.5 does not infer a failure's origin from the overloaded reason.
+- **P4 measured** (§2, §7): the commit read's SQL time is about 15 ms; its cost is bytes.
+- **Grok's measurements are cited** (§4.1, §8): a compact encoding of the §2 delivery is 115,537 characters, 13.6 times smaller than today's
+  bodies, and per-term selection equalled the uncached reads and all three counters on both stores for seq 11084.
 
 ## 0. Decisions this note asks the gate, and Jordan, to confirm
 1. **Step 2 caches derived capture facts, not rows or bodies (§4).**
@@ -91,7 +113,11 @@ on the review worktree (round 1).
   outcome is `unavailable / deadline`.
 - **Inference, not measured.** The live rate is about 460–560 ms for 757K characters. At that rate `capture_commits` would take about 500–600 ms,
   and the amendments stage roughly 85 + 85 + 500 + 550 ≈ 1.2 s. With candidates and consumption (about 100–210 and 90 ms), the classification
-  needs about 1.5 s. P4 measures the commit read's SQL time; its Worker wall time is known only from the success test (§7).
+  needs about 1.5 s. **P4 measured (v3):** the commit read's SQL time on production D1 is 13.6–17.9 ms over three rounds (D1 `rows_read`
+  2,367), against 133–170 ms for the target read (`rows_read` 170,660); both statements returned the expected rows exactly (478 rows, 217
+  bodies, 816,833 characters, 487 pairs; `evt_520a8909cfca46c689bf1c9857d9f66d`). So the commit read's live deadline is not SQL: at the target
+  read's measured ratio (180 ms SQL to 560 ms wall for 756,608 characters), about 430 ms of the commit read is bytes crossing to the Worker.
+  The stage's wall time is bytes, which is what the closure removes.
 - **A thin record per seal still carries about 45 % of the volume.** The record holds id, project, seq, action, actor, caused_by,
   idempotency_key, tags, artifacts {id, kind, role}, tool, stamp, sha and after_hash (the measuring script's projection omits `action_detail`;
   it is an illustration, not the closure format). The artifact lists dominate. So shrinking each row (§6 B) does not fit on its own.
@@ -179,10 +205,12 @@ It holds, as of `through_seq`:
   seq (§3, item 2).
 - **Encoding.** One JSON document per closure with a term dictionary and a key dictionary; pairs are index pairs; rows and seal facts reference
   seqs. `facts_sha256` over the document guards accidental corruption only (§4.5).
-- **Estimated size, an inference until P5.** Codex's literal projection of the v1 seal fields over the §2 replay gave 215 candidates and
-  92,986 characters before membership metadata. With dictionaries, the §2 reads (about 1,000 rows, 1,467 pairs, 236 terms, 403 seal facts) come
-  to roughly 150–250K characters, against 1.57M today. That is an estimate of a compact encoding, not a measurement; P5 measures the final row,
-  and §8 says what follows if it does not fit.
+- **Size, measured offline by Grok (v3; round 1 of its read, `evt_820abe53`).** A compact encoding of the §2 delivery's two reads with term and key
+  dictionaries, `(seq, key, term)` pairs, stamped rows and seal facts cut to the target's units is **115,537 characters** on SqliteStore
+  (236 terms, 234 keys, 2,448 term-pairs, 803 unique rows, 216 unique seals; sha256 `56c8c1ff9a2d7091`) and 115,248 on MemoryEventStore,
+  against 1,565,361 body characters today: 13.6 times smaller, or 7.1 times against the 820,235 unique body characters. Codex's earlier literal
+  projection of the v1 seal fields alone was 92,986 characters. This is an encoding of compact JSON, not a D1 row and not Worker wall time;
+  P5 measures those, and §8 says what follows if it does not fit.
 
 ### 4.2 Requirements
 - **R1. Same decisions, under a stated clock.** For every input, with `now` fixed and the deadline at infinity (the fixtures' and the replay's
@@ -221,46 +249,66 @@ It holds, as of `through_seq`:
   document or a `facts_sha256` mismatch, a store error on the closure read, or the deadline, gives today's uncached path. That path currently
   ends `unavailable / deadline`. **A semantic failure is not a fallback:** a `budget` outcome or a full-OID veto computed from the selected facts
   is returned as the uncached path would return it (`unavailable / budget`, `unavailable / store_error`), because that is the same decision; it
-  is not retried uncached. The closure never weakens a decision.
-- **R7. The counters charge the selected sets exactly (v2).** Per read, the delivery computes from the selected pairs and the extension's rows
-  what the uncached read would have produced, and charges it the same way:
-  - the runner's cap: distinct `(seq, key)` pairs over the selection plus the extension (and the full reads of R4), against the same `row_cap`;
-    `budget` exactly when that count exceeds the cap. The extension and full reads run through the real runner with `row_cap` reduced by the
-    pairs already selected, so the trip point is the same; pairs cannot collide across the pieces because their seq ranges and prefix terms are
-    disjoint;
-  - `rowsRead`: the distinct seqs over the same union, per read;
-  - the owner-login budget: the selected keys that satisfy its predicate, with the same `sameArtifact` and `startsWith` tests, taken through the
-    same `EvidenceBudget`, plus the extension's rows as the proxy already charges them.
+  is not retried uncached, and `timing.failure_origin` names it (R8). The closure never weakens a decision.
+- **R7. One logical read per capture read; the counters charge its union exactly (v3).** Each capture read of the uncached path (targets,
+  commits) becomes one **logical read** made of physical pieces: the selection from the closures, the extension over `(through_seq, U]`, and
+  for the commit read the full reads of prefixes the closures lack. The logical read, not the pieces, is what the counters see:
+  - **the zero-remaining precondition** is tested once, before the first piece, exactly as the proxy tests it today (`owner-login.ts:124`);
+  - **every physical piece runs at the original caps** (`row_cap` = the stage's remaining, bounded by the budget's remaining, as today) and
+    the original deadline; a piece that trips its own cap or the deadline fails the logical read with that reason, because its pairs alone
+    already exceed what the union may hold;
+  - **the union** of all pieces' `(seq, key)` pairs is deduplicated, and so are the seqs; the logical read fails `budget` exactly when the
+    deduplicated pairs exceed the original `row_cap`, which is the uncached read's condition (`store.ts:625–627`). Two prefix terms can match
+    one pair (aliases such as `app@aaaaaaa` are accepted, so `commit:app@aaaaaaa` and `commit:app@aaaaaaa@bbbbbbb` overlap; Codex round 2),
+    and a cached range and a full read can return the same seq; deduplication across pieces is what makes the count equal, and no piece's cap
+    is reduced by another piece;
+  - **the debits happen once, at the success point**: `rowsRead` adds the union's distinct seqs and checks `CLASSIFY_ROW_CAP`
+    (`classify.ts:620–621`); the owner-login budget takes the union's keys that satisfy its predicate, with the same `sameArtifact` and
+    `startsWith` tests (`:127–129`). A failed logical read debits nothing, so `budget_rows_remaining` after a failure equals today's;
+  - the boundary is computed over the union's stamped flags.
 
   Cached facts are charged as reads. No new allowance comes with a hit; a closure that represents more evidence than the caps allow yields
   `budget` as today. Each store keeps its own matching semantics because the pairs were recorded by that store (§4.1). Physical I/O is reported
-  separately (R8) and never enters a decision.
-- **R8. Metrics.** Each closure read records `cache: hit | miss | stale | malformed | above_head`, `through_seq`, the number of selected pairs
-  and rows per read, the size of each extension and full read, and wall times. These go in `timing` (§1 of the parent note's R6) and are
-  excluded from R1's comparison.
+  separately (R8) and never enters a decision. The build implements this as one store-level operation that the `EvidenceBudget` proxy wraps
+  like `captureIndexRows`, not as separate proxied calls per piece.
+- **R8. Metrics, and the origin of a failure.** Each closure read records `cache: hit | miss | stale | dirty | malformed | above_head`,
+  `through_seq`, the number of selected pairs and rows per logical read, the size of each extension and full read, and wall times. A failed
+  stage also records `failure_origin: veto | budget | store | deadline` (v3), because the veto and a store failure share the reason
+  `store_error` today (`classify.ts:656`, `:671`) and the replay classification of §4.5 must not infer the origin from that reason. These go in
+  `timing` (§1 of the parent note's R6) and are excluded from R1's comparison.
 - **R9. Coherent fills.** A fill reads the epoch, the head and every closure of a project in one run, and publishes all of that project's rows in
   one atomic batch or none (§4.4). A partial fill never publishes.
 
 ### 4.3 Invalidation (v2)
-- **The epoch.** A per-project row `capture_index_epoch(project, epoch, changed_at, reason)`; no row means epoch 0. **Every** maintenance
-  operation that inserts, updates, deletes, re-keys or rebuilds `event_artifact_index` rows or `events` bodies at or below the head changes the
-  epoch: backfills (`BACKFILL_ARTIFACT_INDEX_SQL`), migrations, repairs, re-keying, remove-only fixes and manual D1 writes. The operation bumps
-  the epoch **before its first change and after its last**, so a fill that overlaps either boundary sees the change. A manual operation that
-  cannot bump atomically truncates `capture_closure` instead. A well-formed cache under an unchanged epoch after such an operation is the
-  failure Codex named; the contract makes it an operator error that the runbook names, not a state the design accepts.
+- **The generation (v3).** A per-project row `capture_index_epoch(project, epoch, changed_at, reason)`; no row means epoch 0. **An even value
+  is a committed generation; an odd value means maintenance in progress.** Every maintenance operation that inserts, updates, deletes, re-keys
+  or rebuilds `event_artifact_index` rows or `events` bodies at or below the head (backfills such as `BACKFILL_ARTIFACT_INDEX_SQL`, migrations,
+  repairs, re-keying, remove-only fixes, manual D1 writes) follows one protocol: (1) maintenance is serialised, one operation at a time, which
+  the runbook enforces and the odd value makes visible; (2) before its first change it moves the value from the committed `e` to `e + 1`, in
+  its own statement, and refuses to start if the value is already odd; (3) after its last change it moves the value to `e + 2`. Fills and
+  deliveries **refuse an odd value**: a fill that reads an odd value at its start or end publishes nothing; a delivery that reads an odd value,
+  or a value different from its closures', takes the uncached path (`cache: dirty | stale`). A fill publishes only under the even value it read
+  at its start, conditioned in SQL (§4.4). Codex's round-2 interleaving, a fill that starts after the opening move and publishes before the
+  closing one, is refused at its first epoch read because the value is odd; a fill that started before the opening move cannot publish, because
+  the conditional write sees `e + 1`; a closure published under `e` is stale to every delivery after the closing move, which reads `e + 2`.
+  A manual operation that cannot follow the protocol is outside it and is the stated trust limit (§4.5); truncating `capture_closure` is not a
+  substitute, because a fill can start during the operation.
+  **What the fence does not cover:** a delivery's own reads during an operation see what the uncached path would see at that instant. The
+  protocol protects published closures and the fills that make them, not an in-flight read; that exposure is today's and is unchanged.
 - **The ledger anchor.** Each closure records `through_seq` and `through_hash`. A delivery reads `events.hash` at `through_seq` in the same D1
   batch as the closures and compares; a missing row or a different hash is stale. That catches a ledger restored to a different history, a
   rollback below `through_seq`, and a fill that read a chain the live ledger no longer has. The hash is the chain's, so a matching anchor means
   the fill's head is an event of the live chain; events below it are fixed by the chain.
-- **The fill's own coherence** (R9). The fill reads the epoch, then the head, then performs its reads, then reads the epoch again; it publishes
-  only if both epoch reads agree, and the publish batch is conditioned in SQL on the epoch still being that value. A fill that observed partial
-  membership under a new epoch cannot publish, because the operation's closing bump changes the value it conditions on.
+- **The fill's own coherence** (R9). The fill reads the epoch, refuses an odd value, then reads the head, performs its reads, and reads the
+  epoch again; it publishes only if both reads are the same even value, and the publish batch is conditioned in SQL on the epoch still being
+  that value. With the generation rule above, no fill can observe membership that an operation is changing and still publish: it either sees
+  the odd value and stops, or started earlier and is refused by the conditional write.
 - **Project deletion and recreation.** `capture_closure` and `capture_index_epoch` join the table set `deleteProject` deletes in its guarded
   batch (`apps/worker/src/d1-store.ts:65`). A recreated project starts at epoch 0 with no closures, and its new chain's hashes differ, so an
   old closure that somehow survived could not match an anchor.
 - **Restores.** A whole-database restore of one coherent snapshot (events, index, closures and epoch together) stays valid: the anchor and the
   epoch match. A partial restore, or a restore followed by a divergent history, is caught by the anchor on the ledger side; on the index or
-  cache side the restore runbook bumps the epoch. That runbook step is part of the build.
+  cache side the restore runbook runs the maintenance protocol (odd, then the next even). That runbook step is part of the build.
 - **A policy change** changes the complete digest, so a closure keyed by the old digest is never read. A profile change (format, classifier,
   canonicalizer, capture statements) bumps the profile.
 - **A new amendment** has a new target, and so a new closure, filled at the next scheduled run. Until then the delivery takes the uncached path
@@ -273,10 +321,10 @@ It holds, as of `through_seq`:
     unvalidated. The fill processes targets in seq order and stops at its budget; if it cannot finish every target of a project it publishes
     nothing for that project and records `incomplete` (below). The budget and a resume policy for projects with many amendments are measured by
     P5 and set in the build brief, not here.
-  - Per project: read the epoch; read the head `H` (`seq`, `hash`); list the targets from `amendmentEventsUpTo(project, H)`; for each target run
+  - Per project: read the epoch and stop if it is odd (§4.3); read the head `H` (`seq`, `hash`); list the targets from `amendmentEventsUpTo(project, H)`; for each target run
     the two capture reads through `H` with the fill statement (§4.1) and `row_cap = CLASSIFY_ROW_CAP`; derive the prefix superset from every
     seal-shaped matched event; run the commit read; build the document. A read that exceeds the cap writes no closure for the project. Read the
-    epoch again.
+    epoch again; stop unless it is the same even value.
   - Publish: one D1 batch that deletes the project's previous rows and inserts the new ones (`capture_closure`: project, target id, policy digest,
     profile, epoch, `through_seq`, `through_hash`, `facts_json`, `facts_sha256`, `computed_at`), each statement conditioned on the epoch still
     being the value read. All or nothing (R9).
@@ -286,20 +334,21 @@ It holds, as of `through_seq`:
   1. As today: candidates, dependencies and base events (`classify.ts:705–725`), charged as today. The targets' keys and the delivery's
      uncovered keys are computed as today (`:633–647`).
   2. **One D1 batch:** the closures for the candidates' targets (keyed by project, target id, policy digest, profile), the current epoch row, and
-     `events.hash` at the closures' `through_seq`. Validate every R6 condition. All closures used in one delivery must share one `through_seq`;
-     otherwise the uncached path.
+     `events.hash` at the closures' `through_seq`. Validate every R6 condition, including that the epoch is even and equals every closure's.
+     All closures used in one delivery must share one `through_seq`; otherwise the uncached path.
   3. **Target read, by selection.** From each closure, take the pairs whose term is one of the delivery's uncovered keys; union across closures
      and deduplicate by `(seq, key)`, as the uncached single read over the union of keys deduplicates across its statements. Then the extension:
-     one `captureIndexRows` call for the uncovered keys over `(through_seq, U]`, with `row_cap` reduced by the selected pairs. Charge R7. The
-     preliminary boundary is the minimum over the base events' stamped seqs and the selected and extension rows' stamped flags.
+     one `captureIndexRows` call for the uncovered keys over `(through_seq, U]` at the original caps. Union, deduplicate, enforce the caps once
+     and debit once (R7, one logical read). The preliminary boundary is the minimum over the base events' stamped seqs and the union's stamped
+     flags.
   4. **Preliminary seals.** The pool is the base events, the seal facts of the selected rows (as capture records, R5) and the extension's bodies.
      Apply `classifierCaptureSeals`' rules with the delivery's `canonicalRepo`, policy and preliminary boundary: eligibility, repository filter,
      strict full-OID resolution, the conflicting-resolution veto. A veto is returned as `store_error`, exactly as `classify.ts:656` returns it.
      Derive the prefixes as `:657–665` does.
   5. **Commit read, by selection.** Take, from the closures, the pairs whose term is one of the derived prefixes; deduplicate. Prefixes not among
-     the closures' terms: one full `captureIndexRows` call over `(-1, U]`. Cached prefixes: one extension call over `(through_seq, U]`. Each call
-     runs with `row_cap` reduced by what the earlier pieces of this read already counted. Charge R7 over the union. The complete boundary adds
-     the stamped flags of every row in the union.
+     the closures' terms: one full `captureIndexRows` call over `(-1, U]`. Cached prefixes: one extension call over `(through_seq, U]`. Every
+     call runs at the original caps; the three pieces form one logical read (R7): union, deduplicate, enforce the caps once, debit once. The
+     complete boundary adds the stamped flags of every row in the union.
   6. **Complete seals, context, collection,** as today (`:670–748`), with capture records only where no dependency or candidate has the id (R5).
   - Cost, an inference: one batched round trip for step 2 (about 85–100 ms, the small-call cost measured in §1) plus the closure bytes, and two
     to three small index calls for the extensions. The closure read dominates and P5 measures it.
@@ -320,7 +369,8 @@ It holds, as of `through_seq`:
     evidence of corrupted derived state. A **semantic** mismatch is a sealed decision that completed (or failed on `budget`, or on the veto) and
     whose recomputation differs; that is the signal of a tampered closure, or of a bug.
   - **The build adds that classification** to the replay output (§5 (c)), so a reader does not mistake an operational mismatch for tampering
-    or a semantic one for noise.
+    or a semantic one for noise. It reads the sealed record's `timing.failure_origin` (R8) and the stated comparison; it never infers the origin
+    of a failure from the reason string alone, which `store_error` overloads (Codex, round 2).
   - It is a detector after the fact, not a live prevention and not a deployed automatic auditor. A doctor or auditor finding for a semantic
     mismatch is proposed as follow-up work.
 - **Tamper fixtures** (§5 (a)) distinguish a malformed or hash-invalid closure, which falls back (R6), from a well-formed, self-consistent
@@ -337,14 +387,18 @@ It holds, as of `through_seq`:
   - multiple targets, and targets in two repositories, with overlapping keys (the union and deduplication of §4.4 step 3);
   - a closure above `U` (fallback), closures of one project at two heads (fallback), a missing term (fallback);
   - **all three budget boundaries,** each tripped by one row in the uncached path and in the closure path alike: the runner's `row_cap`,
-    `CLASSIFY_ROW_CAP` and `OWNER_LOGIN_ROW_CAP`;
+    `CLASSIFY_ROW_CAP` and `OWNER_LOGIN_ROW_CAP`; and the three round-2 cases on each: an exact-cap selection with an empty extension (must
+    succeed), a failed logical read (must leave `budget_rows_remaining` as today), and overlapping alias prefixes (`app`, `app@aaaaaaa`) whose
+    two terms match one pair (must count it once);
   - the per-store over-match: a `repo:x#/retrace#a.ts` row that the SQL store counts as a pair and the memory store does not, with the budget
     charged per store as today;
   - an evidence id, a cause id and a traversed causal ancestor that are each also a capture record (R5), and a full dependency whose id is also
     a capture candidate;
   - a missing full OID, conflicting resolutions of one reference, and a seal with an empty cut whose own-key seq sets `before`;
-  - each invalidation in §4.3: a policy change, a profile change, an epoch bump by an insert, by a delete, by a rebuild; an epoch bump between
-    a fill's reads and its publication (nothing published); an anchor mismatch; a partial fill (nothing published);
+  - each invalidation in §4.3: a policy change, a profile change, a generation moved by an insert, by a delete, by a rebuild; a move between a
+    fill's reads and its publication (nothing published); a fill that starts, reads and would publish wholly between the opening and closing
+    moves, followed by another maintenance write before any use (nothing published; a delivery in that window takes the uncached path); a
+    delivery that reads an odd value (uncached path); an anchor mismatch; a partial fill (nothing published);
   - a malformed closure and a hash-invalid closure (fallback); a well-formed tampered closure (wrong decision in band, caught by (c)).
 - **(b) A workerd test** of the closure read batch, the fill statement and the extension under D1 limits: at most 100 bound parameters, at most
   5 compound members, and no LIKE or GLOB over 50 bytes. It also asserts that the fill statement's membership equals the capture statement's
@@ -376,10 +430,10 @@ It holds, as of `through_seq`:
   own.
 
 ## 7. Probes before the build brief (read-only; v2)
-- **P4.** Time `capture_commits` on production D1 with the step-1 statement for the current amendment at the live head. The kit
-  (`~/step27.sh`, `evt_78070f5d6b0f4e77a78d51939544ac04`) reports SQL time only: an aggregate wrapper keeps the bodies on D1, so it cannot
-  measure transfer or parse. Worker wall time for the same statement is known only from a live delivery's `amendments_calls`; for
-  `capture_targets` that ratio was 180 ms SQL to 560 ms wall (§1). P4 tests §2's inference about the SQL part; the success test measures the rest.
+- **P4. Done (v3).** `~/step27.sh` (`evt_78070f5d6b0f4e77a78d51939544ac04`) timed both statements on production D1, SQL time only, three
+  rounds; Jordan ran it 2026-10-03 04:41Z (`evt_520a8909cfca46c689bf1c9857d9f66d`). Result in §2: the commit read is about 15 ms of SQL, the
+  target read 133–170 ms, and the cost that deadlines the stage is bytes, not D1 time. Noted for later: the target read's `rows_read` of
+  170,660 index rows for 534 events is the alias-suffix range member; a D1 cost, not a latency problem today.
 - **P5.** Size the closure for the current amendment in its **final encoded form**, membership and seal facts included (§4.1), offline from a
   fresh export; then measure on D1 the read time of one row of that size and of the batched step-2 read for all targets. P5 also measures a
   full fill of every target to set the fill budget (§4.4).
@@ -393,8 +447,11 @@ It holds, as of `through_seq`:
 - It does not claim the closure fits the budget. The sizes are measured offline (§2); the closure's size and read time are inferences until P5,
   and the stage's wall time until the success test. If P5 shows the batched closure read near the budget, the build brief must choose a more
   compact encoding or a smaller fact set before building; a budget raise is not the answer this note proposes.
-- It does not claim R2–R7 reproduce every decision. §3 is a reading of the code at `c9f9e985`, and P6 and the replay are the proof.
+- It does not claim R2–R7 reproduce every decision. §3 is a reading of the code at `c9f9e985`, and P6 and the replay are the proof. Grok's
+  round-1 measurement (one amendment, one head, seq 11084: selected sets and the three counters equal on both stores) is one input, not
+  universal R1.
 - It does not claim equality for operational outcomes (R1): a deadline or a failing store is reproduced by neither path.
+- It does not claim the generation fence covers an in-flight delivery read during maintenance (§4.3); that exposure is today's.
 - It does not claim R6 protects against a D1 writer (§4.5): a well-formed tampered closure decides wrongly until replay finds it.
 - It does not cover the commit-classification path (§3, item 6).
 - **The ledger has one attribution amendment today.** The closure count and the scheduled fill's cost grow with amendments. That is unmeasured;
@@ -414,3 +471,8 @@ It holds, as of `through_seq`:
 | Gate check, round 1 | `evt_2d87f061c0dc4a0d8fe7319a71adb0cc` |
 | P4 kit ready | `evt_78070f5d6b0f4e77a78d51939544ac04` |
 | Jordan's go for the v2 fix round | `evt_c24e9ea03d2a452cb36cabf67c177952` |
+| v2 pushed as `70b30d42` (hook seal) | `evt_b2a192f9b91d4076a4d1c2f7d2f8d3a9` |
+| Codex round 2 at `70b30d42`: rejected (F2, F3 Medium; F1 resolved) | `evt_ac47f32e60ba4e65b6256e956f839741` |
+| NOOA round 2 at `70b30d42`: approved | `evt_dd5838fe3ed24bedbff21c2be6e7b438` |
+| Grok round 1 at `70b30d42`: rejected (G-M1 Medium; F1, F2 closed on its measurements; size 115,537 chars) | `evt_820abe53b0e54ca58e18069da3c1c8a4` |
+| P4 run by Jordan (step 27) and read | `evt_7cd7e1661fc745a19a0d62894fcc1ef7`, `evt_520a8909cfca46c689bf1c9857d9f66d` |
