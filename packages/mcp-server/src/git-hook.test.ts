@@ -285,6 +285,67 @@ test("hook end to end: the named credential is the bearer the server sees; a rej
   }
 });
 
+test("T1 hook proxy mode omits authorization and signatures, ignores ambient credentials, and validates configuration", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "retrace-git-proxy-"));
+  const seen: { authorization?: string; body: EventInput }[] = [];
+  let status = 201;
+  const server = createServer((req, res) => {
+    let body = "";
+    req.on("data", (chunk) => (body += chunk));
+    req.on("end", () => {
+      seen.push({ authorization: req.headers.authorization, body: JSON.parse(body) });
+      res.writeHead(status, { "content-type": "application/json" });
+      if (status === 401) return res.end(JSON.stringify({ error: "unauthorized" }));
+      const input = seen.at(-1)!.body;
+      res.end(JSON.stringify({ event: { ...input, id: "evt_proxy", seq: 0, prev_hash: "0", hash: "0", received_at: new Date().toISOString() }, deduped: false }));
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    sh(dir, "git", ["init", "-q", "-b", "main"]);
+    sh(dir, "git", ["config", "core.hooksPath", "/dev/null"]);
+    writeFileSync(join(dir, "a.ts"), "1\n");
+    sh(dir, "git", ["add", "."]);
+    sh(dir, "git", ["commit", "-qm", "proxy fixture"]);
+    writeFileSync(join(dir, ".retrace.json"), JSON.stringify({ project: "rpg", credential: "retrace-git" }));
+    const proxyEnv = {
+      RETRACE_AUTH: "proxy",
+      RETRACE_URL: url,
+      RETRACE_TOKEN: "ambient-owner-token",
+      RETRACE_HOOK_TOKEN: "ambient-hook-token",
+      RETRACE_HOOK_KEY_FILE: join(dir, "missing-key.jwk"),
+      RETRACE_ENV: "claude-cloud",
+      RETRACE_DEVICE: "claude-cloud",
+      RETRACE_CREDENTIALS_FILE: join(dir, "missing-credentials.json"),
+    };
+    await shAsync(dir, "node", [bin, "commit", "--repo", dir], proxyEnv);
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0].authorization, undefined);
+    assert.equal(seen[0].body.producer_sig, undefined);
+    assert.equal(seen[0].body.location?.environment, "claude-cloud");
+    assert.equal(seen[0].body.location?.device, "claude-cloud");
+
+    await assert.rejects(
+      () => shAsync(dir, "node", [bin, "commit", "--repo", dir], { ...proxyEnv, RETRACE_AUTH: "other" }),
+      /RETRACE_AUTH must be unset or "proxy"/,
+    );
+    await assert.rejects(
+      () => shAsync(dir, "node", [bin, "commit", "--repo", dir], { ...proxyEnv, RETRACE_URL: "" }),
+      /RETRACE_AUTH=proxy requires RETRACE_URL/,
+    );
+    assert.equal(seen.length, 1, "invalid proxy configuration sends nothing");
+
+    status = 401;
+    await assert.rejects(() => shAsync(dir, "node", [bin, "commit", "--hook", "--repo", dir], proxyEnv));
+    const log = readFileSync(join(dir, ".git", "retrace-hook.log"), "utf8");
+    assert.match(log, /proxy mode: the egress proxy did not authenticate this host/);
+    assert.doesNotMatch(log, /ambient-owner-token|ambient-hook-token/);
+  } finally {
+    server.close();
+  }
+});
+
 test("capability mismatches and HTTP 426 are retryable like 5xx; 403 is not", () => {
   assert.equal(retryableHookFailure(new RemoteCapabilityError("GET", "/api", 200, "schema lacks event.producer_sig")), true);
   assert.equal(retryableHookFailure(new RemoteApiError("POST", "/events", 426, new Headers(), "upgrade required")), true);

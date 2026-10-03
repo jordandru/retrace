@@ -51,7 +51,7 @@ import { loadProducerPrivateKeyFromFile, sealForAppend } from "./producer-key.js
 import { isMainModule } from "./is-main.js";
 import { performance } from "node:perf_hooks";
 
-export type Cfg = { project?: string; db?: string; url?: string; token?: string; credential?: string; environment?: string; repoName?: string;
+export type Cfg = { project?: string; db?: string; url?: string; token?: string; credential?: string; auth?: "proxy"; environment?: string; repoName?: string;
   /** Resolved from --allow-remote / RETRACE_ALLOW_REMOTE, not from .retrace.json — a repo that HAS the file is already
    *  permitted, so setting it there would be a no-op. See guardRemoteWrite. */
   allowRemote?: boolean };
@@ -156,12 +156,16 @@ function loadCfg(repo: string, flags: Record<string, string | boolean>): Cfg {
   let file: Cfg = {};
   const p = join(repo, ".retrace.json");
   if (existsSync(p)) file = JSON.parse(readFileSync(p, "utf8"));
+  const auth = process.env.RETRACE_AUTH;
+  if (auth !== undefined && auth !== "proxy") throw new Error('retrace-git: RETRACE_AUTH must be unset or "proxy"');
+  if (auth === "proxy" && !process.env.RETRACE_URL) throw new Error("retrace-git: RETRACE_AUTH=proxy requires RETRACE_URL");
   const cfg: Cfg = {
     project: (flags.project as string) ?? process.env.RETRACE_PROJECT ?? file.project ?? basename(repo),
     db: process.env.RETRACE_DB ?? file.db,
     url: process.env.RETRACE_URL ?? file.url,
     credential: file.credential,
-    token: resolveHookToken(file),
+    auth,
+    token: auth === "proxy" ? undefined : resolveHookToken(file),
     environment: process.env.RETRACE_ENV ?? file.environment ?? "local",
     repoName: file.repoName,
     allowRemote: flags["allow-remote"] !== undefined || process.env.RETRACE_ALLOW_REMOTE === "1",
@@ -296,7 +300,7 @@ async function logCommit(repo: string, sha: string, cfg: Cfg, live = false): Pro
   // duration_ms is producer-signed and therefore can cover hook-local work only, never the POST round trip.
   // Node's monotonic clock starts with the process, before this module and its dependencies load.
   if (live) input.duration_ms = Math.floor(performance.now());
-  const keyFile = resolveHookProducerKeyFile({ credential: cfg.credential });
+  const keyFile = cfg.auth === "proxy" ? undefined : resolveHookProducerKeyFile({ credential: cfg.credential });
   if (keyFile) input = await sealForAppend(input, { privateKey: loadProducerPrivateKeyFromFile(keyFile), remoteUrl: cfg.url, format: PRODUCER_SIG_FORMAT_V2, deadlineMs: hookDeadlineMs() });
   const store = cfg.url ? new RemoteStore(cfg.url, cfg.token, { deadlineMs: hookDeadlineMs() }) : makeStore();
   if (!(store instanceof RemoteStore) && parseTrailerPolicy(process.env.RETRACE_TRAILER_POLICY) === "shadow" && isGitCommitSeal(input) && !isLegacyClientCommitSeal(input)) {
@@ -404,7 +408,10 @@ async function main() {
       let fullSha = failedSha;
       try { fullSha = git(repo, ["rev-parse", failedSha]); } catch {}
       const logPath = join(gitDir, "retrace-hook.log");
-      appendHookLog(gitDir, `commit ${fullSha.slice(0, 12)} in ${repo} NOT logged: ${e?.message ?? e}`);
+      const detail = cfg?.auth === "proxy" && e instanceof RemoteApiError && e.status === 401
+        ? "proxy mode: the egress proxy did not authenticate this host"
+        : e?.message ?? e;
+      appendHookLog(gitDir, `commit ${fullSha.slice(0, 12)} in ${repo} NOT logged: ${detail}`);
       if (flags.hook === true && cfg?.url && retryableHookFailure(e)) {
         appendPendingSeal(gitDir, fullSha);
         if (currentSha) appendPendingSeal(gitDir, currentSha);
