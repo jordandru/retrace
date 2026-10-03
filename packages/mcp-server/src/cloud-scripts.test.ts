@@ -90,7 +90,8 @@ test("cloud MCP configuration and wrapper carry no credential material", () => {
   });
 
   const wrapper = readFileSync(resolve(root, "scripts/cloud/retrace-mcp-cloud.sh"), "utf8");
-  assert.match(wrapper, /unset RETRACE_TOKEN RETRACE_HOOK_TOKEN RETRACE_PRODUCER_KEY_FILE RETRACE_CREDENTIALS_FILE/);
+  assert.match(wrapper, /KEY\\\|TOKEN\\\|SECRET/);
+  assert.match(wrapper, /unset RETRACE_CREDENTIALS RETRACE_CREDENTIALS_EXTRA RETRACE_CREDENTIALS_FILE/);
   assert.doesNotMatch(wrapper, /Authorization|Bearer/);
 
   const settings = JSON.parse(readFileSync(resolve(root, ".claude/settings.json"), "utf8"));
@@ -117,7 +118,7 @@ test("cloud MCP wrapper is inert locally and strips ambient credentials remotely
   const bin = mkdtempSync(resolve(tmpdir(), "retrace-cloud-mcp-"));
   try {
     const fake = resolve(bin, "retrace-mcp");
-    writeFileSync(fake, "#!/bin/sh\nprintf '%s|%s|%s|%s|%s\\n' \"$RETRACE_URL\" \"${RETRACE_TOKEN-unset}\" \"${RETRACE_HOOK_TOKEN-unset}\" \"${RETRACE_PRODUCER_KEY_FILE-unset}\" \"${RETRACE_CREDENTIALS_FILE-unset}\"\n");
+    writeFileSync(fake, "#!/bin/sh\nenv\n");
     chmodSync(fake, 0o755);
     const remote = spawnSync(wrapper, [], {
       env: {
@@ -127,13 +128,33 @@ test("cloud MCP wrapper is inert locally and strips ambient credentials remotely
         RETRACE_URL: "https://example.test",
         RETRACE_TOKEN: "secret",
         RETRACE_HOOK_TOKEN: "secret",
+        RETRACE_PRODUCER_KEY: "secret",
         RETRACE_PRODUCER_KEY_FILE: "/secret/key",
+        RETRACE_HOOK_KEY_FILE: "/secret/hook-key",
+        RETRACE_SIGNING_KEY: "secret",
+        RETRACE_SIGNING_KEY_FILE: "/secret/signing-key",
+        RETRACE_PUBKEY: "secret",
+        RETRACE_CHECKPOINT_PUBKEY: "secret",
+        RETRACE_FUTURE_TOKEN_INPUT: "secret",
+        RETRACE_GITHUB_SECRET: "secret",
+        RETRACE_CREDENTIALS: "secret",
+        RETRACE_CREDENTIALS_EXTRA: "secret",
         RETRACE_CREDENTIALS_FILE: "/secret/credentials",
       },
       encoding: "utf8",
     });
     assert.equal(remote.status, 0);
-    assert.equal(remote.stdout.trim(), "https://example.test|unset|unset|unset|unset");
+    const childEnv = new Map(remote.stdout.trim().split("\n").map((line) => {
+      const separator = line.indexOf("=");
+      return [line.slice(0, separator), line.slice(separator + 1)];
+    }));
+    assert.equal(childEnv.get("RETRACE_URL"), "https://example.test");
+    for (const name of childEnv.keys()) {
+      assert.doesNotMatch(name, /^RETRACE_.*(?:KEY|TOKEN|SECRET)/, name);
+    }
+    for (const name of ["RETRACE_CREDENTIALS", "RETRACE_CREDENTIALS_EXTRA", "RETRACE_CREDENTIALS_FILE"]) {
+      assert.equal(childEnv.has(name), false, name);
+    }
   } finally {
     rmSync(bin, { recursive: true, force: true });
   }
