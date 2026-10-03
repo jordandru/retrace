@@ -120,6 +120,15 @@ class EvidenceBudget {
         if (!rows.ok) this.fail(rows.reason);
         this.take(this.indexedRows(rows.events, q)); return rows;
       };
+      if (property === "captureIndexRows" && target.captureIndexRows) return async (q: ArtifactIndexQuery, _now?: () => number, metrics?: StoreReadMetricsSink) => {
+        if (this.remaining < 1) this.fail("budget");
+        const rows = await this.storeRead(metrics,
+          () => target.captureIndexRows!({ ...q, row_cap: Math.min(q.row_cap, this.remaining), deadline: Math.min(q.deadline, this.deadline) }, this.now, metrics));
+        if (!rows.ok) this.fail(rows.reason);
+        this.take(rows.rows.reduce((n, row) => n + row.keys.filter(key => q.artifact_keys.some(queryKey => sameArtifact(queryKey, key))
+          || q.artifact_prefixes?.some(prefix => key.startsWith(prefix))).length, 0));
+        return rows;
+      };
       const value = Reflect.get(target, property);
       return typeof value === "function" ? value.bind(target) : value;
     } });

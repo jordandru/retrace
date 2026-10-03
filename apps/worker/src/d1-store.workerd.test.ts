@@ -8,7 +8,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Miniflare, convertV4MiniflareOptions } from "miniflare";
-import { MemoryEventStore, appendEvent, eventsReferencingArtifactsStatements } from "@retrace-dev/core";
+import { MemoryEventStore, appendEvent, captureIndexStatements, eventsReferencingArtifactsStatements } from "@retrace-dev/core";
 import type { ArtifactIndexQuery, Event } from "@retrace-dev/core";
 import { D1Store } from "./d1-store.js";
 
@@ -267,7 +267,7 @@ test("D1 in workerd: owner-login amendment capture reads all 11 files of 5d7290f
     const calls = measuredDecision.timing.amendments_calls!;
     assert.deepEqual(calls.map((entry) => entry.call), ["amendment_rows", "dependencies", "capture_targets"]);
     for (const entry of calls) {
-      assert.ok(entry.body_chars > 0, JSON.stringify(entry));
+      assert.ok(entry.call === "capture_targets" ? entry.body_chars === 0 : entry.body_chars > 0, JSON.stringify(entry));
       assert.ok(typeof entry.sql_ms === "number" && entry.sql_ms >= 0, JSON.stringify(entry));
       assert.equal(entry.statements, 1, JSON.stringify(entry));
       assert.equal(entry.outcome, "ok");
@@ -277,9 +277,9 @@ test("D1 in workerd: owner-login amendment capture reads all 11 files of 5d7290f
     assert.equal(JSON.stringify(measuredDecision), JSON.stringify(captureHookFaultDecision),
       "after removing the observation field, instrumentation must leave byte-identical decision JSON");
 
-    const captureReads: { query: ArtifactIndexQuery; result: Awaited<ReturnType<D1Store["eventsReferencingArtifacts"]>> }[] = [];
-    const read = store.eventsReferencingArtifacts.bind(store);
-    store.eventsReferencingArtifacts = async (query, now) => {
+    const captureReads: { query: ArtifactIndexQuery; result: Awaited<ReturnType<D1Store["captureIndexRows"]>> }[] = [];
+    const read = store.captureIndexRows.bind(store);
+    store.captureIndexRows = async (query, now) => {
       const result = await read(query, now);
       if (query.artifact_keys.some(key => key.startsWith("repo:retrace#"))) captureReads.push({ query, result });
       return result;
@@ -290,10 +290,52 @@ test("D1 in workerd: owner-login amendment capture reads all 11 files of 5d7290f
     assert.deepEqual(capture.query.artifact_keys.filter(key => key.startsWith("repo:retrace#")).sort(),
       paths.map(path => `repo:retrace#${path}`).sort());
     assert.equal(capture.result.ok, true, `amendment capture read: ${JSON.stringify(capture.result)}`);
-    if (capture.result.ok) assert.deepEqual(capture.result.events.map(e => e.id), [evidence.id, target.id]);
+    if (capture.result.ok) assert.deepEqual(capture.result.rows.map(e => e.seq), [evidence.seq, target.seq]);
+    const statements = captureIndexStatements(capture.query);
+    assert.equal(statements.length, 1);
+    const plan = await db.prepare("EXPLAIN QUERY PLAN " + statements[0].sql).bind(...statements[0].params).all<{ detail: string }>();
+    const details = plan.results.map(row => row.detail);
+    assert.equal(details.filter(detail => /SEARCH i USING COVERING INDEX idx_eai_project_key_seq/.test(detail)).length, 2);
+    assert.ok(details.some(detail => /SEARCH e USING INDEX sqlite_autoindex_events_2 \(project=\? AND seq=\?\)/.test(detail)));
+    console.log("capture workerd plan", JSON.stringify(details));
+    const old = await store.eventsReferencingArtifacts(capture.query);
+    assert.ok(old.ok && capture.result.ok);
+    if (old.ok && capture.result.ok) {
+      assert.deepEqual(old.events.map(e => e.seq), capture.result.rows.map(r => r.seq));
+      assert.ok(capture.result.rows.every(r => r.event === undefined));
+    }
     const decision = ownerLoginRecord(appended.event)!.decision;
     assert.equal(decision.status, "declared_by_seat", JSON.stringify(decision));
     assert.equal(decision.timing.stage_failed, null);
     assert.deepEqual(decision.consumed, [f.declaration.id]);
+  });
+});
+
+test("D1 in workerd: NUL hider, decoy and 1001-deep body fall back without moving the capture boundary", { timeout: 60_000 }, async () => {
+  await withD1(async db => {
+    const { EventInput } = await import("@retrace-dev/core");
+    const { firstStampedSeq, captureSeals } = await import("../../../packages/core/dist/capture.js");
+    const store = new D1Store(db), sha = "a".repeat(40);
+    const file = { id: "repo:acme/app#a.ts", role: "generated" as const };
+    const append = async (over: Record<string, unknown>) => (await appendEvent(store, EventInput.parse({ project: "p",
+      actor: { type: "agent", id: "codex" }, action: "read", artifacts: [file], ...over }))).event;
+    const seal = () => append({ action: "committed", artifacts: [file, { id: `commit:acme/app@${sha}` }], method: { tool: "git", params: { sha } } });
+    const before = await seal();
+    await append({ method: { params: { "sealed_by\u0000x": "decoy" } } });
+    const hider = await append({ method: { params: { "sealed_by\u0000x": 42, sealed_by: "owner" } } });
+    await seal();
+    let deep: unknown = 1; for (let i = 0; i < 1001; i++) deep = { child: deep };
+    await append({ method: { params: { deep } } });
+    const query = { project: "p", artifact_keys: [file.id], after_seq: -1, through_seq: 10, row_cap: 10, deadline: Date.now() + 30_000 };
+    const old = await store.eventsReferencingArtifacts(query), got = await store.captureIndexRows(query);
+    assert.ok(old.ok && got.ok); if (!old.ok || !got.ok) return;
+    const { sql, params } = captureIndexStatements(query)[0];
+    const raw = await db.prepare(sql).bind(...params).all<{ seq: number; stamped: number | null; body: string | null }>();
+    assert.deepEqual(raw.results.filter(r => r.stamped === null).map(r => r.seq), [1, 2, 4]);
+    assert.ok(raw.results.every(r => typeof r.body === "string"));
+    const boundary = Math.min(...got.rows.filter(r => r.stamped).map(r => r.seq)), policy = { repoName: "acme/app", ownerSeals: true };
+    assert.equal(boundary, hider.seq); assert.equal(boundary, firstStampedSeq(old.events, policy));
+    const fresh = captureSeals(got.rows.flatMap(r => r.event ? [r.event] : []), { ...policy, firstStampedSeq: boundary }, () => sha);
+    assert.deepEqual(fresh, captureSeals(old.events, policy, () => sha)); assert.equal(fresh[0].event.id, before.id);
   });
 });

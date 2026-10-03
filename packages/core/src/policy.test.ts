@@ -5,9 +5,10 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   canonicalPolicyV1, canonicalRepositoryR, compareUtf8, contextKey, eventPolicyRef, jcsSerialize,
-  parseJsonRejectDuplicateKeys, policyDigestOf, policyHashObject, selectPolicyForContext,
+  documentMapKey, matchesPolicyActivationClausesOneToThree, parseJsonRejectDuplicateKeys,
+  policyDigestOf, policyHashObject, selectPolicyForContext,
   validatePolicyBody, validatePolicyEnvelope, verifyPolicySelectionOffline, POLICY_PROFILE,
-  PolicyDocument, evaluateActivation, localConfigDrift,
+  PolicyDocument, PolicySelection, PolicySnapshot, evaluateActivation, localConfigDrift,
 } from "./policy.js";
 import { SEALED_BY_OWNER } from "./store.js";
 import { Event } from "./schema.js";
@@ -116,6 +117,242 @@ function fakeEvent(over: Partial<Event> & { seq: number; id: string; project?: s
     seq: over.seq,
   } as Event;
 }
+
+function oldSelectPolicyForContext(
+  snapshot: PolicySnapshot,
+  documents: ReadonlyMap<string, PolicyDocument>,
+): PolicySelection {
+  const activations = (snapshot.activations.length ? snapshot.activations : snapshot.events)
+    .filter((e) => e.seq <= snapshot.U)
+    .sort((a, b) => b.seq - a.seq);
+
+  const olderEligibleVersions = (seq: number): number[] => {
+    const older = activations.filter((e) => e.seq < seq).sort((a, b) => a.seq - b.seq);
+    const versions: number[] = [];
+    for (const e of older) {
+      const ev = evaluateActivation(e, documents, versions);
+      if (ev.status === "eligible") versions.push(ev.version);
+    }
+    return versions;
+  };
+
+  for (const e of activations) {
+    const ev = evaluateActivation(e, documents, olderEligibleVersions(e.seq));
+    if (ev.status === "incomplete") return ev;
+    if (ev.status === "eligible") {
+      return { status: "selected", digest: ev.digest, version: ev.version, seq: ev.seq, document: ev.document };
+    }
+  }
+  return { status: "none" };
+}
+
+function policyDocument(
+  project: string,
+  version: number,
+  seq: number,
+  opts: { digest?: string; eventId?: string; supersedes?: string | null } = {},
+): PolicyDocument {
+  const digest = opts.digest ?? version.toString(16).padStart(64, "0");
+  return {
+    body: validatePolicyBody({
+      profile: POLICY_PROFILE,
+      project,
+      trusted_hook_stamps: [],
+      unresolved_claims: "record",
+      repositories: [],
+      github_repos: [],
+    }),
+    envelope: validatePolicyEnvelope({
+      version,
+      created_at: "2026-09-10T03:45:00.000Z",
+      set_by: { type: "human", id: "x" },
+      supersedes: opts.supersedes ?? null,
+      activation: { event_id: opts.eventId ?? `evt_policy_${seq}`, seq },
+    }),
+    digest,
+  };
+}
+
+function activationEvent(doc: PolicyDocument, over: Partial<Event> = {}): Event {
+  return fakeEvent({
+    id: doc.envelope.activation.event_id,
+    seq: doc.envelope.activation.seq,
+    project: doc.body.project,
+    artifacts: [{ id: `policy:${doc.body.project}@${doc.digest}`, kind: "policy", role: "generated" }],
+    method: {
+      tool: "retrace-api",
+      params: {
+        sealed_by: SEALED_BY_OWNER,
+        policy_profile: doc.body.profile,
+        policy_version: doc.envelope.version,
+        policy_digest: doc.digest,
+        supersedes: doc.envelope.supersedes,
+        set_by: doc.envelope.set_by,
+      },
+    },
+    idempotency_key: `policy:${doc.body.project}:${doc.envelope.version}`,
+    ...over,
+  });
+}
+
+function policyDocuments(...docs: PolicyDocument[]): Map<string, PolicyDocument> {
+  const result = new Map<string, PolicyDocument>();
+  for (const doc of docs) {
+    result.set(documentMapKey(doc.body.project, doc.digest), doc);
+    result.set(doc.digest, doc);
+  }
+  return result;
+}
+
+function assertSelectionEquivalent(
+  name: string,
+  snapshot: PolicySnapshot,
+  documents: ReadonlyMap<string, PolicyDocument>,
+): void {
+  assert.deepEqual(selectPolicyForContext(snapshot, documents), oldSelectPolicyForContext(snapshot, documents), name);
+}
+
+test("issue #153: policy selection optimization preserves reference results", () => {
+  const v1 = policyDocument("p", 1, 2);
+  const v2 = policyDocument("p", 2, 4, { supersedes: v1.digest });
+  const ev1 = activationEvent(v1);
+  const ev2 = activationEvent(v2);
+  const ordinary = fakeEvent({
+    id: "evt_ordinary",
+    seq: 1,
+    action: "edited",
+    artifacts: [{ id: "repo:acme/app#README.md" }],
+    idempotency_key: "edit:1",
+    method: { tool: "cli", params: {} },
+  });
+
+  const noActivation = { U: 1, events: [ordinary], activations: [ordinary] };
+  assertSelectionEquivalent("no activation", noActivation, new Map());
+
+  const oneEligible = { U: 2, events: [ordinary, ev1], activations: [ordinary, ev1] };
+  assertSelectionEquivalent("one eligible activation", oneEligible, policyDocuments(v1));
+
+  const twoVersions = { U: 4, events: [ordinary, ev1, ev2], activations: [ordinary, ev1, ev2] };
+  assertSelectionEquivalent("v1 then v2", twoVersions, policyDocuments(v1, v2));
+
+  const copiedV1 = policyDocument("p", 1, 6, { digest: v1.digest });
+  const copyEvent = activationEvent(copiedV1);
+  const copyAfterV2 = { U: 6, events: [ordinary, ev1, ev2, copyEvent], activations: [ordinary, ev1, ev2, copyEvent] };
+  assertSelectionEquivalent("copy of v1 after v2", copyAfterV2, policyDocuments(copiedV1, v2));
+  const copySelected = selectPolicyForContext(copyAfterV2, policyDocuments(copiedV1, v2));
+  assert.equal(copySelected.status === "selected" ? copySelected.digest : undefined, v2.digest);
+
+  const missingDoc = policyDocument("p", 3, 8, { supersedes: v2.digest });
+  const missingLater = { U: 8, events: [ev1, ev2, activationEvent(missingDoc)], activations: [ev1, ev2, activationEvent(missingDoc)] };
+  assertSelectionEquivalent("later activation with missing document", missingLater, policyDocuments(v1, v2));
+  assert.equal(selectPolicyForContext(missingLater, policyDocuments(v1, v2)).status, "incomplete");
+
+  const forged = activationEvent(v2, { id: "evt_forged", seq: 5 });
+  const forgedClause4 = { U: 5, events: [ev1, ev2, forged], activations: [ev1, ev2, forged] };
+  assertSelectionEquivalent("forged activation", forgedClause4, policyDocuments(v1, v2));
+
+  const auditMismatch = activationEvent(v1, { actor: { type: "human", id: "forged" } });
+  const auditSnapshot = { U: 2, events: [auditMismatch], activations: [auditMismatch] };
+  assertSelectionEquivalent("audit identity mismatch", auditSnapshot, policyDocuments(v1));
+  const auditResult = verifyPolicySelectionOffline({
+    project: "p",
+    claimedDigest: v1.digest,
+    readHeadSeq: 2,
+    events: [
+      fakeEvent({ id: "evt_0", seq: 0, action: "edited", artifacts: [{ id: "a" }], idempotency_key: "other:0", method: { tool: "cli", params: {} } }),
+      fakeEvent({ id: "evt_1", seq: 1, action: "edited", artifacts: [{ id: "a" }], idempotency_key: "other:1", method: { tool: "cli", params: {} } }),
+      auditMismatch,
+    ],
+    policies: [v1],
+    coverageComplete: true,
+  });
+  assert.ok(auditResult.findings.includes("policy_audit_mismatch"));
+
+  const otherProject = policyDocument("q", 1, 2, { digest: v1.digest, eventId: v1.envelope.activation.event_id });
+  const wrongProject = { U: 2, events: [ev1], activations: [ev1] };
+  assertSelectionEquivalent("policy for another project", wrongProject, policyDocuments(otherProject));
+
+  const unsupported = policyDocument("p", 1, 2);
+  unsupported.body = { ...unsupported.body, profile: "retrace-project-policy/999" as typeof POLICY_PROFILE };
+  const unsupportedEvent = activationEvent(unsupported);
+  const unsupportedProfile = { U: 2, events: [unsupportedEvent], activations: [unsupportedEvent] };
+  assertSelectionEquivalent("unsupported profile", unsupportedProfile, policyDocuments(unsupported));
+
+  const nonStringArtifact = fakeEvent({
+    id: "evt_non_string",
+    seq: 2,
+    artifacts: [{ id: 42 } as unknown as Event["artifacts"][number]],
+  });
+  const nonString = { U: 2, events: [nonStringArtifact], activations: [nonStringArtifact] };
+  assert.equal(matchesPolicyActivationClausesOneToThree(nonStringArtifact), false);
+  assertSelectionEquivalent("non-string policy artifact id", nonString, new Map());
+});
+
+test("issue #153: optimized selection matches reference on 2,048 seeded mixed events", () => {
+  let state = 0x153c0de;
+  const random = (): number => {
+    state ^= state << 13;
+    state ^= state >>> 17;
+    state ^= state << 5;
+    return state >>> 0;
+  };
+
+  const events: Event[] = [];
+  const docs: PolicyDocument[] = [];
+  let previousDigest: string | null = null;
+  for (let seq = 0; seq < 2_048; seq++) {
+    const value = random();
+    if (seq % 257 === 0) {
+      const doc = policyDocument("p", docs.length + 1, seq, { supersedes: previousDigest });
+      docs.push(doc);
+      previousDigest = doc.digest;
+      events.push(activationEvent(doc));
+    } else if (docs.length && value % 89 === 0) {
+      const doc = docs[value % docs.length]!;
+      events.push(activationEvent(doc, { id: `evt_copy_${seq}`, seq }));
+    } else {
+      const variants = [
+        { idempotency_key: `ordinary:${seq}` },
+        { action: "edited" as const },
+        { method: { tool: "cli", params: { sealed_by: SEALED_BY_OWNER } } },
+        { artifacts: [{ id: `repo:acme/app#${seq}` }] },
+      ];
+      events.push(fakeEvent({ id: `evt_${seq}`, seq, ...variants[value % variants.length]! }));
+    }
+  }
+
+  const snapshot = { U: events.length - 1, events, activations: events };
+  assertSelectionEquivalent("seeded mixed sequence", snapshot, policyDocuments(...docs));
+});
+
+test("issue #153: ordinary-event selection work grows linearly", () => {
+  const filterCalls = (count: number): number => {
+    let calls = 0;
+    const events = Array.from({ length: count }, (_, seq) => {
+      const event = fakeEvent({
+        id: `evt_${seq}`,
+        seq,
+        action: "edited",
+        idempotency_key: `ordinary:${seq}`,
+        artifacts: [{ id: `repo:acme/app#${seq}` }],
+        method: { tool: "cli", params: {} },
+      });
+      const artifacts = event.artifacts;
+      Object.defineProperty(artifacts, "filter", {
+        value: (...args: Parameters<typeof artifacts.filter>) => {
+          calls++;
+          return Array.prototype.filter.apply(artifacts, args);
+        },
+      });
+      return event;
+    });
+    assert.deepEqual(selectPolicyForContext({ U: count - 1, events, activations: events }, new Map()), { status: "none" });
+    return calls;
+  };
+
+  assert.equal(filterCalls(200), 200);
+  assert.equal(filterCalls(400), 400);
+});
 
 test("P4 / builder note 1: missing v2 document fails closed; copied v1 after v2 is ignored", async () => {
   const v1: PolicyDocument = {
