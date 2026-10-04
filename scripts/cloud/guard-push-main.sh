@@ -1,111 +1,258 @@
 #!/bin/sh
 # Bypassable policy control: it prevents ordinary Claude Code Bash git pushes, not every possible GitHub write.
+# It parses literal shell quoting without evaluation and fails closed when a push destination cannot be resolved.
+# It examines ordinary assignments, env prefixes, git global options, and shell control operators. For
+# `cd <dir> && git push`, no-refspec fallback checks still run in the hook's cwd.
+# Shell string builders and wrappers (`sh -c`, `bash -lc`, `eval`, aliases, functions, `xargs`, and `script`) are out of scope.
 # GitHub operations such as `gh pr merge` are outside this git-push-only guard.
 set -eu
 
 [ "${CLAUDE_CODE_REMOTE:-}" = "true" ] || exit 0
 
-command="$(
-  node -e '
-    let input = "";
-    process.stdin.setEncoding("utf8");
-    process.stdin.on("data", chunk => input += chunk);
-    process.stdin.on("end", () => {
-      try {
-        const parsed = JSON.parse(input);
-        process.stdout.write(typeof parsed?.tool_input?.command === "string" ? parsed.tool_input.command : "");
-      } catch {
-        process.exitCode = 1;
+node -e '
+  const { spawnSync } = require("node:child_process");
+
+  const REFUSE_MAIN = "refused: a cloud session never pushes main (docs/design/cloud-seat.md §6)";
+  const REFUSE_UNRESOLVED = "refused: cannot resolve the push destination without evaluating the command";
+  const singleQuote = String.fromCharCode(39);
+
+  function refuse(message) {
+    process.stderr.write(`${message}\n`);
+    process.exit(2);
+  }
+
+  function parseCommands(command) {
+    const commands = [];
+    let tokens = [];
+    let token = "";
+    let tokenStarted = false;
+    let quote = "";
+    let error = false;
+
+    const finishToken = () => {
+      if (tokenStarted) {
+        tokens.push(token);
+        token = "";
+        tokenStarted = false;
       }
+    };
+    const finishCommand = () => {
+      finishToken();
+      if (tokens.length > 0) commands.push(tokens);
+      tokens = [];
+    };
+
+    for (let i = 0; i < command.length; i += 1) {
+      const ch = command[i];
+      if (quote === "single") {
+        if (ch === singleQuote) quote = "";
+        else token += ch;
+        tokenStarted = true;
+        continue;
+      }
+      if (quote === "double") {
+        if (ch === "\"") {
+          quote = "";
+          tokenStarted = true;
+          continue;
+        }
+        if (ch === "\\") {
+          const next = command[i + 1];
+          if (next === undefined) {
+            error = true;
+            break;
+          }
+          if (next === "$" || next.charCodeAt(0) === 96 || next === "\"" || next === "\\" || next === "\n") {
+            if (next !== "\n") token += next;
+            tokenStarted = true;
+            i += 1;
+            continue;
+          }
+        }
+        token += ch;
+        tokenStarted = true;
+        continue;
+      }
+
+      if (ch === singleQuote) {
+        quote = "single";
+        tokenStarted = true;
+      } else if (ch === "\"") {
+        quote = "double";
+        tokenStarted = true;
+      } else if (ch === "\\") {
+        const next = command[i + 1];
+        if (next === undefined) {
+          error = true;
+          break;
+        }
+        if (next !== "\n") {
+          token += next;
+          tokenStarted = true;
+        }
+        i += 1;
+      } else if (ch === " " || ch === "\t" || ch === "\r") {
+        finishToken();
+      } else if (ch === ";" || ch === "\n" || ch === "|"
+        || (ch === "&" && command[i + 1] === "&")) {
+        finishCommand();
+        if ((ch === "|" && command[i + 1] === "|") || ch === "&") i += 1;
+      } else {
+        token += ch;
+        tokenStarted = true;
+      }
+    }
+
+    if (quote !== "") error = true;
+    finishCommand();
+    return { commands, malformedLast: error && commands.length > 0 ? commands.length - 1 : -1 };
+  }
+
+  function pushInvocation(tokens) {
+    let index = 0;
+    const assignment = /^[A-Za-z_][A-Za-z0-9_]*=/;
+    while (assignment.test(tokens[index] ?? "")) index += 1;
+
+    if (tokens[index] === "env") {
+      index += 1;
+      while (tokens[index] === "-i" || assignment.test(tokens[index] ?? "")) index += 1;
+    }
+    if (tokens[index] !== "git") return undefined;
+    index += 1;
+
+    const gitContext = [];
+    while (index < tokens.length) {
+      const argument = tokens[index];
+      if (argument === "push") {
+        return { args: tokens.slice(index + 1), gitContext };
+      }
+      if (argument === "-C" || argument === "-c" || argument === "--git-dir"
+        || argument === "--work-tree" || argument === "--namespace") {
+        if (index + 1 >= tokens.length) return undefined;
+        gitContext.push(argument, tokens[index + 1]);
+        index += 2;
+        continue;
+      }
+      if (argument.startsWith("--git-dir=") || argument.startsWith("--work-tree=")
+        || argument.startsWith("--namespace=")) {
+        gitContext.push(argument);
+        index += 1;
+        continue;
+      }
+      if (argument === "--no-pager" || argument === "-p" || argument === "--exec-path"
+        || argument.startsWith("--exec-path=")) {
+        index += 1;
+        continue;
+      }
+      return undefined;
+    }
+    return undefined;
+  }
+
+  function unresolved(token) {
+    return token.includes("$") || token.charCodeAt(0) === 96 || token.includes("`")
+      || token.startsWith("~") || /[*?\[]/.test(token);
+  }
+
+  function targetsMain(refspec) {
+    if (refspec.startsWith("+")) refspec = refspec.slice(1);
+    const colon = refspec.indexOf(":");
+    const destination = colon === -1 ? refspec : refspec.slice(colon + 1);
+    return destination === "main" || destination === "refs/heads/main";
+  }
+
+  function git(gitContext, args) {
+    const result = spawnSync("git", [...gitContext, ...args], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
     });
-  '
-)" || exit 0
+    return result.status === 0 ? result.stdout.trim() : "";
+  }
 
-push_command="$(printf '%s\n' "$command" | sed -nE 's/^[[:space:]]*(git[[:space:]]+push([[:space:]].*)?)[[:space:]]*$/\1/p')"
-[ -n "$push_command" ] || exit 0
+  function inspectPush({ args, gitContext }) {
+    let remote = "";
+    const refspecs = [];
+    let options = true;
 
-refuse_main() {
-  echo "refused: a cloud session never pushes main (docs/design/cloud-seat.md §6)" >&2
-  exit 2
-}
+    for (let index = 0; index < args.length; index += 1) {
+      const argument = args[index];
+      if (options) {
+        if (argument === "--") {
+          options = false;
+          continue;
+        }
+        if (argument === "--repo") {
+          if (index + 1 < args.length) remote = args[index += 1];
+          continue;
+        }
+        if (argument.startsWith("--repo=")) {
+          remote = argument.slice("--repo=".length);
+          continue;
+        }
+        if (argument === "--receive-pack" || argument === "--exec"
+          || argument === "-o" || argument === "--push-option") {
+          if (index + 1 < args.length) index += 1;
+          continue;
+        }
+        if (argument.startsWith("--receive-pack=") || argument.startsWith("--exec=")
+          || argument.startsWith("--push-option=") || argument.startsWith("-")) {
+          continue;
+        }
+      }
+      if (remote === "") remote = argument;
+      else refspecs.push(argument);
+    }
 
-targets_main() {
-  refspec="$1"
-  case "$refspec" in
-    +*) refspec="${refspec#?}" ;;
-  esac
-  case "$refspec" in
-    *:*) destination="${refspec#*:}" ;;
-    *) destination="$refspec" ;;
-  esac
-  [ "$destination" = "main" ] || [ "$destination" = "refs/heads/main" ]
-}
+    if ((remote !== "" && unresolved(remote)) || refspecs.some(unresolved)) refuse(REFUSE_UNRESOLVED);
+    if (refspecs.some(targetsMain)) refuse(REFUSE_MAIN);
+    if (refspecs.length > 0) return;
 
-set -- $push_command
-shift 2
-remote=""
-has_refspec=false
-options=true
-while [ "$#" -gt 0 ]; do
-  argument="$1"
-  shift
-  if [ "$options" = true ]; then
-    case "$argument" in
-      --)
-        options=false
-        continue
-        ;;
-      --repo|--receive-pack|--exec|-o|--push-option)
-        [ "$#" -gt 0 ] && shift
-        continue
-        ;;
-      --repo=*|--receive-pack=*|--exec=*|--push-option=*|-*)
-        continue
-        ;;
-    esac
-  fi
-  if [ -z "$remote" ]; then
-    remote="$argument"
-  else
-    has_refspec=true
-    targets_main "$argument" && refuse_main
-  fi
-done
+    const branch = git(gitContext, ["branch", "--show-current"]);
+    if (branch === "main") refuse(REFUSE_MAIN);
 
-if [ "$has_refspec" = false ]; then
-  branch="$(git branch --show-current 2>/dev/null || true)"
-  [ "$branch" = "main" ] && refuse_main
+    if (remote === "" && branch !== "") {
+      remote = git(gitContext, ["config", "--get", `branch.${branch}.pushRemote`])
+        || git(gitContext, ["config", "--get", "remote.pushDefault"])
+        || git(gitContext, ["config", "--get", `branch.${branch}.remote`]);
+    }
 
-  if [ -z "$remote" ] && [ -n "$branch" ]; then
-    remote="$(git config --get "branch.$branch.pushRemote" 2>/dev/null \
-      || git config --get remote.pushDefault 2>/dev/null \
-      || git config --get "branch.$branch.remote" 2>/dev/null \
-      || true)"
-  fi
+    if (remote !== "") {
+      const configuredRefspecs = git(gitContext, ["config", "--get-all", `remote.${remote}.push`]);
+      if (configuredRefspecs !== "") {
+        if (configuredRefspecs.split("\n").some(targetsMain)) refuse(REFUSE_MAIN);
+        return;
+      }
+    }
 
-  if [ -n "$remote" ]; then
-    configured_refspecs="$(git config --get-all "remote.$remote.push" 2>/dev/null || true)"
-    if [ -n "$configured_refspecs" ]; then
-      while IFS= read -r refspec; do
-        targets_main "$refspec" && refuse_main
-      done <<EOF
-$configured_refspecs
-EOF
-      exit 0
-    fi
-  fi
+    const pushRef = git(gitContext, ["rev-parse", "--abbrev-ref", "@{push}"]);
+    if (pushRef === "main" || (remote !== "" && pushRef === `${remote}/main`)) refuse(REFUSE_MAIN);
 
-  push_ref="$(git rev-parse --abbrev-ref '@{push}' 2>/dev/null || true)"
-  [ "$push_ref" = "main" ] && refuse_main
-  [ -n "$remote" ] && [ "$push_ref" = "$remote/main" ] && refuse_main
+    const pushDefault = git(gitContext, ["config", "--get", "push.default"]) || "simple";
+    if (pushDefault === "upstream" || pushDefault === "simple") {
+      const mergeRef = git(gitContext, ["config", "--get", `branch.${branch}.merge`]);
+      if (mergeRef === "refs/heads/main") refuse(REFUSE_MAIN);
+    }
+  }
 
-  push_default="$(git config --get push.default 2>/dev/null || printf '%s\n' simple)"
-  case "$push_default" in
-    upstream|simple)
-      merge_ref="$(git config --get "branch.$branch.merge" 2>/dev/null || true)"
-      [ "$merge_ref" = "refs/heads/main" ] && refuse_main
-      ;;
-  esac
-fi
+  let input = "";
+  process.stdin.setEncoding("utf8");
+  process.stdin.on("data", chunk => input += chunk);
+  process.stdin.on("end", () => {
+    let command;
+    try {
+      const parsed = JSON.parse(input);
+      command = typeof parsed?.tool_input?.command === "string" ? parsed.tool_input.command : "";
+    } catch {
+      return;
+    }
 
-exit 0
+    const parsed = parseCommands(command);
+    parsed.commands.forEach((tokens, index) => {
+      const invocation = pushInvocation(tokens);
+      if (!invocation) return;
+      if (index === parsed.malformedLast) refuse(REFUSE_UNRESOLVED);
+      inspectPush(invocation);
+    });
+  });
+'
