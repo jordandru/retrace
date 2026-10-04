@@ -39,7 +39,10 @@ Most users should install [`@retrace-dev/cli`](https://www.npmjs.com/package/@re
   annotated only from authenticated ingress (the webhook `User` sender mapping or a verified `signedActor`), never from a client-asserted
   `on_behalf_of`; legacy records decode as before; unknown discriminator values substitute nothing. (2) *Owner-login events* (`owner-login.ts`,
   1,000 ms budget): pull-request, review and issue-comment events mapped from GitHub carry `github_payload` (the HMAC-covered fields the owner-login
-  classifier reads) and an `owner_login_decision`; a push commit event has neither (an owner-login `push` action is a PR `synchronize`).
+  classifier reads). `owner_login_decision` is attached **only** when the project policy is on profile `/2`, the payload names a login, and that
+  login is mapped in `github.identities` or listed in `github.shared_logins` (`owner-login.ts` `classifyOwnerLogin`); on policy `/1`, an empty
+  `/2` `github` block, or an unlisted login the event records no decision — read it as optional. A push commit event has neither field (an
+  owner-login `push` action is a PR `synchronize`).
 - **Export cache**: `GET /projects/:p/export?cached=1` serves the R2-cached bundle; `/status` reports the refresh outcome; a checkpoint refuses a
   stale bundle. Offline policy selection checks older policy versions only for activation-shaped events. New exports from `index.ts`: the capture
   types (`CapturePolicy`, `CaptureSeal`, `RestrictedStamp`, …) and the `owner-login*` modules.
