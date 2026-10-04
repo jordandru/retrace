@@ -13,5 +13,5 @@ The package also installs `retrace-git`, `retrace-mcp`, `retrace-serve`, `retrac
 Node.js 22 or newer is required by the local SQLite-backed server. See the [repository README](https://github.com/jordandru/retrace#readme) for configuration and cloud deployment.
 
 **0.2.0** tracks `@retrace-dev/core` 0.2.0 (exact pin). The core release changes the exported `Actor` schema and tightens two
-`method.params` fields; see the [core README](https://www.npmjs.com/package/@retrace-dev/core) for the migration note. The CLI
+`method.params` fields; see the [core README](https://www.npmjs.com/package/@retrace-dev/core) for the migration notes (0.3.0: policy `/2` `github` field, restricted hook witnesses, `principal_rule`, `RETRACE_AUTH=proxy`; 0.2.0: `Actor` schema). The CLI
 commands, binaries and environment variables are unchanged; `RETRACE_ACTOR_MODEL_SOURCE` is new and optional.
