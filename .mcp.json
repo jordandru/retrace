@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "retrace-cloud": {
+      "type": "http",
+      "url": "https://retrace-api.slcwitit.workers.dev/mcp"
+    }
+  }
+}

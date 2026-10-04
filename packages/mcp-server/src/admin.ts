@@ -38,12 +38,13 @@ import { defaultProducerKeysDir, producerKeySlug, writeProducerPrivateKey } from
 
 /** Kept stable so `new-team` does not silently provision an experimental integration. */
 export const DEFAULT_HARNESSES = ["claude-code", "codex", "gemini", "grok", "github-copilot"] as const;
-export const HARNESSES = [...DEFAULT_HARNESSES, "openclaw", "nooa"] as const;
+export const HARNESSES = [...DEFAULT_HARNESSES, "claude-code-cloud", "openclaw", "nooa"] as const;
 export type Harness = (typeof HARNESSES)[number];
 
 /** Where each harness keeps its MCP server config, for the onboarding text. */
 const HARNESS_CONFIG: Record<Harness, { label: string; file: string; instructions: string }> = {
   "claude-code": { label: "Claude Code", file: "~/.claude.json (or the repo's .mcp.json)", instructions: "CLAUDE.md" },
+  "claude-code-cloud": { label: "Claude Code cloud", file: "the cloud environment's API credentials dialog", instructions: "CLAUDE.md" },
   codex: { label: "Codex", file: "Codex MCP settings", instructions: "AGENTS.md" },
   gemini: { label: "Gemini CLI", file: ".gemini/settings.json", instructions: "GEMINI.md" },
   grok: { label: "Grok", file: "~/.grok/config.toml", instructions: "GROK.md" },
@@ -77,6 +78,7 @@ export type LocalCredential = Credential & { producer_key_file?: string; retired
 
 /** OpenClaw is remote HTTP MCP (Worker must not hold the private key). CI is a read-only assert credential. Everyone else who writes, signs. */
 export function shouldMintProducerKey(c: Credential): boolean {
+  if (c.actor.id === "claude-code-cloud") return false;
   if (c.actor.id === "openclaw") return false;
   if (c.actor.id.startsWith("ci-")) return false;
   if (c.trust === "assert") return true;
@@ -298,6 +300,27 @@ export function planAgentCredential(spec: AgentSpec, rand: (n: number) => Buffer
 /** Single-token onboarding for adding one agent without redistributing an existing team's secrets. */
 export function renderAgentOnboarding(spec: AgentSpec, credential: LocalCredential): string {
   const cfg = HARNESS_CONFIG[spec.harness];
+  if (spec.harness === "claude-code-cloud") {
+    const workerHost = new URL(spec.url).host;
+    return [
+      `# Retrace agent onboarding — \`${spec.harness}\` for \`${spec.project}\``, "",
+      "**This document contains no secret.**", "",
+      `Ledger actor: \`${spec.harness}\` on behalf of \`${spec.member}\`.`, "",
+      "## Claude Code cloud", "",
+      `In \`${cfg.file}\`, configure a Bearer credential with header \`Authorization\`, prefix \`Bearer\`, and allowed website \`${workerHost}\`.`,
+      "The token is delivered by the B4 step script, not by this document.", "",
+      "Set these non-secret environment variables:", "",
+      fence("text", [
+        `RETRACE_URL=${spec.url}`,
+        `RETRACE_PROJECT=${spec.project}`,
+        "RETRACE_AUTH=proxy",
+        "RETRACE_ENV=claude-cloud",
+        "RETRACE_DEVICE=claude-cloud",
+      ].join("\n")), "",
+      "Use `scripts/cloud/setup.sh` as the environment setup script.",
+      `Keep the provenance instructions in \`${cfg.instructions}\`. This onboarding writes no MCP environment block.`,
+    ].join("\n");
+  }
   const lines = [
     `# Retrace agent onboarding — \`${spec.harness}\` for \`${spec.project}\``, "",
     "**This document contains one secret.** Send it like a password and delete it after setup.", "",
@@ -498,7 +521,7 @@ export async function main(argv = process.argv.slice(2), env = process.env, out:
     const members = list(flags.member);
     const harnesses = list(flags.harness);
     if (!project || members.length !== 1 || harnesses.length !== 1)
-      throw new Error("usage: retrace-admin add-agent <project> --member a@x.com --harness openclaw [--url https://…] [--out onboarding.md]");
+      throw new Error("usage: retrace-admin add-agent <project> --member a@x.com --harness openclaw|claude-code-cloud [--url https://…] [--out onboarding.md]");
     const spec: AgentSpec = {
       project,
       member: members[0],
@@ -615,7 +638,7 @@ export async function main(argv = process.argv.slice(2), env = process.env, out:
     }
     return 0;
   }
-  out("retrace-admin <new-team <project> --member a@x.com[,…] [--harness …] | add-agent <project> --member a@x.com --harness openclaw | retire-agent <project> --harness codex | set-principal <project> --actor agent/codex --principal human/a@x.com | set-policy <project> --from <repo>/.retrace.json --if-match <digest>|none | list-teams> [--url https://…] [--credentials-file …] [--out file.md (default: ~/.retrace/onboarding-*.md)] [--producer-keys-dir ~/.retrace/producer-keys] [--dry-run]");
+  out("retrace-admin <new-team <project> --member a@x.com[,…] [--harness …] | add-agent <project> --member a@x.com --harness openclaw|claude-code-cloud | retire-agent <project> --harness codex | set-principal <project> --actor agent/codex --principal human/a@x.com | set-policy <project> --from <repo>/.retrace.json --if-match <digest>|none | list-teams> [--url https://…] [--credentials-file …] [--out file.md (default: ~/.retrace/onboarding-*.md)] [--producer-keys-dir ~/.retrace/producer-keys] [--dry-run]");
   return cmd ? 1 : 0;
 }
 

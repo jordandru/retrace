@@ -18,7 +18,7 @@ import {
   type ModelClaimCompleteness,
 } from "./commit-actor.js";
 import {
-  actorKey, captureSealEligible, captureSeals, firstStampedSeq, generatesArtifact, previousCaptureTouch, sameArtifact,
+  actorKey, captureSealEligible, captureSeals, effectiveBoundary, firstStampedSeq, generatesArtifact, previousCaptureTouch, sameArtifact,
   type CapturePolicy, type CaptureSeal,
 } from "./capture.js";
 import {
@@ -243,11 +243,13 @@ export function deriveCommitClaim(input: EventInput): {
     ? params.author as { name?: unknown; email?: unknown }
     : undefined;
   const raw = typeof params.raw_message === "string" ? params.raw_message : "";
+  const principalRule = params.principal_rule === "agent-address/1" ? "agent-address/1" : undefined;
   const resolved = resolveCommitActor({
     message: raw,
     authorName: typeof author?.name === "string" ? author.name : undefined,
     authorEmail: typeof author?.email === "string" ? author.email : undefined,
     parents: extractParents(input),
+    principalRule,
   });
   const submittedDiffers = input.actor.type !== resolved.actor.type || input.actor.id !== resolved.actor.id;
   const source: ClaimSource = submittedDiffers && resolved.claimSource !== "malformed" ? "malformed" : resolved.claimSource;
@@ -376,14 +378,22 @@ async function classifierLedgerAttributionContext(
   const canonicalArtifact = (id: string, _seq: number) => classifierCanonicalArtifact(policy, id);
   const domains = new Map<string, AttributionDomain>();
   const byId = new Map(events.map((e) => [e.id, e]));
-  const seals = new Map<string, { key: string; seq: number; paths: Set<string> }>();
+  const seals = new Map<string, CaptureSeal>();
   for (const seal of captureFacts) {
     const existing = seals.get(seal.key);
-    const value = existing ?? { key: seal.key, seq: seal.seq, paths: new Set<string>() };
+    const value = existing ?? { ...seal, paths: new Set<string>(), restricted: [] };
     value.seq = Math.min(value.seq, seal.seq);
     for (const artifactId of seal.paths) {
       const id = canonicalArtifact(artifactId, seal.seq);
       if (id) value.paths.add(id);
+    }
+    for (const touch of seal.restricted) {
+      const paths = new Set<string>();
+      for (const artifactId of touch.paths) {
+        const id = canonicalArtifact(artifactId, touch.seq);
+        if (id) paths.add(id);
+      }
+      value.restricted.push({ ...touch, paths });
     }
     seals.set(seal.key, value);
   }
@@ -395,7 +405,7 @@ async function classifierLedgerAttributionContext(
     if (ownCommit && (target.action === "committed" || target.action === "merged") && !ownKey) {
       throw new Error("context_missing: target commit identity");
     }
-    const before = Math.min(target.seq, ownKey ? seals.get(ownKey)?.seq ?? target.seq : target.seq);
+    const ownSeal = ownKey ? seals.get(ownKey) : undefined;
     const units: AttributionUnit[] = [];
     target.artifacts.forEach((a, index) => {
       if (/^(commit|event|actor):/.test(a.id) || ["commit", "event", "actor"].includes(a.kind ?? "")) return;
@@ -408,6 +418,7 @@ async function classifierLedgerAttributionContext(
       const existing = units.find((u) => u.id === id);
       if (existing) existing.refs.push(index);
       else {
+        const before = Math.min(target.seq, ownSeal ? effectiveBoundary(ownSeal, id) ?? target.seq : target.seq);
         const touches = [...seals.values()].filter((seal) => seal.key !== ownKey);
         units.push({ id, refs: [index], names: [id], after: previousCaptureTouch(touches, id, before), before });
       }
@@ -969,6 +980,8 @@ export interface ClassifyOpts {
   now?: () => number;
   deadline?: number;
   signedActor?: { type: Actor["type"]; id: string; on_behalf_of?: string };
+  /** Principal derived by an authenticated producer such as the HMAC-verified GitHub webhook. */
+  authenticatedPrincipal?: string;
 }
 
 async function classifyCommitClaimInner(opts: ClassifyOpts): Promise<ClassifyResult> {
@@ -1190,8 +1203,14 @@ async function classifyCommitClaimInner(opts: ClassifyOpts): Promise<ClassifyRes
   const mismatch = harnessMismatch(derived.claim.id, harness.marker, witnessClients);
   if (now() >= deadline) return { kind: "unavailable", reason: "deadline" };
 
+  const principalRule = opts.input.method?.params?.principal_rule;
+  const derivedPrincipal = principalRule === "agent-address/1"
+    ? opts.authenticatedPrincipal
+    : principalRule === undefined
+      ? derived.resolved.actor.on_behalf_of
+      : undefined;
   const signed = opts.signedActor ?? (derived.claim.type && derived.claim.id
-    ? { type: derived.claim.type, id: derived.claim.id, ...(derived.resolved.actor.on_behalf_of ? { on_behalf_of: derived.resolved.actor.on_behalf_of } : {}) }
+    ? { type: derived.claim.type, id: derived.claim.id, ...(derivedPrincipal ? { on_behalf_of: derivedPrincipal } : {}) }
     : undefined);
 
   const record: ClaimDecision = {

@@ -654,6 +654,7 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
               classifyCommitClaim({
                 store, input: parsed.data, producer: "github-push",
                 sealedBy: SEALED_BY_GITHUB_WEBHOOK, trailerPolicy: mode, canonicalR: repo,
+                authenticatedPrincipal: parsed.data.actor.on_behalf_of,
                 deadline: operationDeadline,
               }),
               operationDeadline,
@@ -1263,6 +1264,7 @@ export async function drainPendingGithubDeliveries(store: EventStore, opts: {
       const classified = await classifyCommitClaim({
         store, input: parsed.data, producer: "github-push",
         sealedBy: SEALED_BY_GITHUB_WEBHOOK, trailerPolicy: opts.trailerPolicy, canonicalR: row.repo,
+        authenticatedPrincipal: parsed.data.actor.on_behalf_of,
       });
       if (classified.kind === "unavailable") {
         const attemptCount = outcomes[sha]?.attempt_count ?? 0;

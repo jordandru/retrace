@@ -46,7 +46,7 @@ async function resolveCheckpointTrustedKey(flag: unknown): Promise<{ key: JsonWe
 
 function parseArgs(argv: string[]) {
   const flags: Record<string, string | boolean> = {}; const pos: string[] = [];
-  for (let i = 0; i < argv.length; i++) { const a = argv[i]; if (a.startsWith("--")) { const n = argv[i + 1]; if (n && !n.startsWith("--")) { flags[a.slice(2)] = n; i++; } else flags[a.slice(2)] = true; } else pos.push(a); }
+  for (let i = 0; i < argv.length; i++) { const a = argv[i]; if (a.startsWith("--")) { const key = a.slice(2); const n = argv[i + 1]; if (n && !n.startsWith("--")) { flags[key] = key === "restricted-hook-stamp" && typeof flags[key] === "string" ? `${flags[key]}\n${n}` : n; i++; } else flags[key] = true; } else pos.push(a); }
   return { flags, pos };
 }
 

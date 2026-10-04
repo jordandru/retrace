@@ -1512,3 +1512,62 @@ test("F18: bare-only and file-only evidence remains diagnostic, never a witness"
     assert.deepEqual(got.record.decision.witnesses, []);
   }
 });
+
+test("T16 agent-address/1 decision records use only producer-authenticated principals", async () => {
+  const makeInput = (principalRule?: string): EventInput => ({
+    project: "p",
+    actor: { type: "agent", id: "claude-code", on_behalf_of: "github:jordan" },
+    action: "committed",
+    artifacts: [
+      { id: `commit:acme/app@${SHA.slice(0, 12)}`, role: "generated" },
+      { id: "repo:acme/app#a.ts", role: "generated" },
+    ],
+    timestamp: "2026-09-10T12:00:00.000Z",
+    method: {
+      tool: "git",
+      params: {
+        sha: SHA,
+        raw_message: "change\n\nRetrace-Actor: claude-code\n",
+        author: { name: "Claude", email: "noreply@anthropic.com" },
+        parents: [],
+        ...(principalRule === undefined ? {} : { principal_rule: principalRule }),
+      },
+    },
+  });
+
+  const store = new MemoryEventStore();
+  await putPolicy(store);
+  await pinnedEdit(store, { actor: "claude-code", path: "a.ts" });
+
+  const versioned = await classify(store, makeInput("agent-address/1"), {
+    producer: "github-webhook", sealedBy: "webhook:github", authenticatedPrincipal: "github:jordan",
+  });
+  assert.equal(versioned.kind, "decision");
+  if (versioned.kind !== "decision") return;
+  assert.deepEqual(versioned.record.signed_actor, {
+    type: "agent", id: "claude-code", on_behalf_of: "github:jordan",
+  });
+
+  const legacy = await classify(store, makeInput());
+  assert.equal(legacy.kind, "decision");
+  if (legacy.kind !== "decision") return;
+  assert.deepEqual(legacy.record.signed_actor, {
+    type: "agent", id: "claude-code", on_behalf_of: "noreply@anthropic.com",
+  });
+
+  const unknown = await classify(store, makeInput("agent-address/2"));
+  assert.equal(unknown.kind, "decision");
+  if (unknown.kind !== "decision") return;
+  assert.deepEqual(unknown.record.signed_actor, {
+    type: "agent", id: "claude-code",
+  });
+
+  const signedHook = await classify(store, makeInput("agent-address/1"), {
+    signedActor: { type: "agent", id: "claude-code", on_behalf_of: "credential:claude-code" },
+  });
+  assert.equal(signedHook.kind, "decision");
+  if (signedHook.kind !== "decision") return;
+  assert.deepEqual(signedHook.record.signed_actor, {
+    type: "agent", id: "claude-code", on_behalf_of: "credential:claude-code",
+  });
+});
