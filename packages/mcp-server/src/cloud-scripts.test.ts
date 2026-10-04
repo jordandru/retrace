@@ -6,6 +6,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { performance } from "node:perf_hooks";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const guard = resolve(root, "scripts/cloud/guard-push-main.sh");
@@ -23,115 +24,135 @@ function runGuard(cwd: string, command: string, cloud = true) {
 test("T11 push guard refuses main forms only in cloud sessions", () => {
   chmodSync(guard, 0o755);
   const repo = mkdtempSync(resolve(tmpdir(), "retrace-cloud-guard-"));
-  const fallbackRepo = mkdtempSync(resolve(tmpdir(), "retrace-cloud-guard-cwd-"));
+  const shapeMessage = "refused: a cloud session pushes only 'git push [-u] [--force-with-lease] <remote> <branch>' to a non-main branch (docs/design/cloud-seat.md §6)";
+  const unresolvedMessage = "refused: cannot resolve the push destination without evaluating the command";
+  const assertAllowed = (command: string, cloud = true) => {
+    const result = runGuard(repo, command, cloud);
+    assert.equal(result.status, 0, command);
+    assert.equal(result.stderr, "", command);
+  };
+  const assertRefused = (command: string, message = shapeMessage) => {
+    const result = runGuard(repo, command);
+    assert.equal(result.status, 2, command);
+    assert.equal(result.stderr.trim(), message, command);
+  };
   try {
-    assert.equal(spawnSync("git", ["init", "-q", "-b", "main"], { cwd: repo }).status, 0);
-    assert.equal(spawnSync("git", [
-      "-c", "user.name=Cloud Guard Test",
-      "-c", "user.email=cloud-guard@example.test",
-      "commit", "--allow-empty", "-q", "-m", "initial",
-    ], { cwd: repo }).status, 0);
+    const startedAt = performance.now();
+    assertAllowed("git push origin feature/x");
+    assert.ok(performance.now() - startedAt < 500, "git push origin feature/x");
 
     for (const command of [
+      "git push -u origin feature/x",
+      "git push --set-upstream origin feature/x",
+      "git push --force-with-lease origin feature/x",
+      "git push --force-with-lease=feature/x:0123abc origin feature/x",
+      "git push -u --force-with-lease origin feature/x",
+      "git push --force-with-lease --set-upstream origin feature/x",
+      "git push origin feature.x-1",
+      "git push origin \"feature/x\"",
+      "git push upstream topic",
+      "git push origin feature/cloud",
+      "echo hello",
+      "gh pr merge",
+    ]) assertAllowed(command);
+    assertAllowed("git push origin main", false);
+
+    for (const command of [
+      "git push",
+      "git push origin",
       "git push origin main",
       "git push origin HEAD:main",
+      "git push origin HEAD:feature/x",
       "git push origin refs/heads/main",
-      "git push --force origin main",
-      "git push -u origin main",
+      "git push origin refs/heads/feature/x",
+      "git push origin heads/main",
+      "git push origin +feature/x",
       "git push origin +main",
-      "git push origin HEAD:refs/heads/main",
       "git push origin :main",
-      "git push origin",
-      "git push",
-    ]) {
-      const result = runGuard(repo, command);
-      assert.equal(result.status, 2, command);
-      assert.match(result.stderr, /refused: a cloud session never pushes main/, command);
-    }
-
-    assert.equal(runGuard(repo, "gh pr merge").status, 0);
-    assert.equal(runGuard(repo, "git push origin feature/cloud").status, 0);
-    assert.equal(runGuard(repo, "git push origin main", false).status, 0);
-    assert.equal(spawnSync("git", ["checkout", "-q", "-b", "feature-cloud"], { cwd: repo }).status, 0);
-    assert.equal(spawnSync("git", ["config", "branch.feature-cloud.remote", "origin"], { cwd: repo }).status, 0);
-    assert.equal(spawnSync("git", ["config", "branch.feature-cloud.merge", "refs/heads/main"], { cwd: repo }).status, 0);
-    for (const mode of ["upstream", "simple"]) {
-      assert.equal(spawnSync("git", ["config", "push.default", mode], { cwd: repo }).status, 0);
-      const result = runGuard(repo, "git push");
-      assert.equal(result.status, 2, `push.default=${mode}`);
-      assert.match(result.stderr, /refused: a cloud session never pushes main/, `push.default=${mode}`);
-    }
-
-    assert.equal(spawnSync("git", ["config", "push.default", "current"], { cwd: repo }).status, 0);
-    assert.equal(spawnSync("git", ["config", "branch.feature-cloud.merge", "refs/heads/feature-cloud"], { cwd: repo }).status, 0);
-
-    for (const command of [
+      "git push origin :",
+      "git push origin +:",
+      "git push origin HEAD:refs/heads/main",
+      "git push --all origin",
+      "git push --mirror origin",
+      "git push --tags origin",
+      "git push origin HEAD:heads/main",
+      "git push origin feature/main",
       "git push --repo origin HEAD:main",
       "git push --repo=origin HEAD:main",
+      "git push --repo origin feature/x",
+      "git push --repo=origin feature/x",
+      "git push --force origin feature/x",
+      "git push -f origin feature/x",
+      "git push -o x origin feature/x",
+      "git push origin feature/x main",
+      "git push origin main feature/x",
+      "git push -u origin main",
+      "git push --force-with-lease origin main",
+      "git push -u --set-upstream origin feature/x",
+      "git push --force-with-lease --force-with-lease origin feature/x",
+      "git push --force-with-lease= origin feature/x",
+      "git push /tmp/origin feature/x",
       "git push origin \"HEAD:main\"",
       "git push origin 'main'",
       "git push origin \"refs/heads/main\"",
       "git push origin HEAD\\:main",
       "git -C . push origin HEAD:main",
-      `git -C ${repo} push origin main`,
-      "env git push origin HEAD:main",
-      "env FOO=1 git push origin main",
-      "FOO=1 git push origin main",
-      "git -c push.default=current push origin main",
-      "git --no-pager push origin main",
-      "echo start && git push origin main",
-      "git fetch origin; git push origin HEAD:main",
-      "git push origin feature/x && git push origin main",
-    ]) {
-      const result = runGuard(repo, command);
-      assert.equal(result.status, 2, command);
-      assert.match(result.stderr, /refused: a cloud session never pushes main/, command);
-    }
-
-    for (const command of [
-      "git push origin \"HEAD:main",
-      "git push origin $DEST",
-      "git push origin HEAD:$(cat x)",
-      "git push origin HEAD:`cat x`",
-      "git push origin ~DEST",
-      "git push origin HEAD:*",
-      "git push \"$R\" main",
-    ]) {
-      const result = runGuard(repo, command);
-      assert.equal(result.status, 2, command);
-      assert.match(result.stderr, /refused: cannot resolve the push destination without evaluating the command/, command);
-    }
-
-    for (const command of [
-      "git push --repo origin HEAD:feature/x",
-      "git push --repo=origin feature/x",
-      "git push origin \"feature/x\"",
       "git -C . push origin feature/x",
+      `git -C ${repo} push origin main`,
+      `git -C ${repo} push`,
+      "env git push origin HEAD:main",
       "env git push origin feature/x",
+      "env FOO=1 git push origin main",
+      "env FOO=1 git push origin feature/x",
+      "FOO=1 git push origin main",
+      "FOO=1 git push origin feature/x",
+      "git -c push.default=current push origin main",
+      "git -c push.default=current push origin feature/x",
+      "git -P push origin feature/x",
+      "git --paginate push origin feature/x",
+      "git --no-optional-locks push origin feature/x",
+      "git --no-pager push origin main",
+      "git --no-pager push origin feature/x",
+      "time git push origin feature/x",
+      "command git push origin feature/x",
+      "exec git push origin feature/x",
+      "nice git push origin feature/x",
+      "nohup git push origin feature/x",
+      "(git push origin feature/x)",
+      "{ git push origin feature/x; }",
+      "/usr/bin/git push origin feature/x",
+      "echo start && git push origin main",
+      "echo start && git push origin feature/x",
+      "echo start & git push origin main",
+      "echo start & git push origin feature/x",
+      "echo start |& git push origin main",
+      "echo start |& git push origin feature/x",
+      "git fetch origin; git push origin HEAD:main",
+      "git fetch origin; git push origin feature/x",
+      "git push origin feature/x && git push origin main",
+      "git push origin feature/x && echo done",
+      "git push origin feature/x >/dev/null",
+      "git push origin feature/x 2>&1",
+      ">/dev/null git push origin feature/x",
+      "git push origin HEAD:main>/dev/null",
       "echo main && git push origin feature/x",
-      "git push",
-    ]) {
-      assert.equal(runGuard(repo, command).status, 0, command);
-    }
+    ]) assertRefused(command);
 
-    assert.equal(spawnSync("git", ["init", "-q", "-b", "main"], { cwd: fallbackRepo }).status, 0);
-    assert.equal(spawnSync("git", [
-      "-c", "user.name=Cloud Guard Test",
-      "-c", "user.email=cloud-guard@example.test",
-      "commit", "--allow-empty", "-q", "-m", "initial",
-    ], { cwd: fallbackRepo }).status, 0);
-    assert.equal(spawnSync("git", ["config", "push.default", "simple"], { cwd: fallbackRepo }).status, 0);
+    for (const command of [
+      "git push origin \"feature/x",
+      "git push origin feature\\",
+    ]) assertRefused(command, unresolvedMessage);
 
-    const fallbackCommand = `git -C ${fallbackRepo} push`;
-    const fallbackResult = runGuard(repo, fallbackCommand);
-    assert.equal(fallbackResult.status, 2, fallbackCommand);
-    assert.match(fallbackResult.stderr, /refused: a cloud session never pushes main/, fallbackCommand);
-
-    const allowedFallbackCommand = `git -C ${fallbackRepo} push origin feature/x`;
-    assert.equal(runGuard(repo, allowedFallbackCommand).status, 0, allowedFallbackCommand);
+    for (const command of [
+      "git push origin $BRANCH",
+      "git push origin $(cat x)",
+      "git push origin ~x",
+      "git push origin feature/*",
+      "git push origin HEAD:`cat x`",
+      "git push \"$R\" main",
+    ]) assertRefused(command);
   } finally {
     rmSync(repo, { recursive: true, force: true });
-    rmSync(fallbackRepo, { recursive: true, force: true });
   }
 });
 

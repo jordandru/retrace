@@ -1,33 +1,34 @@
 #!/bin/sh
-# Bypassable policy control: it prevents ordinary Claude Code Bash git pushes, not every possible GitHub write.
-# It parses literal shell quoting without evaluation and fails closed when a push destination cannot be resolved.
-# It examines ordinary assignments, env prefixes, git global options, and shell control operators. For
-# `cd <dir> && git push`, no-refspec fallback checks still run in the hook's cwd.
-# Shell string builders and wrappers (`sh -c`, `bash -lc`, `eval`, aliases, functions, `xargs`, and `script`) are out of scope.
+# Fail-closed allowlist: a cloud session may run only
+# `git push [-u|--set-upstream] [--force-with-lease[=<ref>:<sha>]] <remote> <non-main branch>`.
+# Bare pushes, --all, --mirror, --tags, refspecs containing `:`, `+` or `refs/`, and every prefix,
+# operator, redirection, Git global option or extra command are refused.
+# This is a bypassable policy control: string builders and wrappers (`sh -c`, `bash -lc`, `eval`,
+# aliases, functions, `xargs`, `script`, and similar forms) cannot be seen and remain out of scope.
 # GitHub operations such as `gh pr merge` are outside this git-push-only guard.
 set -eu
 
 [ "${CLAUDE_CODE_REMOTE:-}" = "true" ] || exit 0
 
 node -e '
-  const { spawnSync } = require("node:child_process");
-
-  const REFUSE_MAIN = "refused: a cloud session never pushes main (docs/design/cloud-seat.md §6)";
+  const apostrophe = String.fromCharCode(39);
+  const REFUSE_SHAPE = `refused: a cloud session pushes only ${apostrophe}git push [-u] [--force-with-lease] <remote> <branch>${apostrophe} to a non-main branch (docs/design/cloud-seat.md §6)`;
   const REFUSE_UNRESOLVED = "refused: cannot resolve the push destination without evaluating the command";
   const singleQuote = String.fromCharCode(39);
+  const syntax = new Set([";", "&", "|", "(", ")", "{", "}", "<", ">", "!"]);
 
   function refuse(message) {
     process.stderr.write(`${message}\n`);
     process.exit(2);
   }
 
-  function parseCommands(command) {
-    const commands = [];
-    let tokens = [];
+  function tokenize(command) {
+    const tokens = [];
     let token = "";
     let tokenStarted = false;
     let quote = "";
     let error = false;
+    let hasNewline = false;
 
     const finishToken = () => {
       if (tokenStarted) {
@@ -36,17 +37,15 @@ node -e '
         tokenStarted = false;
       }
     };
-    const finishCommand = () => {
-      finishToken();
-      if (tokens.length > 0) commands.push(tokens);
-      tokens = [];
-    };
 
     for (let i = 0; i < command.length; i += 1) {
       const ch = command[i];
       if (quote === "single") {
         if (ch === singleQuote) quote = "";
-        else token += ch;
+        else {
+          if (ch === "\n") hasNewline = true;
+          token += ch;
+        }
         tokenStarted = true;
         continue;
       }
@@ -63,12 +62,14 @@ node -e '
             break;
           }
           if (next === "$" || next.charCodeAt(0) === 96 || next === "\"" || next === "\\" || next === "\n") {
-            if (next !== "\n") token += next;
+            if (next === "\n") hasNewline = true;
+            else token += next;
             tokenStarted = true;
             i += 1;
             continue;
           }
         }
+        if (ch === "\n") hasNewline = true;
         token += ch;
         tokenStarted = true;
         continue;
@@ -86,17 +87,22 @@ node -e '
           error = true;
           break;
         }
-        if (next !== "\n") {
+        if (next === "\n") {
+          hasNewline = true;
+        } else {
           token += next;
           tokenStarted = true;
         }
         i += 1;
       } else if (ch === " " || ch === "\t" || ch === "\r") {
         finishToken();
-      } else if (ch === ";" || ch === "\n" || ch === "|"
-        || (ch === "&" && command[i + 1] === "&")) {
-        finishCommand();
-        if ((ch === "|" && command[i + 1] === "|") || ch === "&") i += 1;
+      } else if (ch === "\n") {
+        finishToken();
+        tokens.push(ch);
+        hasNewline = true;
+      } else if (syntax.has(ch)) {
+        finishToken();
+        tokens.push(ch);
       } else {
         token += ch;
         tokenStarted = true;
@@ -104,135 +110,46 @@ node -e '
     }
 
     if (quote !== "") error = true;
-    finishCommand();
-    return { commands, malformedLast: error && commands.length > 0 ? commands.length - 1 : -1 };
+    finishToken();
+    return { tokens, error, hasNewline };
   }
 
-  function pushInvocation(tokens) {
-    let index = 0;
-    const assignment = /^[A-Za-z_][A-Za-z0-9_]*=/;
-    while (assignment.test(tokens[index] ?? "")) index += 1;
+  function isPushCandidate(tokens) {
+    return tokens.some((token, index) => token === "push"
+      && tokens.slice(0, index).some(prefix => prefix === "git" || prefix.endsWith("/git")));
+  }
 
-    if (tokens[index] === "env") {
-      index += 1;
-      while (tokens[index] === "-i" || assignment.test(tokens[index] ?? "")) index += 1;
-    }
-    if (tokens[index] !== "git") return undefined;
-    index += 1;
+  function allowed(tokens, hasNewline) {
+    if (hasNewline || tokens[0] !== "git" || tokens[1] !== "push") return false;
 
-    const gitContext = [];
+    let index = 2;
+    let upstream = false;
+    let forceWithLease = false;
     while (index < tokens.length) {
-      const argument = tokens[index];
-      if (argument === "push") {
-        return { args: tokens.slice(index + 1), gitContext };
-      }
-      if (argument === "-C" || argument === "-c" || argument === "--git-dir"
-        || argument === "--work-tree" || argument === "--namespace") {
-        if (index + 1 >= tokens.length) return undefined;
-        gitContext.push(argument, tokens[index + 1]);
-        index += 2;
-        continue;
-      }
-      if (argument.startsWith("--git-dir=") || argument.startsWith("--work-tree=")
-        || argument.startsWith("--namespace=")) {
-        gitContext.push(argument);
+      const token = tokens[index];
+      if (token === "-u" || token === "--set-upstream") {
+        if (upstream) return false;
+        upstream = true;
         index += 1;
         continue;
       }
-      if (argument === "--no-pager" || argument === "-p" || argument === "--exec-path"
-        || argument.startsWith("--exec-path=")) {
+      if (token === "--force-with-lease" || /^--force-with-lease=[^:\s]+:[^:\s]+$/.test(token)) {
+        if (forceWithLease) return false;
+        forceWithLease = true;
         index += 1;
         continue;
       }
-      return undefined;
-    }
-    return undefined;
-  }
-
-  function unresolved(token) {
-    return token.includes("$") || token.charCodeAt(0) === 96 || token.includes("`")
-      || token.startsWith("~") || /[*?\[]/.test(token);
-  }
-
-  function targetsMain(refspec) {
-    if (refspec.startsWith("+")) refspec = refspec.slice(1);
-    const colon = refspec.indexOf(":");
-    const destination = colon === -1 ? refspec : refspec.slice(colon + 1);
-    return destination === "main" || destination === "refs/heads/main";
-  }
-
-  function git(gitContext, args) {
-    const result = spawnSync("git", [...gitContext, ...args], {
-      cwd: process.cwd(),
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    });
-    return result.status === 0 ? result.stdout.trim() : "";
-  }
-
-  function inspectPush({ args, gitContext }) {
-    let remote = "";
-    const refspecs = [];
-    let options = true;
-
-    for (let index = 0; index < args.length; index += 1) {
-      const argument = args[index];
-      if (options) {
-        if (argument === "--") {
-          options = false;
-          continue;
-        }
-        if (argument === "--repo") {
-          if (index + 1 < args.length) remote = args[index += 1];
-          continue;
-        }
-        if (argument.startsWith("--repo=")) {
-          remote = argument.slice("--repo=".length);
-          continue;
-        }
-        if (argument === "--receive-pack" || argument === "--exec"
-          || argument === "-o" || argument === "--push-option") {
-          if (index + 1 < args.length) index += 1;
-          continue;
-        }
-        if (argument.startsWith("--receive-pack=") || argument.startsWith("--exec=")
-          || argument.startsWith("--push-option=") || argument.startsWith("-")) {
-          continue;
-        }
-      }
-      if (remote === "") remote = argument;
-      else refspecs.push(argument);
+      break;
     }
 
-    if ((remote !== "" && unresolved(remote)) || refspecs.some(unresolved)) refuse(REFUSE_UNRESOLVED);
-    if (refspecs.some(targetsMain)) refuse(REFUSE_MAIN);
-    if (refspecs.length > 0) return;
-
-    const branch = git(gitContext, ["branch", "--show-current"]);
-    if (branch === "main") refuse(REFUSE_MAIN);
-
-    if (remote === "" && branch !== "") {
-      remote = git(gitContext, ["config", "--get", `branch.${branch}.pushRemote`])
-        || git(gitContext, ["config", "--get", "remote.pushDefault"])
-        || git(gitContext, ["config", "--get", `branch.${branch}.remote`]);
-    }
-
-    if (remote !== "") {
-      const configuredRefspecs = git(gitContext, ["config", "--get-all", `remote.${remote}.push`]);
-      if (configuredRefspecs !== "") {
-        if (configuredRefspecs.split("\n").some(targetsMain)) refuse(REFUSE_MAIN);
-        return;
-      }
-    }
-
-    const pushRef = git(gitContext, ["rev-parse", "--abbrev-ref", "@{push}"]);
-    if (pushRef === "main" || (remote !== "" && pushRef === `${remote}/main`)) refuse(REFUSE_MAIN);
-
-    const pushDefault = git(gitContext, ["config", "--get", "push.default"]) || "simple";
-    if (pushDefault === "upstream" || pushDefault === "simple") {
-      const mergeRef = git(gitContext, ["config", "--get", `branch.${branch}.merge`]);
-      if (mergeRef === "refs/heads/main") refuse(REFUSE_MAIN);
-    }
+    if (tokens.length - index !== 2) return false;
+    const remote = tokens[index];
+    const branch = tokens[index + 1];
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(remote)) return false;
+    if (!/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(branch)) return false;
+    if (branch.includes(":") || branch.startsWith("+") || branch.startsWith("refs/")) return false;
+    if (branch === "main" || branch === "heads/main" || branch === "refs/heads/main") return false;
+    return !branch.endsWith("/main");
   }
 
   let input = "";
@@ -247,12 +164,9 @@ node -e '
       return;
     }
 
-    const parsed = parseCommands(command);
-    parsed.commands.forEach((tokens, index) => {
-      const invocation = pushInvocation(tokens);
-      if (!invocation) return;
-      if (index === parsed.malformedLast) refuse(REFUSE_UNRESOLVED);
-      inspectPush(invocation);
-    });
+    const parsed = tokenize(command);
+    if (!isPushCandidate(parsed.tokens)) return;
+    if (parsed.error) refuse(REFUSE_UNRESOLVED);
+    if (!allowed(parsed.tokens, parsed.hasNewline)) refuse(REFUSE_SHAPE);
   });
 '
