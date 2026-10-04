@@ -24,7 +24,7 @@ function runGuard(cwd: string, command: string, cloud = true) {
 test("T11 push guard refuses main forms only in cloud sessions", () => {
   chmodSync(guard, 0o755);
   const repo = mkdtempSync(resolve(tmpdir(), "retrace-cloud-guard-"));
-  const shapeMessage = "refused: a cloud session pushes only 'git push [-u] [--force-with-lease] <remote> <branch>' to a non-main branch (docs/design/cloud-seat.md §6)";
+  const shapeMessage = "refused: a cloud session pushes only 'git push [-u] [--force-with-lease] <remote> <branch>:refs/heads/<branch>' to a non-main branch (docs/design/cloud-seat.md §6)";
   const unresolvedMessage = "refused: cannot resolve the push destination without evaluating the command";
   const assertAllowed = (command: string, cloud = true) => {
     const result = runGuard(repo, command, cloud);
@@ -37,24 +37,24 @@ test("T11 push guard refuses main forms only in cloud sessions", () => {
     assert.equal(result.stderr.trim(), message, command);
   };
   try {
+    const allowedPushCommands = [
+      "git push origin feature/x:refs/heads/feature/x",
+      "git push -u origin feature/x:refs/heads/feature/x",
+      "git push --set-upstream origin feature/x:refs/heads/feature/x",
+      "git push --force-with-lease origin feature/x:refs/heads/feature/x",
+      "git push --force-with-lease=feature/x:0123abc origin feature/x:refs/heads/feature/x",
+      "git push --force-with-lease=refs/heads/feature/x:0123abc origin feature/x:refs/heads/feature/x",
+      "git push -u --force-with-lease origin feature/x:refs/heads/feature/x",
+      "git push --force-with-lease --set-upstream origin feature/x:refs/heads/feature/x",
+      "git push origin \"feature/x:refs/heads/feature/x\"",
+      "git push upstream topic:refs/heads/topic",
+    ];
     const startedAt = performance.now();
-    assertAllowed("git push origin feature/x");
-    assert.ok(performance.now() - startedAt < 500, "git push origin feature/x");
+    assertAllowed(allowedPushCommands[0]);
+    assert.ok(performance.now() - startedAt < 500, allowedPushCommands[0]);
 
-    for (const command of [
-      "git push -u origin feature/x",
-      "git push --set-upstream origin feature/x",
-      "git push --force-with-lease origin feature/x",
-      "git push --force-with-lease=feature/x:0123abc origin feature/x",
-      "git push -u --force-with-lease origin feature/x",
-      "git push --force-with-lease --set-upstream origin feature/x",
-      "git push origin feature.x-1",
-      "git push origin \"feature/x\"",
-      "git push upstream topic",
-      "git push origin feature/cloud",
-      "echo hello",
-      "gh pr merge",
-    ]) assertAllowed(command);
+    for (const command of allowedPushCommands.slice(1)) assertAllowed(command);
+    for (const command of ["echo hello", "gh pr merge"]) assertAllowed(command);
     assertAllowed("git push origin main", false);
 
     for (const command of [
@@ -63,6 +63,8 @@ test("T11 push guard refuses main forms only in cloud sessions", () => {
       "git push origin main",
       "git push origin HEAD:main",
       "git push origin HEAD:feature/x",
+      "git push origin HEAD",
+      "git push origin HEAD:refs/heads/HEAD",
       "git push origin refs/heads/main",
       "git push origin refs/heads/feature/x",
       "git push origin heads/main",
@@ -77,6 +79,27 @@ test("T11 push guard refuses main forms only in cloud sessions", () => {
       "git push --tags origin",
       "git push origin HEAD:heads/main",
       "git push origin feature/main",
+      "git push origin feature/x",
+      "git push -u origin feature/x",
+      "git push --set-upstream origin feature/x",
+      "git push --force-with-lease origin feature/x",
+      "git push --force-with-lease=feature/x:0123abc origin feature/x",
+      "git push -u --force-with-lease origin feature/x",
+      "git push --force-with-lease --set-upstream origin feature/x",
+      "git push origin feature.x-1",
+      "git push origin \"feature/x\"",
+      "git push upstream topic",
+      "git push origin feature/cloud",
+      "git push origin feature/x:refs/heads/feature/y",
+      "git push origin feature/x:feature/x",
+      "git push origin feature/x:refs/heads/main",
+      "git push origin main:refs/heads/main",
+      "git push origin Main:refs/heads/Main",
+      "git push origin MAIN:refs/heads/MAIN",
+      "git push origin x/Main:refs/heads/x/Main",
+      "git push origin refs/heads/feature/x:refs/heads/feature/x",
+      "git push origin +feature/x:refs/heads/feature/x",
+      "git push --force-with-lease=main:0123abc origin feature/x:refs/heads/feature/x",
       "git push --repo origin HEAD:main",
       "git push --repo=origin HEAD:main",
       "git push --repo origin feature/x",
@@ -151,6 +174,53 @@ test("T11 push guard refuses main forms only in cloud sessions", () => {
       "git push origin HEAD:`cat x`",
       "git push \"$R\" main",
     ]) assertRefused(command);
+
+    const bare = resolve(repo, "remote.git");
+    const clone = resolve(repo, "clone");
+    const git = (cwd: string, args: string[]) => spawnSync("git", args, { cwd, encoding: "utf8" });
+    assert.equal(git(repo, ["init", "--bare", "-q", bare]).status, 0, "init bare remote");
+    assert.equal(git(repo, ["init", "-q", "-b", "main", clone]).status, 0, "init clone");
+    assert.equal(git(clone, [
+      "-c", "user.name=Cloud Guard Test",
+      "-c", "user.email=cloud-guard@example.test",
+      "commit", "--allow-empty", "-q", "-m", "initial",
+    ]).status, 0, "initial commit");
+    assert.equal(git(clone, ["remote", "add", "origin", bare]).status, 0, "add origin");
+    assert.equal(git(clone, ["remote", "add", "upstream", bare]).status, 0, "add upstream");
+    assert.equal(git(clone, ["push", "-q", "origin", "main"]).status, 0, "seed remote main");
+    for (const branch of ["feature/x", "topic"]) {
+      assert.equal(git(clone, ["branch", branch]).status, 0, branch);
+    }
+    const remoteRef = (ref: string) => {
+      const result = git(repo, ["--git-dir", bare, "rev-parse", ref]);
+      assert.equal(result.status, 0, ref);
+      return result.stdout.trim();
+    };
+
+    for (const command of allowedPushCommands) {
+      assert.equal(runGuard(clone, command).status, 0, command);
+      const mainBefore = remoteRef("refs/heads/main");
+      const pushed = spawnSync("sh", ["-c", command], { cwd: clone, encoding: "utf8" });
+      if (command.includes(":0123abc")) assert.notEqual(pushed.status, 0, command);
+      else assert.equal(pushed.status, 0, `${command}: ${pushed.stderr}`);
+      assert.equal(remoteRef("refs/heads/main"), mainBefore, command);
+    }
+
+    assert.equal(git(clone, ["config", "remote.origin.push", "refs/heads/feature/x:refs/heads/main"]).status, 0, "configured push refspec");
+    assert.equal(git(clone, ["checkout", "-q", "feature/x"]).status, 0, "checkout feature/x");
+    assert.equal(git(clone, [
+      "-c", "user.name=Cloud Guard Test",
+      "-c", "user.email=cloud-guard@example.test",
+      "commit", "--allow-empty", "-q", "-m", "feature update",
+    ]).status, 0, "feature commit");
+    const configuredCommand = "git push origin feature/x:refs/heads/feature/x";
+    assert.equal(runGuard(clone, configuredCommand).status, 0, configuredCommand);
+    const configuredMainBefore = remoteRef("refs/heads/main");
+    const configuredFeatureBefore = remoteRef("refs/heads/feature/x");
+    const configuredPush = spawnSync("sh", ["-c", configuredCommand], { cwd: clone, encoding: "utf8" });
+    assert.equal(configuredPush.status, 0, `${configuredCommand}: ${configuredPush.stderr}`);
+    assert.equal(remoteRef("refs/heads/main"), configuredMainBefore, configuredCommand);
+    assert.notEqual(remoteRef("refs/heads/feature/x"), configuredFeatureBefore, configuredCommand);
   } finally {
     rmSync(repo, { recursive: true, force: true });
   }
