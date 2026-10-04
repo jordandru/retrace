@@ -93,7 +93,9 @@ contacted, and no production credential was created** (see Limits).
 - **Production use needs a keyless pinned identity, and none can be minted for a new name today.**
   - The Worker's `/mcp` accepts only pinned, single-project agent credentials without `require_signature`
     (`apps/worker/src/mcp.ts`).
-  - `retrace-admin` mints a keyless agent credential only for `openclaw` (`packages/mcp-server/src/admin.ts`).
+  - `retrace-admin` mints a keyless agent credential only for the names its no-key exception lists — `openclaw`,
+    `claude-code-cloud` (since PR 169) and `ci-*` — and for no new name (`packages/mcp-server/src/admin.ts`,
+    `shouldMintProducerKey`).
   - So a production pilot needs a class-(a) change and an agent-rules 7 exception: the same shape as the cloud-seat
     design's steps B2 and B6. That is Stage 2's question (Option P), and it is not decided.
 
