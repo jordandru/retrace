@@ -14,11 +14,19 @@ Fail-closed evidence (NOOA N-M1), hermes_cli/plugins_dispatch.py at 7b362884d88c
     241                if fail_closed:  # a guard that raised made no decision: same veto as a timeout
     242                    results.append(_policy_error_block_directive(hook_name, cb, exc))
   with ``_HOOK_TIMEOUT_FAIL_CLOSED_HOOKS = {"pre_tool_call"}`` (line 49). So a registered pre_tool_call callback that raises or
-  times out yields a block directive. Independently, scripts/retrace-guard-check.sh (a fail_closed shell hook on pre_tool_call)
-  blocks whenever the session's verdict file has no "ok" for the request id, so a raised or missing plugin callback cannot let a
-  tool run. Exercised by RETRACE_GUARD_TEST=scan-raise (the request scan raises; no verdict; tools blocked), by
-  tests.test_guard.HookTests.test_scan_raise_switch_blocks and LoadSwitchTests.test_register_switch_raises, and by the Gate 1a
-  negatives (hermes-seat.md §7 1a).
+  times out yields a block directive. Independently, scripts/retrace-guard-check.sh runs as a fail_closed pre_tool_call shell
+  hook. It allows (exit 0, no output) only when the session's verdict file holds a passing verdict for the tool call's own
+  api_request_id; on every other input it prints a block directive and exits 2, which Hermes blocks on even without a
+  directive (BLOCK_EXIT_CODE, agent/shell_hooks.py line 42; _evaluate_result, lines 406-437). Measured in PR 186 v4 with
+  measure-guard-check.sh (sha256 cf5022db9a544dbc...): input (a), a passing verdict, allows; (b) no verdict file, (c) a failing
+  verdict, (d) a verdict-file line that is not an object, (e) bytes that are not UTF-8, (f) a payload whose extra is not an
+  object, (g) a 140 KB payload, (h) a 1 KB payload and (i) no python3 on PATH all block. So with the plugin absent or its
+  callback raising, a tool runs only on a request the plugin had scanned as passing. Not covered: a rendered config without
+  the hooks entry (the launcher's template check refuses one), a script modified in the working tree (the launcher pins the
+  profile copy to the working-tree file, not to HEAD), and any Hermes path that runs a tool without pre_tool_call.
+  Exercised by RETRACE_GUARD_TEST=scan-raise (the request scan raises; no verdict; tools blocked), by
+  tests.test_guard.HookTests.test_scan_raise_switch_blocks and LoadSwitchTests.test_register_switch_raises, by
+  tests.test_guard_check (cases a-i and the hijack paths), and by the Gate 1a negatives (hermes-seat.md §7 1a).
 
 Coverage of edits (layer C, check 8; Grok G-L1): edited paths come from write_file and patch arguments and, best effort, from
 terminal commands: redirection targets (``>``, ``>>``), ``tee [-a]`` files, ``sed -i`` file arguments, ``cp``/``mv`` destinations, and
