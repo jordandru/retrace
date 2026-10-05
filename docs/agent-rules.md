@@ -79,6 +79,29 @@ each one names the product change that would make it unnecessary.
    you happen to read; a harness that can only load another seat's identity file does not join (the
    OpenCode decision, PR 19).
 
+   **Bounded exception: the OpenShell seat's probe.** (Added 2026-10-05 as step W6a of
+   `docs/design/openshell-seat.md` v2, §2.3 and §8, on Jordan's signed instruction
+   `evt_57b9aa9577234371a30fa830866ebd51`.) The seat `claude-code-openshell` runs inside an OpenShell sandbox on the
+   Omarchy PC. The sandbox's proxy substitutes the seat's bearer token at the Worker but cannot sign, so the seat has
+   one pinned credential and **no producer key**, and every event it writes carries `producer_sig_verdict: none`. That
+   departure is permitted for the probe of that note's §7 and for nothing else. During a probe run, one execution of
+   §7's lines on Jordan's go, the seat may read project `retrace`, its rule-15 verification reads included, and may
+   write only these, each under its own pinned credential and on a dispatch it has verified under rule 15:
+   - `retrace_instruct` and `retrace_log` events that record the probe's own acts;
+   - one commit on one branch the dispatch names under `openshell-probe/`, sealed by the git hook, and one push of
+     that branch, exactly `git push origin <branch>:refs/heads/<branch>`, declared first under agent-ops 19;
+   - the probe's negative controls: the push guard fed a push toward `main` as a hook payload, which executes nothing;
+     `git push --dry-run` toward `main` through the harness, which the guard must refuse and which sends no update if
+     it does not; and `gh pr create`, which the sandbox policy (`api.github.com` read-only) and the GitHub token's
+     permissions (contents only, no pull requests) each refuse.
+
+   It never reviews, gives a verdict, merges, opens a pull request, comments, or sends a pane message, and it never
+   runs a push that could reach `main`. A probe run starts only when this exception and the push guard's
+   `RETRACE_SEAT` selector (step W3) are both on main, the image it runs was built from a main that holds both, the
+   PC's host rules in that note's §6 hold, and Jordan has given the run its go. The exception lapses when the standing
+   exception of step W7 replaces it, or when Jordan withdraws it by a signed instruction. Outside a probe run, until
+   W7, the seat reads, and writes only the `received` records rule 15 asks of a receiver.
+
 8. **Doctor before every commit.** `node packages/mcp-server/dist/doctor.js doctor` (or the packed
    `retrace doctor`) must print `READY`; resolve every FAIL. One run, retried up to three times to READY
    on a transient fetch failure — never two independent runs treated as one result.
