@@ -1,0 +1,55 @@
+# Hermes seat profile template (docs/design/hermes-seat.md §6.1). Rendered by scripts/hermes-seat.sh into
+# $HERMES_HOME/config.yaml. The launcher accepts exactly four substitutions: the primary checkout path, the scripts
+# directory, the model id, and one of the two env blocks in hermes.retrace.phases.yaml. Anything else that differs
+# fails the launch. (The placeholders are written only where they are substituted, never in these comments.)
+_config_version: 49
+mcp_discovery_timeout: 30          # the first turn waits for the retrace MCP server (default 1.5 s is shorter than node startup)
+mcp_single_query_discovery_timeout: 30
+model:
+  provider: nous
+  model: "{{MODEL}}"
+agent:
+  max_turns: 60
+  disabled_toolsets: [memory, skills, web, browser, cronjob, delegation, image_gen]
+approvals:
+  mode: manual
+  unattended_mode: deny
+  single_query_mode: deny
+  cron_mode: deny
+compression:
+  enabled: false
+memory:
+  memory_enabled: false
+skills:
+  write_approval: true
+  guard_agent_created: true
+security:
+  protected_instruction_files: true
+  protected_instruction_extra_patterns: [".hermes.md"]
+terminal:
+  backend: local
+  home_mode: profile
+  auto_source_bashrc: false
+  shell_init_files: []
+tools:
+  tool_search:
+    enabled: "off"         # every tool eager: the five retrace tools are always listed, never deferred behind tool_search/tool_call
+plugins:
+  enabled: [retrace-guard]
+  entries:
+    retrace-guard:
+      granted_capabilities: [tools.override]
+hooks:
+  pre_tool_call:
+    - command: "{{SCRIPTS_DIR}}/retrace-guard-check.sh"
+      timeout: 10
+      fail_closed: true
+hooks_auto_accept: true
+mcp_servers:
+  retrace:
+    command: node
+    args: ["{{PRIMARY_CHECKOUT}}/packages/mcp-server/dist/index.js"]
+    env:
+{{PHASE_ENV}}
+    tools:
+      include: [retrace_instruct, retrace_log, retrace_status, retrace_why, retrace_history]

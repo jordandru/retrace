@@ -1,0 +1,15 @@
+# The two MCP environment blocks for the Hermes seat (docs/design/hermes-seat.md §6.1, Codex C-M4). The launcher
+# copies exactly one into the template's `env:` (indented six spaces). They are mutually exclusive: scratch has a
+# local store and no Worker; live has the Worker and no local store. Values in ${…} resolve from the profile .env.
+common:
+  RETRACE_ACTOR: hermes
+  RETRACE_PROJECT: retrace
+  RETRACE_ON_BEHALF_OF: jordansboxing@gmail.com
+  RETRACE_ACTOR_MODEL: "${RETRACE_ACTOR_MODEL}"
+  RETRACE_ACTOR_MODEL_SOURCE: harness-config
+scratch:
+  RETRACE_DB: "{{PROFILE}}/run/scratch-{{DATE}}.sqlite"
+live:
+  RETRACE_URL: "https://retrace-worker.jordandru.workers.dev"
+  RETRACE_TOKEN: "${RETRACE_TOKEN_HERMES}"
+  RETRACE_PRODUCER_KEY_FILE: "${RETRACE_PRODUCER_KEY_FILE_HERMES}"
