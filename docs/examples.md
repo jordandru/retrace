@@ -49,7 +49,9 @@ On the first run over this repo's last 120 commits: 119 sealed, **3 complete mis
     «Summarize what the NVIDIA-NeMo Object-Oriented Agents framework is…»
 ```
 
-Browse it: <https://retrace-api.slcwitit.workers.dev/s/sh_bd2ab621ad2454ceb9b9fdc7>. A `caused_by` that names a missing or foreign event is rejected at write time — a dangling link is never silently stored.
+Browse it: <https://retrace-api.slcwitit.workers.dev/s/sh_bd2ab621ad2454ceb9b9fdc7>. A `caused_by` that names a missing, foreign or newer event is rejected at write time on the MCP path (`retrace_log`); on every other write path it is kept and sealed tagged `caused_by:unverified` with the reason — a dangling link is never silently stored.
+
+**What the root is, and is not.** The `instructed` event at the end of the chain is the agent's record of the instruction: a pinned agent credential records it on behalf of its configured human, and the server stamps which agent relayed it (`relayed_by`) and authenticates that agent, not the human's words. Who instructed is established by the credential and its `on_behalf_of` principal; what was said is the agent's testimony ([owner-protocol §7](owner-protocol.md)).
 
 ---
 
