@@ -1,6 +1,6 @@
 # Involuntary capture for Claude Code: a `PostToolUse` hook that logs edits as the seat
 
-**Status:** v1 draft, 2026-10-04 22:04 MDT (2026-10-05 04:04Z). Author `claude-code` (`claude-fable-5-1`, `model_source:
+**Status:** v2, 2026-10-05 07:29 MDT (13:29Z): round-1 findings resolved: C-M1–C-M5 (Codex REJECTED `evt_51d29a9e84f944daaaa7a4edc93d3908`), G-L1, G-L2 (Grok APPROVED WITH NOTES `evt_7b28bdddf1f24eed9b105c2ee6a4ff30`); NOOA APPROVED with confirmations only (`evt_24607740c90c4962a4ce87922de4eee0`); applied in place on the coordinator's fix-round routing `evt_76b818938ba94d2f830e42858224d3ad` and Jordan's go `evt_c22d7d53215242e0936a6bf32f80ada4`; §10 lists every change. v1 draft 2026-10-04 22:04 MDT (2026-10-05 04:04Z). Author `claude-code` (`claude-fable-5-1`, `model_source:
 harness-runtime`), session `0a9d8a07`, worktree `claude-capture-design` from main `8d77bc08`. **Class (a)** under
 agent-rules 12: it proposes a control that would write to the ledger on every edit and touches agent-rules 2, 3, 7 and
 13. Design only: no code, no hook installed, no change to `.claude/settings.json`, no credential. A prototype is a
@@ -21,9 +21,13 @@ sealed as, what it cites as its cause when the agent recorded no instruction, wh
 never log, and how the result is measured. It leaves to Jordan the eight yes/no decisions in §8 and to a later build
 gate the code. It changes no rule by itself; §7 lists the amendments a build would carry.
 
-The one-sentence version: **a hook event is a machine witness that the seat's process touched a file; it is not the
-agent's testimony about why.** The design keeps those two kinds of claim visibly distinct in the ledger, and it keeps
-"tamper-evident, not tamper-proof" and "instruction roots are testimony" intact.
+The one-sentence version: **a hook event is the seat's asserted record that a process of its own saw a tool report an
+edit to a file; it is not the agent's testimony about why, and it is not an attestation that the capture code ran.**
+Under I-1 (§2.3) the seat's signature authenticates the assertion, not the observation: the same key signs the agent's
+own `retrace_log` calls, and the marker that tells the two apart is a convention the producer follows, not a boundary
+the Worker enforces (Codex C-M1). The design keeps the two kinds of claim visibly distinct in the ledger by that
+convention, states its limit wherever it matters, and keeps "tamper-evident, not tamper-proof" and "instruction roots
+are testimony" intact.
 
 ## 1. The question and the measured gap
 
@@ -35,7 +39,7 @@ input; here is what the record says.
 | Figure | Primary record | What it measures |
 |---|---|---|
 | **0.16** | `docs/design/step5-phase0-instrument.md:255`: boxing-rpg, "91 seals → 84 unique SHAs → 83 intervals. p50 **0**, p95 **1**, mean **0.16**, max **4**, **90.4%** zero", export of 2026-09-12 | `retrace_log` calls per commit interval over the project's whole history to 2026-09-12. Not "agent events per commit" in general; `docs/design/evaluation-response-plan-2026-09-24.md:212` (C63) already notes the census counts every agent action, not only edits |
-| **43 percent** | **Not in the repository.** The checked-in figures are 19.0 % (2026-09-12) and 32.9 % (2026-09-15), `docs/measurements/step5-phase-a/window-start.md:25`. The live `retrace_status` for `boxing-rpg`, read 2026-10-05 03:57:34Z by this session, returns `causality.coverage_pct: 42.8` over 173 eligible events, 94 unlinked, 221 events total, last event 2026-09-17 | The review rounded a live status read. The number is real and reproducible today (`retrace_status`, project `boxing-rpg`); it has no checked-in record until this note |
+| **43 percent** | **Checked in once, as a live read, not as a measurement record:** `docs/design/evaluation-response-plan-2026-09-24.md:213` (C64) records "causal coverage is 42.8%" with "96 of 140 commits are unlinked" from a live status read (Grok G-L1; v1 of this note wrongly said "not in the repository"). The dated figures in measurement records are 19.0 % (2026-09-12) and 32.9 % (2026-09-15), `docs/measurements/step5-phase-a/window-start.md:25`. The live `retrace_status` for `boxing-rpg`, read 2026-10-05 03:57:34Z by this session, returns `causality.coverage_pct: 42.8` over 173 eligible events, 94 unlinked, 221 events total, last event 2026-09-17 | The review rounded the C64 figure or a live read of its own. The number is real and reproducible today (`retrace_status`, project `boxing-rpg`) |
 | Reconcile, boxing-rpg, last 20 commits | This session, 2026-10-05 04:04Z: `RETRACE_PROJECT=boxing-rpg retrace-export reconcile --repo ~/provenance/slc-wit-it --limit 20 --hook-sealed-by 'assert:git hook (assert)'`, HEAD `5e7fe52` (2026-09-17), ledger seqs 150–219 | 20 sealed, 0 missing, **22 uncovered of 168 evaluated file transitions** (claude-code 8 of 154, grok 14 of 14), 0 misattributed |
 | Reconcile, retrace, last 40 commits | This session, 2026-10-05 04:03Z: `retrace-export reconcile --repo . --limit 40`, ledger seqs 11652–12873, head 13069 | 40 sealed, **0 uncovered of 77 evaluated file transitions** (github-copilot 59, claude-code 18), 0 misattributed; 13 `unreachable_seal` and 2 `producer_disagreement` are outside this note |
 | Causal coverage, retrace | `retrace_status`, 2026-10-05 03:57:28Z | 98.3 % over 8,417 eligible events; 13,049 events total |
@@ -86,11 +90,11 @@ One `EventInput` per fired hook, posted to the Worker's `POST /events` (`package
 | `change` | `before_hash`, `after_hash` (sha256 of the file bytes, from the pre-hook and from disk); **no `diff`, no `summary`** | the hook reads the file; it never reads `tool_input.content` or `old_string`/`new_string` |
 | `method.tool` | `claude-code:PostToolUse` | fixed string; it is how every consumer tells this event from a `retrace_log` call |
 | `method.automated` | `true` | fixed |
-| `method.params` | `hook_event_name`, `tool_name`, `tool_use_id`, `duration_ms`, `caused_by_source` (§2.4), `capture_version` (the hook's own package version) | stdin payload |
+| `method.params` | `hook_event_name`, `tool_name`, `tool_use_id`, `duration_ms`, `capture_version` (the hook's own package version), `session_root_candidate` and `session_root_candidate_source` (§2.4), `redacted` (§5.1) | stdin payload |
 | `location` | `path` (repository root), `session` = the payload's `session_id`, `system: claude-code`, `environment: local`, `surface: agent` | the harness payload. The MCP server stamps the same id from `CLAUDE_CODE_SESSION_ID` (`packages/mcp-server/src/index.ts:157–162`, 180–202); §4 P2 measures that the two ids are equal |
-| `caused_by` | §2.4 | |
+| `caused_by` | **absent** in the pilot (C-3, §2.4) | |
 | `intent` | **absent.** A hook has no why; writing one would be a fabricated testimony | |
-| `idempotency_key` | `capture:<session_id>:<tool_use_id>` | prevents a double seal when a queued event is retried (§5.4) |
+| `idempotency_key` | `capture:<sha256 of session_id + tool_use_id, first 32 hex>` | prevents a double seal when a queued event is retried (§5.4); hashed so that no unvalidated payload string is copied into an identifier or a queue filename (C-M5) |
 | `producer_sig` | §2.3 | |
 
 `location.session`, `device`, `client`, `ide`, `workspace` and `surface` are server-only on the MCP path
@@ -121,19 +125,29 @@ The Worker pins the actor from the credential on every pinned write and stamps `
 run as the same OS user. The model can already read the key file and the credential mirror through `Bash` and
 `POST` anything it likes under the seat's identity; the MCP server's `RETRACE_ACTOR_LOCK` is a convenience, not a
 boundary. So I-1 adds no capability the seat's trust domain lacked, and I-2 buys a label, not a boundary: the second
-key would sit in the same home directory. The boundary that would make the distinction mean something is the
-sandbox credential proxy (`docs/design/sandbox-credential-proxy.md`, PR 175), where the model's process holds
-neither token nor key and only the proxy signs. Until that exists, **recommend I-1** for the pilot, state the limit in
-the note and the agent-rules line, and revisit I-2 when credentials leave the Worker secret (agent-ops 13's
-direction), because a second credential is cheap then and expensive now.
+key would sit in the same home directory. The boundary that would make the distinction mean something is a signer
+the model's process cannot reach. The sandbox credential proxy (`docs/design/sandbox-credential-proxy.md`, PR 175)
+is not that signer: it holds bearer tokens and states in its §4.1 that a proxy holds no producer key and cannot sign.
+An isolated signer is a separate, unbuilt design, and moving credentials out of the Worker secret (agent-ops 13's
+direction) does not by itself isolate signing (Codex, scoped judgement on I-1). **Recommend I-1** for the pilot and
+state the limit wherever the event is described: the rule-13 line §7 proposes permits exactly the installed capture
+process to read the key by path, not any same-seat process, and it is not permission to print or export key material.
+Revisit I-2 only when an isolated signer exists; "when credentials leave the Worker secret" is a consideration, not a
+trigger.
 
 **Where the hook gets the token.** Never from the shell's `RETRACE_TOKEN`: on this machine that is the owner token
 (agent-ops 16 and this seat's memory), and an owner-token write keeps whatever actor the body asserts, stamped
 `sealed_by: owner`, verdict `none` (agent-rules 15; `router.ts:294–299`), which is worthless as a seat witness and a
-rule-13 breach. The hook resolves its credential the way the git hook does (`packages/mcp-server/src/git-hook.ts:
-13–18`, `resolveHookToken` and `resolveHookProducerKeyFile`): a credential **name** in `.retrace.json`
-(`capture.credential`), looked up in the local mirror `~/.retrace/worker-credentials.json`, and a `producer_key_file`
-**path** on that entry. A named-but-missing credential is an error, never a fallback to env.
+rule-13 breach. The git hook's resolution is the precedent, with one deliberate difference. `resolveHookToken`
+(`packages/mcp-server/src/git-hook.ts:69–83`; the header comment at 13–18 describes it) reads, in order,
+`RETRACE_HOOK_TOKEN`, then the credential named by the `.retrace.json` field **`credential`** (matched on `actor.id` in
+`~/.retrace/worker-credentials.json`), then **falls back to `RETRACE_TOKEN`** and the file's `token` when no credential
+is named; `resolveHookProducerKeyFile` (87–100) takes the `producer_key_file` **path** from the same entry (Grok G-L2;
+v1 miscited the lines and the field). The capture hook proposes a sibling field, `capture.credential`, with the same
+mirror lookup and **no environment fallback at all**: an absent or unresolvable `capture.credential` means the hook
+writes nothing, queues one `config_missing` diagnostic record (§5.4) and exits 2 with a one-line stderr. It never
+reads `RETRACE_TOKEN` or `RETRACE_HOOK_TOKEN`. That is the one place this design is stricter than the git hook, because
+on this laptop the fallback is the owner token.
 
 ### 2.4 The `caused_by` rule
 
@@ -153,22 +167,31 @@ The options the brief asks for, plus the one the code makes available:
 | Option | What the event says | Truth value | Cost |
 |---|---|---|---|
 | **C-1 Refuse** when no instruct root is known; the file stays `uncovered` | nothing | true by silence | throws away the capture exactly when the agent skipped `retrace_instruct`, which is the boxing-rpg case; the review's point is lost |
-| **C-2 Session-root convention**: `caused_by` = the most recent `instructed` event in this project whose `location.session` equals the hook's `session_id`; `method.params.caused_by_source: "session-latest-instruct"` | "the latest instruction this session recorded preceded this edit" | a mechanical rule, stated as such; wrong when one session runs several tasks (the agent's own `retrace_log` names the specific one; the hook's link is weaker and labelled) | one read per fire, or a per-session cache. `GET /projects/:p/events` filters by `artifact_id`, `actor_id`, `since`, `text` but not by session (`router.ts:14`), so the first build either scans the recent page client-side or adds a `session=` filter (small router change) |
+| **C-2 Session-root convention**: `caused_by` = the most recent `instructed` event in this project whose `location.session` equals the hook's `session_id`, labelled in `method.params` | "the latest instruction this session recorded preceded this edit" | a mechanical rule, stated as such; wrong when one session runs several tasks or concurrent subagents share the session id (the agent's own `retrace_log` names the specific one); and **today's consumers ignore the label**, so the link counts as rooted (C-M2) | one read per fire, or a per-session cache. `GET /projects/:p/events` filters by `artifact_id`, `actor_id`, `since`, `text` but not by session (`router.ts:14`), so the first build either scans the recent page client-side or adds a `session=` filter (small router change) |
 | **C-3 No `caused_by`, session id only**: `location.session` carries the harness id and nothing else is claimed | "this edit happened in session S" | strictly true | causal coverage counts the event `unlinked`; the join to the session's instruct roots exists in the data but no consumer makes it today |
 | **C-4 A fixed default root** (a per-pane or per-day "capture root") | "this edit was caused by X" | **false**; and under `appendEvent` it would be sealed with `caused_by:unverified` if the id were stale, or silently accepted if it exists | rejected |
 
-**Recommend C-2 with C-3 as the fallback**: when the session has an instruct root, cite its latest one and label the
-source; when it has none, write no `caused_by`, set `caused_by_source: "none"`, and let causal coverage show the
-unlinked event. **State the metric consequence now so nobody is surprised later:** on a project where the agent
-skips `retrace_instruct`, file coverage rises and causal coverage *falls* once the hook is live, because the ledger
-starts recording edits whose why was never given. Today's 98.3 % on `retrace` is coverage of what agents chose to
-log. The fall is the truth arriving, not a regression, and the measurement plan (§4) reports both numbers side by
-side.
+**Recommend C-3 for the pilot, with the C-2 candidate recorded outside `caused_by`.** v1 recommended C-2 with C-3
+as the fallback. Codex C-M2 showed why that is wrong today: no consumer reads the label. `causalRootState` walks
+`caused_by` and never looks at `method.params` (`causality.ts:6–18`), and `buildProjectStatus` counts every rooted
+traversal into `coverage_pct` (`status.ts:101`, `125–134`, `179–183`). Codex's synthetic ledger (one rooted and one
+unlinked agent event, 50 %) went to 75 % after two C-2-labelled capture events were added, with the unlinked event
+unchanged (`evt_51d29a9e…`). So C-2 as the written `caused_by` would **inflate** the headline metric on a disciplined
+project by multiplying inferred links, while on an undisciplined project C-3 makes it **fall**. Both effects are
+stated here before D3 is decided. The pilot therefore writes **no `caused_by`** and records the inference where no
+consumer mistakes it for the agent's own citation: `method.params.session_root_candidate` (the id of the most recent
+`instructed` event in this project whose `location.session` equals the hook's `session_id`, when one exists) and
+`session_root_candidate_source: "session-latest-instruct"`, or `"none"`. A reader can still make the join; status
+and `causalRootState` do not. C-2 becomes available only after a consumer change that reports agent-cited and
+hook-inferred links in separate numerators with the same denominator; that change is a class (c) item of its own,
+not part of this note. `appendEvent`'s check (existence, project, order) validates that an id exists, not that it is
+the true cause, so an existing but wrong root would pass it; one more reason the inference stays out of `caused_by`.
 
 ### 2.5 Two events for one edit
 
-An agent that keeps logging under agent-rules 2 and 3 produces its own `edited` event beside the hook's. Reconcile
-counts a file covered when `n ≥ 1` (`reconcile.ts:381`), so duplication is harmless there. Census figures such as
+An agent that keeps logging under agent-rules 2 and 3 produces its own `edited` event beside the hook's. Reconcile's
+coverage is **existential per file transition**: one qualifying edit event in the window covers the path
+(`reconcile.ts:371–395`, `n ≥ 1` at 381), so duplication is harmless there, and so is a missing second capture (§3). Census figures such as
 "`retrace_log` calls per commit" (`step5-phase0-instrument.md` §7) must exclude `method.tool: claude-code:PostToolUse`
 or they double-count; the classifier's witness set (`docs/design/commit-trailer-consistency.md` §3.3) admits any
 `pinned:` agent output claim, so hook events become witnesses to commit claims, which is the intended effect and is
@@ -176,15 +199,24 @@ stated in §3.
 
 ## 3. What it proves and what it does not
 
-**Proves.** A sealed hook event proves that a process holding the seat's credential (and, under I-1, its key)
-observed a tool call named `Edit` or `Write` report success on path `p` in harness session `S`, and that the file's
-bytes hashed to `after_hash` immediately afterwards. With the pre-hook, it also fixes `before_hash`. Because the
-Worker pins the actor and stamps `sealed_by`, a reader can tell it came through the seat's credential and not the
-owner token or an assert relay.
+**Records.** A sealed hook event records that a holder of the seat's credential (and, under I-1, its key) **asserted**
+that a tool call named `Edit` or `Write` reported success on path `p` in harness session `S`, and that the file's
+bytes hashed to `after_hash` afterwards (and, with the pre-hook, to `before_hash` before). Because the Worker pins the
+actor and stamps `sealed_by`, a reader can tell the assertion came through the seat's credential and not the owner
+token or an assert relay. That is the whole of what the seal authenticates.
 
 **Does not prove.**
-- **Why.** The why stays the instruct root the agent chose to log. A C-2 link is a session-ordering claim, labelled
-  as such; it is not the agent saying "I did this because of that". Instruction roots remain testimony.
+- **That capture code ran.** The seat's signature authenticates the assertion, not the observation. The MCP log path
+  preserves a caller's `method.tool`, `method.automated`, `method.params` and `change` and signs the result with the
+  same key (`packages/mcp-server/src/index.ts:318–330`; `schema.ts:218–234`), so the model can emit an event labelled
+  `claude-code:PostToolUse` through `retrace_log` without any tool call and without touching the key file. The
+  marker is a convention; a consumer that trusts it is trusting the producer. The §5.3 gate is a compatibility
+  filter over inherited values, not harness authentication. Such an event also corroborates the seat's own commit
+  claims under the classifier's pinned-output witness rule (`commit-trailer-consistency.md` §3.3), which is one more
+  assertion from the same trust domain, not independent evidence (Codex C-M1).
+- **Why.** The why stays the instruct root the agent chose to log. The session-root candidate (§2.4) is a
+  session-ordering inference kept out of `caused_by`; it is not the agent saying "I did this because of that".
+  Instruction roots remain testimony.
 - **That the model made the edit.** Anything in the seat's trust domain can produce the event; on this laptop that
   domain includes the model's own `Bash`. The independent witness is still git: reconcile compares the commit's file
   list from the repository, never from the ledger (`reconcile.ts:4–8`), and the GitHub webhook seals the push a
@@ -192,8 +224,12 @@ owner token or an assert relay.
   other when something is wrong.
 - **Edits made outside `Edit` and `Write`.** `Bash` writes, editor writes, `git apply`, a `MultiEdit` if the harness
   adds one unannounced: none fire this hook. 5,346 `Bash` calls against 450 edit-tool calls in seven days on this
-  laptop (§1) says the blind spot is large, and the gap stays visible as `uncovered` in reconcile, which is where it
-  belongs.
+  laptop (§1) says the blind spot is large. Reconcile shows it only when **no** qualifying event covers the file in
+  its window: coverage is existential per file transition, so an earlier hook event or manual log for `x.ts` covers
+  the path even when a later `Bash` write, disabled-hook edit or lost capture to the same file is absent, and a
+  capture that lands after the commit seal shows as `pending` or `orphan_edit`, not as `uncovered` on that commit
+  (`reconcile.ts:371–395`, `428–446`; Codex C-M4's fixture). Missing and late captures are detected by the
+  tool-use pairing in §4, not by reconcile.
 - **That the hook ran.** Hooks are user configuration. Claude Code holds back every hook until the workspace trust
   dialog is accepted, except in `-p` or SDK sessions, where "hooks committed in a repository's `.claude/settings.json`
   run in a folder you've never trusted" (reference, "Workspace trust"). A user can remove the settings file; a session
@@ -216,19 +252,33 @@ Before any of this is called an improvement, the following is measured and writt
   equality likely and unproven. Pass: byte-equal in one session.
 - **P3** `NotebookEdit`'s `tool_input` names a path (decides whether it joins the matcher).
 - **P4** The hook fires, or does not, in Copilot CLI and Grok Build sessions that read `.claude/settings.json`
-  (§6) and the harness gate in §5.3 exits 0 there. Pass: zero events from a non-Claude session.
-- **P5** Cost: wall-clock of one hook fire end to end, with and without the C-2 lookup, over 20 fires. Report p50
-  and p95; the number decides whether C-2 caches.
+  (§6) and the harness gate in §5.3 exits 0 there, for ordinary launches **and** for a launch nested inside a Claude
+  Code session that inherits `CLAUDE_CODE_SESSION_ID` (C-M1). Pass: zero events from a non-Claude session, and a
+  sanitized local diagnostic record for each refused fire. Behaviour is established by the run, never inferred from
+  inheritance.
+- **P5** Cost: wall-clock of one hook fire end to end, with and without the session-root lookup, over 20 fires.
+  Report p50 and p95; the number decides whether the lookup caches.
+- **P6** Durability (C-M3): kill the hook process between the in-flight record and the POST; force a timeout whose
+  append outcome is unknown; make the queue directory unwritable; fire two `Edit` calls in parallel. Pass: every
+  case leaves a record the doctor check sees, the retry with the same `idempotency_key` is deduplicated
+  (`store.ts:1054–1060`), and the unwritable directory is a doctor FAIL, never a silent exit 0.
 
 **Before/after on `retrace`.** Before: the 40-commit reconcile of §1 (0 uncovered, 77 transitions), and the
 transcript tool-call counts. After the hook is live in one pane (the coordinator's, the only pane whose settings
 the coordinator controls without a second seat's build), over the next **20 non-merge commits sealed as
-`claude-code`**: (a) reconcile `uncovered` on those commits stays 0 and `misattributed` stays 0; (b) **capture
-ratio** = hook events with `method.tool: claude-code:PostToolUse` ÷ `Edit`+`Write` tool calls in that pane's
-transcripts over the same window **≥ 0.95**; (c) causal coverage on `retrace` reported before and after, with the
-count of hook events that carry `caused_by_source: none`. Failure looks like: ratio below 0.95 (the hook is not
-firing or the queue is stuck), any event whose `change` carries content, any event sealed `owner`, or an edit event
-for a path under §5.1's never-log list.
+`claude-code`**, with the installation time and the ledger seq at installation written down first: (a) reconcile
+`uncovered` on those commits stays 0 and `misattributed` stays 0, which shows **no regression**, not complete capture
+(C-M4); (b) **capture pairing**: every successful `Edit` or `Write` tool call in that pane's transcripts over the
+window, identified by its `tool_use_id`, is paired one-to-one with a **reported** capture event carrying the same
+`tool_use_id` in `method.params` (C-M1: the numerator is reported capture events; the transcript is the independent
+observation the pilot checks them against), and the result is tabulated as captured, redacted (§5.1), missing,
+duplicate, and late (sealed after the git-hook seal of the commit that carried the file); the pilot acceptance
+threshold is **captured ÷ eligible ≥ 0.95 with zero duplicates**, a bounded pilot choice over a sample that must hold
+enough eligible calls to mean anything, not a reliability claim; (c) causal coverage on `retrace` reported before and
+after, with the counts of capture events whose `session_root_candidate_source` is `none` and
+`session-latest-instruct`. Failure looks like: pairing below 0.95, any missing or late capture without a matching
+queue record, any event whose `change` carries content, any event sealed `owner`, or an edit event naming a path
+under §5.1's never-log classes.
 
 **Before/after on `boxing-rpg`.** Before: §1's 20-commit reconcile (22 uncovered of 168, causal 42.8 %, 0.16 calls
 per commit historically). After: the second-project baseline's live-window rule applies unchanged
@@ -258,15 +308,25 @@ thing the ledger must never hold: ledger bodies are hash-covered and served by s
 (`schema.ts:189–215`, the `device` comment), and no later redaction is possible. Rules, in order:
 1. **Content never.** No `change.diff`, no `change.summary`, no `tool_input` fields other than `file_path`, no
    `tool_response` text. Hashes of file bytes only.
-2. **Never-log paths.** An edit whose resolved path is under `~/.retrace`, `~/.ssh`, `~/.copilot`, a shell startup
-   file, or matches `*.env`, `*credentials*`, `*key*.json`, `*.jwk`, `*.pem`, or is `.gitignore`d inside the
-   repository, produces one event with `artifacts: [{id: "redacted:<top-level dir>", kind: "redacted-path"}]`, no
-   hashes, `method.params.redacted: true`. The edit is counted; the name is not written. A hash of a secret file
-   leaks little, but a path such as `~/.retrace/claude-code.env` is already information, and the never-log list is
-   the whole defence against the next sink nobody thought of.
-3. **Outside the repository.** A path not under the repository root and not in rule 2 is logged with `file:` id
-   and `kind: file`, loose by construction (`reconcile.ts` treats `file:` ids as loose), so it never corroborates a
-   commit.
+2. **Outside the repository: redacted by default.** Any resolved path not under the repository root produces one
+   event with `artifacts: [{id: "redacted:path", kind: "redacted-path"}]`, no hashes, `method.params.redacted: true`.
+   The identifier is a **constant**: v1's `redacted:<top-level dir>` reproduced a path component, which is itself a
+   disclosure (Codex C-M5). The edit is counted; nothing of the name is written. A project may allow-list specific
+   outside directories as loggable `file:` ids (loose, never corroborating a commit) through `.retrace.json`; nothing
+   is allow-listed by default.
+3. **Never-log classes inside the repository.** A path matching any of these is redacted the same way, and the
+   decision is taken **before** the pre-hook hashes and again before the post-hook hashes, so no hash of such a file
+   is ever computed: `.gitignore`d paths; names `.env`, `.env.*`, `*.env`, `*.env.*`, `*credentials*`, `*secret*`,
+   `*token*`, `*key*.json`, `*.jwk`, `*.pem`, `*.p12`, `*.pfx`, `*.kdbx`; and, should the repository root ever be a
+   home directory or contain one, the harness and credential locations `~/.claude.json` (Anthropic documents it as
+   the store for local and user MCP configurations), `~/.claude/`, `~/.codex/`, `~/.cursor/`, `~/.grok/`,
+   `~/.copilot/`, `~/.config/`, `~/.retrace/`, `~/.ssh/`, `~/.aws/`, `~/.gnupg/`, and shell startup files. The list is
+   a floor; the default-redacted rule 2 is the defence against the next sink nobody thought of.
+4. **Shareable metadata, named.** `location.session` (the harness session id), `location.path` (the repository
+   root) and `tool_use_id` are correlation information, not secrets, and every MCP event this seat writes already
+   carries the first two (`index.ts:180–202`); omitting content does not make them confidential, and this note
+   records that they are written. No other payload string is copied into an identifier, a queue filename or a
+   diagnostic (`idempotency_key` is a hash, §2.2).
 
 ### 5.2 The seat key in a hook process
 
@@ -284,27 +344,51 @@ Copilot CLI executed this repository's `.claude/settings.json` `PreToolUse` hook
 this seat's memory of the lock-out), and xAI's documentation says Grok Build reads "Claude Code hook files" as well
 (`https://docs.x.ai/build/features/hooks`). A capture hook that fired in a Copilot or Grok session and posted under
 `claude-code`'s credential would misattribute every edit, agent-rules 7's exact prohibition. The hook therefore
-**exits 0 before reading anything when it cannot establish it is running under Claude Code**: `hook_event_name` and
+**exits before reading anything when it cannot establish it is running under Claude Code**: `hook_event_name` and
 `session_id` present in the payload **and** `CLAUDE_CODE_SESSION_ID` set in its environment **and** equal to the
-payload's `session_id` (P2). Absence of any one is a silent exit, and P4 measures that this gate holds in the other
-two harnesses.
+payload's `session_id` (P2). **What the gate is:** a compatibility filter over values the caller supplies and the
+process inherits, not harness authentication; it rejects a nested harness whose payload carries a different session
+id even though the child inherited the variable, and it cannot certify which harness supplied two equal strings
+(Codex C-M1). **What a refused fire leaves behind:** a sanitized local diagnostic, one counter line per refusal in
+`~/.retrace/capture-queue/<project>/refused.log` with the reason code (`no_payload_session`, `no_env_session`,
+`session_mismatch`, `config_missing`) and a timestamp, no payload strings, so a Claude Code deployment whose gate is
+failing is distinguishable from a harness that was intentionally excluded, and doctor reports the count. P4 covers
+ordinary and nested launches.
 
 ### 5.4 The hook's own failure mode
 
-`PostToolUse` cannot deny: "the tool already ran" (reference). So "fail closed = deny the edit" is only possible as a
-`PreToolUse` hook that blocks the edit until a ledger write succeeds, which would (a) seal a claim that an edit
-happened before it happens, a false claim if the tool then fails, and (b) stop all work on every Worker fetch flake
-(this seat's retry memory of 2026-09-29) and every outage. Rejected.
+`PostToolUse` cannot deny: "the tool already ran" (reference). A blocking `PreToolUse` that waits for a ledger write
+before every edit would stop all work on every Worker fetch flake (this seat's retry memory of 2026-09-29) and every
+outage, so it is rejected on cost. It is not rejected as inherently untruthful: a pre-hook can record that an
+operation **started** without claiming an edit succeeded (Codex, scoped judgement on D4), and that is exactly what the
+design below has the pre-hook do.
 
-**Recommend F-2, fail open at the edit and fail closed at the commit.** On any failure to seal, the hook appends the
-fully formed event (hashes, no content) to a local queue, `~/.retrace/capture-queue/<project>/<idempotency_key>.json`
-(0600, like `retrace-pending-seal` in `git-hook.ts:109–127`), prints one stderr line and exits 2 so the model sees
-"capture queued, N pending". Every later fire drains the queue first (the git hook's `drainPendingSeals` pattern,
-`git-hook.ts:317–322`), with the `idempotency_key` making a retry safe. **The commit boundary is where it fails
-closed:** `retrace doctor` gains a check that the capture queue for this project is empty, and agent-rules 8 already
-makes a doctor FAIL a stop before every commit. A queued event that landed after the commit seal would read
-`uncovered` by agent-rules 9's sequencing, which is exactly the finding reconcile should produce in that case, so
-nothing is backdated and no timestamp is faked to repair it.
+**Recommend F-2, fail open at the edit and fail closed at the commit, with durable state written before any remote
+work** (C-M3; v1 queued only after a detected failure, which left a crash, a cancelled hook, an ambiguous timeout or a
+queue-write failure with no record). The record directory is `~/.retrace/capture-queue/<project>/`, mode 0700, files
+0600, named by the hashed `idempotency_key`, written with write-to-temp-then-rename so a record is either whole or
+absent:
+1. **Pre-hook (`PreToolUse`, observe-only):** writes an `in_flight` record (`tool_use_id`, path or `redacted`,
+   `before_hash` or none, `started_at`) **before the tool runs**. It asserts an operation started, nothing more.
+2. **Post-hook:** rewrites the record to `sealing` with `after_hash`, then POSTs with the `idempotency_key`. On a
+   2xx it deletes the record. On a timeout or any error it leaves the record (`pending`, with the error class) and
+   exits 2 with one stderr line, "capture pending, N records", so the model sees it. Every later fire drains pending
+   records first (the git hook's `drainPendingSeals` pattern, `git-hook.ts:317–322`); a retry of an append whose
+   outcome was unknown is deduplicated by the Worker on the key (`store.ts:1054–1060`), so the ambiguous case
+   resolves to exactly one event.
+3. **Crash, cancellation, queue-write failure:** a process that dies after step 1 leaves `in_flight`; a hook cancelled
+   on timeout leaves whatever state it reached; a queue directory that cannot be written makes the hook exit 2 with
+   `capture state unavailable`, and the doctor check below treats an unwritable directory as a FAIL. Parallel tool
+   calls each own one record. P6 measures all four.
+4. **The commit boundary:** `retrace doctor` gains a check that the directory holds no `in_flight`, `sealing` or
+   `pending` record and no refusals since the last check (§5.3), and agent-rules 8 already makes a doctor FAIL a stop
+   before every commit. **Stated guarantee and its limit:** this closes the boundary for a single-writer worktree,
+   one agent pane per worktree (agent-ops 1) that runs doctor and then commits with no tool call between them. An
+   edit made between the doctor run and the commit, or a second writer in the same worktree, is outside the
+   guarantee; the retirement condition is a `pre-commit` git hook that runs the same check at commit time, which this
+   note proposes as a build item and does not assume. A capture that lands after the commit seal is not backdated and
+   no timestamp is faked; it appears as `pending` or `orphan_edit` in reconcile and as `late` in §4's pairing, which is
+   where it is counted.
 
 **Mode and self-lock-out.** The 2026-10-04 incident (a hook rewritten as mode 644, every shell call denied, the agent
 unable to `chmod`) applies to any hook script. The capture hook is installed from the packed CLI (`retrace capture
@@ -313,7 +397,9 @@ condition), never hand-edited in place by an agent; the wrapper's first statemen
 non-executable wrapper is a `PostToolUse` error, which cannot deny anything, so the lock-out cannot recur on this
 event. The `PreToolUse` pre-hash hook can: its wrapper is the same file, and a broken one would deny every `Edit`
 and `Write`. The pre-hook therefore exits 0 on any internal error (observe-only, stated in its header), and only a
-non-executable file can deny, which the installer checks (`stat -c %a`) and doctor re-checks.
+non-executable file can deny, which the installer checks (`stat -c %a`) and doctor re-checks. Installer and doctor
+checks are operational checks; they are no guarantee against a hook that is disabled, missing, cancelled or broken,
+which is why §3 says the absence of capture events proves nothing about edits.
 
 ### 5.5 Sinks named
 
@@ -348,7 +434,7 @@ first hook ships for Claude Code with the harness gate; each further harness is 
 | agent-rules 2 (log every meaningful act) | **One sentence**: an automated capture event is not the agent's log of the act; the agent still logs its edits with intent and the specific cause |
 | agent-rules 3 (name every changed file) | **One sentence**: a `method.automated: true` capture event covers a file in reconcile like any pinned edit; census figures that count an agent's own logging exclude `method.tool: claude-code:PostToolUse` |
 | agent-rules 7 (one credential) | **None under I-1.** Under I-2, a bounded exception like cloud-seat §2.3 |
-| agent-rules 13 (keys stay with the seat) | **One line**: the seat's key may be read by a second process of the same seat on the same host (the capture hook) by path from the credential mirror; still never env, argv, a shared secret or another host |
+| agent-rules 13 (keys stay with the seat) | **One line, bounded**: the installed capture hook of the same seat on the same host may read the seat's key by path from the credential mirror entry; no other process gains anything, and the line is not permission to print, copy or export key material; still never env, argv, a shared secret or another host |
 | agent-ops 3 (git hooks run main's dist) | **Analogue**: the capture hook runs the packed CLI pinned by version, never a checkout's dist |
 | agent-ops, new rule | hook installation: project `.claude/settings.json` hooks fire in Copilot CLI and Grok Build; every hook there carries a harness gate; hook scripts are installed by the CLI, never hand-edited by an agent; mode checked after install |
 | `docs/team-roles.md` | **None** |
@@ -362,10 +448,10 @@ Each is answerable yes/no on this note's evidence; "overrule" says how.
 |---|---|---|---|---|
 | D1 | Build the prototype as a class (c) code PR, for one pane (the coordinator's) on this laptop, scratch ledger first, production after P1–P5 pass | **yes** | one builder brief; a small CLI subcommand, hook wrapper, doctor check; no credential | say no and the review's item 1 is closed as "declined, voluntary logging stays" |
 | D2 | Identity I-1 (seat's credential and key, `automated: true`) rather than I-2 (second credential) | **I-1** for the pilot | agent-rules 13 one-line amendment | choose I-2: adds a mint under agent-ops 16 and agent-rules 7 exception |
-| D3 | `caused_by` rule C-2 with C-3 fallback; never C-4 | **yes** | causal coverage may fall on undisciplined projects, reported as such | choose C-3 only (simpler, no lookup) or C-1 (lose the capture when it matters) |
-| D4 | Failure mode F-2: fail open at the edit, queue, fail closed at commit through doctor | **yes** | a doctor check; a queue directory | choose a blocking `PreToolUse` (stops work on outages; pre-logs edits) |
-| D5 | Content policy §5.1: hashes only, never-log path classes, redacted events for secret paths | **yes** | some edits appear as `redacted:<dir>` | narrow or widen the list |
-| D6 | Pre-hook for `before_hash` (observe-only `PreToolUse`) | **yes** | one more hook entry; the only entry that could deny on a broken file | drop it; events carry `after_hash` only |
+| D3 | `caused_by` rule **C-3 for the pilot** (no `caused_by`; the session-root candidate recorded in `method.params`); C-2 only after a consumer change that reports agent-cited and hook-inferred links separately; never C-4 | **yes** | causal coverage falls on undisciplined projects and does not rise on disciplined ones, both reported as such; the lookup still runs to fill the candidate | choose C-2 now (the metric inflates, C-M2) or C-1 (lose the capture when it matters) |
+| D4 | Failure mode F-2 with durable state: in-flight record before the tool runs, pending record on any failure, doctor FAIL on any record; guarantee stated for a single-writer worktree, `pre-commit` check as the build item that widens it | **yes** | a doctor check; a record directory; one more probe set (P6) | choose a blocking `PreToolUse` (stops work on outages) |
+| D5 | Content policy §5.1: hashes only; outside-repository paths redacted by default under a constant identifier; never-log classes inside the repository; session id and repository root named as shareable metadata | **yes** | edits outside the repository appear only as counts | allow-list specific outside directories per project |
+| D6 | Pre-hook (observe-only `PreToolUse`) for `before_hash` and the in-flight record | **yes** | one more hook entry; the only entry that could deny on a broken file; the hash pair is not atomic evidence of one tool's change when another writer intervenes | drop it; events carry `after_hash` only and durability falls back to the post-hook's first write |
 | D7 | boxing-rpg "after" requires real work by you under the live-window rule; otherwise reported not measured | **yes** | your time on that repository | say the retrace measurement alone decides |
 | D8 | Matcher `Edit\|Write` now; `NotebookEdit` after P3; `MultiEdit` never until documented | **yes** | none | add names on your word |
 
@@ -380,8 +466,32 @@ Each is answerable yes/no on this note's evidence; "overrule" says how.
   `PreToolUse` hook is measured (2026-10-04); that it would run a `PostToolUse` entry is not.
 - The write-volume estimate uses this laptop's transcripts and the `retrace` ledger; it is not a forecast for any
   other machine or project, and D1 limits are not measured.
-- The 43 percent figure has no checked-in record before this note; the live status read of 2026-10-05 03:57Z is its
-  only source.
+- The 42.8 percent figure's only checked-in occurrence before this note is a live read recorded in C64
+  (`evaluation-response-plan-2026-09-24.md:213`); no class (b) measurement record holds it; this session's live read of
+  2026-10-05 03:57Z is reproduced in §1.
+- The marker `method.tool: claude-code:PostToolUse` and `method.automated: true` are producer conventions. Nothing in
+  the Worker distinguishes a hook-written event from a model-written one under I-1, and this note does not claim it
+  does.
+- Codex's two synthetic fixtures (coverage 50 % to 75 % under C-2; a late edit reported `pending`, not `uncovered`)
+  are Codex's measurements on in-memory ledgers (`evt_51d29a9e…`), restated here, not re-run by this session.
 - The brief's statement that `POST /events` rejects a dangling `caused_by` is corrected in §2.4 by code read, not by
   a test run; a test at the build gate should confirm `appendEvent`'s `caused_by:unverified` path on a hook-shaped
   event.
+
+## 10. Changes in v2 (fix round 1, 2026-10-05 13:29Z)
+
+Routing `evt_76b818938ba94d2f830e42858224d3ad` on Jordan's `evt_c22d7d53215242e0936a6bf32f80ada4` ("Go on A for both").
+Round-1 verdicts: NOOA approved, confirmations only (`evt_24607740…`); Grok approved with two Lows (`evt_7b28bddd…`);
+Codex rejected with five Mediums (`evt_51d29a9e…`). Every finding is applied in place; the earlier text is in the
+git history of this file (`e0fa9dd4`). No recommendation reversed except D3.
+
+| Finding | Change | Where |
+|---|---|---|
+| C-M1 (the "Proves" paragraph authenticated the observation, not the assertion; the model can emit capture-labelled events through `retrace_log`; the §5.3 gate is a compatibility filter) | "Proves" became "Records … asserted"; a new first "does not prove" bullet names the MCP path (`index.ts:318–330`) and calls the marker a convention; the gate is described as a filter over inherited values, with a sanitized refusal log; §4's numerator is "reported capture events" paired by `tool_use_id` against the transcript; P4 covers nested launches | §0, §3, §4, §5.3 |
+| C-M2 (an inferred `caused_by` counts as rooted; fixture 50 % to 75 %) | Recommendation changed from C-2-with-C-3-fallback to **C-3 for the pilot**; the candidate root is recorded in `method.params.session_root_candidate`, never in `caused_by`; both metric effects stated; C-2 gated on a consumer change (`status.ts:101,125–134,179–183`; `causality.ts:6–18`) | §2.2, §2.4, §8 D3 |
+| C-M3 (queue only after a detected failure; crashes, ambiguous appends, parallel fires escape the gate) | Durable `in_flight` record written by the pre-hook before the tool runs; `sealing`/`pending` transitions by atomic rename; dedup by `idempotency_key` (`store.ts:1054–1060`); unwritable directory is a doctor FAIL; guarantee narrowed to a single-writer worktree with a `pre-commit` check as the build item; P6 added; the blocking pre-hook is rejected on cost, not called inherently untruthful | §5.4, §4, §8 D4, D6 |
+| C-M4 (reconcile coverage is existential per file transition; zero uncovered is not complete capture; late captures are `pending`, not `uncovered`) | §2.5 and §3 now describe reconcile as existential with the line cites (`reconcile.ts:371–395`, `428–446`); the agent-rules 9 sentence in §5.4 corrected; §4 pairs successful tool calls one-to-one with reported events and tabulates captured / redacted / missing / duplicate / late; zero uncovered is "no regression" | §2.5, §3, §4, §5.4 |
+| C-M5 (never-log classes missed `~/.claude.json` and env-file variants; `redacted:<dir>` disclosed a path component; session ids and roots are shareable metadata) | Outside-repository paths redacted by default under the constant `redacted:path`; the in-repository class list extended (harness and credential locations, `.env.*` variants, `*secret*`, `*token*`); the decision taken before either hash; session id, repository root and `tool_use_id` named as shareable metadata; `idempotency_key` hashed so no payload string enters an identifier or filename | §2.2, §5.1, §8 D5 |
+| G-L1 (42.8 % is checked in as C64) | §1 row and §9 corrected: checked in once as a live read at `evaluation-response-plan-2026-09-24.md:213`, in no measurement record | §1, §9 |
+| G-L2 (`git-hook.ts:13–18` is the header comment; `resolveHookToken` is 69–83; the field is `credential`; an env fallback exists) | Cites corrected; the existing precedence stated including the `RETRACE_TOKEN` fallback; `capture.credential` introduced as a proposed sibling field with **no** environment fallback | §2.3 |
+| Codex scoped judgement on I-1 (the sandbox proxy cannot sign; moving credentials does not isolate signing; the rule-13 line must be bounded) | §2.3 and §7 reworded: the needed boundary is an isolated signer, unbuilt; the rule-13 line covers the installed hook only and is no export permission | §2.3, §7 |
