@@ -317,7 +317,9 @@ thing the ledger must never hold: ledger bodies are hash-covered and served by s
 3. **Never-log classes inside the repository.** A path matching any of these is redacted the same way, and the
    decision is taken **before** the pre-hook hashes and again before the post-hook hashes, so no hash of such a file
    is ever computed: `.gitignore`d paths; names `.env`, `.env.*`, `*.env`, `*.env.*`, `*credentials*`, `*secret*`,
-   `*token*`, `*key*.json`, `*.jwk`, `*.pem`, `*.p12`, `*.pfx`, `*.kdbx`; and, should the repository root ever be a
+   `*token*`, `*key*.json`, `*.jwk`, `*.pem`, `*.p12`, `*.pfx`, `*.kdbx`; the project-scope MCP configuration file `.mcp.json`
+   at the repository root (Claude Code's project-scope MCP config, which lives inside the repository by design; this
+   repository tracks one); and, should the repository root ever be a
    home directory or contain one, the harness and credential locations `~/.claude.json` (Anthropic documents it as
    the store for local and user MCP configurations), `~/.claude/`, `~/.codex/`, `~/.cursor/`, `~/.grok/`,
    `~/.copilot/`, `~/.config/`, `~/.retrace/`, `~/.ssh/`, `~/.aws/`, `~/.gnupg/`, and shell startup files. The list is
@@ -495,3 +497,5 @@ git history of this file (`e0fa9dd4`). No recommendation reversed except D3.
 | G-L1 (42.8 % is checked in as C64) | §1 row and §9 corrected: checked in once as a live read at `evaluation-response-plan-2026-09-24.md:213`, in no measurement record | §1, §9 |
 | G-L2 (`git-hook.ts:13–18` is the header comment; `resolveHookToken` is 69–83; the field is `credential`; an env fallback exists) | Cites corrected; the existing precedence stated including the `RETRACE_TOKEN` fallback; `capture.credential` introduced as a proposed sibling field with **no** environment fallback | §2.3 |
 | Codex scoped judgement on I-1 (the sandbox proxy cannot sign; moving credentials does not isolate signing; the rule-13 line must be bounded) | §2.3 and §7 reworded: the needed boundary is an isolated signer, unbuilt; the rule-13 line covers the installed hook only and is no export permission | §2.3, §7 |
+
+v3 (round 2, routing `evt_ed2934624a354b92993672e357f57e47`): Grok's G-L1 (r2) applied, the project-scope `.mcp.json` added by name to §5.1 rule 3's never-log classes; nothing else changed.
