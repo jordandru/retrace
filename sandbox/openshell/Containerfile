@@ -1,0 +1,82 @@
+# The OpenShell seat image: Claude Code as `claude-code-openshell` inside an OpenShell sandbox on the Omarchy PC.
+# Design: docs/design/openshell-seat.md v2 (W4 = this directory). Class (a): these files govern what the seat can reach.
+#
+# Build on the PC (rootless Podman, account `stranger`), from the repository root:
+#   podman build -t localhost/retrace-openshell-seat:w4 -f sandbox/openshell/Containerfile sandbox/openshell
+# Record `podman image inspect localhost/retrace-openshell-seat:w4 --format '{{.Digest}} {{.Id}}'` in the W6 record.
+#
+# This image holds NO credential. The three credentials (Retrace token, Anthropic API key, GitHub token) are attached at
+# `openshell sandbox create` time as providers; the sandbox sees `openshell:…` placeholders only. Everything the seat runs is
+# installed here, pinned, so the runtime network policy opens no package registry.
+
+FROM docker.io/library/ubuntu:24.04
+
+ARG NODE_VERSION=22.23.3
+ARG CLAUDE_CODE_VERSION=2.1.289
+ARG RETRACE_CLI_VERSION=0.3.0
+ARG GH_VERSION=2.102.0
+ARG REPO_URL=https://github.com/jordandru/retrace.git
+ARG REPO_REF=main
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl git xz-utils perl \
+ && rm -rf /var/lib/apt/lists/*
+
+# node, verified against the SHASUMS256.txt of the same release (same origin; a pin, not an independent attestation)
+RUN set -eu; cd /tmp; \
+    curl -fsSLO "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz"; \
+    curl -fsSLO "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt"; \
+    grep " node-v${NODE_VERSION}-linux-x64.tar.xz\$" SHASUMS256.txt | sha256sum -c -; \
+    tar -xJf "node-v${NODE_VERSION}-linux-x64.tar.xz" -C /usr/local --strip-components=1 --no-same-owner; \
+    rm -f "node-v${NODE_VERSION}-linux-x64.tar.xz" SHASUMS256.txt
+
+# the GitHub CLI, verified against the release's checksums file (reads only: the github-seat profile allows no API write)
+RUN set -eu; cd /tmp; \
+    curl -fsSLO "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz"; \
+    curl -fsSLO "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_checksums.txt"; \
+    grep " gh_${GH_VERSION}_linux_amd64.tar.gz\$" "gh_${GH_VERSION}_checksums.txt" | sha256sum -c -; \
+    tar -xzf "gh_${GH_VERSION}_linux_amd64.tar.gz"; \
+    install -m 0755 "gh_${GH_VERSION}_linux_amd64/bin/gh" /usr/local/bin/gh; \
+    rm -rf gh_${GH_VERSION}_linux_amd64*
+
+# the harness and the Retrace CLI (retrace-mcp, retrace-git, retrace doctor), both pinned
+RUN npm install --global "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" "@retrace-dev/cli@${RETRACE_CLI_VERSION}" \
+ && npm cache clean --force
+
+# the seat user: non-root, uid 1000 (Podman runs the workload as the image's USER). ubuntu:24.04 ships `ubuntu` at uid 1000.
+RUN userdel -r ubuntu 2>/dev/null || true \
+ && useradd -m -u 1000 -s /bin/bash seat
+USER seat
+WORKDIR /home/seat
+
+# Non-secret environment read by the hook, the MCP server and the harness (docs/design/openshell-seat.md §3.1, §5.1).
+# RETRACE_TOKEN, RETRACE_HOOK_TOKEN, ANTHROPIC_API_KEY and GITHUB_TOKEN are NOT set here: the providers inject placeholders.
+ENV RETRACE_URL=https://retrace-api.slcwitit.workers.dev \
+    RETRACE_PROJECT=retrace \
+    RETRACE_ENV=openshell-pc \
+    RETRACE_DEVICE=omarchy-pc \
+    RETRACE_SEAT=claude-code-openshell \
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
+    DISABLE_AUTOUPDATER=1 \
+    DISABLE_TELEMETRY=1 \
+    DISABLE_ERROR_REPORTING=1
+
+# The clone (public repository), the commit identity (an agent address: D2 never records it as the principal), and the hooks.
+# `retrace-git install` resolves a hook token at install time, before any provider exists: every subcommand, `install` included,
+# runs `loadCfg` first (TypeScript at main fab82ea9, packages/mcp-server/src/git-hook.ts line 426, `const cfg = loadCfg(repo, flags)`;
+# the `install` branch follows at line 428; the packed CLI 0.3.0 compiles this file to git-hook.js). So the step runs with a fixed,
+# meaningless build-time value that no server accepts; the provider's placeholder replaces it at runtime.
+RUN git clone --branch "${REPO_REF}" "${REPO_URL}" /home/seat/retrace \
+ && git -C /home/seat/retrace config user.name "claude-code-openshell" \
+ && git -C /home/seat/retrace config user.email "noreply@anthropic.com" \
+ && RETRACE_HOOK_TOKEN=build-time-no-token retrace-git install --repo /home/seat/retrace --project retrace
+
+# Claude Code configuration, user scope: the seat's identity block (loads before the clone's CLAUDE.md), the settings
+# (push-guard hook, the repository's `retrace-cloud` MCP entry disabled), and the seat's own MCP server entry.
+COPY --chown=seat:seat CLAUDE.seat.md /home/seat/.claude/CLAUDE.md
+COPY --chown=seat:seat settings.json  /home/seat/.claude/settings.json
+COPY --chown=seat:seat claude.json    /home/seat/.claude.json
+
+WORKDIR /home/seat/retrace
+CMD ["claude"]

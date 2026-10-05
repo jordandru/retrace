@@ -1,0 +1,45 @@
+# Provider profile for Claude Code's model credential, for the OpenShell seat `claude-code-openshell`.
+# A copy of OpenShell's example `providers/claude-code.yaml` (commit 021400be). Every body difference from the shipped file:
+#   1. `id`, `display_name`, `description`: renamed so the seat's provider type is distinct from the upstream example.
+#   2. `credentials[0].env_vars`: [ANTHROPIC_API_KEY] instead of [ANTHROPIC_API_KEY, CLAUDE_API_KEY]. Claude Code's documented
+#      variable is ANTHROPIC_API_KEY (code.claude.com/docs/en/authentication); one name means one placeholder in the sandbox.
+#   3. `endpoints`: statsig.anthropic.com and sentry.io are REMOVED ("Drop the last two if your policy forbids that traffic");
+#      the image sets CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1, DISABLE_TELEMETRY=1, DISABLE_ERROR_REPORTING=1 and
+#      DISABLE_AUTOUPDATER=1, so the harness does not need them. api.anthropic.com is unchanged.
+#   4. `binaries`: [/usr/bin/claude, /usr/local/bin/claude] becomes [/usr/local/bin/claude, /usr/local/bin/node,
+#      /usr/local/lib/node_modules/@anthropic-ai/**], the paths this image installs ("An npm global install resolves elsewhere …
+#      add that path if your image installs it that way").
+# Nothing else differs (credential name, auth_style, header_name, discovery, category, inference_capable, the API endpoint).
+# Design: docs/design/openshell-seat.md §5.2. Import on the PC's gateway:
+#   openshell profile lint   -f sandbox/openshell/profiles/claude-code-seat.yaml
+#   openshell profile import -f sandbox/openshell/profiles/claude-code-seat.yaml --global
+#
+# Credential scope:  ANTHROPIC_API_KEY (an Anthropic API key, metered; D-a a1), sent as the x-api-key header to
+#                    api.anthropic.com and nowhere else. The sandbox holds a placeholder.
+# Smoke test:        openshell sandbox create --from localhost/retrace-openshell-seat:w4 --provider anthropic-seat -- \
+#                      claude -p 'reply with OK'
+
+id: claude-code-seat
+display_name: Claude Code (OpenShell seat)
+description: Claude Code CLI, API key only, no telemetry hosts
+category: agent
+inference_capable: true
+credentials:
+  - name: api_key
+    description: Anthropic API key used by Claude Code
+    env_vars: [ANTHROPIC_API_KEY]
+    required: true
+    auth_style: header
+    header_name: x-api-key
+discovery:
+  credentials: [api_key]
+endpoints:
+  - host: api.anthropic.com
+    port: 443
+    protocol: rest
+    access: read-write
+    enforcement: enforce
+binaries:
+  - /usr/local/bin/claude
+  - /usr/local/bin/node
+  - /usr/local/lib/node_modules/@anthropic-ai/**
