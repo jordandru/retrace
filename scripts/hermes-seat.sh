@@ -26,6 +26,19 @@ cd "$ROOT"
 [ -f .hermes.md ] || fail ".hermes.md missing at $ROOT"
 h_work="$(sha256sum .hermes.md | cut -d' ' -f1)"; h_head="$(git show HEAD:.hermes.md 2>/dev/null | sha256sum | cut -d' ' -f1)"
 [ "$h_work" = "$h_head" ] || fail ".hermes.md differs from HEAD's (work ${h_work:0:12}, HEAD ${h_head:0:12})"
+# (2b) the guard plugin, its shell-hook check and the seat-config templates are the committed ones. The seat works in this worktree,
+#      so an edit here between launches must not become its guard or its config without a word: refuse, before anything is
+#      installed, when a working-tree file differs from HEAD (or is not in HEAD). Step 6 then installs HEAD's bytes, not the
+#      working tree's, and checks each copy against HEAD's sha256.
+declare -A HEAD_SHA
+for f in packages/hermes-plugin/retrace-guard/plugin.yaml packages/hermes-plugin/retrace-guard/__init__.py scripts/retrace-guard-check.sh hermes.retrace.yaml hermes.retrace.phases.yaml; do
+  git cat-file -e "HEAD:$f" 2>/dev/null || fail "$f is not in HEAD"
+  [ -f "$f" ] || fail "$f is missing from the working tree"
+  hw="$(sha256sum "$f" | cut -d' ' -f1)"; hh="$(git show "HEAD:$f" | sha256sum | cut -d' ' -f1)"
+  [ "$hw" = "$hh" ] || fail "$f differs from HEAD (work ${hw:0:12}, HEAD ${hh:0:12})"
+  HEAD_SHA[$f]="$hh"
+done
+echo "pinned to HEAD: retrace-guard/plugin.yaml ${HEAD_SHA[packages/hermes-plugin/retrace-guard/plugin.yaml]:0:12}, retrace-guard/__init__.py ${HEAD_SHA[packages/hermes-plugin/retrace-guard/__init__.py]:0:12}, retrace-guard-check.sh ${HEAD_SHA[scripts/retrace-guard-check.sh]:0:12}, hermes.retrace.yaml ${HEAD_SHA[hermes.retrace.yaml]:0:12}, hermes.retrace.phases.yaml ${HEAD_SHA[hermes.retrace.phases.yaml]:0:12}"
 # (3) no context file below the root
 hits="$(find . -mindepth 2 \( -path ./node_modules -o -path ./.git \) -prune -o \( -name AGENTS.override.md -o -name AGENTS.md -o -name agents.md -o -name CLAUDE.md -o -name claude.md -o -name .cursorrules \) -print | head -5)"
 [ -z "$hits" ] || fail "context files below the root would be spliced into tool results: $hits"
@@ -33,7 +46,7 @@ hits="$(find . -mindepth 2 \( -path ./node_modules -o -path ./.git \) -prune -o 
 mkdir -p "$PROFILE/home" "$PROFILE/run/guard" "$PROFILE/plugins" "$PROFILE/bin"
 for f in .profile .bash_profile .bash_login .bashrc .bash_logout; do [ -e "$PROFILE/home/$f" ] && fail "$PROFILE/home/$f exists; the profile home must hold no startup file"; done
 if ls /etc/profile.d/*.sh >/dev/null 2>&1 && grep -l "RETRACE_" /etc/profile.d/*.sh 2>/dev/null | head -1 | grep -q .; then fail "/etc/profile.d exports a RETRACE_ name (operator prerequisite, §6.3 step 5)"; fi
-# (6) render the config from the committed template; copy the guard and the check script by hash
+# (6) render the config from the template (the working tree equals HEAD, step 2b); install the guard and the check script from HEAD
 PRIMARY="${RETRACE_PRIMARY_CHECKOUT:-/home/jordandrumiler/provenance/retrace}"
 [ -f "$PRIMARY/packages/mcp-server/dist/index.js" ] || fail "no built MCP server at $PRIMARY/packages/mcp-server/dist/index.js"
 DATE="$(date -u +%Y%m%d)"
@@ -83,12 +96,16 @@ rend=rend.replace(f'"{hookdir}/','"{{HOOK_DIR}}/').replace(f'"{primary}/','"{{PR
 sys.exit(0 if rend==tmpl else 1)
 PYCHK
 mv "$PROFILE/config.yaml.new" "$PROFILE/config.yaml"
-rm -rf "$PROFILE/plugins/retrace-guard"; cp -r "$ROOT/packages/hermes-plugin/retrace-guard" "$PROFILE/plugins/retrace-guard"
-for f in plugin.yaml __init__.py; do [ "$(sha256sum "$PROFILE/plugins/retrace-guard/$f" | cut -c1-64)" = "$(sha256sum "$ROOT/packages/hermes-plugin/retrace-guard/$f" | cut -c1-64)" ] || fail "guard copy differs: $f"; done
-cp "$ROOT/scripts/retrace-guard-check.sh" "$PROFILE/bin/retrace-guard-check.sh" && chmod 755 "$PROFILE/bin/retrace-guard-check.sh"
-[ "$(sha256sum "$PROFILE/bin/retrace-guard-check.sh" | cut -c1-64)" = "$(sha256sum "$ROOT/scripts/retrace-guard-check.sh" | cut -c1-64)" ] || fail "shell hook copy differs from the committed scripts/retrace-guard-check.sh"
-[ -x "$PROFILE/bin/retrace-guard-check.sh" ] || fail "$PROFILE/bin/retrace-guard-check.sh is not executable"
-echo "config sha256 $(sha256sum "$PROFILE/config.yaml" | cut -c1-12); guard sha256 $(sha256sum "$ROOT/packages/hermes-plugin/retrace-guard/__init__.py" | cut -c1-12); check sha256 $(sha256sum "$PROFILE/bin/retrace-guard-check.sh" | cut -c1-12) (profile copy = committed); phase $PHASE; .hermes.md sha256 ${h_head:0:12}"
+install_from_head() { # $1 path in HEAD, $2 destination: writes HEAD's bytes, then checks the copy against HEAD's sha256 (step 2b)
+  git show "HEAD:$1" > "$2" || fail "could not install $1 from HEAD"
+  [ "$(sha256sum "$2" | cut -d' ' -f1)" = "${HEAD_SHA[$1]}" ] || fail "profile copy of $1 differs from HEAD"
+}
+rm -rf "$PROFILE/plugins/retrace-guard"; mkdir -p "$PROFILE/plugins/retrace-guard"
+install_from_head packages/hermes-plugin/retrace-guard/plugin.yaml "$PROFILE/plugins/retrace-guard/plugin.yaml"
+install_from_head packages/hermes-plugin/retrace-guard/__init__.py "$PROFILE/plugins/retrace-guard/__init__.py"
+install_from_head scripts/retrace-guard-check.sh "$PROFILE/bin/retrace-guard-check.sh"
+chmod 755 "$PROFILE/bin/retrace-guard-check.sh"; [ -x "$PROFILE/bin/retrace-guard-check.sh" ] || fail "$PROFILE/bin/retrace-guard-check.sh is not executable"
+echo "config sha256 $(sha256sum "$PROFILE/config.yaml" | cut -c1-12); guard sha256 ${HEAD_SHA[packages/hermes-plugin/retrace-guard/__init__.py]:0:12}; check sha256 ${HEAD_SHA[scripts/retrace-guard-check.sh]:0:12} (profile copies = HEAD); phase $PHASE; .hermes.md sha256 ${h_head:0:12}"
 # (7) the model string for the MCP server
 export RETRACE_ACTOR_MODEL="$MODEL"
 # (8) the pinned Hermes
@@ -104,8 +121,8 @@ ENVV=(PATH="$PATH" HOME="$HOME" USER="${USER:-$(id -un)}" LANG="${LANG:-C.UTF-8}
 [ -n "${RETRACE_GUARD_TEST_LOAD:-}" ] && ENVV+=(RETRACE_GUARD_TEST_LOAD="$RETRACE_GUARD_TEST_LOAD") && echo "override: RETRACE_GUARD_TEST_LOAD=$RETRACE_GUARD_TEST_LOAD"
 smoke="$(env -i "${ENVV[@]}" "$SRC/.venv/bin/hermes" plugins list 2>&1 | grep -i "retrace-guard" | head -2)"
 echo "pre-start smoke (plugins list): ${smoke:-<retrace-guard not listed>}"
-# A fresh profile's first Hermes run prepares its isolated runtime (pm/runtime.py prepare_runtime), which outlasts the
-# MCP handshake timeout; so the test runs twice when the first pass reports that preparation. The second pass is the check.
+# A fresh profile's first Hermes run prepares its isolated runtime (pm/runtime.py prepare_runtime), which can outlast the
+# MCP handshake timeout; so whenever the first pass does not connect, the test runs once more, and the second pass is the check.
 for pass in 1 2; do
   t0=$(date +%s); mcp_raw="$(env -i "${ENVV[@]}" timeout 120 "$SRC/.venv/bin/hermes" mcp test retrace 2>&1)"; mcp_rc=$?; t1=$(date +%s)
   printf '%s\n' "$mcp_raw" > "$PROFILE/run/mcp-test-pass$pass.txt"

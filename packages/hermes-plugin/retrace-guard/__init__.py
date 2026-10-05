@@ -22,8 +22,10 @@ Fail-closed evidence (NOOA N-M1), hermes_cli/plugins_dispatch.py at 7b362884d88c
   verdict, (d) a verdict-file line that is not an object, (e) bytes that are not UTF-8, (f) a payload whose extra is not an
   object, (g) a 140 KB payload, (h) a 1 KB payload and (i) no python3 on PATH all block. So with the plugin absent or its
   callback raising, a tool runs only on a request the plugin had scanned as passing. Not covered: a rendered config without
-  the hooks entry (the launcher's template check refuses one), a script modified in the working tree (the launcher pins the
-  profile copy to the working-tree file, not to HEAD), and any Hermes path that runs a tool without pre_tool_call.
+  the hooks entry (the launcher's template check refuses one), a profile copy changed after the launch (the launcher refuses
+  a working tree whose plugin, check script or config templates differ from HEAD and installs HEAD's bytes, but it does not
+  watch the profile afterwards, and the launcher script itself runs from the working tree), and any Hermes path that runs a
+  tool without pre_tool_call.
   Exercised by RETRACE_GUARD_TEST=scan-raise (the request scan raises; no verdict; tools blocked), by
   tests.test_guard.HookTests.test_scan_raise_switch_blocks and LoadSwitchTests.test_register_switch_raises, by
   tests.test_guard_check (cases a-i and the hijack paths), and by the Gate 1a negatives (hermes-seat.md §7 1a).
