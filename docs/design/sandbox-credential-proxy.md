@@ -5,6 +5,10 @@ harness-runtime). **It proposes no code, no credential and no rule text.** Class
 note on how seat credentials are held.
 - Written on Jordan's signed go `evt_0eac86082cb946579c9b6ace937284be` ("Go on 1", received 15:50 MDT / 21:50Z), item
   1 of the open list this session gave on resume (`evt_c1370e69…`).
+- **v2, 2026-10-05** (the same session, now `claude-fable-5-1`): the fix round on Jordan's "fix all at once"
+  (`evt_66b0b90b…`, relayed by the coordinator's verified brief `evt_b3dc5279…`, routing `evt_46b1e26f…`). It answers
+  Codex's round-2 rejection `evt_f3b89329…` (C-M1 and C-M2, Medium: §3, §4.5, A1, §7, §8) and Grok's G-L1 Low
+  (`evt_b6e4f7ab…`, the §1 event list); NOOA approved round 1 (`evt_ca578537…`). Fixed in place: an unmerged draft.
 - The question is Stage 2 of the OpenShell plan saved on Jordan's instruction `evt_d182ae0f…`. Stage 1, the
   credential-custody pilot it depends on, passed and is merged as
   `docs/measurements/openshell-stage1-omarchy-2026-10-04.md` (PR 174, `5ae3388f`).
@@ -23,7 +27,9 @@ against agent-ops 16's credential sinks, and state what it cannot do: producer k
 - **A1. Yes, for every seat that runs inside a sandbox.** The seat's bearer token is held outside the sandbox and is
   never placed in the session's environment, files or arguments. The platform's credential proxy is the way available
   today, and the cloud seat is already designed this way. A1 holds whichever way the seat's producer key is handled
-  (§4.1).
+  (§4.1). **A1 is a placement policy, not a guarantee:** it keeps the value out of what the session holds on its own
+  side. A bound destination that reflects the header returns the value into the sandbox (§4.5), so A1 also requires a
+  destination that does not, and Stage 1's tests 2 and 3 do not prove that part.
 - **A2. No change for the laptop seats.** No sandbox can run on this laptop (§2.3). And the most powerful token on the
   laptop sits in every pane's environment: the owner token (§2, §3). No proxy for seat tokens touches it. §7 records it
   for the coordinator to route as its own item.
@@ -38,7 +44,7 @@ against agent-ops 16's credential sinks, and state what it cannot do: producer k
 
 | Source | What it shows | Where |
 |---|---|---|
-| Stage 1, measured | On native Linux (OpenShell v0.1.2, rootless Podman), the sandbox held only a placeholder. The proxy added the token only at the bound endpoint and refused it elsewhere. A scratch Retrace server sealed a placeholder-only call under its pinned identity. A gateway restart was an explicit loss. Fake and scratch tokens only; plain HTTP only | the Stage 1 doc; `evt_fe1baad0`, `evt_9751dd20`, `evt_3820bd45`, `evt_0af2013c`, `evt_b87a9a78` |
+| Stage 1, measured | On native Linux (OpenShell v0.1.2, rootless Podman), the sandbox held only a placeholder. The proxy added the token only at the bound endpoint and refused it elsewhere. A scratch Retrace server sealed a placeholder-only call under its pinned identity. A gateway restart was an explicit loss. Fake and scratch tokens only; plain HTTP only | the Stage 1 doc; `evt_9751dd20`, `evt_3820bd45`, `evt_0af2013c`, `evt_b87a9a78` |
 | The research report, 2026-10-01 | OpenShell's documented design, platform needs and limits | `evt_3bd81e05…`; OpenShell's documentation, below |
 | The cloud seat, designed | A keyless seat whose token sits in Anthropic's proxy, and the bounded rules exception that needs. The token was minted and placed on 2026-10-04 (B4 complete, `evt_255a43b7`). The probe that checks it (P3) has not run | `docs/design/cloud-seat.md` |
 | Retrace's code at `5ae3388f` | What each kind of token can do | `packages/core/src/router.ts` (`authenticate`, `POST /events`); `apps/worker/src/mcp.ts` (`authenticateRemoteMcp`); `packages/mcp-server/src/admin.ts` (`shouldMintProducerKey`) |
@@ -114,9 +120,12 @@ inference from Stage 1's tests 2 and 3, not a measurement.
 | 10-04 | `evt_8fc5c456…` | clipboard, then transcript | the cloud seat's first token, pasted into a pane on its way into Anthropic's proxy | **No.** It happened while a token was being put into a proxy |
 
 Sink by sink:
-- **Transcripts.** A sandboxed agent holds only a placeholder (Stage 1, test 2), so nothing it prints or writes can
-  carry the value. That closes the mode of the 10-04 `nooa` exposure: a plain-text configuration file, read by
-  accident. It does nothing for the owner token, which reached a transcript from the shell environment (09-16).
+- **Transcripts.** A sandboxed agent holds only a placeholder (Stage 1, test 2), so nothing it prints or writes from
+  its own environment, files or arguments can carry the value: what the proxy settles is where the credential is placed
+  on the client side. That closes the mode of the 10-04 `nooa` exposure: a plain-text configuration file, read by
+  accident. It does nothing for the owner token, which reached a transcript from the shell environment (09-16). And it
+  is conditional: a bound destination that reflects the header returns the value into the sandbox, where a transcript
+  can capture it (§4.5).
 - **A pane's environment after a rotation.** Documented, not measured: after a static credential update, "launch a new
   client process to use the updated reference. An existing process keeps its revision-scoped reference"
   (`providers/overview.mdx`). So a rotation still needs a client restart, as panes do today. What changes is that the
@@ -127,8 +136,9 @@ Sink by sink:
 - **Containers.** A sandboxed agent holds no value to write into a container's environment or configuration. A value
   that someone writes into the sandbox by hand is not covered.
 
-**Net:** the proxy closes the sinks inside the sandbox. Provisioning and the host account stay as they are. And on
-this laptop, the token that reached a transcript from a pane's environment was the owner's.
+**Net:** the proxy removes the credential from the client side of the sandbox: its environment, files and arguments.
+It does not control what a bound destination sends back (§4.5). Provisioning and the host account stay as they are.
+And on this laptop, the token that reached a transcript from a pane's environment was the owner's.
 
 ## 4. What a proxy cannot do
 
@@ -173,7 +183,17 @@ The proxy limits where a token goes: the host, port and path, and the binaries t
 a process in the sandbox writes with it. A prompt-injected agent can still append as its seat, and the pinned stamp
 will attribute that write to the seat. Custody is not authorisation.
 
-### 4.5 The rest
+### 4.5 Control what the bound destination returns
+
+The proxy puts the value into the request to the bound destination, and that destination is trusted with it. Whatever
+the destination sends back enters the sandbox unchanged. Stage 1's own swap check is the measurement: the bound echo
+endpoint returned the substituted fake token to the sandbox, and the hash of the returned `Bearer` value matched the
+stored one (`evt_b87a9a78`). Destination binding was not broken; the destination disclosed the value. So tests 2 and 3
+establish where the credential is placed on the client side, not that it can never reach the client. Under A1 the
+bound destination is the Worker, and A1 depends on the Worker never reflecting the header; this note does not measure
+that. Stage 1's rule stands as written: a real token is never bound to an echo endpoint.
+
+### 4.6 The rest
 
 - **TLS.** OpenShell's proxy "terminates TLS transparently using a per-sandbox ephemeral CA" (`best-practices.mdx`),
   so it holds ledger traffic in clear. Stage 1 measured plain HTTP only.
@@ -234,14 +254,18 @@ token on this laptop, and the one that reached a transcript from a pane's enviro
 - **A gap between the rule and the practice.** Agent-rules 15 says the receiver reads "with its own credential". This
   note records the gap and changes neither.
 - **A way out already exists in agent-ops 18's direction.** A narrow `retrace_verify_send` tool, served by each seat's
-  MCP server under that seat's own credential, would end the raw reads. Scoped read credentials would cover the CLIs.
+  MCP server under that seat's own credential, would end the raw reads. Scoped read credentials would cover the
+  read-only uses in the inventory, and only those: `retrace-admin set-policy` performs an owner-only `PUT`
+  (`packages/mcp-server/src/admin.ts`; §2.1), which no read credential can authorise. Before any replacement is said
+  to cover the inventory, the routed item must sort each reader into required-read, seat-write and owner-only
+  operations. This note designs no replacement and does not propose moving owner operations into panes.
 - **Recommendation:** the coordinator routes "the owner token out of the pane environment" as its own item. It starts
   with an inventory of every reader of `RETRACE_TOKEN` in panes. This note does not design it.
 
 ## 8. What this note does not claim
 
 - That OpenShell holds a production token safely. Stage 1 used fake and scratch tokens only.
-- That a proxy protects a token from its host account (§4.3).
+- That a proxy protects a token from its host account (§4.3), or from a bound destination that returns it (§4.5).
 - That Anthropic's proxy keeps the cloud token from the model (cloud-seat §9).
 - That §3's last column is measured. It is inferred from Stage 1's tests 2 and 3.
 - That §3's five events are every event on these sinks. They are what a text search of the ledger found.
