@@ -1,6 +1,6 @@
-# OpenShell seat: a sandboxed Claude Code builder on the Omarchy PC (design note v1)
+# OpenShell seat: a sandboxed Claude Code builder on the Omarchy PC (design note v2)
 
-**Status:** v1, 2026-10-05, by `claude-code` (third session, "OpenShell S1"; `claude-fable-5-1`, model source harness-runtime,
+**Status:** v2, 2026-10-05, by `claude-code` (third session, "OpenShell S1"; `claude-fable-5-1`, model source harness-runtime,
 effort xhigh). **Not built.** Class (a) under agent-rules 12: it defines a new seat, the custody of three credentials, a sandbox
 image and network policy, and an instruction convention.
 - Written on Jordan's signed `evt_2d28d89f704b4b19b2806a3c64fee316` ("Let's start the OpenShell process on Omarchy", 03:32Z) and
@@ -10,6 +10,11 @@ image and network policy, and an instruction convention.
   in `evt_165a4983…`, and one signed line overrules any of the three before this note is routed.
 - The coordinator's brief for the S1 pane is `~/.retrace/ops-2026-10-04/brief-openshell-s1-r1.md` (sha256 `4436078fa6ace764…`,
   on Jordan's `evt_5925fdda…`). The scope it follows is `IMPLEMENTATION-SCOPE.md` (sha256 `9350e0f8…`, on `evt_f996ea94…`).
+- **v2, 2026-10-05** (the same session, about 07:0xZ): the round-1 fix, all findings resolved in one round on Jordan's decision
+  `evt_c22d7d53215242e0936a6bf32f80ada4` ("Go on A for both"; his go on this pane `evt_1c0b732c…`), the coordinator's gate check
+  `evt_de4fadb6…` and fix-round routing `evt_91e3176cbf4b41c78b0677c83851f008`. Resolved: Codex C-M1–C-M4 (`evt_85554085…`, Medium),
+  Grok G-L1–G-L2 (`evt_e96ab2a7…`, Low), NOOA L1–L2 (`evt_1104114c…`, Low). Fixed in place: an unmerged draft (rule 10 binds the
+  merged record, Jordan `evt_9dc98206`). §11 gives each finding its disposition.
 - It is step W2 of that scope. Stage 1 (`docs/measurements/openshell-stage1-omarchy-2026-10-04.md`, PR 174) measured the custody
   on the PC with fake and scratch tokens. Stage 2 (`docs/design/sandbox-credential-proxy.md`, PR 175) decided A1–A4, all yes
   (`evt_fb8166ff…`). The template is `docs/design/cloud-seat.md` v2: the same shape, with OpenShell on hardware Jordan owns in
@@ -17,10 +22,11 @@ image and network policy, and an instruction convention.
 
 ## 0. What this note decides, and what it leaves to the gate
 
-- **The seat.** One Claude Code session runs inside an OpenShell v0.1.2 sandbox on the Omarchy PC (rootless Podman 6.1.1, account
-  `stranger`), under its own actor id, `claude-code-openshell`, with a keyless pinned Retrace credential held by an OpenShell
-  provider. The sandbox only ever holds placeholders; the proxy substitutes the real value at the one host each credential is
-  bound to. An Anthropic API key (the model) and a GitHub fine-grained token (pushes) are held the same way.
+- **The seat, as designed.** One Claude Code session would run inside an OpenShell v0.1.2 sandbox on the Omarchy PC (rootless
+  Podman 6.1.1, account `stranger`), under its own actor id, `claude-code-openshell`, with a keyless pinned Retrace credential held
+  by an OpenShell provider. The sandbox would only ever hold placeholders; the proxy would substitute the real value at the one host
+  each credential is bound to. An Anthropic API key (the model) and a GitHub fine-grained token (pushes) would be held the same way.
+  None of this runs yet (§8).
 - **The three decisions Jordan took on 2026-10-05** (§1.1): D-a, Claude Code on an Anthropic API key, Claude Opus 5.5 by default;
   D-b, the cloud seat's bound, build only; D-c, dispatch only, the brief carried in the ledger.
 - **What it leaves to later gates:** the W3 code brief's exact text; the W4 image, profiles and policy files (outlined in §5, §6,
@@ -36,7 +42,7 @@ image and network policy, and an instruction convention.
 | Host account | Anthropic's VM | `stranger` on a PC Jordan owns; any process of that account can read the store (Stage 1 observation 5; Stage 2 §4.3) |
 | Model credential | the Max plan, included in the cloud session | an Anthropic API key behind a second provider, metered |
 | GitHub | pushes through Anthropic's GitHub proxy as Jordan's account | pushes through a third provider holding a fine-grained token, as Jordan's account |
-| Instruction channel | owner-protocol §10 (PR 176, the cloud prompt box) | dispatch only; no owner-protocol change (§2.4) |
+| Instruction channel | an owner-protocol §10 for the cloud prompt box, **proposed in PR 176 (open)**; at this head, at the base and at main, `owner-protocol.md` ends at §9 and `cloud-seat.md` §2.4 still calls the cloud channel undefined | dispatch only; no owner-protocol change (§2.4) |
 | TLS | Anthropic's | terminated by OpenShell's per-sandbox CA; ledger and API traffic in clear inside the gateway's process on the PC (Stage 2 §4.6) |
 
 ## 1. Evidence
@@ -46,7 +52,7 @@ image and network policy, and an instruction convention.
 | Stage 1, measured on the PC | Landlock ABI 10 inside the sandbox; the sandbox held only `openshell:re…` placeholders; the proxy swapped them at the bound endpoint only and refused elsewhere (`credential_endpoint_mismatch`); a scratch Retrace server sealed a placeholder-only POST under the pinned identity; a gateway restart stops every sandbox and kills in-flight processes; the store's key-encryption key sits in the same account | PR 174; `evt_fe1baad0`, `evt_9751dd20`, `evt_3820bd45`, `evt_0af2013c`, `evt_b87a9a78` |
 | Stage 2, decided | A1 placement policy for sandboxed seats, conditional on the destination never reflecting the header (§4.5); A2 laptop unchanged; A3 Option P waits; A4 limits: no producer key, no seat-to-seat separation on one host, the host account reads the store | PR 175, `8d77bc08`; `evt_fb8166ff…` |
 | The cloud seat, designed and partly built | issuance of a keyless pinned credential (§2.2, built as B2 in `@retrace-dev/cli` 0.3.0); the keyless tier and its bounded exception (§2.3); the restricted capture policy (§3.5, built); D2 the principal rule (§4, built); the probe P3 (§7, not yet run); the push guard | `docs/design/cloud-seat.md`; `packages/mcp-server/src/admin.ts` lines 40–41, 80–86; `packages/core/src/capture.ts`, `reconcile.ts`, `attribution-context.ts` line 56; `scripts/cloud/guard-push-main.sh` |
-| The code at main `8d77bc08` | the hook's token precedence: `RETRACE_HOOK_TOKEN` first, then the credential named by `.retrace.json`, then `RETRACE_TOKEN` (`git-hook.ts` lines 69–83); a missing key path means the hook does not sign (lines 87–100); the MCP client sends `authorization: Bearer <token>` when a token is set (`remote-store.ts` line 47); the Worker stamps `sealed_by` as `pinned:<credential name>` server-side (`router.ts` lines 294–299); the Worker's `/mcp` accepts pinned single-project agent credentials without `require_signature` and caps a request body at 128 KiB (`apps/worker/src/mcp.ts` line 38); the event schema puts no length on `intent` (`schema.ts` line 248) | the files named |
+| The code at main `8d77bc08` | the hook's token precedence: `RETRACE_HOOK_TOKEN` first, then the credential named by `.retrace.json`, then `RETRACE_TOKEN` (`git-hook.ts` lines 69–83); a missing key path means the hook does not sign (lines 87–100); the MCP client sends `authorization: Bearer <token>` when a token is set (`remote-store.ts` line 47); the Worker stamps `sealed_by` as `pinned:<credential name>` server-side (`router.ts` lines 294–299); the Worker's `/mcp` accepts pinned single-project agent credentials without `require_signature` (`apps/worker/src/mcp.ts`, `authenticateRemoteMcp`, lines 61–75) and caps a request body at 128 KiB (`RETRACE_MCP_MAX_BODY_BYTES`, line 38, enforced at lines 238–240); the event schema puts no length on `intent` (`schema.ts` line 248) | the files named |
 | OpenShell's documentation at commit `021400be` | the `claude-code` profile (`ANTHROPIC_API_KEY`/`CLAUDE_API_KEY` as `x-api-key` to `api.anthropic.com`, plus `statsig.anthropic.com` and `sentry.io`, "drop the last two if your policy forbids that traffic"); the `github` profile (bearer `authorization`; `api.github.com` read-only; `github.com` clone and fetch only, "push (git-receive-pack) stays denied"); a profile may list several env var names for one credential; `--from-existing` reads the named variables from the creating command's environment; the substitution table (header value; Basic auth decoded, resolved, re-encoded); `--env` values are readable by the agent, so "to hide a secret from the agent, attach it through a profile-backed provider"; `sandbox create --from <image>`, `--cpu`, `--memory`; `sandbox upload`, `sandbox exec`, `sandbox connect`; CA certificates among the baseline paths a networked sandbox gets; TLS terminated "using a per-sandbox ephemeral CA" | `providers/claude-code.yaml`, `providers/github.yaml`, `providers/codex.yaml`; `docs/how-it-works/providers/overview.mdx` (lines 44, 400–401); `docs/how-it-works/sandboxes/overview.mdx`; `docs/how-it-works/policies/default-policy.mdx`; `docs/security/best-practices.mdx`; `docs/tutorials/github-push-access.mdx` |
 | Claude Code's documentation, read 2026-10-05 | `ANTHROPIC_API_KEY` is sent as `X-Api-Key`; `ANTHROPIC_AUTH_TOKEN` and the setup token as `Authorization: Bearer`; the host list (`api.anthropic.com` required; `downloads.claude.ai` for updates and plugins; telemetry hosts optional) and `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`, `DISABLE_AUTOUPDATER`; `.mcp.json` expands `${VAR}` in `command`, `args`, `env`, `url` and `headers`; MCP scopes local, project, user; `~/.claude/CLAUDE.md` loads before the project's `CLAUDE.md` | `code.claude.com/docs/en/authentication`, `…/network-config`, `…/mcp`, `…/memory` |
 | The W1 sheet and its research | the options for D-a, D-b, D-c with costs; OpenShell's `codex` profile injects OAuth tokens into the sandbox as values (the reason a3 was declined); OpenAI's guidance that automation belongs on an API key | `DECISIONS-W1.md` §1–§3 |
@@ -108,9 +114,13 @@ follows from custody, not from the sandbox. The name follows the harness and the
 
 The sandbox can hold no private key that the model cannot read, and the proxy substitutes a bearer value but cannot sign (Stage 2
 §4.1). So the seat is **keyless**: every event carries `producer_sig_verdict: none`. That departs from agent-rules 7, and a design
-note does not enact it: **W7 includes the agent-rules amendment (class a)**, in B6's shape, bounding the exception to this seat:
-it builds only; it never reviews or merges; it sends no agent-rules 15 pane messages; its only GitHub writes are pushes to
-non-main branches (§6). The bound is D-b as decided.
+note does not enact it, and neither does a custody go (W5) or an operational go for the probe (W6): **the exception is enacted in
+two class (a) steps before the seat writes anything** (§8). **W6a**, before the probe: a bounded *probe* exception, in B6's shape,
+that permits exactly the probe's operations under the seat's pinned credential (writes to project `retrace`; one commit and one
+push to one named non-main branch; no other GitHub write) together with the identity clause the seat needs (§2.4). **W7**, after
+the probe passes: the standing exception for the seat's bound: it builds only; it never reviews or merges; it sends no agent-rules
+15 pane messages; its only GitHub writes are pushes to non-main branches (§6). The bound is D-b as decided. Until W6a merges, the
+seat may read and report only; a dispatch (§2.4) authenticates an instruction and enacts no rule.
 
 ### 2.4 The identity block and the instruction channel
 
@@ -147,8 +157,22 @@ The sandbox's terminal on the PC is not one, and this note does not make it one.
    exactly what the hash check measures (probe Q8). If it fails, carrier B (`openshell sandbox upload` by Jordan's hand, hashed
    against the `sent` event) needs no design change.
 
-The seat's raw reads are the gap Stage 2 §7 recorded for the laptop, closed here by construction: the seat has only its own
-credential, so "with its own credential" (agent-rules 15) holds on the PC without a new tool.
+**What a sealed brief may contain (the content contract for carrier A).** A brief sealed as an event is ledger content for good.
+The Worker's share routes return the selected events and exports to whoever holds an applicable share link, before any further
+authentication, and an artifact share can include causal ancestors (`packages/core/src/router.ts` lines 764–815, the share
+routes, especially 784–796). Carrier A is therefore **not a private channel**: the hash check authenticates the delivered bytes, not
+their confidentiality. So a brief is sealed only when it is written to be share-safe: no secret value, private key or live bearer
+URL (agent-rules 13 is the floor), and no operational, personal or proprietary detail whose disclosure to a share recipient would be
+unacceptable. The coordinator checks the text against this contract before sealing and records the check on the brief event
+(`method.params.share_safe: "checked"`); a brief that cannot meet it is not sealed: only its sha256 and a reference go on the
+`sent` event, and its body travels by carrier B. A later amendment appends; it does not redact a sealed body. Revoking a share
+does not retract copies already delivered. Every brief this project has written so far lives in the operator's folder, outside
+the ledger; carrier A changes that for the briefs it carries, and this contract is the admission rule.
+
+The seat's raw reads use its own credential because it holds no other, so "with its own credential" (agent-rules 15) holds for
+the PC receiver's own read path without a new tool. That is a statement about this receiver's path, not a measurement (Q8 measures
+it), and it does not close the laptop gap: `docs/design/sandbox-credential-proxy.md` §7 records that in a laptop pane the raw
+verification reads run on the owner token from the pane's environment, and that gap stays open for the coordinator to route.
 
 ## 3. The second witness on the PC
 
@@ -190,12 +214,23 @@ memory. Cloud-seat §3.5's four rules (identity by `idempotency_key`, authorship
 intersected with the webhook's file list, boundary only for those paths) are built in `capture.ts` and `reconcile.ts` and need
 no change; the regression cases there are the regression cases here.
 
-### 3.4 Expected reconcile result once live
+### 3.4 What reconcile shows once live, and what it does not
 
 For a seat-authored commit, the restricted seal and the webhook seal agree on sha and on the actor `claude-code-openshell`, so
-`producer_disagreement` clears. `uncovered` clears only when the seat logged its edits through its MCP server before the commit
-(agent-rules 9). A commit whose trailer names another seat gets no eligible restricted seal and reads as an agent commit seen
-only by the webhook, which fails by default.
+`producer_disagreement` clears. `uncovered` clears when the seat's edit declarations for the changed paths sit before the commit's
+accepted ledger boundary (agent-rules 9). **That is a statement about ledger order, not about time, hook execution or authorship.**
+`capture.ts` admits a restricted self-seal whenever the idempotency key, the sha, the commit artifact, the webhook's actor and the
+paths match (lines 109–126), and `reconcile.ts` compares ledger sequence numbers, not Git commit times (lines 368–381). So a seat
+could commit without any hook, declare its edits afterwards through its MCP server, post a matching `git:<sha>` self-seal, then
+push: the webhook confirms the pushed commit and its actor, the self-seal is eligible, and reconcile reports `ok` with the paths'
+coverage window ending at the forged seal. Codex reproduced exactly this against the built implementation with a synthetic fixture
+(`evt_85554085…`, C-M3). What the pair proves is therefore the webhook-confirmed commit and actor, and edit declarations accepted
+before a boundary the seat itself supplied; it does not prove that a hook ran, when the edits were declared relative to the commit,
+or who authored them. The keyless tier accepts that limit (§2.3); it is stated here, not solved. Two verdicts are distinct:
+`uncovered`, no qualifying declaration for a path, and `misattributed`, the only qualifying declarations belong to another seat
+(`reconcile.ts` lines 381–395); another seat's declaration can clear the first while causing the second. A commit whose trailer
+names another seat gets no eligible restricted seal, because the webhook resolves a different actor (`capture.ts` lines 119–126,
+`reconcile.ts` lines 346–352), and reads as an agent commit seen only by the webhook, which fails by default.
 
 ### 3.5 Code this needs (W3)
 
@@ -222,7 +257,10 @@ the hooks installed in that clone; `sandbox/openshell/CLAUDE.seat.md` copied to 
 `PreToolUse` hook; `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` and `DISABLE_AUTOUPDATER=1`. Everything the seat runs is in
 the image, so the runtime policy opens no package registry. Resources at creation: `--cpu 2 --memory 3Gi`, an estimate for an
 8 GB machine that also runs Omarchy, Podman and the gateway, to be measured in W6. The sandbox is created with the three
-providers attached and `-- claude` as its canonical process, so `openshell sandbox connect` attaches to the harness.
+providers attached and `-- claude` as its canonical process, so `openshell sandbox connect` attaches to the harness. One build-time
+detail: `retrace-git install` calls `loadCfg`, which resolves a hook token at install time (`git-hook.ts` lines 426–446), before
+any provider exists; the Containerfile therefore runs it with a fixed, non-secret, meaningless `RETRACE_HOOK_TOKEN` that no server
+accepts, and the provider's placeholder replaces it in the running sandbox's environment.
 
 ### 5.2 Three providers, three profiles (W4, in the repository beside the Containerfile)
 
@@ -262,7 +300,15 @@ Two paths this note does **not** take, and why:
 - **Pushes to main.** OpenShell's policy sees one endpoint, `git-receive-pack`, and cannot tell branches apart, so the policy rule
   that allows the push allows a push to any branch. What stops `main` is the push guard (a bypassable policy control, as
   cloud-seat §6 says) and the ledger: a webhook seal on `refs/heads/main` naming `claude-code-openshell` is evidence a reader
-  notices. No automated alert exists. A doctor finding for it is future work, as it is for the cloud seat.
+  notices. No automated alert exists. A doctor finding for it is future work, as it is for the cloud seat. **The residual, named:**
+  the token plus repository-wide `git-receive-pack` access grants more ref authority than D-b authorises, and the guard, not the
+  policy and not GitHub, holds the line; W5's custody go names this residual when the token is minted. Two alternatives were
+  considered and are **declined for v1**: a GitHub App or machine identity for the seat, governed by a branch ruleset that nothing
+  bypasses (a ruleset that exempts Jordan does not constrain a token acting as Jordan; this belongs with the per-seat GitHub
+  identity work, `docs/design/github-owner-login-attribution.md` §6 step 5 and issue #82), and a push destination confined to a
+  separate repository with coordinator promotion (two repositories to reconcile for one seat). Either can replace the residual
+  later without changing the rest of this note. As on the cloud seat, a wrong trailer also defeats an actor-filtered search for a
+  push to `main` (cloud-seat §6).
 - **The GitHub token** is fine-grained, one repository, contents read and write, no other permission, held by the `github-seat`
   provider only, minted and rotated by Jordan (W5). The push arrives as his account, as every seat's push does today
   (agent-ops 19, issue #82).
@@ -277,7 +323,9 @@ Two paths this note does **not** take, and why:
   on Jordan's own machine (Stage 2 §4.6). Accepted and stated. Whether node and `curl` in the sandbox trust that CA without extra
   configuration is unmeasured (Stage 1 was plain HTTP): probe Q2.
 - **The A1 condition (Stage 2 §4.5).** The Worker must never reflect the `Authorization` header into a response the sandbox can
-  read. Probe Q3 measures it over real responses, and the Worker's response paths are read for it in W6's verification.
+  read. Probe Q3 scans every response recorded during the probe for all three credentials; a negative result bounds the inspected
+  representations and response paths, and is not a proof that the Worker never reflects a header. The Worker's response paths are
+  also read in W6's verification, and that reading is stated as a reading.
 
 ## 7. The probe (W6)
 
@@ -288,7 +336,7 @@ probe at that line except as noted. Results go into a dated correction to this n
 |---|---|---|---|
 | Q1 | Does the proxy substitute the Retrace credential? | `curl` `GET /projects/retrace/head` with `authorization: Bearer $RETRACE_TOKEN` (the placeholder); the same request with no header | 200 with the header, 401 without |
 | Q2 | Does node's `fetch` go through the proxy and trust its CA? | the same request from `node -e` with built-in `fetch` | 200 |
-| Q3 | Is the credential absent from the bytes the seat can inspect, **including every response it receives**? | inside the sandbox: every environment value, every file under the home and the clone, and every HTTP response body and header captured during Q1–Q9 are scanned for maximal runs of base64url characters 43 or longer; the sha256 of every 43-character window is printed, never the run. On the laptop, Jordan's script compares those hashes with the credential's. Both scripts tested first with dummy tokens (cloud-seat §7, Q3) | no 43-character base64url window in the inspected bytes hashes to the credential; the Worker reflected nothing (the §4.5 condition) |
+| Q3 | Are **all three** credentials absent from the bytes the seat can inspect, **including every response it receives**? **Runs last, after Q9**, because its input includes the Q4–Q9 traffic | Inside the sandbox, over every environment value, every file under the home and the clone, and every HTTP response (headers and body) recorded during Q1–Q9, including the `authorization`, `x-api-key` and Basic-auth headers git and the harness send: one detector per credential, each built from that credential's own length and alphabet as minted (Retrace's token: 43 base64url characters, `mintToken`; the Anthropic key and the GitHub fine-grained token: the lengths and alphabets of the values Jordan's script minted, supplied to the sandbox as non-secret numbers, never inferred from Retrace's generator). For each detector, every maximal run of its alphabet at least its length long is scanned and the sha256 of every window of exactly its length is printed, never the run; Basic-auth headers are also decoded before scanning. On the laptop, Jordan's script compares the printed digests with reference digests computed from the three values, which never enter the sandbox. Positive controls run first with dummy values of each type in an environment variable, a file, a full reflected `authorization` header, a reflected `x-api-key` header and a Basic-auth header | no printed digest equals a reference digest for any of the three credentials; stated as "no inspected representation on the inspected response paths carried a credential", a finite negative scan, not a proof that the Worker never reflects a header (§6) |
 | Q4 | Do the hooks run in the clone and seal with the restricted stamp? | one authorised commit on a named non-main branch | a `committed` event for that sha, `sealed_by` `pinned:<name>`, verdict `none`, `idempotency_key` `git:<sha>` |
 | Q5 | Does the MCP path work? | `retrace_instruct` and `retrace_log` through the stdio `retrace-mcp` | both seal under actor `claude-code-openshell`, `sealed_by` `pinned:<name>`. Fails: the image-scope HTTP entry is tried; both fail: stop |
 | Q6 | Do the producers agree, within the restriction? | `reconcile` over the Q4 commit with `--restricted-hook-stamp "<stamp>=claude-code-openshell"` | no `producer_disagreement`; `uncovered` only if no edit was logged |
@@ -308,11 +356,13 @@ rotated by typed script before anything else and the question goes back to Jorda
 | W3 | `admin.ts` harness entry, no-key exception, onboarding branch, tests; the guard's second selector with tests | a builder from a brief the coordinator routes | code order; brief class (a) |
 | W4 | `sandbox/openshell/`: Containerfile, the three profiles, `CLAUDE.seat.md`, the settings file; built on the PC by Jordan | claude-code drafts in the S1 worktree while W2 is in review; Jordan builds the image | class (a): the files govern what the seat can reach |
 | W5 | custody: mint the Retrace credential and update the Worker secret; carry it over SSH into `openshell provider create`; the Anthropic key and the GitHub token the same way | Jordan, by typed scripts outside Orca, one go each; the coordinator writes the scripts and receives only names and hashes | credential and secret changes |
+| W6a | rules, part 1: the bounded **probe** exception to agent-rules 7 (§2.3: the probe's named non-main branch and operations under the seat's pinned credential, nothing else) and the `CLAUDE.md` selector clause (§2.4) | claude-code | class (a); **merged before W6 starts**. A W6 operational go is not a rule amendment |
 | W6 | the probe, §7 | Jordan runs; claude-code verifies from the ledger | — |
-| W7 | rules: the agent-rules 7 exception (§2.3); `restricted_hook_stamps` in `.retrace.json`; the `CLAUDE.md` clause; `team-roles`; the agent-ops host entries (§6) | claude-code | class (a) |
+| W7 | rules, part 2: the standing exception for the seat's bound (§2.3); `restricted_hook_stamps` in `.retrace.json`; `team-roles`; the agent-ops host entries (§6); the seat marked live | claude-code | class (a); after W6 passes |
 | W8 | the first real task through the seat, then a measurement doc | the seat; claude-code writes the doc | class (b) |
 
-Nothing past W2 starts without its gate. W3 and W4 may run in parallel after W2 merges.
+Nothing past W2 starts without its gate. W3 and W4 may run in parallel after W2 merges. W6 does not start until W6a has merged;
+until then the seat, if it exists at all, reads and reports only.
 
 ## 9. What this note does not claim
 
@@ -324,6 +374,9 @@ Nothing past W2 starts without its gate. W3 and W4 may run in parallel after W2 
 - That the proxy protects the token from the `stranger` account (Stage 2 §4.3), or from a destination that reflects it (Q3).
 - That the 8 GB PC runs the stack comfortably. The resource numbers in §5.1 are estimates.
 - That OpenShell 0.1.x keeps these interfaces: "Interfaces marked Experimental may change or be removed in a patch release."
+- That carrier A is private. A sealed brief is shareable ledger content (§2.4), and the content contract is the only guard.
+- That a clean reconcile proves the hook ran or that edits were logged before the commit. It proves ledger order (§3.4).
+- That a negative Q3 proves the Worker never reflects a header. It bounds the inspected representations and paths (§7).
 - That any of §3, §5, §6 or §7 works. Nothing here is built.
 
 ## 10. Gate
@@ -332,3 +385,18 @@ Class (a) under agent-rules 12: Codex, NOOA and Grok review (team-roles rule 2);
 merge-readiness only (agent-rules 11). Merge on Jordan's go. Nothing in this note is code, so no code order applies; W3 and W4
 have their own gates. The W1 sheet, the brief and the scope are in the operator's folder; what this note uses from them is
 restated here with the ledger events that recorded them.
+
+## 11. Changes in v2
+
+| Finding | Disposition |
+|---|---|
+| Codex C-M1 (Medium), carrier A seals the brief's bytes into shareable history with no admission rule | **Applied.** §2.4 gains the content contract: share-safe text only, a pre-seal check recorded on the brief event, confidential briefs by carrier B with hash and reference sealed, and the statement that amendments and share revocation cannot retract a sealed or delivered body. §9 says carrier A is not private |
+| Codex C-M2 (Medium), Q3 detects only Retrace's 43-character token shape and ran too early | **Applied.** Q3 is one detector per credential, built from each credential's own length and alphabet supplied as non-secret numbers, with owner-side reference digests, positive controls for every type including full reflected headers and Basic auth, decoded Basic-auth headers, a pass condition scoped to the inspected representations and paths, and it runs last, after Q9. §6's A1 bullet and §9 say what a negative scan does and does not prove |
+| Codex C-M3 (Medium), §3.4 overclaimed that a clean `uncovered` means edits were logged before the commit | **Applied.** §3.4 states the forgery case Codex reproduced and what reconcile shows for it, describes the evidence as edit declarations before an accepted ledger boundary, and distinguishes `uncovered` from `misattributed`. §9 carries the limit |
+| Codex C-M4 (Medium), W6 would exercise the keyless seat before W7 enacts the agent-rules 7 exception | **Applied.** The exception is enacted in two class (a) steps: W6a, a bounded probe exception plus the identity clause, merged before W6; W7, the standing bound, after the probe. §2.3 and §8 say that neither a custody go nor an operational go amends a rule |
+| Grok G-L1 (Low), one `mcp.ts` line number asked to carry two facts | **Applied.** §1 cites `authenticateRemoteMcp` lines 61–75 for acceptance and line 38 (enforced at 238–240) for the body cap |
+| Grok G-L2 (Low), owner-protocol §10 cited as if it existed | **Applied.** §0.1 says §10 is proposed in the open PR 176, that the file ends at §9 at this head, the base and main, and that `cloud-seat.md` §2.4 still calls the channel undefined |
+| NOOA L1 (Low), §0 read as a running system beside "Not built" | **Applied.** §0's first bullet is phrased as the design ("would run") and points at §8 |
+| NOOA L2 (Low), §2.4's Stage 2 §7 claim unverifiable from the packet and read too broadly | **Applied.** The sentence cites `sandbox-credential-proxy.md` §7 by file, narrows the claim to the PC receiver's own read path, says it is not a measurement, and says the laptop gap stays open |
+| Codex scoped conclusions, recommended not required | **Applied.** §5.1 notes that `retrace-git install` resolves a token at install time and names the build-time override; §6 names the GitHub push-scope residual, the two alternatives declined for v1 and why, and keeps the wrong-trailer limit |
+
