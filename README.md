@@ -23,6 +23,36 @@ It exists because a commit in this repo named the wrong AI agent as its author. 
 
 ## Quick start (local, no cloud account)
 
+**Your own repo, no checkout of this one.** Two commands from the published package, run inside the repository you want recorded:
+
+```bash
+npx -y -p @retrace-dev/cli@0.3.0 retrace-git install --project <project>   # writes .retrace.json and the post-commit / post-merge hooks
+npx -y -p @retrace-dev/cli@0.3.0 retrace doctor                            # READY when the ledger, hooks and project agree
+```
+
+Then give your agent the MCP server from the same package — Claude Code shown (`~/.claude.json` or the repository's `.mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "retrace": {
+      "command": "npx",
+      "args": ["-y", "-p", "@retrace-dev/cli@0.3.0", "retrace-mcp"],
+      "env": {
+        "RETRACE_PROJECT": "<project>",
+        "RETRACE_ACTOR": "claude-code",
+        "RETRACE_ON_BEHALF_OF": "<your email>",
+        "RETRACE_PRODUCER_KEY_FILE": "/home/<you>/.retrace/producer-keys/claude-code.jwk"
+      }
+    }
+  }
+}
+```
+
+The producer key file is the same one described under the contributor path below; the agent still has to be told to call the tools (see [SETUP-GUIDE](SETUP-GUIDE.md)). This block answers [#83](https://github.com/jordandru/retrace/issues/83).
+
+**Contributing to this repository** (a clone):
+
 ```bash
 npm install && npm run build && npm test
 npm run serve            # local timeline at http://127.0.0.1:7777 (prints a one-time token)
@@ -68,6 +98,7 @@ Commits, GitHub PRs and Google Drive become events through adapters; the hosted 
 
 ## What it deliberately does not do
 
+- **Instruction roots are the agent's testimony.** An `instructed` event records what the agent says the human said; the pinned credential proves which seat sealed it and when, not that the quote is faithful ([owner-protocol §7](docs/owner-protocol.md)). Causality is only as honest as the seat that logs its root.
 - It is **tamper-evident, not tamper-proof** — between hourly checkpoints there is a window in which an operator could rewrite; after a checkpoint, rewriting means rewriting Rekor.
 - **Model names are asserted** by the agent and labeled as such; the identity and time are what's cryptographically bound. Agent events missing a model are counted as declared none (`model_source: none`) or no source recorded (legacy events with no `model_source` field).
 - **Coverage is what producers log** — complete for commits (enforced by the gate), not keystrokes, prompts, the harness's system prompt, or the model's reasoning.
