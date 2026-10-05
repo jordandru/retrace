@@ -63,7 +63,7 @@ Browse it: <https://retrace-api.slcwitit.workers.dev/s/sh_bd2ab621ad2454ceb9b9fd
 
 | Field | Who decides | How it's protected |
 |---|---|---|
-| **who** (actor id) | the server, from the credential | agents cannot impersonate each other |
+| **who** (actor id) | the server, from the credential | the actor comes from the credential: on a pinned credential the server writes it, on an `assert`-trust credential the body's actor is kept within the credential's allowed list; who holds the credential is the limit (issue #74, item 6) |
 | **when** | the server (arrival time) | sealed into the hash |
 | **model** | the agent | recorded as *asserted*, shown as such |
 | producer signature | the agent's own Ed25519 key | verified by the server; the server never holds the private key |
