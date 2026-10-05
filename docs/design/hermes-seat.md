@@ -1,6 +1,6 @@
-# Hermes seat: Hermes Agent as an opt-in builder (design note v1, draft)
+# Hermes seat: Hermes Agent as an opt-in builder (design note v1)
 
-**Status:** v1 draft, 2026-10-05, by `claude-code` (coordinator, session 30; `claude-fable-5-1`, model source harness-runtime).
+**Status:** v1, 2026-10-05, by `claude-code` (the "Hermes seat investigation" pane, author; `claude-fable-5-1`, model source harness-runtime). Drafted at 01:30 MDT; the four decisions were signed at 01:45 MDT (`evt_648a046e4778483b81db7bcbf2babc1e`, "0a, a2, b1, c1") and folded in.
 **Not built.** Class (a) under agent-rules 12: it defines a new seat, its identity file, a guard that governs what the seat may do,
 the custody of its credential, and a launcher. Written on Jordan's signed `evt_af0778b61f08410884d91c94aafd9db6` ("Draft design
 note"), after his signed `evt_3c29b74571ab49f5a69d8995c4125348` ("Investigate potential hermes seat") and `evt_cfd331e1abec4c50b99bb6bd3974e26b`
@@ -8,9 +8,9 @@ note"), after his signed `evt_3c29b74571ab49f5a69d8995c4125348` ("Investigate po
 and its Gate 0 measurement `gate0/RESULTS.md` (sha256 `b1b329b4…`, `evt_fb0a8f7d50274ea48b9658e42b288f9f`). The template is
 `docs/design/opencode-seat.md` (PR 58, closed) for the identity gate and `docs/design/cloud-seat.md` for the shape of a seat note.
 
-**Draft means:** the four decisions in §1 are Jordan's and are not taken here. Each carries the author's recommendation and the
-line that overrules it. The note is complete under those recommendations and is routed for review only after the decisions are
-signed, so reviewers read a note with answers, not placeholders.
+**Decisions taken.** The four decisions in §1 were Jordan's; he signed `0a, a2, b1, c1` (`evt_648a046e…`). The table keeps the options
+and the author's recommendations beside what was taken, so a reader sees where the decision followed the recommendation (H-0, H-b,
+H-c) and where it did not (H-a: Nous Portal rather than a direct vendor key).
 
 ## 0. What this note decides, and what it leaves to the gate
 
@@ -28,14 +28,14 @@ signed, so reviewers read a note with answers, not placeholders.
 
 ## 1. The decisions Jordan owns
 
-| | Question | Options | Recommendation | Overrule |
+| | Question | Options | Recommendation | Taken (`evt_648a046e…`) |
 |---|---|---|---|---|
-| **H-0** | Is a seventh seat wanted at all? `SETUP-GUIDE.md` line 330 says "do not add … a sixth agent … while completeness (omission detection) and attribution … are still weak"; the 2026-09-01 NemoClaw assessment said the same. Since then: trailer-consistency classifier (PR 19 line), model-source v2 (PR 118/119), reconcile HEAD-only, `@retrace-dev/cli` 0.3.0 | (0a) yes, and that sentence is revised to name the gates a new seat must pass; (0b) yes, as a time-boxed pilot with no roster line; (0c) no, file this note as reference | **0a**: the gates in §7 are the condition the sentence lacked. The sentence changes in the same pull request as the roster line, after Gate 2 | one signed line: 0b or 0c |
-| **H-a** | Which model and provider, and whose claim is the model id? | (a1) a vendor outside the Core Four on its own API key (DeepSeek, Moonshot, Alibaba, Zhipu…): the vendor's claim, metered; (a2) Nous Portal Plus, $20/month for $22 credit: a reseller's claim (opencode-seat §6 precedent), 300+ models; (a3) OpenRouter: reseller's claim, metered; (a4) a Core Four model (Anthropic/OpenAI/xAI): no vendor diversity, duplicates a seat | **a1** if the budget allows one metered key with a hard monthly cap; otherwise **a2**. Not a4: a builder on GPT or Claude adds a harness and no independence. Not a Nous model: Nous says Hermes 4 is "not recommended for use inside Hermes Agent" | one signed line naming a1 with the vendor, a2, a3 or a4 |
-| **H-b** | Where does it run? | (b1) this laptop, an Orca pane, like the other seats; (b2) NemoHermes inside OpenShell on the Omarchy PC, a second tenant of PR 179's custody (bearer substituted at egress, no key in the sandbox) | **b1** for Gates 1–3; b2 after PR 179's W4–W6 exist, as a dated amendment here | one signed line: b2 now |
-| **H-c** | What may it do? | (c1) build only: edits, tests, commits, pushes to non-main branches, pull requests opened by the coordinator from its branch; (c2) build and open its own pull requests; (c3) build and review | **c1**, matching OpenCode; c2 after one clean Gate 3; never c3 (team-roles 1, 3) | one signed line: c2 |
+| **H-0** | Is a seventh seat wanted at all? `SETUP-GUIDE.md` line 330 says "do not add … a sixth agent … while completeness (omission detection) and attribution … are still weak"; the 2026-09-01 NemoClaw assessment said the same. Since then: trailer-consistency classifier (PR 19 line), model-source v2 (PR 118/119), reconcile HEAD-only, `@retrace-dev/cli` 0.3.0 | (0a) yes, and that sentence is revised to name the gates a new seat must pass; (0b) yes, as a time-boxed pilot with no roster line; (0c) no, file this note as reference | **0a**: the gates in §7 are the condition the sentence lacked. The sentence changes in the same pull request as the roster line, after Gate 2 | **0a**: a seventh seat, and `SETUP-GUIDE.md` line 330 is revised to name the gates (§8 item 4) |
+| **H-a** | Which model and provider, and whose claim is the model id? | (a1) a vendor outside the Core Four on its own API key (DeepSeek, Moonshot, Alibaba, Zhipu…): the vendor's claim, metered; (a2) Nous Portal Plus, $20/month for $22 credit: a reseller's claim (opencode-seat §6 precedent), 300+ models; (a3) OpenRouter: reseller's claim, metered; (a4) a Core Four model (Anthropic/OpenAI/xAI): no vendor diversity, duplicates a seat | **a1** if the budget allows one metered key with a hard monthly cap; otherwise **a2**. Not a4: a builder on GPT or Claude adds a harness and no independence. Not a Nous model: Nous says Hermes 4 is "not recommended for use inside Hermes Agent" | **a2**: Nous Portal. The model is chosen from the Portal catalog at Gate 1 and recorded verbatim; the model id is the Portal's claim (§6.1, §9). A model from a vendor outside the Core Four is preferred within that catalog (team-roles 3) |
+| **H-b** | Where does it run? | (b1) this laptop, an Orca pane, like the other seats; (b2) NemoHermes inside OpenShell on the Omarchy PC, a second tenant of PR 179's custody (bearer substituted at egress, no key in the sandbox) | **b1** for Gates 1–3; b2 after PR 179's W4–W6 exist, as a dated amendment here | **b1**: this laptop, an Orca pane |
+| **H-c** | What may it do? | (c1) build only: edits, tests, commits, pushes to non-main branches, pull requests opened by the coordinator from its branch; (c2) build and open its own pull requests; (c3) build and review | **c1**, matching OpenCode; c2 after one clean Gate 3; never c3 (team-roles 1, 3) | **c1**: build only |
 
-The note below assumes 0a, a1-or-a2, b1, c1. Where a choice would change a section, the section says so.
+The note below is written under 0a, a2, b1, c1. A later change to any of them is a dated amendment here.
 
 ## 2. Evidence
 
@@ -139,8 +139,8 @@ a check for such files is part of the launcher's preconditions.
 
 ```yaml
 model:
-  provider: <H-a>            # a1: the vendor's provider id; a2: nous; a3: openrouter
-  model: <H-a, verbatim>     # the exact string; the launcher copies it into RETRACE_ACTOR_MODEL
+  provider: nous             # H-a a2: Nous Portal
+  model: <chosen at Gate 1 from the Portal catalog, verbatim as Hermes records it; the launcher copies it into RETRACE_ACTOR_MODEL>
 agent:
   max_turns: 60
   dangerous_command_approval: true
@@ -180,8 +180,10 @@ builder needs; `retrace_amend`, `retrace_share`, `retrace_export`, `retrace_proj
 
 ### 6.2 The profile's `.env` (`~/.hermes-retrace/.env`, mode 0600, written by Jordan's typed step, agent-ops 16)
 
-`RETRACE_TOKEN_HERMES=<pinned credential>`, `RETRACE_PRODUCER_KEY_FILE_HERMES=<path, mode 0600>`, and the model provider's key under
-the name Hermes expects for H-a. `.env` values never enter `os.environ` (`local.py:363`) and Gate 0 (f) showed `OPENAI_API_KEY` from
+`RETRACE_TOKEN_HERMES=<pinned credential>` and `RETRACE_PRODUCER_KEY_FILE_HERMES=<path, mode 0600>`. Under a2 there is no model API key
+in `.env`: Nous Portal authenticates by OAuth. `hermes -p retrace auth add nous` (a browser login, Jordan's typed step) writes a refresh
+token to `~/.hermes-retrace/auth.json`, from which Hermes mints a short-lived JWT per call. The Plus subscription ($20/month, $22 credit)
+is Jordan's outward action (agent-rules 14); the Portal's Tool Gateway tools stay off (they are opt-in per tool). `.env` values never enter `os.environ` (`local.py:363`) and Gate 0 (f) showed `OPENAI_API_KEY` from
 `.env` absent from the terminal; whether `RETRACE_TOKEN_HERMES` is likewise absent is measured in Gate 1 (a name Hermes does not know).
 
 ### 6.3 The launcher `scripts/hermes-seat.sh`
@@ -243,7 +245,7 @@ Nothing is called supported until a sealed event shows it (agent-rules 0).
   `pre_api_request` would bypass it. None is known at `7b362884`; Gate 0 saw every main call pass through it (`hooks.jsonl`, A2 and G).
 - **Env inheritance.** The terminal sees the launching environment; the launcher starts from `env -i`. The seat never runs from a shell
   that holds the owner token.
-- **Model id** under a2/a3 is a gateway's claim. `post_api_request` carries `response_model` (Gate 0 (h) payload list; the provider's
+- **Model id** under a2 is Nous Portal's claim about what served the request, as OpenCode Go's was (opencode-seat §6); no line in this repository may call it verified. `post_api_request` carries `response_model` (Gate 0 (h) payload list; the provider's
   echo of the served model): a possible verification input for `model-source.md` §4.5, untested, not claimed.
 - **Approvals.** A builder in a pane needs a human for dangerous-command prompts; `auto_approval_dangerous` stays false. Unattended runs
   are out of scope for this note.
@@ -254,7 +256,8 @@ Nothing is called supported until a sealed event shows it (agent-rules 0).
 ## 10. What this note does not claim
 
 That Hermes is supported (Gate 2); that a Hermes session calls the tools (Gate 1); that the guard is written (§8 item 2); that the
-model id is verified (§9); that NemoHermes on the PC works (H-b b2, PR 179's gates); that any Nous model is involved (none is).
+model id is verified (§9); that NemoHermes on the PC works (b2 was not chosen; PR 179's gates); that any Nous model is involved (the
+Portal serves third-party models; none of Nous's own is chosen).
 
 ## 11. Dispositions of review findings
 
