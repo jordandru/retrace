@@ -1,5 +1,5 @@
 {
- "source": "gate0 run E, last request (2aa6ae41\u2026): sub/AGENTS.md spliced into a tool result",
+ "source": "Gate 0 run E, requests.jsonl line 5 of 6 (the last request that carried tools; line 6 is the title-generation call without tools; file sha256 2aa6ae41649f36c1\u2026): the 'messages' array only (roles system, user, assistant, tool, assistant, tool); the second tool message carries '[Subdirectory context discovered: sub/AGENTS.md]'. Nothing omitted from the array.",
  "messages": [
   {
    "role": "system",

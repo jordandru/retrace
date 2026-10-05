@@ -1,6 +1,7 @@
 # Hermes seat profile template (docs/design/hermes-seat.md §6.1). Rendered by scripts/hermes-seat.sh into
-# $HERMES_HOME/config.yaml. The launcher accepts exactly four substitutions: the primary checkout path, the scripts
-# directory, the model id, and one of the two env blocks in hermes.retrace.phases.yaml. Anything else that differs
+# $HERMES_HOME/config.yaml. The launcher accepts exactly four substitutions: the primary checkout path, the profile's
+# hook directory (where it copies and hash-pins scripts/retrace-guard-check.sh), the model id, and mcp_env_common plus one
+# of mcp_env_scratch / mcp_env_live from hermes.retrace.phases.yaml. Anything else that differs
 # fails the launch. (The placeholders are written only where they are substituted, never in these comments.)
 _config_version: 49
 mcp_discovery_timeout: 30          # the first turn waits for the retrace MCP server (default 1.5 s is shorter than node startup)
@@ -41,7 +42,7 @@ plugins:
       granted_capabilities: [tools.override]
 hooks:
   pre_tool_call:
-    - command: "{{SCRIPTS_DIR}}/retrace-guard-check.sh"
+    - command: "{{HOOK_DIR}}/retrace-guard-check.sh"
       timeout: 10
       fail_closed: true
 hooks_auto_accept: true

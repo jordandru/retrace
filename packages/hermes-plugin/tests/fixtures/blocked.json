@@ -1,5 +1,5 @@
 {
- "source": "gate0 run C, first tooled request (d7639a11\u2026): .hermes.md blocked by the scanner",
+ "source": "Gate 0 run C, requests.jsonl line 3 of 6 (first request with tools; file sha256 d7639a1189a2cd43\u2026): the 'messages' array only (roles system, user); the system prompt holds the '[BLOCKED: .hermes.md \u2026]' placeholder. Nothing omitted from the array.",
  "messages": [
   {
    "role": "system",

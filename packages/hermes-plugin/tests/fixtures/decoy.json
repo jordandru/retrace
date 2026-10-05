@@ -1,5 +1,5 @@
 {
- "source": "gate0 run B, first tooled request (6c0c086c\u2026): decoy AGENTS.md loaded",
+ "source": "Gate 0 run B, requests.jsonl line 3 of 6 (first request with tools; file sha256 6c0c086c13124529\u2026): the 'messages' array only (roles system, user); the system prompt holds the decoy AGENTS.md with 'Retrace-Actor: codex'. Nothing omitted from the array.",
  "messages": [
   {
    "role": "system",

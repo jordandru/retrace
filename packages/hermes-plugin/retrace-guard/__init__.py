@@ -4,6 +4,28 @@ Every provider-bound request is scanned (pre_api_request, pre_auxiliary_call). A
 whose scan passed (pre_tool_call keyed by api_request_id). Verdicts are appended to
 <HERMES_HOME>/run/guard/<session_id>.jsonl, which scripts/retrace-guard-check.sh reads independently.
 
+Fail-closed evidence (NOOA N-M1), hermes_cli/plugins_dispatch.py at 7b362884d88c887bdcc68271c3b51d25ad1a2197, quoted:
+    226        fail_closed = hook_name in _HOOK_TIMEOUT_FAIL_CLOSED_HOOKS
+    231                    if ret is _HOOK_SKIPPED:
+    232                        if fail_closed:  # policy hook: fail closed with a block directive
+    233                            results.append({"action": "block", "message": _PRE_TOOL_CALL_TIMEOUT_BLOCK_MESSAGE})
+    239            except (Exception, SystemExit) as exc:
+    240                self._report_hook_failure(hook_name, cb, kwargs, exc)
+    241                if fail_closed:  # a guard that raised made no decision: same veto as a timeout
+    242                    results.append(_policy_error_block_directive(hook_name, cb, exc))
+  with ``_HOOK_TIMEOUT_FAIL_CLOSED_HOOKS = {"pre_tool_call"}`` (line 49). So a registered pre_tool_call callback that raises or
+  times out yields a block directive. Independently, scripts/retrace-guard-check.sh (a fail_closed shell hook on pre_tool_call)
+  blocks whenever the session's verdict file has no "ok" for the request id, so a raised or missing plugin callback cannot let a
+  tool run. Exercised by RETRACE_GUARD_TEST=scan-raise (the request scan raises; no verdict; tools blocked), by
+  tests.test_guard.HookTests.test_scan_raise_switch_blocks and LoadSwitchTests.test_register_switch_raises, and by the Gate 1a
+  negatives (hermes-seat.md §7 1a).
+
+Coverage of edits (layer C, check 8; Grok G-L1): edited paths come from write_file and patch arguments and, best effort, from
+terminal commands: redirection targets (``>``, ``>>``), ``tee [-a]`` files, ``sed -i`` file arguments, ``cp``/``mv`` destinations, and
+the ``+++ b/`` paths of a patch file given to ``git apply``/``patch -p1``. Heredoc bodies, scripts executed by the shell, ``git apply``
+from stdin, and programs that write paths of their own are NOT tracked; the classifier at Worker ingestion remains the enforcement of
+record (hermes-seat.md §4.1 check 8, §9).
+
 Test switches (Gate 1a negatives only; never set for a real session):
   RETRACE_GUARD_TEST=scan-raise | scan-timeout | scan-skip   -> the request scan raises / sleeps / records nothing
   RETRACE_GUARD_TEST_LOAD=import | register | timeout        -> the plugin fails at import / in register() / hangs loading
@@ -160,6 +182,51 @@ def _paths_from_terminal(cmd: str) -> List[str]:
     return [tok for tok in re.split(r"[\s'\";|&<>()]+", cmd) if "/" in tok and not tok.startswith("-") and not tok.startswith("http")]
 
 
+_REDIRECT_RE = re.compile(r"(?<![<>])(?:\d?)>>?\s*([^\s;&|]+)")
+
+
+def terminal_write_targets(cmd: str, workdir: str) -> List[str]:
+    """Best-effort paths a terminal command writes, relative to workdir (see the module docstring for the limits)."""
+    out: List[str] = []
+    def add(tok: str) -> None:
+        tok = tok.strip("'\"")
+        if not tok or tok.startswith("-") or tok in ("/dev/null", "&1", "&2") or tok.startswith("/dev/"):
+            return
+        out.append(_rel(tok, workdir))
+    for m in _REDIRECT_RE.finditer(cmd):
+        add(m.group(1))
+    for seg in re.split(r"[;|&]+|&&|\|\|", cmd):
+        toks = [t for t in re.split(r"\s+", seg.strip()) if t]
+        if not toks:
+            continue
+        name = toks[0]
+        if name == "tee":
+            for t in toks[1:]:
+                if not t.startswith("-"):
+                    add(t)
+        elif name == "sed" and any(t.startswith("-i") or t == "--in-place" for t in toks[1:]):
+            args_ = [t for t in toks[1:] if not t.startswith("-")]
+            for t in args_[1:]:  # the first non-flag argument is the script
+                add(t)
+        elif name in ("cp", "mv") and len(toks) >= 3:
+            add(toks[-1])
+        elif (name == "git" and len(toks) >= 3 and toks[1] == "apply") or (name == "patch"):
+            for t in toks[2:] if name == "git" else toks[1:]:
+                if t.startswith("-"):
+                    continue
+                try:
+                    pf = Path(t).expanduser()
+                    pf = pf if pf.is_absolute() else Path(workdir) / pf
+                    for line in pf.read_text(encoding="utf-8", errors="replace").splitlines():
+                        if line.startswith("+++ b/"):
+                            add(line[6:].strip())
+                        elif line.startswith("+++ ") and not line.startswith("+++ /dev/null"):
+                            add(line[4:].split("\t")[0].strip())
+                except Exception:
+                    pass
+    return out
+
+
 def _check_retrace_actor_model(args: Dict[str, Any], st: Dict[str, Any]) -> Optional[str]:
     actor = args.get("actor") if isinstance(args, dict) else None
     if isinstance(actor, dict) and actor.get("model") and st.get("model") and actor["model"] != st["model"]:
@@ -241,6 +308,9 @@ def _on_post_tool_call(tool_name: str = "", args: Optional[Dict[str, Any]] = Non
     args = args if isinstance(args, dict) else {}
     if tool_name in ("write_file", "patch") and isinstance(args.get("path"), str):
         st["edited"].add(_rel(args["path"], st["workdir"]))
+    if tool_name == "terminal" and isinstance(args.get("command"), str):
+        for pth in terminal_write_targets(args["command"], st["workdir"]):
+            st["edited"].add(pth)
     if tool_name in RETRACE_LOG_TOOL_NAMES:
         for a in args.get("artifacts") or []:
             if isinstance(a, dict) and isinstance(a.get("id"), str):

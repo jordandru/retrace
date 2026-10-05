@@ -1,4 +1,5 @@
-"""Unit tests for retrace-guard against recorded Gate 0 request bodies (docs/design/hermes-seat.md §7 1a).
+"""Unit tests for retrace-guard against message arrays extracted from recorded Gate 0 request bodies (docs/design/hermes-seat.md §7 1a;
+fixtures/*.json name the run and jsonl line each array came from).
 Run: python3 -m unittest discover -s packages/hermes-plugin/tests  (no Hermes install needed)."""
 import importlib.util, json, os, sys, tempfile, unittest
 from pathlib import Path
@@ -61,6 +62,24 @@ class HookTests(unittest.TestCase):
         os.environ["RETRACE_GUARD_TEST"] = "scan-skip"
         self.h["pre_api_request"](session_id="s1", api_request_id="r1", request=req("ok"))
         self.assertEqual(self.h["pre_tool_call"](tool_name="terminal", args={"command": "ls"}, session_id="s1", api_request_id="r1")["action"], "block")
+
+    def test_scan_raise_switch_blocks(self):  # N-M1: a raising request scan records no verdict; tools blocked
+        os.environ["RETRACE_GUARD_TEST"] = "scan-raise"
+        with self.assertRaises(RuntimeError):
+            self.h["pre_api_request"](session_id="s1", api_request_id="r1", request=req("ok"))
+        r = self.h["pre_tool_call"](tool_name="terminal", args={"command": "ls"}, session_id="s1", api_request_id="r1")
+        self.assertEqual(r["action"], "block"); self.assertIn("never scanned", r["message"])
+
+    def test_terminal_writes_tracked_for_coverage(self):  # G-L1
+        wd = Path(self.tmp.name) / "proj"; wd.mkdir(); (wd / "p.diff").write_text("--- a/src/x.ts\n+++ b/src/x.ts\n@@\n")
+        guard._sessions["s1"]["workdir"] = str(wd)
+        self.h["pre_api_request"](session_id="s1", api_request_id="r1", request=req("ok"))
+        for cmd in ("echo hi > notes.md", "printf x >> log/out.txt", "cat a | tee -a b.txt", "sed -i 's/a/b/' c.py", "cp one.txt two.txt", "git apply p.diff"):
+            self.h["post_tool_call"](tool_name="terminal", args={"command": cmd}, session_id="s1")
+        self.assertTrue({"notes.md", "log/out.txt", "b.txt", "c.py", "two.txt", "src/x.ts"} <= guard._sessions["s1"]["edited"], guard._sessions["s1"]["edited"])
+        commit = "git commit --only notes.md -m 'x\n\nRetrace-Actor: hermes\nRetrace-Model: m\nRetrace-Model-Source: harness-config\nRetrace-Caused-By: evt_1'"
+        self.assertEqual(self.h["pre_tool_call"](tool_name="terminal", args={"command": commit}, session_id="s1", api_request_id="r1")["action"], "block")
+        self.assertEqual(guard.terminal_write_targets("ls > /dev/null 2>&1", str(wd)), [])
 
     def test_decoy_blocks_session(self):
         self.h["pre_api_request"](session_id="s1", api_request_id="r1", request=req("decoy"))

@@ -1,5 +1,5 @@
 {
- "source": "gate0 run A, first tooled request (requests.jsonl sha256 0f48c42e\u2026)",
+ "source": "Gate 0 run A, requests.jsonl line 3 of 6 (the first request that carried tools; sha256 of the file 0f48c42eaa6d663e\u2026): the 'messages' array only (roles system, user). Nothing omitted: that request precedes any tool call. Headers, tool list and the stub's annotations are not included.",
  "messages": [
   {
    "role": "system",
