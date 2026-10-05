@@ -63,8 +63,10 @@ ENV RETRACE_URL=https://retrace-api.slcwitit.workers.dev \
     DISABLE_ERROR_REPORTING=1
 
 # The clone (public repository), the commit identity (an agent address: D2 never records it as the principal), and the hooks.
-# `retrace-git install` resolves a hook token at install time (git-hook.ts, loadCfg), before any provider exists, so it runs
-# with a fixed, meaningless build-time value that no server accepts; the provider's placeholder replaces it at runtime.
+# `retrace-git install` resolves a hook token at install time, before any provider exists: every subcommand, `install` included,
+# runs `loadCfg` first (TypeScript at main fab82ea9, packages/mcp-server/src/git-hook.ts line 426, `const cfg = loadCfg(repo, flags)`;
+# the `install` branch follows at line 428; the packed CLI 0.3.0 compiles this file to git-hook.js). So the step runs with a fixed,
+# meaningless build-time value that no server accepts; the provider's placeholder replaces it at runtime.
 RUN git clone --branch "${REPO_REF}" "${REPO_URL}" /home/seat/retrace \
  && git -C /home/seat/retrace config user.name "claude-code-openshell" \
  && git -C /home/seat/retrace config user.email "noreply@anthropic.com" \

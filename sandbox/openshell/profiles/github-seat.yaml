@@ -1,7 +1,14 @@
 # Provider profile for the seat's GitHub token, for the OpenShell seat `claude-code-openshell`.
-# A copy of OpenShell's example `providers/github.yaml` (commit 021400be) with ONE added rule, the one the OpenShell tutorial
-# "Grant GitHub Push Access to a Sandboxed Agent" shows: POST to this repository's git-receive-pack, so `git push` works for
-# jordandru/retrace. Everything else is as shipped: api.github.com read-only (REST and GraphQL), github.com clone and fetch.
+# A copy of OpenShell's example `providers/github.yaml` (commit 021400be). Every body difference from the shipped file:
+#   1. `id`, `display_name`, `description`, and `credentials[0].description`: renamed and narrowed to this seat and this repository.
+#   2. `endpoints[2].rules`: ONE added rule, the one the OpenShell tutorial "Grant GitHub Push Access to a Sandboxed Agent" shows:
+#      POST to this repository's git-receive-pack, so `git push` works for jordandru/retrace. The four shipped rules (GET, HEAD,
+#      OPTIONS, POST git-upload-pack) are unchanged; api.github.com REST and GraphQL stay read-only, enforce.
+#   3. `binaries`: the four shipped paths [/usr/bin/gh, /usr/local/bin/gh, /usr/bin/git, /usr/local/bin/git] become the two this
+#      image installs: /usr/bin/git (apt) and /usr/local/bin/gh (the release tarball).
+# Kept as shipped, and worth stating because the design's §5.2 names only GITHUB_TOKEN: `env_vars` lists GH_TOKEN as well. The GitHub
+# CLI reads "GH_TOKEN, GITHUB_TOKEN (in order of precedence)" (`gh help environment`), so both names carry the same placeholder of
+# the same single credential; a second name widens no host, no rule and no permission.
 # Design: docs/design/openshell-seat.md §5.2, §6 (the bound: pushes to non-main branches only; the push guard holds `main`,
 # because OpenShell's policy sees one endpoint and cannot tell branches apart). Import on the PC's gateway:
 #   openshell profile lint   -f sandbox/openshell/profiles/github-seat.yaml
