@@ -21,3 +21,7 @@ worker-credentials.json
 .vscode/mcp.json
 # retrace-admin onboarding docs carry one live token each — never in the tree (write them with --out outside the repo)
 onboarding-*.md
+
+# Python byte-code caches (packages/hermes-plugin tests and the retrace-guard plugin)
+__pycache__/
+*.pyc
