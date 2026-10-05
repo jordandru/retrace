@@ -21,7 +21,7 @@ import { recomputeOwnerLogin } from "./owner-login-replay.js";
  * Uses the same store config as the MCP server (RETRACE_DB / RETRACE_URL+RETRACE_TOKEN).
  */
 import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { ProducerKey, keyId, buildExportBundle, verifyExportBundle, exportVerdictOk, policyFindingsFailExport, parseExportBundle, renderReportHtml, parseSigningKey, ExportBundle, newShareId, checkpointFromBundle, verifyCheckpoint, compareBundleToCheckpoint, parseCheckpointLog, latestCheckpoint } from "@retrace-dev/core";
 import { makeStore } from "./index.js";
 import { RemoteStore } from "./remote-store.js";
@@ -56,6 +56,21 @@ function bundleVerifyOpts(flags: Record<string, string | boolean>, bundle: Expor
     project: bundle.scope.project,
     ...(producers ? { producers } : {}),
   };
+}
+
+async function collectAttributionForRepo(flags: Record<string, string | boolean>, bundle: ExportBundle) {
+  const attribution = collectAttributionAmendments(bundle.events);
+  const repo = String(flags.repo ?? process.cwd());
+  if (flags.policy === undefined && !existsSync(join(repo, ".retrace.json"))) {
+    attribution.unavailable = `no_repository_context: no .retrace.json in ${repo}; run inside the recorded repository or pass --repo <path>`;
+    return attribution;
+  }
+  try {
+    return collectAttributionAmendments(bundle.events, await attributionOptionsForRepo(repo, bundle.events, bundle.scope.project, [], typeof flags.policy === "string" ? flags.policy : undefined));
+  } catch (error) {
+    attribution.unavailable = error instanceof Error ? error.message : String(error);
+    return attribution;
+  }
 }
 
 type CheckpointStore = ReturnType<typeof makeStore>;
@@ -195,7 +210,7 @@ async function main() {
     const verdict=await verifyExportBundle(bundle,trusted?.key, bundleVerifyOpts(flags, bundle));
     let attribution=collectAttributionAmendments(bundle.events);
     if (exportVerdictOk(verdict) && !bundle.scope.artifact_id) {
-      try { attribution=collectAttributionAmendments(bundle.events, await attributionOptionsForRepo(String(flags.repo ?? process.cwd()),bundle.events,bundle.scope.project,[],typeof flags.policy === "string" ? flags.policy : undefined)); } catch(error) { attribution.unavailable=error instanceof Error?error.message:String(error); }
+      attribution=await collectAttributionForRepo(flags,bundle);
     }
     if(!exportVerdictOk(verdict))attribution.unavailable="untrusted_export: signature or complete-chain verification failed";
     if(verdict.coverage.scope!=="full")attribution.unavailable="incomplete_snapshot: scoped export";
@@ -255,7 +270,7 @@ async function main() {
     console.log("  coverage: " + v.coverage.note);
     let attribution=collectAttributionAmendments(bundle.events);
     if(exportVerdictOk(v) && !bundle.scope.artifact_id) {
-      try { attribution=collectAttributionAmendments(bundle.events, await attributionOptionsForRepo(String(flags.repo ?? process.cwd()),bundle.events,bundle.scope.project,[],typeof flags.policy === "string" ? flags.policy : undefined)); } catch(error) { attribution.unavailable=error instanceof Error?error.message:String(error); }
+      attribution=await collectAttributionForRepo(flags,bundle);
     }
     if(!exportVerdictOk(v))attribution.unavailable="untrusted_export: signature or complete-chain verification failed";
     if(v.coverage.scope!=="full")attribution.unavailable="incomplete_snapshot: scoped export";

@@ -390,6 +390,33 @@ test("verify binds hook stamps to bundle.scope.project, not cwd (two-project, de
   }
 });
 
+test("verify outside a repository reports no_repository_context instead of ENOENT", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "retrace-no-repository-context-"));
+  try {
+    const store = new SqliteStore(join(dir, "ledger.db"));
+    await appendEvent(store, {
+      project: "p",
+      actor: { type: "human", id: "jordan@example.com" },
+      action: "created",
+      artifacts: [{ id: "artifact:a", role: "generated" }],
+    });
+    const issuer = await generateSigningKey();
+    const bundle = await buildExportBundle(store, { project: "p" }, { signingKey: issuer.privateKey });
+    const bundleFile = join(dir, "bundle.json");
+    const issuerPub = join(dir, "issuer-pub.json");
+    writeFileSync(bundleFile, JSON.stringify(bundle));
+    writeFileSync(issuerPub, JSON.stringify(issuer.publicKey));
+
+    const result = runVerify([bundleFile, "--pubkey", issuerPub]);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.match(result.stdout, /VALID/);
+    assert.match(result.stdout, /no_repository_context/);
+    assert.doesNotMatch(result.stdout, /ENOENT/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("verify basename collision: projectA config in a directory named projectB fails closed", async () => {
   const root = mkdtempSync(join(tmpdir(), "retrace-basename-collision-"));
   const colliding = join(root, "projectB");
