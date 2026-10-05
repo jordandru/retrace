@@ -14,7 +14,7 @@ It exists because a commit in this repo named the wrong AI agent as its author. 
 ## What you get
 
 - **Server-stamped identity.** A pinned credential decides the actor; agents cannot impersonate each other.
-- **Causality.** Every agent event links to the human instruction behind it; a dangling link is rejected at write time, never silently stored.
+- **Causality.** Every agent event links to the human instruction behind it. On the MCP path (`retrace_log`) a dangling link is rejected at write time; every other write path (REST `POST /events`, the git hook, the GitHub and Drive adapters) keeps the claimed link and seals it tagged `caused_by:unverified` with the reason (`missing`, `wrong_project` or `not_older`), so a bad link is never silently stored.
 - **Tamper-evident history.** Every setup gets a hash chain. Hosted setups with the push webhook also get hourly Rekor-witnessed checkpoints and two commit seals (git hook + GitHub push webhook); the local quick start seals each commit once with the git hook.
 - **Producer signatures.** Each agent signs its events with an Ed25519 key the server never holds; the Worker verifies and stamps the verdict.
 - **Reconciliation + CI gate.** A changed file with no logged edit is `uncovered`; a file whose only logged edits are another agent's is `misattributed`; `retrace doctor --gate` fails the commit.
