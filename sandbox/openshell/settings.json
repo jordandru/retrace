@@ -1,0 +1,16 @@
+{
+  "disabledMcpjsonServers": ["retrace-cloud"],
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/seat/retrace/scripts/cloud/guard-push-main.sh"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,53 @@
+# Provider profile for the seat's GitHub token, for the OpenShell seat `claude-code-openshell`.
+# A copy of OpenShell's example `providers/github.yaml` (commit 021400be) with ONE added rule, the one the OpenShell tutorial
+# "Grant GitHub Push Access to a Sandboxed Agent" shows: POST to this repository's git-receive-pack, so `git push` works for
+# jordandru/retrace. Everything else is as shipped: api.github.com read-only (REST and GraphQL), github.com clone and fetch.
+# Design: docs/design/openshell-seat.md §5.2, §6 (the bound: pushes to non-main branches only; the push guard holds `main`,
+# because OpenShell's policy sees one endpoint and cannot tell branches apart). Import on the PC's gateway:
+#   openshell profile lint   -f sandbox/openshell/profiles/github-seat.yaml
+#   openshell profile import -f sandbox/openshell/profiles/github-seat.yaml --global
+#
+# Credential scope:  GITHUB_TOKEN, a fine-grained personal access token scoped to jordandru/retrace, contents read and write,
+#                    nothing else; bearer `authorization` for api.github.com; for git over HTTPS the proxy decodes git's
+#                    Basic-auth header, resolves the placeholder and re-encodes it (providers/overview.mdx, "Header value
+#                    (Basic auth)"). Documented, not yet measured here: probe Q9.
+# Client binaries:   git (git-remote-https matches by ancestry) and gh (reads only; no API write rule exists).
+
+id: github-seat
+display_name: GitHub (OpenShell seat)
+description: GitHub API read-only; git clone, fetch and push for one repository
+category: source_control
+credentials:
+  - name: api_token
+    description: GitHub fine-grained token scoped to jordandru/retrace (contents read and write)
+    env_vars: [GITHUB_TOKEN, GH_TOKEN]
+    required: true
+    auth_style: bearer
+    header_name: authorization
+discovery:
+  credentials: [api_token]
+endpoints:
+  # api.github.com stays read-only: no pull requests, comments or reviews from the seat (D-b b2).
+  - host: api.github.com
+    port: 443
+    protocol: rest
+    access: read-only
+    enforcement: enforce
+  - host: api.github.com
+    port: 443
+    path: /graphql
+    protocol: graphql
+    access: read-only
+    enforcement: enforce
+  # github.com is the git transport. Clone and fetch as shipped; push (git-receive-pack) for ONE repository.
+  - host: github.com
+    port: 443
+    protocol: rest
+    enforcement: enforce
+    rules:
+      - allow: { method: GET, path: "**" }
+      - allow: { method: HEAD, path: "**" }
+      - allow: { method: OPTIONS, path: "**" }
+      - allow: { method: POST, path: "/**/git-upload-pack" }
+      - allow: { method: POST, path: "/jordandru/retrace.git/git-receive-pack" }
+binaries: [/usr/bin/git, /usr/local/bin/gh]

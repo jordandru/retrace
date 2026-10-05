@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "retrace": {
+      "type": "stdio",
+      "command": "retrace-mcp",
+      "args": [],
+      "env": {
+        "RETRACE_URL": "https://retrace-api.slcwitit.workers.dev",
+        "RETRACE_PROJECT": "retrace",
+        "RETRACE_ACTOR": "claude-code-openshell",
+        "RETRACE_ON_BEHALF_OF": "jordansboxing@gmail.com",
+        "RETRACE_DEVICE": "omarchy-pc"
+      }
+    }
+  }
+}
