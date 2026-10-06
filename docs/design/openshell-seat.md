@@ -15,8 +15,9 @@ image and network policy, and an instruction convention.
   `evt_de4fadb6…` and fix-round routing `evt_91e3176cbf4b41c78b0677c83851f008`. Resolved: Codex C-M1–C-M4 (`evt_85554085…`, Medium),
   Grok G-L1–G-L2 (`evt_e96ab2a7…`, Low), NOOA L1–L2 (`evt_1104114c…`, Low). Fixed in place: an unmerged draft (rule 10 binds the
   merged record, Jordan `evt_9dc98206`). §11 gives each finding its disposition.
-- **Corrections, 2026-10-05, with step W6a** (rule 10; the W6a pull request, `claude-code`, `claude-opus-5-5`): §2.4's identity
-  clause belongs to W6a, not W7; §7 Q9's control toward `main` becomes two checks that cannot push. Each is marked in place below.
+- **Corrections with step W6a** (rule 10; the W6a pull request, `claude-code`, `claude-opus-5-5`), three, each marked in place
+  below: (1) 2026-10-05, §2.4's identity clause belongs to W6a, not W7; (2) 2026-10-05, §7 Q9's control toward `main` becomes two
+  checks that cannot push; (3) 2026-10-06, the seat's local scratch files and who runs Q3's in-sandbox half (§7, after Q9's).
 - It is step W2 of that scope. Stage 1 (`docs/measurements/openshell-stage1-omarchy-2026-10-04.md`, PR 174) measured the custody
   on the PC with fake and scratch tokens. Stage 2 (`docs/design/sandbox-credential-proxy.md`, PR 175) decided A1–A4, all yes
   (`evt_fb8166ff…`). The template is `docs/design/cloud-seat.md` v2: the same shape, with OpenShell on hardware Jordan owns in
@@ -361,6 +362,14 @@ guard script fed that command as a hook payload, which must exit 2; then `git pu
 the harness, which the hook must refuse and which sends no update if it does not. `gh pr create` stays as written: the policy
 (`api.github.com` read-only) and the token's permissions (contents only, no pull requests) each refuse it. The probe exception
 under agent-rules 7 permits nothing else toward `main`, and a probe run needs W3 on main and in the image.*
+
+*Correction, 2026-10-06 (step W6a, PR 189 fix round 1; Codex C-M1, `evt_3688cb83d43e4608af963e0b8ae7d488`): the brief the seat
+materializes in §2.4 step 3 ("the `intent` bytes written to disk"), the file carrier B uploads in step 4, and Q8's written file go
+only in one scratch directory, `/tmp/openshell-seat/`: outside the clone and `~/.claude`, no configuration path, and writable under
+OpenShell's baseline policy (`docs/how-it-works/policies/default-policy.mdx` at `021400be`: `/tmp` read-write). Hashing a
+materialized brief is not acting on it; nothing in it is acted on before the six checks and its hash pass. Q3's in-sandbox half,
+its dummy-value fixtures, response captures and scan, is run by Jordan through `openshell sandbox exec` in that directory, not by
+the seat, and Q3 scans that directory along with the home and the clone. Agent-rules 7's probe exception states the bound.*
 
 ## 8. Build order
 
