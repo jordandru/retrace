@@ -79,10 +79,11 @@ each one names the product change that would make it unnecessary.
    you happen to read; a harness that can only load another seat's identity file does not join (the
    OpenCode decision, PR 19).
 
-   **Bounded exception: the OpenShell seat's probe.** (Added 2026-10-05 as step W6a of
-   `docs/design/openshell-seat.md` v2, §2.3 and §8, on Jordan's signed instruction
-   `evt_57b9aa9577234371a30fa830866ebd51`.) The seat `claude-code-openshell` runs inside an OpenShell sandbox on the
-   Omarchy PC. The sandbox's proxy substitutes the seat's bearer token at the Worker but cannot sign, so the seat has
+   **Bounded exception: the OpenShell seat's probe.** (Added 2026-10-06 as step W6a of
+   `docs/design/openshell-seat.md` v2, §2.3 and §8, on Jordan's signed go `evt_74e25b25370c44d7966f3298686a992c`,
+   which confirmed the draft written on his `evt_57b9aa9577234371a30fa830866ebd51`.) The seat `claude-code-openshell`
+   runs inside an OpenShell sandbox on the Omarchy PC. The sandbox's proxy substitutes the seat's bearer token at the
+   Worker but cannot sign, so the seat has
    one pinned credential and **no producer key**, and every event it writes carries `producer_sig_verdict: none`. That
    departure is permitted for the probe of that note's §7 and for nothing else. During a probe run, one execution of
    §7's lines on Jordan's go, the seat may read project `retrace`, its rule-15 verification reads included, and may
