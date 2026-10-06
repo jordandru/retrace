@@ -153,10 +153,15 @@ does not load, reconcile carries on without it: the collector returns "unavailab
 <reason>" (mcp-server `reconcile.ts:130`, `:145`). The `--json` report does not: with `--json` reconcile prints
 only the report object (`:144`), and the object carries no attribution state and no export head hash (core
 `reconcile.ts:460`). At this head the context fails on every run. A read-only reconcile of the last 30
-commits on 2026-10-05 at 22:12Z ended "attribution evaluation unavailable: context_missing: full commit
-identity commit:b96676bc29253fda3434b7f4c93240fb5802d8a8". That artifact sits on two claude-code events of
-2026-09-30 (`evt_742cdd136bf24a588a8a8f7b28545119`, `evt_48a996bfe70941b0b7a8f07c41e1057b`), and the ledger is
-append-only, so every later run inherits it. A digest reading `--json` today would render corrected
+commits on 2026-10-05 at 22:12Z, and another at `27f4264` on 2026-10-06, ended "attribution evaluation
+unavailable: context_missing: full commit identity commit:b96676bc29253fda3434b7f4c93240fb5802d8a8". The trigger
+is one record: seq 10390, `evt_0e3d0382558f4b229b9d4bc6a5c14103`, a `merged` record for PR #60 that the
+claude-code seat logged through MCP on 2026-09-30, whose commit artifact is that bare ref. The context treats a
+commit or merge record's commit artifact as a seal identity and fails closed unless it reads
+`commit:<repo>@<sha>` (core `attribution-context.ts:75-81`, `:99-106`). The same bare ref on two non-commit
+events of that day (`evt_742cdd136bf24a588a8a8f7b28545119`, `evt_48a996bfe70941b0b7a8f07c41e1057b`) only yields
+an `ignored` diagnostic (`:101-104`). A scan of all 14,192 events on 2026-10-06 found no other such record. The
+ledger is append-only, so every later run inherits it (issue #195). A digest reading `--json` today would render corrected
 misattributions as live tier-2 findings and could not tell. Stage 1 therefore treats reconcile's attribution
 state as unknown until the JSON report states it, and marks every reconcile `misattributed` finding
 `incomplete` while the state is unknown or unavailable; a reported "unavailable" is also a tier-1 "source
@@ -1042,7 +1047,7 @@ reconcile's attribution state is unknown or unavailable (§4), every reconcile `
   live run (§4, attribution availability): (1) the `--json` report states whether attribution evaluation ran
   and, if not, why, and carries the export head hash it reconciled under; (2) the attribution context
   tolerates, or reports per event, a commit artifact it cannot resolve, so one event cannot disable the
-  evaluation for every run (today `commit:b96676bc29253fda3434b7f4c93240fb5802d8a8`).
+  evaluation for every run (today the merged record at seq 10390, §4; issue #195).
 - *Added 2026-10-06 (v1.5; claude-code):* rules. No agent-rule text covers a seat that runs no model.
   Agent-rules 1, 4, 7 and 13 assume a harness, and rule 4's `model_source: none` records an unknown model,
   not a seat with none by design. A class (a) rules change says how such a seat records itself before its
@@ -1177,6 +1182,9 @@ will be folded as dated additions.
     - **Citations.** Every code citation in the draft was re-checked at head
       (`evt_29cf75a3189f4d23a4f05985b483308d`): three line ranges fixed (export-cache.ts :59-66; router.ts
       :866-868; router.ts :836-837) and one word removed (export.ts, "only"). No code claim was false.
+    - **Before review, 2026-10-06** (Jordan's go to push, `evt_5e903888d5654a63b32c7f951835b0c6`): §4's attribution
+      paragraph now names the actual trigger, the merged record at seq 10390, in place of two non-commit events
+      that only yield diagnostics; issue #195 is cited in §4 and §11.
 
 - **v1.4 (2026-09-15)** — reassigned last review (cursor-agent, GPT-5.6 Sol, GitHub review 5206011343):
   the post-publication seat audit could not make an already-sealed `digest` outcome `failed` without
