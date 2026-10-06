@@ -2,8 +2,6 @@ name: retrace-guard
 version: 0.1.0
 description: "Retrace seat guard for Hermes Agent: scans every provider-bound request for the seat's own identity and for other seats' identities, permits a tool only on a request that passed, and writes a per-session verdict file that an independent shell hook checks. Design: docs/design/hermes-seat.md section 4."
 author: "jordandru/retrace"
-capabilities:
-  - tools.override   # a user plugin may veto a tool from pre_tool_call only when the user granted this (plugins.entries.retrace-guard.granted_capabilities)
 provides_hooks:
   - on_session_start
   - pre_api_request

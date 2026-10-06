@@ -12,6 +12,11 @@ and its Gate 0 measurement `gate0/RESULTS.md` (sha256 `b1b329b4…`, `evt_fb0a8f
   (`evt_2ad4a2d444e04def9dd992a599e78d1a`). One fix round for all eleven on Jordan's `evt_21422d2f03204b2abe05805d5d2864b4` ("Go on A for
   183"), gate check `evt_91b3cc8d94a04dbe84ce36009f38afc0`, fix-round routing `evt_5cb66e9614954a5dac6c15fb378d8212`. §11 gives each disposition.
   Fixed in place because the note is an unmerged draft (Jordan, `evt_9dc98206`).
+- **Corrected in place, 2026-10-06** (agent-rules 10; the note is merged): nine dated corrections from building and reviewing the Gate 1a
+  prep files (PR 186, merged as `27f4264f`), each marked *Correction 2026-10-06* beside the text it corrects; the earlier text stays.
+  §8 item 2 is now built and merged; the seat is still not supported (Gate 1a has not run). One correction withdraws a claim the author
+  made while building PR 186, that the guard's veto needs a `tools.override` grant (§6.1; ledger `evt_d96ee652f76d498dba1b03395f029d43`).
+  Instruction root: Jordan's signed "Continue", `evt_55be366775f74225920fafb4357fbec0`.
 
 **Decisions taken.** The four decisions in §1 were Jordan's; he signed `0a, a2, b1, c1` (`evt_648a046e…`). The table keeps the options
 and the author's recommendations beside what was taken, so a reader sees where the decision followed the recommendation (H-0, H-b,
@@ -115,15 +120,25 @@ with the reason and the sha256 of the request body scanned; `blocked`, a sticky 
    the main-loop events never carry. The plugin subscribes and applies check 1; a hit sets `blocked`. Those hooks are observer-only and
    fail open (their module docstring), so this is detection; an auxiliary call produces no tool call, so the bound in check 3 holds. The
    seat configuration disables compression (§6.1), leaving title generation as the auxiliary task Gate 0 observed (run A, request 5).
+   *Correction 2026-10-06 (source: Gate 1a prep smoke 2026-10-05, the title-generation request; PR 186, `scan_messages(require_seat=False)`):* an
+   auxiliary request carries Hermes's own prompt, not the seat's system prompt, so it never holds the seat marker. The plugin applies
+   only the foreign-marker half of check 1 to auxiliary requests; requiring the marker there would fail every auxiliary call.
 6. **Model equality (layer C).** A `mcp_retrace_retrace_log` or `mcp_retrace_retrace_instruct` call whose `actor.model` differs from the
    session's `model` is blocked with the two strings in the message. The seat's MCP server is launched with `RETRACE_ACTOR_MODEL` set by
    the launcher from `config.yaml` and `RETRACE_ACTOR_MODEL_SOURCE=harness-config` (`model-source.md` §4), so the ordinary path never trips
    this check; it catches a narrated model. Under a2 the model id is the Portal's claim (§9).
+   *Correction 2026-10-06 (source: Gate 1a prep smoke 2026-10-05, Hermes log "registered 5 tool(s): mcp__retrace__retrace_log, …"; PR 186):* Hermes
+   `7b362884` registers MCP tools as `mcp__<server>__<tool>`, so the names in checks 4 and 6 are `mcp__retrace__*`,
+   `mcp__retrace__retrace_log` and `mcp__retrace__retrace_instruct`, not `mcp_retrace_*`. The guard matches both spellings.
 7. **Commits (layer C).** A `terminal` command that contains `git commit` is blocked unless its message carries `Retrace-Actor: hermes`,
    `Retrace-Model:`, `Retrace-Model-Source:` and `Retrace-Caused-By:` as one final paragraph, and is blocked when it contains `--amend` or
    names another actor. `git commit -F`, a heredoc, `-c`, or a shell the plugin cannot parse step around this; stated, not closed.
 8. **Coverage (layer C).** A commit is blocked while a path this session edited (tracked from `post_tool_call` on `write_file`, `patch`,
    and `terminal` writes the plugin can see) has never been named in a `retrace_log` the session made. Best effort for the same reasons.
+   *Correction 2026-10-06 (source: PR 186 round 1, Grok G-L1 `evt_c3935c1191094e0c98e489ae7fa233e9`; test `test_terminal_writes_tracked_for_coverage`):*
+   the terminal writes the plugin can see are redirect targets (`>`, `>>`), `tee` files, `sed -i` files, `cp` and `mv` destinations, and
+   the `+++` paths of a patch file given to `git apply` or `patch`. It cannot see heredoc bodies, scripts the shell executes, `git apply`
+   from stdin, or programs that choose their own paths.
 
 What the guard proves and does not: every request the harness sent through `pre_api_request` or `pre_auxiliary_call` was scanned and
 no tool ran on a request that did not pass; the model may have seen foreign text once (check 3) and acted on nothing. It does not prove
@@ -144,6 +159,15 @@ blocks; both fail only if the config and the plugin both failed, which the launc
 Shell hooks need consent on first run (`hooks_auto_accept`, `HERMES_ACCEPT_HOOKS`); the launcher sets it because it has already hashed the
 script and the config. The launcher also runs the pinned Hermes once pre-start with the profile to confirm the plugin loads in that
 environment; that is a smoke, not a guarantee for the live process, and the note does not call it one.
+
+*Correction 2026-10-06 (source: PR 186 round 2, the coordinator's measurement in gate check `evt_19afe0c6f47c42d481741176a283d35d`; Hermes
+`agent/shell_hooks.py` `_evaluate_result`, lines 406–437):* "prints `{"action": "block", …}`" is not enough. Hermes treats a hook that
+exits 0 with no directive as allow, even with `fail_closed: true`, and the first version of the check let five of the nine measured inputs
+through that way. The contract the check meets as merged in PR 186: it reads the payload from stdin, never argv, so a payload over 128 KiB cannot
+break it; it type-checks the payload, its `extra` and every verdict-file line; on every failure, a missing `python3` included, it prints a
+block directive and exits 2, Hermes's `BLOCK_EXIT_CODE`, which blocks even without a directive; nothing forces exit 0; and it runs python
+isolated (`-I`), so a `json.py` in the working directory or on `PYTHONPATH` cannot end the check. Measured with `measure-guard-check.sh`
+(sha256 `cf5022db…`): a passing verdict allows; eight failing inputs block.
 
 Why a plugin at all, when the shell hook could do everything: per-session state across `pre_api_request`, `pre_auxiliary_call` and
 `pre_tool_call` is in-process, and the request body is large; the shell hook is the small, independent, fail-closed check on the plugin's
@@ -232,10 +256,27 @@ section, no gateway. The `tools.include` list is the five tools a builder needs;
 `retrace_projects`, `retrace_verify` and `retrace_lineage` are out (`retrace_amend` is a correction seal, Jordan's under agent-rules 14;
 artifact-scoped reads wedge the server, a known issue).
 
+*Correction 2026-10-06 (source: Gate 1a prep smoke 2026-10-05; PR 186 `hermes.retrace.yaml`; measurement `evt_d96ee652f76d498dba1b03395f029d43`):* the
+template as built adds four keys the block above lacks. `_config_version: 49`: without it Hermes logged the file as a config older than
+version 12 that it could not migrate.
+`mcp_discovery_timeout: 30` and `mcp_single_query_discovery_timeout: 30` give the retrace MCP server time to start; the defaults are 1.5 s
+and 15 s. `tools.tool_search.enabled: "off"` keeps every tool eager rather than behind a search bridge; whether the default would defer
+the retrace tools was not measured. The hook command points at the profile's copy, `<profile>/bin/retrace-guard-check.sh` (§6.3).
+**No capability grant.** While building PR 186 the author wrote that the guard's `pre_tool_call` veto needs
+`plugins.entries.retrace-guard.granted_capabilities: [tools.override]`, and PR 186 shipped that grant. The claim was wrong. Hermes honours
+any plugin's block directive with no capability check (`hermes_cli/plugins.py` 2040–2092); `tools.override` only decides whether a
+plugin may replace built-in tools (`hermes_cli/plugins_loader.py` 556–573). Measured 2026-10-06 with the grant removed, the shell hook
+dropped and the request scan skipped: Hermes logged the capability as denied, and the plugin alone blocked every tool. The pull request
+that carries these corrections removes the grant and the manifest's capability declaration.
+
 **The MCP environment, complete, per phase (Codex C-M4).** Hermes gives a stdio child only its safe baseline plus the server entry's own
 `env` (`tools/mcp_tool_config.py:182–200`), and the launcher starts from `env -i`, so nothing reaches the server that this block does not
 name. The template commits two blocks, `mcp_env_scratch` and `mcp_env_live`; the renderer copies exactly one into `env` and the launcher
 accepts no other difference from the template except the absolute paths it renders.
+*Correction 2026-10-06 (source: PR 186 round 1, Grok G-L4 and G-M1, `evt_c3935c1191094e0c98e489ae7fa233e9`):* the blocks live in
+`hermes.retrace.phases.yaml` as three: `mcp_env_common`, the five shared keys, plus exactly one of `mcp_env_scratch` and `mcp_env_live`.
+The live block names the Worker of record, `RETRACE_PUBLIC_URL` from `apps/worker/wrangler.toml`
+(`https://retrace-api.slcwitit.workers.dev`), not a placeholder.
 
 ```yaml
 # common to both phases
@@ -286,9 +327,23 @@ and `retrace-guard-check.sh` into the profile and refuse if either hashes differ
 at the pinned commit) to confirm `retrace-guard` loads in this environment (a smoke, §4.2). (9) `hermes -p retrace chat`. Approvals are
 `manual`: every prompt is answered by the human at the pane (agent-ops 18: never send into a human's pane).
 
+*Correction 2026-10-06 (source: PR 186 rounds 1 and 3, Grok G-L2 and G-L1, gate check `evt_86fb5d372b4f4896b17ff027b867852b`; evidence in the
+PR 186 v5 notes):* step 6 as built pins five files to HEAD, not to the working tree: the plugin's `plugin.yaml` and `__init__.py`,
+`scripts/retrace-guard-check.sh`, and both config templates. A step 2b refuses, before anything is installed, when any of them differs
+from HEAD or is not in HEAD. Step 6 then writes HEAD's bytes (`git show HEAD:<path>`) into `<profile>/plugins/retrace-guard/` and
+`<profile>/bin/`, and checks each copy against HEAD's sha256. Steps 8 and 9 as built select the profile with `HERMES_HOME=<profile>`,
+overridable for tests with `HERMES_PROFILE_HOME`, rather than `-p retrace`; both name `~/.hermes-retrace`. Before the session the
+launcher runs `hermes plugins list` and `hermes mcp test retrace`. A fresh profile's first start prepares Hermes's isolated runtime
+(`pm/runtime.py`), which can outlast the MCP connect timeout, so the MCP test runs once more when the first pass fails, and the launcher
+refuses unless it connects. Step 9 is `hermes chat` under the same `HERMES_HOME`.
+
 Hermes is installed by Jordan's typed step, not by the `curl | bash` installer: a shallow clone at `HERMES_COMMIT` into
 `~/.hermes-retrace/hermes-agent`, `uv python install 3.14`, `uv sync --frozen --no-dev`; nothing is written to a shell rc. Gate 0 ran
 Hermes exactly this way.
+*Correction 2026-10-06 (source: Gate 1a prep 2026-10-05, Hermes error "requires the 'mcp' Python SDK"; Jordan's install verified
+`evt_4116d080…`):* the sync needs `--extra mcp`, because the core dependencies omit the `mcp` SDK the stdio transport needs. Jordan's
+typed step ran `uv sync --frozen --no-dev --extra mcp`, and the venv holds `mcp` 2.0.0. Gate 0 used no MCP server, so it did not show
+the gap.
 
 ## 7. Gates
 
@@ -330,6 +385,9 @@ Nothing is called supported until a sealed event shows it (agent-rules 0).
 2. `.hermes.md` (§5, with the line that says the seat is not supported yet), `packages/hermes-plugin/retrace-guard` with tests against the
    recorded Gate 0 request bodies and the scanner unit test, `scripts/retrace-guard-check.sh`, `hermes.retrace.yaml` with both phase blocks,
    `scripts/hermes-seat.sh` (class a: controls);
+   *Correction 2026-10-06 (source: PR 186, merged as `27f4264f`):* as built, item 2 also carries `hermes.retrace.phases.yaml`. Its tests run on
+   message arrays extracted from the recorded Gate 0 request bodies, and two further suites cover the shell-hook check
+   (`test_guard_check.py`) and the launcher's HEAD pins (`test_launcher_pins.py`).
 3. `HARNESSES` gains `"hermes"` and `shouldMintProducerKey` keeps it keyed (code order; `DEFAULT_HARNESSES` unchanged);
 4. after Gate 2: the `docs/team-roles.md` roster line, the `SETUP-GUIDE.md` section, the revised line 330, and the removal of the
    not-supported line from `.hermes.md` (class a);

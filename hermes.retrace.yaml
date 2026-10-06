@@ -37,9 +37,6 @@ tools:
     enabled: "off"         # every tool eager: the five retrace tools are always listed, never deferred behind tool_search/tool_call
 plugins:
   enabled: [retrace-guard]
-  entries:
-    retrace-guard:
-      granted_capabilities: [tools.override]
 hooks:
   pre_tool_call:
     - command: "{{HOOK_DIR}}/retrace-guard-check.sh"
