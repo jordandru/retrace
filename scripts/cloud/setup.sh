@@ -8,7 +8,7 @@ set -eu
 # RETRACE_ENV=claude-cloud
 # RETRACE_DEVICE=claude-cloud
 
-CLI_VERSION="0.3.0"
+CLI_VERSION="0.3.1"
 HOOKS_DIR="/usr/local/share/retrace/hooks"
 
 print_sha256() {

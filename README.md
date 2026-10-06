@@ -26,8 +26,8 @@ It exists because a commit in this repo named the wrong AI agent as its author. 
 **Your own repo, no checkout of this one.** Two commands from the published package, run inside the repository you want recorded:
 
 ```bash
-npx -y -p @retrace-dev/cli@0.3.0 retrace-git install --project <project>   # writes .retrace.json and the post-commit / post-merge hooks
-npx -y -p @retrace-dev/cli@0.3.0 retrace doctor                            # READY when the ledger, hooks and project agree
+npx -y -p @retrace-dev/cli@0.3.1 retrace-git install --project <project>   # writes .retrace.json and the post-commit / post-merge hooks
+npx -y -p @retrace-dev/cli@0.3.1 retrace doctor                            # READY when the ledger, hooks and project agree
 ```
 
 Then give your agent the MCP server from the same package — Claude Code shown (`~/.claude.json` or the repository's `.mcp.json`):
@@ -37,7 +37,7 @@ Then give your agent the MCP server from the same package — Claude Code shown 
   "mcpServers": {
     "retrace": {
       "command": "npx",
-      "args": ["-y", "-p", "@retrace-dev/cli@0.3.0", "retrace-mcp"],
+      "args": ["-y", "-p", "@retrace-dev/cli@0.3.1", "retrace-mcp"],
       "env": {
         "RETRACE_PROJECT": "<project>",
         "RETRACE_ACTOR": "claude-code",
