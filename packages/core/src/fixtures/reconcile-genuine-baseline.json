@@ -102,5 +102,8 @@
     "producer_disagreement": 0,
     "unreachable_seal": 0
   },
+  "attribution": {
+    "status": "not_needed"
+  },
   "ok": true
 }
