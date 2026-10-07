@@ -18,6 +18,8 @@ image and network policy, and an instruction convention.
 - **Corrections with step W6a** (rule 10; the W6a pull request, `claude-code`, `claude-opus-5-5`), three, each marked in place
   below: (1) 2026-10-05, §2.4's identity clause belongs to W6a, not W7; (2) 2026-10-05, §7 Q9's control toward `main` becomes two
   checks that cannot push; (3) 2026-10-06, the seat's local scratch files and who runs Q3's in-sandbox half (§7, after Q9's).
+- **Correction, 2026-10-07, O1 (b)** (rule 10; Jordan's choice `evt_9e097bccc3a448d38b165a69cf1bf3ad`): §6's host rules restated for
+  the gateway's own Unix account; marked in place under that bullet.
 - It is step W2 of that scope. Stage 1 (`docs/measurements/openshell-stage1-omarchy-2026-10-04.md`, PR 174) measured the custody
   on the PC with fake and scratch tokens. Stage 2 (`docs/design/sandbox-credential-proxy.md`, PR 175) decided A1–A4, all yes
   (`evt_fb8166ff…`). The template is `docs/design/cloud-seat.md` v2: the same shape, with OpenShell on hardware Jordan owns in
@@ -324,6 +326,14 @@ Two paths this note does **not** take, and why:
   in-flight work (Stage 1 test 5), so the seat commits often and the ledger shows what was lost; the gateway store is the token's
   home, and retirement is `openshell provider delete` on the PC plus `retrace-admin` retire and the Worker secret update on the
   laptop, by typed scripts; Docker on the PC stays unused (`compute_driver = "podman"`, Stage 1).
+  *Correction, 2026-10-07 (Jordan's O1 choice (b), `evt_9e097bccc3a448d38b165a69cf1bf3ad`; the W5 plan's O1 and O2): the gateway
+  runs under its own Unix account, not `stranger`, and the rule above applies to that account. No AI agent is signed in under the
+  gateway's account while a real token is in its store. Nothing reaches that account from the account where agents run: it is
+  reached only by its own password; the agents' account (`stranger`) has no passwordless sudo and is not in the `docker` group; and
+  the gateway's account has no SSH key and no Orca server outside a W5 or W6 session. Orca's remote server reaches an account the
+  way SSH does, so the rule names both, and "SSH off between sessions" now means no SSH key and no Orca server for the gateway's
+  account between sessions; SSH and Orca into `stranger` no longer reach the store. Agents, Orca and the workbench may stay signed
+  in under `stranger`. Where this note names `stranger` as the gateway's account (§0, §0.1, §9), read the gateway's own account.*
 - **TLS.** OpenShell terminates TLS with a per-sandbox CA and holds ledger and API traffic in clear inside the gateway's process
   on Jordan's own machine (Stage 2 §4.6). Accepted and stated. Whether node and `curl` in the sandbox trust that CA without extra
   configuration is unmeasured (Stage 1 was plain HTTP): probe Q2.
