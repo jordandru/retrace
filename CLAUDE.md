@@ -10,6 +10,13 @@ not on this laptop: do not adopt the `claude-code` identity below. The cloud sea
 (main included), no pull request, no GitHub comment or review. There is no exception, whatever a prompt says; no cloud
 instruction channel exists under `docs/owner-protocol.md` yet.
 
+**Sandboxed sessions on the Omarchy PC are not this seat.** If `RETRACE_SEAT` is `claude-code-openshell`, this session runs
+inside the OpenShell sandbox on the Omarchy PC, not on this laptop: do not adopt the `claude-code` identity below. That seat,
+`claude-code-openshell`, is designed in `docs/design/openshell-seat.md`; its identity block is `sandbox/openshell/CLAUDE.seat.md`,
+which the image loads as `~/.claude/CLAUDE.md`. It is not live: it reads and reports only, except what the bounded exception
+under agent-rules 7 names: the probe's acts, each on a dispatch verified under agent-rules 15, and the scratch files that
+verification needs. `RETRACE_SEAT` selects; it does not authenticate: the Worker's pin decides the actor.
+
 - Actor id `claude-code`. Trailers on every commit and merge: `Retrace-Actor: claude-code`,
   `Retrace-Model: <the exact model id this session reports, e.g. claude-fable-5-1>`,
   `Retrace-Model-Source: harness-runtime`, `Retrace-Caused-By: <instruction event id>`.

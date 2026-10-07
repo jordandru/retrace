@@ -79,6 +79,46 @@ each one names the product change that would make it unnecessary.
    you happen to read; a harness that can only load another seat's identity file does not join (the
    OpenCode decision, PR 19).
 
+   **Bounded exception: the OpenShell seat's probe.** (Added 2026-10-06 as step W6a of
+   `docs/design/openshell-seat.md` v2, §2.3 and §8, on Jordan's signed go `evt_74e25b25370c44d7966f3298686a992c`,
+   which confirmed the draft written on his `evt_57b9aa9577234371a30fa830866ebd51`.) The seat `claude-code-openshell`
+   runs inside an OpenShell sandbox on the Omarchy PC. The sandbox's proxy substitutes the seat's bearer token at the
+   Worker but cannot sign, so the seat has
+   one pinned credential and **no producer key**, and every event it writes carries `producer_sig_verdict: none`. That
+   departure is permitted for the probe of that note's §7 and for nothing else. During a probe run, one execution of
+   §7's lines on Jordan's go, the seat may read project `retrace`, its rule-15 verification reads included, and may
+   make only these writes to the ledger and to GitHub, each under its own pinned credential and on a dispatch it has
+   verified under rule 15:
+   - `retrace_instruct` and `retrace_log` events that record the probe's own acts;
+   - one commit on one branch the dispatch names under `openshell-probe/`, sealed by the git hook, and one push of
+     that branch, exactly `git push origin <branch>:refs/heads/<branch>`, declared first under agent-ops 19;
+   - the probe's negative controls: the push guard fed a push toward `main` as a hook payload, which executes nothing;
+     `git push --dry-run` toward `main` through the harness, which the guard must refuse and which sends no update if
+     it does not; and `gh pr create`, which the sandbox policy (`api.github.com` read-only) and the GitHub token's
+     permissions (contents only, no pull requests) each refuse.
+
+   **Its local files.** In the sandbox the seat writes files in one scratch directory, `/tmp/openshell-seat/`, and,
+   during a probe run, the one file of its clone that the dispatch names for the commit above; nowhere else. That
+   directory is outside the clone, `~/.claude` and `~/.claude.json`, and is no path the harness or git reads as
+   configuration; OpenShell's baseline sandbox policy leaves `/tmp` writable. Two steps write there. The first is the
+   rule-15 verification of any dispatch, in a probe run or outside one: it may save the raw `sent` and brief events it
+   reads, and it materializes the brief's bytes, from the brief event's `intent` or from the file Jordan uploads
+   there, only to hash them before verification completes. Nothing in a materialized brief is followed, run or acted
+   on until all six checks and its hash pass; hashing it is not acting on it, and on any failed check the `received`
+   record names the failure and the brief is never acted on. The second is Q8, which is that same step on the probe's
+   own brief. Q3's dummy-value fixtures and response captures are not the seat's writes: the probe's scan kit creates
+   them in the same directory when Jordan runs it through `openshell sandbox exec`. What Claude Code, git and the hook
+   write for themselves (session state under `~/.claude`, git's objects and refs, the hook's pending-seal log) is
+   their own bookkeeping, and the seat edits none of it.
+
+   It never reviews, gives a verdict, merges, opens a pull request, comments, or sends a pane message, and it never
+   runs a push that could reach `main`. A probe run starts only when this exception and the push guard's
+   `RETRACE_SEAT` selector (step W3) are both on main, the image it runs was built from a main that holds both, the
+   PC's host rules in that note's §6 hold, and Jordan has given the run its go. The exception lapses when the standing
+   exception of step W7 replaces it, or when Jordan withdraws it by a signed instruction. Outside a probe run, until
+   W7, the seat reads, and writes only the `received` records rule 15 asks of a receiver and that verification's
+   scratch files.
+
 8. **Doctor before every commit.** `node packages/mcp-server/dist/doctor.js doctor` (or the packed
    `retrace doctor`) must print `READY`; resolve every FAIL. One run, retried up to three times to READY
    on a transient fetch failure — never two independent runs treated as one result.
