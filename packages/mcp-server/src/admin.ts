@@ -5,12 +5,14 @@
  *   retrace-admin new-team <project> --member a@x.com[,b@y.com] [--harness claude-code,codex,gemini,grok,github-copilot]
  *                          [--url https://retrace-api.<you>.workers.dev] [--credentials-file ~/.retrace/worker-credentials.json]
  *                          [--out ~/.retrace/onboarding-<project>.md] [--producer-keys-dir ~/.retrace/producer-keys] [--dry-run]
- *   retrace-admin add-agent <project> --member a@x.com --harness openclaw [--url https://…] [--out ~/.retrace/onboarding-…md]
+ *   retrace-admin add-agent <project> --member a@x.com --harness openclaw|claude-code-cloud|claude-code-openshell [--url https://…] [--out ~/.retrace/onboarding-…md]
  *   retrace-admin retire-agent <project> --harness codex
  *   retrace-admin set-principal <project> --actor agent/codex --principal human/a@x.com [--on-behalf-of a@x.com]
  *   retrace-admin list-teams [--credentials-file …]
  *
  * What new-team does (nothing touches the Worker by itself — secrets are pushed by the operator, see the printed step):
+ *   0. Refuses the provider-held seats (claude-code-cloud, claude-code-openshell) before anything else: their token belongs in a
+ *      provider, never in the MCP env block this onboarding writes, so add-agent is their only path.
  *   1. Mints project-scoped credentials (Credential.projects = [<project>], so a leaked team token cannot read or write
  *      any other team's ledger): one PINNED agent credential per member × harness (actor.on_behalf_of = the member, so
  *      retrace_instruct can record that member's instructions and nobody else's), one ASSERT credential for the team's
@@ -38,13 +40,14 @@ import { defaultProducerKeysDir, producerKeySlug, writeProducerPrivateKey } from
 
 /** Kept stable so `new-team` does not silently provision an experimental integration. */
 export const DEFAULT_HARNESSES = ["claude-code", "codex", "gemini", "grok", "github-copilot"] as const;
-export const HARNESSES = [...DEFAULT_HARNESSES, "claude-code-cloud", "openclaw", "nooa"] as const;
+export const HARNESSES = [...DEFAULT_HARNESSES, "claude-code-cloud", "claude-code-openshell", "openclaw", "nooa"] as const;
 export type Harness = (typeof HARNESSES)[number];
 
 /** Where each harness keeps its MCP server config, for the onboarding text. */
 const HARNESS_CONFIG: Record<Harness, { label: string; file: string; instructions: string }> = {
   "claude-code": { label: "Claude Code", file: "~/.claude.json (or the repo's .mcp.json)", instructions: "CLAUDE.md" },
   "claude-code-cloud": { label: "Claude Code cloud", file: "the cloud environment's API credentials dialog", instructions: "CLAUDE.md" },
+  "claude-code-openshell": { label: "Claude Code in an OpenShell sandbox", file: "an OpenShell provider on the PC's gateway", instructions: "sandbox/openshell/CLAUDE.seat.md" },
   codex: { label: "Codex", file: "Codex MCP settings", instructions: "AGENTS.md" },
   gemini: { label: "Gemini CLI", file: ".gemini/settings.json", instructions: "GEMINI.md" },
   grok: { label: "Grok", file: "~/.grok/config.toml", instructions: "GROK.md" },
@@ -76,9 +79,12 @@ export interface AgentSpec {
 /** Local mirror may carry `producer_key_file` (a path). The Worker Credential schema must not grow this field. */
 export type LocalCredential = Credential & { producer_key_file?: string; retired_at?: string };
 
-/** OpenClaw is remote HTTP MCP (Worker must not hold the private key). CI is a read-only assert credential. Everyone else who writes, signs. */
+/** Keyless pinned seats: a proxy holds their bearer token and cannot sign, so no producer key is minted (claude-code-cloud behind
+ *  Anthropic's agent proxy; claude-code-openshell behind an OpenShell provider, docs/design/openshell-seat.md §2.3). OpenClaw is remote
+ *  HTTP MCP (Worker must not hold the private key). CI is a read-only assert credential. Everyone else who writes, signs. */
 export function shouldMintProducerKey(c: Credential): boolean {
   if (c.actor.id === "claude-code-cloud") return false;
+  if (c.actor.id === "claude-code-openshell") return false;
   if (c.actor.id === "openclaw") return false;
   if (c.actor.id.startsWith("ci-")) return false;
   if (c.trust === "assert") return true;
@@ -136,6 +142,20 @@ export function validateSpec(spec: TeamSpec): void {
   if (!/^https:\/\//.test(spec.url)) throw new Error(`--url must be https (got ${spec.url})`);
 }
 
+/** Seats whose bearer token a provider holds: claude-code-cloud (the cloud environment's credential, attached by Anthropic's agent
+ *  proxy) and claude-code-openshell (an OpenShell gateway provider, docs/design/openshell-seat.md §2.3). Team onboarding would write
+ *  their token into a generic MCP env block, so new-team refuses them; add-agent, whose onboarding for them is secret-free, is their
+ *  only path. */
+export const PROVIDER_HELD_HARNESSES: readonly Harness[] = ["claude-code-cloud", "claude-code-openshell"];
+
+/** new-team's check: validateSpec, plus no provider-held seat. Runs before any mint, credential write or onboarding write. */
+export function validateTeamSpec(spec: TeamSpec): void {
+  validateSpec(spec);
+  for (const h of spec.harnesses)
+    if (PROVIDER_HELD_HARNESSES.includes(h))
+      throw new Error(`new-team refuses harness "${h}": a provider holds that seat's token, and team onboarding would write it into an MCP env block. Add the seat with add-agent: retrace-admin add-agent ${spec.project} --member <email> --harness ${h}`);
+}
+
 /** 32 random bytes, base64url — 43 chars, comfortably above the 16-char minimum the Worker enforces. */
 export function mintToken(rand: (n: number) => Buffer = randomBytes): string {
   return rand(32).toString("base64url");
@@ -146,7 +166,7 @@ export function ciActorId(project: string): string { return `ci-${project}`; }
 
 /** Pure: the credentials a team needs. Deterministic given `rand`, so it is testable. */
 export function planCredentials(spec: TeamSpec, rand: (n: number) => Buffer = randomBytes): Credential[] {
-  validateSpec(spec);
+  validateTeamSpec(spec);
   const out: Credential[] = [];
   for (const member of spec.members) {
     for (const h of spec.harnesses) {
@@ -321,6 +341,28 @@ export function renderAgentOnboarding(spec: AgentSpec, credential: LocalCredenti
       `Keep the provenance instructions in \`${cfg.instructions}\`. This onboarding writes no MCP environment block.`,
     ].join("\n");
   }
+  if (spec.harness === "claude-code-openshell") {
+    const workerHost = new URL(spec.url).host;
+    return [
+      `# Retrace agent onboarding — \`${spec.harness}\` for \`${spec.project}\``, "",
+      "**This document contains no secret.**", "",
+      `Ledger actor: \`${spec.harness}\` on behalf of \`${spec.member}\`.`, "",
+      "## Claude Code in an OpenShell sandbox", "",
+      `The token is held by ${cfg.file}: provider \`retrace-seat\`, type \`retrace-worker\` (\`sandbox/openshell/profiles/retrace-worker.yaml\`), bound to \`${workerHost}\`. The sandbox sees only a placeholder, under the names \`RETRACE_TOKEN\` and \`RETRACE_HOOK_TOKEN\`.`,
+      "The token reaches the PC only through the W5 step script, over SSH into `openshell provider create --from-existing`; never through this document, the clipboard, argv or a file on the PC.", "",
+      "The sandbox image sets these non-secret environment variables (`sandbox/openshell/Containerfile`):", "",
+      fence("text", [
+        `RETRACE_URL=${spec.url}`,
+        `RETRACE_PROJECT=${spec.project}`,
+        "RETRACE_ENV=openshell-pc",
+        "RETRACE_DEVICE=omarchy-pc",
+        "RETRACE_SEAT=claude-code-openshell",
+      ].join("\n")), "",
+      "The gateway and its provider store run under their own Unix account on the PC, not `stranger`, where the agents run (O1 (b), `evt_9e097bccc3a448d38b165a69cf1bf3ad`).",
+      "Follow `sandbox/openshell/README.md` for the steps on the PC only once its dated O1 (b) correction is merged and the W5-0 pre-flight has passed, and run them as that account.",
+      `Keep the provenance instructions in \`${cfg.instructions}\`. This onboarding writes no MCP environment block.`,
+    ].join("\n");
+  }
   const lines = [
     `# Retrace agent onboarding — \`${spec.harness}\` for \`${spec.project}\``, "",
     "**This document contains one secret.** Send it like a password and delete it after setup.", "",
@@ -490,7 +532,7 @@ export async function main(argv = process.argv.slice(2), env = process.env, out:
       harnesses: (flags.harness ? list(flags.harness) : [...DEFAULT_HARNESSES]) as Harness[],
       url: String(flags.url ?? env.RETRACE_URL ?? "").replace(/\/+$/, ""),
     };
-    validateSpec(spec);
+    validateTeamSpec(spec);
     const existing = readCredentialsFile(credentialsFile);
     if (existing.some((c) => c.projects?.includes(project))) throw new Error(`${credentialsFile} already holds credentials scoped to "${project}" — refusing to mint a second set (remove them first, or pick another project name)`);
     const plan = planTeam(spec);
@@ -521,7 +563,7 @@ export async function main(argv = process.argv.slice(2), env = process.env, out:
     const members = list(flags.member);
     const harnesses = list(flags.harness);
     if (!project || members.length !== 1 || harnesses.length !== 1)
-      throw new Error("usage: retrace-admin add-agent <project> --member a@x.com --harness openclaw|claude-code-cloud [--url https://…] [--out onboarding.md]");
+      throw new Error("usage: retrace-admin add-agent <project> --member a@x.com --harness openclaw|claude-code-cloud|claude-code-openshell [--url https://…] [--out onboarding.md]");
     const spec: AgentSpec = {
       project,
       member: members[0],
@@ -638,7 +680,7 @@ export async function main(argv = process.argv.slice(2), env = process.env, out:
     }
     return 0;
   }
-  out("retrace-admin <new-team <project> --member a@x.com[,…] [--harness …] | add-agent <project> --member a@x.com --harness openclaw|claude-code-cloud | retire-agent <project> --harness codex | set-principal <project> --actor agent/codex --principal human/a@x.com | set-policy <project> --from <repo>/.retrace.json --if-match <digest>|none | list-teams> [--url https://…] [--credentials-file …] [--out file.md (default: ~/.retrace/onboarding-*.md)] [--producer-keys-dir ~/.retrace/producer-keys] [--dry-run]");
+  out("retrace-admin <new-team <project> --member a@x.com[,…] [--harness …] | add-agent <project> --member a@x.com --harness openclaw|claude-code-cloud|claude-code-openshell | retire-agent <project> --harness codex | set-principal <project> --actor agent/codex --principal human/a@x.com | set-policy <project> --from <repo>/.retrace.json --if-match <digest>|none | list-teams> [--url https://…] [--credentials-file …] [--out file.md (default: ~/.retrace/onboarding-*.md)] [--producer-keys-dir ~/.retrace/producer-keys] [--dry-run]");
   return cmd ? 1 : 0;
 }
 

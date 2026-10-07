@@ -1,4 +1,7 @@
 #!/bin/sh
+# Applies in two sandboxed seats and nowhere else: a Claude Code cloud session (CLAUDE_CODE_REMOTE=true;
+# docs/design/cloud-seat.md §6) and the OpenShell seat on the Omarchy PC (RETRACE_SEAT=claude-code-openshell, exact
+# match; docs/design/openshell-seat.md §6). Any other session, the laptop seats and the merger included, is not gated.
 # Fail-closed allowlist: a cloud session may run only
 # `git push [-u|--set-upstream] [--force-with-lease[=<ref>:<sha>]] <remote> <name>:refs/heads/<name>`.
 # The explicit byte-identical destination is required because Git can resolve a source-only refspec
@@ -10,7 +13,7 @@
 # GitHub operations such as `gh pr merge` are outside this git-push-only guard.
 set -eu
 
-[ "${CLAUDE_CODE_REMOTE:-}" = "true" ] || exit 0
+[ "${CLAUDE_CODE_REMOTE:-}" = "true" ] || [ "${RETRACE_SEAT:-}" = "claude-code-openshell" ] || exit 0
 
 node -e '
   const apostrophe = String.fromCharCode(39);

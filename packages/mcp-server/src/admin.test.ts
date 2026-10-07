@@ -4,7 +4,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, 
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHandler, EventInput, MemoryEventStore, parseCredentials } from "@retrace-dev/core";
-import { DEFAULT_HARNESSES, planAgentCredential, renderAgentOnboarding, planTeam, planCredentials, validateSpec, teamsIn, appendCredentials, writeSecretFile, readCredentialsFile, gitHookActorId, ciActorId, containingGitTree, defaultOnboardingFile, main, mintProducerKeys, producerKeyFileName, shouldMintProducerKey, findLivePinned, retireLivePinned, duplicateLivePinnedError, TeamSpec } from "./admin.js";
+import { DEFAULT_HARNESSES, HARNESSES, PROVIDER_HELD_HARNESSES, planAgentCredential, renderAgentOnboarding, planTeam, planCredentials, validateSpec, teamsIn, appendCredentials, writeSecretFile, readCredentialsFile, gitHookActorId, ciActorId, containingGitTree, defaultOnboardingFile, main, mintProducerKeys, producerKeyFileName, shouldMintProducerKey, findLivePinned, retireLivePinned, duplicateLivePinnedError, TeamSpec } from "./admin.js";
 
 /** deterministic "randomness": counter-filled buffers, distinct per call */
 const fakeRand = () => { let n = 0; return (len: number) => Buffer.alloc(len, ++n); };
@@ -330,6 +330,117 @@ test("T2 claude-code-cloud issuance is pinned, unsigned, secret-free, and accept
   assert.equal(sealed.method?.params?.producer_sig_verdict, "none");
   const rejected = await post({ ...input, actor: { type: "human", id: "alice@acme.dev" }, idempotency_key: "ordinary-human-write" });
   assert.equal(rejected.status, 403);
+});
+
+test("T2o claude-code-openshell issuance is pinned, unsigned, secret-free, and accepts only its configured actor", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "retrace-admin-openshell-"));
+  const file = join(dir, "creds.json");
+  const onboarding = join(dir, "openshell.md");
+  const keysDir = join(dir, "producer-keys");
+  appendCredentials(file, [], planCredentials(spec, fakeRand()));
+
+  const argv = [
+    "add-agent", "acme-app", "--member", "alice@acme.dev", "--harness", "claude-code-openshell",
+    "--url", "https://retrace-api.example.workers.dev", "--credentials-file", file,
+    "--producer-keys-dir", keysDir, "--out", onboarding,
+  ];
+  assert.equal(await main(argv, {}, () => {}), 0);
+  const added = readCredentialsFile(file).at(-1)!;
+  assert.deepEqual(added.actor, { type: "agent", id: "claude-code-openshell", on_behalf_of: "alice@acme.dev" });
+  assert.deepEqual(added.principal, { type: "human", id: "alice@acme.dev" });
+  assert.deepEqual([added.trust, added.projects], ["pinned", ["acme-app"]]);
+  assert.equal(added.public_key, undefined);
+  assert.equal(added.require_signature, undefined);
+  assert.equal(added.producer_key_file, undefined);
+  assert.equal(existsSync(keysDir), false, "no private key directory is created for the OpenShell seat");
+
+  const doc = readFileSync(onboarding, "utf8");
+  assert.match(doc, /This document contains no secret/);
+  assert.match(doc, /provider `retrace-seat`, type `retrace-worker`/);
+  assert.match(doc, /sandbox\/openshell\/profiles\/retrace-worker\.yaml/);
+  assert.match(doc, /bound to `retrace-api\.example\.workers\.dev`/);
+  assert.match(doc, /`RETRACE_TOKEN` and `RETRACE_HOOK_TOKEN`/);
+  assert.match(doc, /openshell provider create --from-existing/);
+  assert.match(doc, /RETRACE_SEAT=claude-code-openshell/);
+  assert.match(doc, /RETRACE_ENV=openshell-pc/);
+  assert.match(doc, /sandbox\/openshell\/README\.md/);
+  assert.match(doc, /own Unix account on the PC, not `stranger`, where the agents run/, "C-L1: the gateway runs under its own account (O1 b)");
+  assert.match(doc, /O1 \(b\), `evt_9e097bccc3a448d38b165a69cf1bf3ad`/);
+  assert.match(doc, /only once its dated O1 \(b\) correction is merged and the W5-0 pre-flight has passed, and run them as that account/);
+  assert.match(doc, /sandbox\/openshell\/CLAUDE\.seat\.md/);
+  assert.doesNotMatch(doc, /RETRACE_AUTH/, "an OpenShell provider substitutes a header the client sends; proxy mode would send none");
+  assert.doesNotMatch(doc, /[A-Za-z0-9_-]{43}/);
+  assert.doesNotMatch(doc, /"env"\s*:/);
+  assert.doesNotMatch(doc, new RegExp(added.token));
+
+  const store = new MemoryEventStore();
+  const handle = createHandler(store, { credentials: [added] });
+  const input: EventInput = {
+    project: "acme-app",
+    actor: { type: "agent", id: "claude-code-openshell" },
+    action: "edited",
+    artifacts: [{ id: "repo:acme/app#a.ts", role: "generated" }],
+  };
+  const post = (body: EventInput) => handle(new Request("http://test/events", {
+    method: "POST",
+    headers: { authorization: `Bearer ${added.token}`, "content-type": "application/json" },
+    body: JSON.stringify(body),
+  }));
+  const accepted = await post(input);
+  assert.equal(accepted.status, 201);
+  const sealed = (await store.all("acme-app"))[0];
+  assert.match(String(sealed.method?.params?.sealed_by), /^pinned:/);
+  assert.equal(sealed.method?.params?.producer_sig_verdict, "none");
+  const rejected = await post({ ...input, actor: { type: "human", id: "alice@acme.dev" }, idempotency_key: "ordinary-human-write" });
+  assert.equal(rejected.status, 403);
+});
+
+/** C-M1 (PR 196 round 1): team onboarding would write a provider-held seat's token into a generic MCP env block, so new-team refuses
+ *  these seats before any mint or write, alone or in a mixed batch, dry run included. add-agent (T2, T2o) stays their path. */
+async function teamPathRefusal(harness: "claude-code-cloud" | "claude-code-openshell") {
+  const refusal = new RegExp(`new-team refuses harness "${harness}".*add-agent`);
+  // the pure planners refuse too, so no caller gets a team onboarding holding this seat's token
+  assert.throws(() => planTeam({ ...spec, harnesses: [harness] }, fakeRand()), refusal);
+  assert.throws(() => planCredentials({ ...spec, harnesses: ["codex", harness] }, fakeRand()), refusal);
+
+  const dir = mkdtempSync(join(tmpdir(), `retrace-admin-team-refusal-${harness}-`));
+  const onboarding = join(dir, "team.md");
+  const keysDir = join(dir, "producer-keys");
+  const argvFor = (file: string, harnesses: string) => [
+    "new-team", "new-app", "--member", "alice@acme.dev", "--harness", harnesses,
+    "--url", "https://retrace-api.example.workers.dev", "--credentials-file", file,
+    "--producer-keys-dir", keysDir, "--out", onboarding,
+  ];
+  // no mirror yet: none is created
+  const fresh = join(dir, "fresh.json");
+  for (const harnesses of [harness, `codex,${harness}`]) {
+    for (const extra of [[], ["--dry-run"]]) {
+      const printed: string[] = [];
+      await assert.rejects(() => main([...argvFor(fresh, harnesses), ...extra], {}, (line) => printed.push(line)), refusal);
+      assert.deepEqual(printed, [], "nothing printed: no dry-run plan, no wrangler step");
+    }
+  }
+  assert.equal(existsSync(fresh), false, "no credentials file is created");
+  // an existing mirror holding another project's set: byte-for-byte unchanged
+  const file = join(dir, "creds.json");
+  appendCredentials(file, [], planCredentials(spec, fakeRand()));
+  const before = readFileSync(file);
+  await assert.rejects(() => main(argvFor(file, `codex,${harness}`), {}, () => {}), refusal);
+  assert.deepEqual(readFileSync(file), before, "no credential appended, not even the batch's codex");
+  assert.equal(existsSync(onboarding), false, "no onboarding file");
+  assert.equal(existsSync(keysDir), false, "no producer-keys directory");
+}
+
+test("T2n new-team refuses claude-code-cloud before any mint or write; add-agent is its path", () => teamPathRefusal("claude-code-cloud"));
+test("T2on new-team refuses claude-code-openshell before any mint or write; add-agent is its path", () => teamPathRefusal("claude-code-openshell"));
+
+test("new-team still plans every other harness; the refusal list is exactly the two provider-held seats", () => {
+  assert.deepEqual(PROVIDER_HELD_HARNESSES, ["claude-code-cloud", "claude-code-openshell"]);
+  const others = HARNESSES.filter((h) => !PROVIDER_HELD_HARNESSES.includes(h));
+  assert.deepEqual(others, ["claude-code", "codex", "gemini", "grok", "github-copilot", "openclaw", "nooa"]);
+  const plan = planTeam({ ...spec, harnesses: others }, fakeRand());
+  assert.equal(plan.credentials.length, spec.members.length * others.length + 2, "one per member × harness, plus the hook and the CI reader");
+  assert.match(plan.onboarding, /"env": \{/, "their team onboarding keeps its MCP env entries");
 });
 
 test("add-agent validates a single member/harness and requires an existing project", async () => {
