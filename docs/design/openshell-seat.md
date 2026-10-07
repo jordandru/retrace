@@ -18,6 +18,9 @@ image and network policy, and an instruction convention.
 - **Corrections with step W6a** (rule 10; the W6a pull request, `claude-code`, `claude-opus-5-5`), three, each marked in place
   below: (1) 2026-10-05, §2.4's identity clause belongs to W6a, not W7; (2) 2026-10-05, §7 Q9's control toward `main` becomes two
   checks that cannot push; (3) 2026-10-06, the seat's local scratch files and who runs Q3's in-sandbox half (§7, after Q9's).
+- **Correction, 2026-10-07, O1 (b)** (rule 10; Jordan's choice `evt_9e097bccc3a448d38b165a69cf1bf3ad`): §6's host rules restated for
+  the gateway's own Unix account, with the isolation condition W5-0 verifies and what ends a W5 or W6 session; marked in place under
+  that bullet.
 - It is step W2 of that scope. Stage 1 (`docs/measurements/openshell-stage1-omarchy-2026-10-04.md`, PR 174) measured the custody
   on the PC with fake and scratch tokens. Stage 2 (`docs/design/sandbox-credential-proxy.md`, PR 175) decided A1–A4, all yes
   (`evt_fb8166ff…`). The template is `docs/design/cloud-seat.md` v2: the same shape, with OpenShell on hardware Jordan owns in
@@ -324,6 +327,25 @@ Two paths this note does **not** take, and why:
   in-flight work (Stage 1 test 5), so the seat commits often and the ledger shows what was lost; the gateway store is the token's
   home, and retirement is `openshell provider delete` on the PC plus `retrace-admin` retire and the Worker secret update on the
   laptop, by typed scripts; Docker on the PC stays unused (`compute_driver = "podman"`, Stage 1).
+  *Correction, 2026-10-07 (Jordan's O1 choice (b), `evt_9e097bccc3a448d38b165a69cf1bf3ad`; the W5 plan's O1 and O2): the gateway
+  runs under its own Unix account, not `stranger`, and the rule above applies to that account. No AI agent is signed in under the
+  gateway's account while a real token is in its store. Agents, Orca and the workbench may stay signed in under `stranger` only
+  while the agents' account is verifiably isolated from the gateway's, during a W5 or W6 session as well as between sessions: from
+  `stranger` there is no read access to a credential, the store or its key; no write or replace access to the gateway's code, unit,
+  profiles or configuration, or to a directory that holds them; and no usable path to control the gateway, root or any
+  administrative function. Four checks are necessary examples of that condition, not proof of it: the gateway's account is reached
+  only by its own password; `stranger` has no passwordless sudo; `stranger` is not in the `docker` group; and the gateway's account
+  has no inbound SSH or Orca access outside a W5 or W6 session. Paths they miss include a gateway file or directory that `stranger`
+  can write through a shared group or an ACL, the gateway account's Podman API socket, direct read access to the store and its key,
+  and sudo, polkit or `machinectl` grants that one `sudo -n true` does not exercise. W5-0 verifies the whole condition with harmless
+  fixtures before any real token reaches the store; if it fails, no real token goes in. Orca's remote server reaches an account the
+  way SSH does, so the rule names both. A W5 or W6 session ends only when both hold: the temporary client's inbound authorization is
+  revoked (the SSH authorized key that admits it, not merely a private-key file under the gateway's account, and any Orca grant),
+  and every temporary access channel is closed and verified absent (authenticated SSH sessions, forwarding and multiplexed
+  connections, and the Orca listener and its sessions). An Orca service that restarts or is socket-activated does not pass by being
+  absent at one instant; until both hold, the session is not over. The commands are the W5 and W6 scripts'. "SSH off between
+  sessions" now means that end state holds for the gateway's account. With the condition verified, SSH and Orca into `stranger` do
+  not reach the store. Where this note names `stranger` as the gateway's account (§0, §0.1, §9), read the gateway's own account.*
 - **TLS.** OpenShell terminates TLS with a per-sandbox CA and holds ledger and API traffic in clear inside the gateway's process
   on Jordan's own machine (Stage 2 §4.6). Accepted and stated. Whether node and `curl` in the sandbox trust that CA without extra
   configuration is unmeasured (Stage 1 was plain HTTP): probe Q2.

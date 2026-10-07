@@ -42,6 +42,12 @@ The runtime network policy is the union of the three profiles' endpoints and not
 
 Run as `stranger` in a plain terminal on the PC, from a fresh clone of the repository at the merged commit. The PC's SSH stays off
 except while a session needs it.
+*Correction, 2026-10-07 (Jordan's O1 choice (b), `evt_9e097bccc3a448d38b165a69cf1bf3ad`; design §6): run every step below as the
+gateway's own Unix account, not `stranger`, logged in with that account's own password. Step 4, the first real token, waits until
+W5-0 has verified that `stranger` cannot read the store or its key, cannot write or replace the gateway's code or configuration, and
+has no path to control the gateway or root (design §6). Inbound SSH or Orca access to that account exists only during a W5 or W6
+session. Step 7 is where such a session ends: the temporary inbound authorization is revoked, and the SSH sessions, forwarding and
+multiplexed connections and the Orca listener and its sessions are closed and verified absent.*
 
 1. **Lint the profiles.** `openshell profile lint -f sandbox/openshell/profiles/<name>.yaml` for each of the three.
    Passes when each prints no error.
@@ -67,6 +73,12 @@ except while a session needs it.
 Never: `--env` with a credential value (OpenShell warns, and the agent could read it); a bind mount of anything outside a scratch
 directory; a second credential for a seat that has one; a host-level `claude` signed in while a real token is in the gateway's
 store (design §6).
+*Correction, 2026-10-07 (Jordan's O1 choice (b), `evt_9e097bccc3a448d38b165a69cf1bf3ad`; design §6): the last item reads: any AI
+agent signed in under the gateway's own account while a real token is in its store; and any path from the account where agents run
+to that account's store, key, code, configuration or control, such as passwordless sudo, the `docker` group, a shared group or an
+ACL, the Podman socket, a polkit grant, or inbound SSH or Orca access outside a W5 or W6 session. It is reached only by its own
+password. Agents, Orca and the workbench may stay in `stranger` only while the isolation condition of design §6 holds; W5-0 verifies
+it.*
 
 ## What this directory does not claim
 
