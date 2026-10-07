@@ -12,27 +12,43 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const guard = resolve(root, "scripts/cloud/guard-push-main.sh");
 const setup = resolve(root, "scripts/cloud/setup.sh");
 
-function runGuard(cwd: string, command: string, cloud = true) {
+// The guard applies when CLAUDE_CODE_REMOTE is "true" (the cloud seat) or RETRACE_SEAT is exactly "claude-code-openshell"
+// (the OpenShell seat). `undefined` removes the variable from the child's environment.
+type Selector = Record<string, string | undefined>;
+const CLOUD: Selector = { CLAUDE_CODE_REMOTE: "true", RETRACE_SEAT: undefined };
+const OPENSHELL: Selector = { CLAUDE_CODE_REMOTE: "", RETRACE_SEAT: "claude-code-openshell" };
+const INERT: Selector = { CLAUDE_CODE_REMOTE: "", RETRACE_SEAT: undefined };
+
+function guardEnv(selector: Selector): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  for (const [key, value] of Object.entries(selector)) {
+    if (value === undefined) delete env[key];
+    else env[key] = value;
+  }
+  return env;
+}
+
+function runGuard(cwd: string, command: string, selector: Selector = CLOUD) {
   return spawnSync(guard, {
     cwd,
-    env: { ...process.env, ...(cloud ? { CLAUDE_CODE_REMOTE: "true" } : { CLAUDE_CODE_REMOTE: "" }) },
+    env: guardEnv(selector),
     input: JSON.stringify({ tool_name: "Bash", tool_input: { command } }),
     encoding: "utf8",
   });
 }
 
-test("T11 push guard refuses main forms only in cloud sessions", () => {
+function guardMatrix(selector: Selector) {
   chmodSync(guard, 0o755);
   const repo = mkdtempSync(resolve(tmpdir(), "retrace-cloud-guard-"));
   const shapeMessage = "refused: a cloud session pushes only 'git push [-u] [--force-with-lease] <remote> <branch>:refs/heads/<branch>' to a non-main branch (docs/design/cloud-seat.md §6)";
   const unresolvedMessage = "refused: cannot resolve the push destination without evaluating the command";
-  const assertAllowed = (command: string, cloud = true) => {
-    const result = runGuard(repo, command, cloud);
+  const assertAllowed = (command: string, env: Selector = selector) => {
+    const result = runGuard(repo, command, env);
     assert.equal(result.status, 0, command);
     assert.equal(result.stderr, "", command);
   };
   const assertRefused = (command: string, message = shapeMessage) => {
-    const result = runGuard(repo, command);
+    const result = runGuard(repo, command, selector);
     assert.equal(result.status, 2, command);
     assert.equal(result.stderr.trim(), message, command);
   };
@@ -55,7 +71,7 @@ test("T11 push guard refuses main forms only in cloud sessions", () => {
 
     for (const command of allowedPushCommands.slice(1)) assertAllowed(command);
     for (const command of ["echo hello", "gh pr merge"]) assertAllowed(command);
-    assertAllowed("git push origin main", false);
+    assertAllowed("git push origin main", INERT);
 
     for (const command of [
       "git push",
@@ -198,7 +214,7 @@ test("T11 push guard refuses main forms only in cloud sessions", () => {
     };
 
     for (const command of allowedPushCommands) {
-      assert.equal(runGuard(clone, command).status, 0, command);
+      assert.equal(runGuard(clone, command, selector).status, 0, command);
       const mainBefore = remoteRef("refs/heads/main");
       const pushed = spawnSync("sh", ["-c", command], { cwd: clone, encoding: "utf8" });
       if (command.includes(":0123abc")) assert.notEqual(pushed.status, 0, command);
@@ -214,13 +230,39 @@ test("T11 push guard refuses main forms only in cloud sessions", () => {
       "commit", "--allow-empty", "-q", "-m", "feature update",
     ]).status, 0, "feature commit");
     const configuredCommand = "git push origin feature/x:refs/heads/feature/x";
-    assert.equal(runGuard(clone, configuredCommand).status, 0, configuredCommand);
+    assert.equal(runGuard(clone, configuredCommand, selector).status, 0, configuredCommand);
     const configuredMainBefore = remoteRef("refs/heads/main");
     const configuredFeatureBefore = remoteRef("refs/heads/feature/x");
     const configuredPush = spawnSync("sh", ["-c", configuredCommand], { cwd: clone, encoding: "utf8" });
     assert.equal(configuredPush.status, 0, `${configuredCommand}: ${configuredPush.stderr}`);
     assert.equal(remoteRef("refs/heads/main"), configuredMainBefore, configuredCommand);
     assert.notEqual(remoteRef("refs/heads/feature/x"), configuredFeatureBefore, configuredCommand);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+}
+
+test("T11 push guard refuses main forms only in cloud sessions", () => guardMatrix(CLOUD));
+
+test("T11o push guard applies the same matrix in the OpenShell sandbox (RETRACE_SEAT=claude-code-openshell)", () => guardMatrix(OPENSHELL));
+
+test("T11w W6a rows: payloads toward main are refused, the probe branch is allowed, and the selector is an exact match", () => {
+  chmodSync(guard, 0o755);
+  const repo = mkdtempSync(resolve(tmpdir(), "retrace-openshell-guard-"));
+  try {
+    for (const selector of [CLOUD, OPENSHELL]) {
+      const label = JSON.stringify(selector);
+      assert.equal(runGuard(repo, "git push origin HEAD:refs/heads/main", selector).status, 2, label);
+      assert.equal(runGuard(repo, "git push --dry-run origin HEAD:refs/heads/main", selector).status, 2, label);
+      const probe = runGuard(repo, "git push origin openshell-probe/2026-10-05:refs/heads/openshell-probe/2026-10-05", selector);
+      assert.equal(probe.status, 0, label);
+      assert.equal(probe.stderr, "", label);
+    }
+    for (const seat of [undefined, "", "claude-code", "claude-code-openshellx", "CLAUDE-CODE-OPENSHELL", " claude-code-openshell"]) {
+      const result = runGuard(repo, "git push origin HEAD:refs/heads/main", { CLAUDE_CODE_REMOTE: "", RETRACE_SEAT: seat });
+      assert.equal(result.status, 0, `RETRACE_SEAT=${JSON.stringify(seat)} leaves the guard inert`);
+      assert.equal(result.stderr, "", `RETRACE_SEAT=${JSON.stringify(seat)}`);
+    }
   } finally {
     rmSync(repo, { recursive: true, force: true });
   }

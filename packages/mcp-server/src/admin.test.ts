@@ -332,6 +332,66 @@ test("T2 claude-code-cloud issuance is pinned, unsigned, secret-free, and accept
   assert.equal(rejected.status, 403);
 });
 
+test("T2o claude-code-openshell issuance is pinned, unsigned, secret-free, and accepts only its configured actor", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "retrace-admin-openshell-"));
+  const file = join(dir, "creds.json");
+  const onboarding = join(dir, "openshell.md");
+  const keysDir = join(dir, "producer-keys");
+  appendCredentials(file, [], planCredentials(spec, fakeRand()));
+
+  const argv = [
+    "add-agent", "acme-app", "--member", "alice@acme.dev", "--harness", "claude-code-openshell",
+    "--url", "https://retrace-api.example.workers.dev", "--credentials-file", file,
+    "--producer-keys-dir", keysDir, "--out", onboarding,
+  ];
+  assert.equal(await main(argv, {}, () => {}), 0);
+  const added = readCredentialsFile(file).at(-1)!;
+  assert.deepEqual(added.actor, { type: "agent", id: "claude-code-openshell", on_behalf_of: "alice@acme.dev" });
+  assert.deepEqual(added.principal, { type: "human", id: "alice@acme.dev" });
+  assert.deepEqual([added.trust, added.projects], ["pinned", ["acme-app"]]);
+  assert.equal(added.public_key, undefined);
+  assert.equal(added.require_signature, undefined);
+  assert.equal(added.producer_key_file, undefined);
+  assert.equal(existsSync(keysDir), false, "no private key directory is created for the OpenShell seat");
+
+  const doc = readFileSync(onboarding, "utf8");
+  assert.match(doc, /This document contains no secret/);
+  assert.match(doc, /provider `retrace-seat`, type `retrace-worker`/);
+  assert.match(doc, /sandbox\/openshell\/profiles\/retrace-worker\.yaml/);
+  assert.match(doc, /bound to `retrace-api\.example\.workers\.dev`/);
+  assert.match(doc, /`RETRACE_TOKEN` and `RETRACE_HOOK_TOKEN`/);
+  assert.match(doc, /openshell provider create --from-existing/);
+  assert.match(doc, /RETRACE_SEAT=claude-code-openshell/);
+  assert.match(doc, /RETRACE_ENV=openshell-pc/);
+  assert.match(doc, /sandbox\/openshell\/README\.md/);
+  assert.match(doc, /sandbox\/openshell\/CLAUDE\.seat\.md/);
+  assert.doesNotMatch(doc, /RETRACE_AUTH/, "an OpenShell provider substitutes a header the client sends; proxy mode would send none");
+  assert.doesNotMatch(doc, /[A-Za-z0-9_-]{43}/);
+  assert.doesNotMatch(doc, /"env"\s*:/);
+  assert.doesNotMatch(doc, new RegExp(added.token));
+
+  const store = new MemoryEventStore();
+  const handle = createHandler(store, { credentials: [added] });
+  const input: EventInput = {
+    project: "acme-app",
+    actor: { type: "agent", id: "claude-code-openshell" },
+    action: "edited",
+    artifacts: [{ id: "repo:acme/app#a.ts", role: "generated" }],
+  };
+  const post = (body: EventInput) => handle(new Request("http://test/events", {
+    method: "POST",
+    headers: { authorization: `Bearer ${added.token}`, "content-type": "application/json" },
+    body: JSON.stringify(body),
+  }));
+  const accepted = await post(input);
+  assert.equal(accepted.status, 201);
+  const sealed = (await store.all("acme-app"))[0];
+  assert.match(String(sealed.method?.params?.sealed_by), /^pinned:/);
+  assert.equal(sealed.method?.params?.producer_sig_verdict, "none");
+  const rejected = await post({ ...input, actor: { type: "human", id: "alice@acme.dev" }, idempotency_key: "ordinary-human-write" });
+  assert.equal(rejected.status, 403);
+});
+
 test("add-agent validates a single member/harness and requires an existing project", async () => {
   const dir = mkdtempSync(join(tmpdir(), "retrace-admin-agent-invalid-"));
   const file = join(dir, "creds.json");
