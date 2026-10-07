@@ -11,6 +11,8 @@
  *   retrace-admin list-teams [--credentials-file …]
  *
  * What new-team does (nothing touches the Worker by itself — secrets are pushed by the operator, see the printed step):
+ *   0. Refuses the provider-held seats (claude-code-cloud, claude-code-openshell) before anything else: their token belongs in a
+ *      provider, never in the MCP env block this onboarding writes, so add-agent is their only path.
  *   1. Mints project-scoped credentials (Credential.projects = [<project>], so a leaked team token cannot read or write
  *      any other team's ledger): one PINNED agent credential per member × harness (actor.on_behalf_of = the member, so
  *      retrace_instruct can record that member's instructions and nobody else's), one ASSERT credential for the team's
@@ -140,6 +142,20 @@ export function validateSpec(spec: TeamSpec): void {
   if (!/^https:\/\//.test(spec.url)) throw new Error(`--url must be https (got ${spec.url})`);
 }
 
+/** Seats whose bearer token a provider holds: claude-code-cloud (the cloud environment's credential, attached by Anthropic's agent
+ *  proxy) and claude-code-openshell (an OpenShell gateway provider, docs/design/openshell-seat.md §2.3). Team onboarding would write
+ *  their token into a generic MCP env block, so new-team refuses them; add-agent, whose onboarding for them is secret-free, is their
+ *  only path. */
+export const PROVIDER_HELD_HARNESSES: readonly Harness[] = ["claude-code-cloud", "claude-code-openshell"];
+
+/** new-team's check: validateSpec, plus no provider-held seat. Runs before any mint, credential write or onboarding write. */
+export function validateTeamSpec(spec: TeamSpec): void {
+  validateSpec(spec);
+  for (const h of spec.harnesses)
+    if (PROVIDER_HELD_HARNESSES.includes(h))
+      throw new Error(`new-team refuses harness "${h}": a provider holds that seat's token, and team onboarding would write it into an MCP env block. Add the seat with add-agent: retrace-admin add-agent ${spec.project} --member <email> --harness ${h}`);
+}
+
 /** 32 random bytes, base64url — 43 chars, comfortably above the 16-char minimum the Worker enforces. */
 export function mintToken(rand: (n: number) => Buffer = randomBytes): string {
   return rand(32).toString("base64url");
@@ -150,7 +166,7 @@ export function ciActorId(project: string): string { return `ci-${project}`; }
 
 /** Pure: the credentials a team needs. Deterministic given `rand`, so it is testable. */
 export function planCredentials(spec: TeamSpec, rand: (n: number) => Buffer = randomBytes): Credential[] {
-  validateSpec(spec);
+  validateTeamSpec(spec);
   const out: Credential[] = [];
   for (const member of spec.members) {
     for (const h of spec.harnesses) {
@@ -342,7 +358,8 @@ export function renderAgentOnboarding(spec: AgentSpec, credential: LocalCredenti
         "RETRACE_DEVICE=omarchy-pc",
         "RETRACE_SEAT=claude-code-openshell",
       ].join("\n")), "",
-      "Follow `sandbox/openshell/README.md` for the steps on the PC.",
+      "The gateway and its provider store run under their own Unix account on the PC, not `stranger`, where the agents run (O1 (b), `evt_9e097bccc3a448d38b165a69cf1bf3ad`).",
+      "Follow `sandbox/openshell/README.md` for the steps on the PC only once its dated O1 (b) correction is merged and the W5-0 pre-flight has passed, and run them as that account.",
       `Keep the provenance instructions in \`${cfg.instructions}\`. This onboarding writes no MCP environment block.`,
     ].join("\n");
   }
@@ -515,7 +532,7 @@ export async function main(argv = process.argv.slice(2), env = process.env, out:
       harnesses: (flags.harness ? list(flags.harness) : [...DEFAULT_HARNESSES]) as Harness[],
       url: String(flags.url ?? env.RETRACE_URL ?? "").replace(/\/+$/, ""),
     };
-    validateSpec(spec);
+    validateTeamSpec(spec);
     const existing = readCredentialsFile(credentialsFile);
     if (existing.some((c) => c.projects?.includes(project))) throw new Error(`${credentialsFile} already holds credentials scoped to "${project}" — refusing to mint a second set (remove them first, or pick another project name)`);
     const plan = planTeam(spec);
