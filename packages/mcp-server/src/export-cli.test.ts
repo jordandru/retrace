@@ -743,3 +743,35 @@ test("owner-login replay preserves sealed amendments call timing verbatim", asyn
   assert.equal(ownerLoginRecord(bundle.events.at(-1)!)!.decision.timing.amendments_calls_truncated, true);
   assert.ok(replay.results[0]?.preserved.includes("timing"));
 });
+
+test("#160 checkpoint refuses a bundle whose generated_at does not parse, in both the server and the --bundle branch", async () => {
+  const now = new Date("2026-10-01T16:00:00.000Z");
+  const fixture = await checkpointFixture(new Date(now.getTime() - 3_600_000));
+  const unparseable = { ...fixture.bundle, generated_at: "not-a-date" };
+  try {
+    // server branch: the age guard must refuse before anything else happens
+    const remote = new CheckpointRemoteStore(unparseable, { seq: 0, hash: fixture.bundle.chain.head_hash ?? "" });
+    await assert.rejects(
+      checkpointCommand("p", { pubkey: fixture.pubkey, out: join(fixture.dir, "checkpoints.jsonl") }, { store: remote, now }),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /generated_at "not-a-date" is not a parseable datetime/);
+        assert.match(error.message, /unknown age is refused/);
+        assert.doesNotMatch(error.message, /NaN/);
+        return true;
+      },
+    );
+    assert.ok(!existsSync(join(fixture.dir, "checkpoints.jsonl")), "nothing checkpointed");
+    // --bundle branch: exempt from the age LIMIT, not from having an age
+    const file = join(fixture.dir, "unparseable.json");
+    writeFileSync(file, JSON.stringify(unparseable));
+    const messages: string[] = [];
+    await assert.rejects(
+      checkpointCommand("p", { bundle: file, pubkey: fixture.pubkey, out: join(fixture.dir, "checkpoints.jsonl") }, { now, log: (m) => messages.push(m) }),
+      /generated_at "not-a-date" is not a parseable datetime; a bundle of unknown age is refused/,
+    );
+    assert.equal(messages.length, 0, "no NaN age line is logged");
+  } finally {
+    rmSync(fixture.dir, { recursive: true, force: true });
+  }
+});

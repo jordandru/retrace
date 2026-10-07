@@ -86,6 +86,9 @@ export async function checkpointCommand(
   if (flags.bundle) {
     bundle = parseExportBundle(readFileSync(String(flags.bundle), "utf8"));
     const generatedAt = Date.parse(bundle.generated_at);
+    // Issue #160: an unparseable generated_at is an unknown age, and an unknown age is refused, never logged as NaN.
+    if (!Number.isFinite(generatedAt))
+      throw new Error(`bundle ${flags.bundle} generated_at ${JSON.stringify(bundle.generated_at)} is not a parseable datetime; a bundle of unknown age is refused`);
     const ageHours = Math.max(0, (now.getTime() - generatedAt) / 3_600_000);
     log(`bundle ${flags.bundle} generated_at ${bundle.generated_at}; age ${ageHours.toFixed(2)} hours (--bundle is an explicit operator choice, age limit exempt)`);
   } else {
@@ -97,6 +100,10 @@ export async function checkpointCommand(
       if (!Number.isFinite(maxAgeHours) || maxAgeHours <= 0)
         throw new Error("--max-bundle-age-hours must be a positive number");
       const generatedAt = Date.parse(bundle.generated_at);
+      // Issue #160: `NaN > maxAgeHours` is false, so without this check an unparseable generated_at skipped the
+      // stale-bundle refusal and the checkpoint proceeded on a bundle of unknown age. Refuse it instead.
+      if (!Number.isFinite(generatedAt))
+        throw new Error(`server bundle generated_at ${JSON.stringify(bundle.generated_at)} is not a parseable datetime; a bundle of unknown age is refused (--max-bundle-age-hours ${maxAgeHours} cannot be checked)`);
       const ageHours = Math.max(0, (now.getTime() - generatedAt) / 3_600_000);
       if (ageHours > maxAgeHours) {
         const liveHead = await store.head(project);
