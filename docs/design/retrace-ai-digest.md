@@ -168,8 +168,13 @@ state as unknown until the JSON report states it, and marks every reconcile `mis
 unavailable: reconcile attribution" finding (§6). Two §11 items are prerequisites for the first live run.
 
 **The shadow source while the trailer policy is off (v1.5, 2026-10-06; claude-code, measured).** The shadow row
-above yields "unavailable" whenever the classifier is not classifying. On 2026-10-05, none of the 126 commit
-and merge seals sealed since 2026-10-04 carried `claim_decision`, so the source is unavailable today. Under §6
+above yields "unavailable" whenever the classifier is not classifying. On 2026-10-05, none of the 130 commit
+and merge seals with a `timestamp` from 2026-10-04T00:00:00Z up to 2026-10-05T22:07:00Z carried
+`claim_decision` (actions `committed` and `merged`, every producer: 94 committed, of which 39 asserted by the
+git hook and 55 by the GitHub webhook, and 36 merged, of which 14 by the hook, 14 by the webhook and 8 logged
+through MCP; re-measured 2026-10-07 for v2 after Grok's round-1 finding G-L2, `evt_a7a96c37cc47457488313bc9e986bff1`,
+in `evt_df98b877719c4831af88da21a4fc407b`; v1.5 read 126, which is not reproduced; the count is the same
+through the end of 2026-10-05), so the source is unavailable today. Under §6
 every run would then carry a tier-1 "source unavailable" finding and fail §10's condition (c): no promotion
 window can count while the policy is off. This revision keeps the rule, because "unavailable, never no
 conflicts" is its point, and states the consequence instead: promotion waits for the trailer policy to be on,
@@ -251,10 +256,18 @@ honestly claim.
 
 *Correction, 2026-10-06 (v1.5; claude-code; source: the planning pane's cross-check, re-measured on the
 ledger in `evt_e4147e876bb0453aa3d36d48e4ebc867`). The paragraph above stays as written; this one replaces its
-rule.* Read literally, the rule degrades most runs on a ledger that is taking writes. In the 48 hours to
-2026-10-05 22:07Z the ledger took 1953 events: 40.7 an hour on average, 108 in the busiest tenth of hours, 94 in
-the busiest 33 minutes. The head moved during a 60-second window at 31.5% of start times and during a
-120-second window at 41.5%. A run reads its ledger-backed sources one after another over minutes, so two of
+rule.* Read literally, the rule degrades most runs on a ledger that is taking writes. In the 48 hours from
+2026-10-03T22:07:00Z to 2026-10-05T22:07:00Z (half-open; every event of project `retrace` whose `timestamp`,
+parsed to UTC, falls in it; re-measured 2026-10-07 for v2 after Grok's round-1 finding G-L1,
+`evt_a7a96c37cc47457488313bc9e986bff1`, in `evt_df98b877719c4831af88da21a4fc407b`; v1.5 read 1953 events, 108
+"in the busiest tenth of hours", 31.5% and 41.5%, and that 108 was a 90th-percentile hour on another grid, not
+reproducible as written) the ledger took 1951 events (seq 12106 to 14056): 40.6 an hour on average (1951/48);
+115 in the busiest 60-minute bucket and 105 in the 90th-percentile bucket (nearest rank, the 44th of 48
+ascending), both on a fixed grid of 60-minute buckets from the window start; 94 in the busiest 33 minutes (a
+sliding window that starts at each event's timestamp). The head moved during a 60-second window at 31.2% of
+start times and during a 120-second window at 41.6%: the start times are every 60 seconds on a fixed grid from
+the window start, 2880 of them, and a start counts when at least one event's timestamp falls in
+[start, start + length). A run reads its ledger-backed sources one after another over minutes, so two of
 them rarely share a head, and §10 counts every degraded run against readiness. On an append-only chain,
 different heads are not an inconsistency; a fork is.
 
