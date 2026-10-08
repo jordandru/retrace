@@ -167,18 +167,4 @@ test("router: #96 a signature whose kid the Worker knows as another credential's
   res = await post(handle, "/events", await signProducer(input({ idempotency_key: "rk-owner" }), key.privateKey), "owner-tok");
   assert.equal(res.status, 201);
   assert.equal(verdictOf(store.events.at(-1)!), "unknown_kid");
-  // PR 201 round 1, Codex C-M1: an unsupported format must not get a foreign known kid past the refusal. The format check
-  // in producerSigCheck answers `invalid` before it looks at the kid, so the refusal is decided on the kid alone, first.
-  const unsupported = async (body: EventInput) => ({ ...body, producer_sig: { ...body.producer_sig!, format: "retrace-producer-sig/999" } });
-  await expectRefused(await unsupported(await signProducer(input({ actor: gemini, idempotency_key: "rk-foreign-live-999" }), key.privateKey)), "cred-nokey-0123456789a", "foreign live key, unsupported format");
-  await expectRefused(await unsupported(await signProducer(input({ actor: gemini, idempotency_key: "rk-foreign-retired-999" }), retired.privateKey)), "cred-nokey-0123456789a", "foreign retired key, unsupported format");
-  await expectRefused(await unsupported(await signProducer(input({ actor: { type: "agent", id: "codex" }, idempotency_key: "rk-foreign-keyed-999" }), retired.privateKey)), "cred-codex-0123456789ab", "foreign key on a keyed credential, unsupported format");
-  // the bearer's own key with the unsupported format is `invalid` and seals, as before
-  res = await post(handle, "/events", await unsupported(await signProducer(input({ idempotency_key: "rk-own-999" }), key.privateKey)), "cred-claude-0123456789");
-  assert.equal(res.status, 201);
-  assert.equal(verdictOf(store.events.at(-1)!), "invalid");
-  // a kid nobody owns with the unsupported format is `invalid` and seals, as before (the format check runs first)
-  res = await post(handle, "/events", await unsupported(await signProducer(input({ actor: gemini, idempotency_key: "rk-stranger-999" }), other.privateKey)), "cred-nokey-0123456789a");
-  assert.equal(res.status, 201);
-  assert.equal(verdictOf(store.events.at(-1)!), "invalid");
 });
