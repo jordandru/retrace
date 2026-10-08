@@ -7,7 +7,9 @@ written on 2026-10-05 on the Omarchy PC by a Claude Code session (claude-opus-5-
 and relayed by Jordan. claude-code verified it, re-checked every claim it uses at `27f4264`, amended it (§13),
 and answers for it. v1.5 answers the 2026-10-05 cross-check of HEAD `6190d5f` (see §13). Review round 1 at
 `e43da144` (2026-10-07): Codex rejected it with four Mediums; Grok and NOOA approved. Fix round 1 (2026-10-08, on
-Jordan's go `evt_7c055bb7e6f44599a0c8223e938cc47f`) answers the four (§13). It has not passed the design gate;
+Jordan's go `evt_7c055bb7e6f44599a0c8223e938cc47f`) answers the four (§13). Round 2 at `c83b43ec`: Codex re-raised
+C-M1 and C-M2, and Grok approved. Fix round 2 (2026-10-08, Jordan's go `evt_054df4d9869b4f1bb1a9e117ebff1f60`)
+answers both (§13). It has not passed the design gate;
 until it merges, v1.4 is the reviewed revision. The v1.4 status follows; only its leading label changed.
 Effect on the build brief (added 2026-10-05): v1.5 lands in one pull request with the brief's 2026-10-05
 corrections and takes the design gate with them. From that merge the brief's spec is v1.5, and each brief
@@ -142,8 +144,12 @@ revision decides both. The sentence above is withdrawn.
 
   Where a path's class is uncertain it is listed, because the higher gate applies (agent-rules 12). Left out,
   each for a stated reason:
-  - source code and tests (`packages/*/src/**`, `apps/worker/src/**`, test fixtures), which agent-rules 12
-    classes (c), not this list;
+  - source code and tests (`packages/*/src/**`, `apps/worker/src/**`, test fixtures). This list does not classify
+    them (reworded in fix round 2, after a Codex r2 precision note).
+    - Agent-rules 12 classes code by consequence too, so some code is class (a); the build brief treats the
+      executable doctor gate that way.
+    - The list names only paths whose location alone marks them as governing.
+    - An uncovered change to source code is tier 4 under it, as it was before this revision;
   - `docs/measurements/**`, `docs/examples.md`, `docs/reference.md`, `docs/second-project-baseline.md`, `claude/**`
     (a working list and a review record) and the `LICENSE` files, which govern nothing (class (b));
   - `site/**` and `packages/core/ui/**`, a landing page and a viewer.
@@ -196,8 +202,9 @@ unavailable: reconcile attribution" finding (§6). Two §11 items are prerequisi
 *Added 2026-10-08 (fix round 1; the coordinator's finding, not a reviewer's; measured).* The fix for the seq 10390
 shape is in review (PR #198). That fix alone does not make the context load.
 - The Git-facts adapter resolves the commit refs of every `committed` or `merged` record with `git rev-parse` in
-  the reconciling checkout. When an object is absent, the adapter fails the whole context
-  (`packages/mcp-server/src/attribution.ts:30-41` at `ce2a78cc`).
+  the reconciling checkout (`packages/mcp-server/src/attribution.ts:30-41` at `ce2a78cc`). When that fails, it falls
+  back to a full OID the ledger supplies, a `git:` key or a full-length commit ref, if exactly one matches
+  (`:36-39`). Otherwise it fails the whole context (precision from Codex r2, fix round 2).
 - A webhook push seal names the pushed commit, whatever branch it is on.
 - On 2026-10-07 the checkpoint bot's push seal at seq 14839 (`evt_55b573a57a5644f4be6f1198becf4459`) named commit
   `c47fee54d5b7`, which was on origin's `checkpoint/20261007-14837` only. A reconcile run from a clone that had
@@ -206,8 +213,8 @@ shape is in review (PR #198). That fix alone does not make the context load.
   read `evt_4b301d3ee8ae430cb93506d48912a9cc`).
 
 The runner therefore fetches the remote's branches and pull-request heads before the reconcile read, and it
-records the fetch (remote, refspecs, time) in the selection manifest. A commit in neither still fails the
-context; the second §11 reconcile item covers that case.
+records the fetch (remote, refspecs, time) in the selection manifest. A commit in neither, whose full OID the
+ledger does not supply, still fails the context; the second §11 reconcile item covers that case.
 
 **The shadow source while the trailer policy is off (v1.5, 2026-10-06; claude-code, measured).** The shadow row
 above yields "unavailable" whenever the classifier is not classifying. On 2026-10-05, none of the 130 commit
@@ -339,8 +346,15 @@ the reference chain is taken, and reconcile applies both when it builds its find
 cite an interpretation the ledger has already superseded.
 
 So after the reference chain is taken, the runner checks each source's **reference tail**. That is the
-events on the reference chain after the source's read head (for a bracket, after its upper end `H2`), up to
-the reference head. The tail is checked against the source's row in the **supersession table**:
+events on the reference chain after the last event the source actually read, up to the reference head, on both
+passes (fix round 2, Codex r2 C-M1):
+- for reconcile, after `range.head_seq`, the seq of the last event it read (above). A bracket end is never the
+  start, because the read can end before `H2`: an acknowledgement sealed between `range.head_seq` and `H2` is
+  in the tail. When `range.head_seq` is `null` (the "no head" pin), the tail is the whole reference chain;
+- for doctor, after the ledger head it prints (§6, *Doctor's ledger view*);
+- for the instruction follow-up, after the live head its read reached.
+
+The tail is checked against the source's row in the **supersession table**:
 - The table is a required part of `digest-rules/1.json`, versioned and digest-cited like the rest of the file.
   A change to it is a rules-file version bump and class (a).
 - A row names the event shapes that the source's interpretation reads for a finding's subject.
@@ -348,18 +362,26 @@ the reference head. The tail is checked against the source's row in the **supers
   applies.
 
 Stage-1 rows:
-- **reconcile**, for each per-commit finding. The subject is its commit, plus its file when present. A tail
-  event matches when it is one of these:
-  - a `committed` or `merged` record that names the commit in an artifact id or a `derived_from` entry (core
-    `reconcile.ts:231-265`);
-  - a `correction`-tagged event that names the commit. This is reconcile's acknowledgement (`:157-171`,
-    `:266-272`);
-  - any attribution amendment, that is `action: other` with `action_detail: "amended"` (core `attribution.ts:56`).
-    An amendment matches every `misattributed` finding, because which seal it moves is decided inside
-    reconcile's attribution context.
+- **reconcile**, for every per-commit finding (revised in fix round 2, Codex r2 C-M1: the round-1 row matched
+  only records that name the finding's own commit). Any tail event of these shapes matches every reconcile
+  per-commit finding, whichever commit it names:
+  - a `committed` or `merged` record, for any commit, in the reconciled range or not (core `reconcile.ts:231-265`).
+    A seal for another commit can change a finding's window. Coverage counts the edits between the previous
+    capture boundary of another commit and the commit's own seal (`:368-372`). A later webhook seal can activate
+    an earlier restricted witness for another commit (`capture.ts:9-22`, `:120-126`, `:191-203`). That moves the
+    boundary below an in-range commit's seal, even when the webhook names a commit outside the range;
+  - a `correction`-tagged event: reconcile's acknowledgement (`:157-171`, `:266-272`);
+  - an attribution amendment, that is `action: other` with `action_detail: "amended"` (core `attribution.ts:56`).
 
-  Commits are matched by prefix, as reconcile matches them (`:159`). `orphan_edit` and the observation counts
-  have no row: they are counts read between the bracket ends and are rendered as such.
+  Edit events have no row. An edit sealed after a commit's seal falls outside that commit's window: coverage
+  skips every edit at or above the commit's own seal (`reconcile.ts:368-372`, at `ce2a78cc`). An unsealed commit's
+  finding reads only commit and merge records (`:326-337`). `orphan_edit` and the observation counts have no row:
+  they are counts read up to `range.head_seq` and are rendered as such.
+
+  The cost, from the measured rate: the ledger took 130 commit and merge seals in 46 hours (§4, the shadow
+  source), about three an hour. A tail of a few minutes seldom holds one. When it does, reconcile is read once
+  more. A finding then ends `incomplete` only if a further seal lands during that second read and doctor's run.
+  That takes about two minutes; a 30-commit reconcile read took 57 s (§4).
 - **instruction follow-up**, for each finding. The subject is the instruction, and an event whose `caused_by`
   is that instruction matches. When this read serves as the reference chain, its tail is empty.
 - **doctor**, for the ledger-derived labels (§6, *Doctor's ledger view*). Every tail event matches. Some of
@@ -481,7 +503,7 @@ and digest-cited by every run.
 
 | Tier | Meaning | Rule ids (source) |
 | --- | --- | --- |
-| 1 — integrity | positive evidence the chain or a witness disagrees, or a source that would prove it is unavailable or inconsistent | status integrity not ok; checkpoint head absent from export; reconcile producer-disagreement; NOOA FAIL; source unavailable (incl. absent NOOA audit); snapshot inconsistent; adapter unknown kind; doctor `owner-login` WARN/FAIL while it has one key (v1.5, §6 doctor rule); the runner's own next-run findings: seat wrote outside its envelope, terminal event mismatch, seat audit incomplete, seat key mismatch (v1.5, 2026-10-05; §8 already names each as tier 1; listed here so the table is complete); every other doctor label at tier 1 in the §6 doctor label table (v1.5, 2026-10-05) |
+| 1 — integrity | positive evidence the chain or a witness disagrees, or a source that would prove it is unavailable or inconsistent | status integrity not ok; checkpoint head absent from export; reconcile producer-disagreement; NOOA FAIL; source unavailable (incl. absent NOOA audit); snapshot inconsistent; adapter unknown kind; doctor `owner-login` WARN/FAIL while it has one key (v1.5, §6 doctor rule); the runner's own next-run findings: seat wrote outside its envelope, terminal event mismatch, seat audit incomplete, seat key mismatch (v1.5, 2026-10-05; §8 already names each as tier 1; listed here so the table is complete), and terminal event unknown (fix round 2, §8 withdrawal); every other doctor label at tier 1 in the §6 doctor label table (v1.5, 2026-10-05) |
 | 2 — attribution | a record says who and evidence says otherwise | reconcile misattributed; shadow `conflicting` (labelled shadow); doctor FAIL on identity/credential checks, and their WARN where `--gate` alone sets the level (v1.5, §6 doctor rule); "identity/credential checks" are exactly the labels at tier 2 in the §6 doctor label table, at every level listed there (v1.5, 2026-10-05) |
 | 3 — coverage | a record is missing where one should exist | reconcile missing on main, which is every `missing_commit` in the range (§4); uncovered on a governing path (rule 12 class a paths, read as `reconcile.governing_paths`, §4); unlinked-commit count above baseline; instructions without follow-up older than the rules-file threshold (default 24h), from the verified export (§4), never from the status count; the doctor labels at tier 3 in the §6 doctor label table (v1.5, 2026-10-05); the runner's own next-run finding "terminal event withheld" (root withdrawn before publication; fix round 1, §8) |
 | 4 — hygiene | nothing wrong, something stale | unreachable-seal, orphan paths, loose, non-agent, uncovered off a governing path (v1.5, 2026-10-05; §4), agent events without model, unverified links, NOOA INCONCLUSIVE age; doctor WARN `export-cache` and `model claim absent` (v1.5); reconcile acknowledged, `reconcile.acknowledged` (v1.5, §4); the other doctor labels at tier 4 in the §6 doctor label table (v1.5, 2026-10-05) |
@@ -893,21 +915,48 @@ configuration, not the ledger: a project runs only while the configuration names
   - Replacing the root withdraws the old one and designates the new one.
   - Revoking the `retrace-ai` credential, which is Jordan's to do (§11), stops every project at once. It is the
     stop to use when the runner's host is not trusted.
+- **Publication state** (fix round 2, Codex r2 C-M2). A frozen envelope's publication state is `unattempted`,
+  `attempted` or `published`, or one of the outcomes `terminal mismatch`, `withdrawn` and `unknown`.
+  - The runner writes `attempted` durably before it sends the first POST. A crash, or a response lost after
+    sending, therefore leaves `attempted`, never `unattempted`.
+  - It writes `published` only after the T7 re-read and equality check.
+  - Every state survives a crash, as `terminal mismatch` does.
 - **Checked again at publication.**
   - The runner reads the configuration again immediately before every publication attempt: this run's envelope
     at §7 step 6, and each retained envelope it would publish on the unwritable-ledger path above.
   - An envelope is published only if the configuration still names, for its project, the root the envelope cites
     as `caused_by`.
-  - Otherwise it is never published. Its publication state records `withdrawn`, which survives a crash as
-    `terminal mismatch` does, and no later run retries it.
-  - A change that lands after that read cannot stop that one attempt. Every later attempt reads the
+  - Otherwise no POST is ever sent for it again. A POST would dedupe to an existing event, but it would also
+    seal the envelope if none exists, and that is a write the configuration no longer authorizes. What follows
+    depends on the state:
+    - `unattempted`: the runner never sent it, so it is not published. It is marked `withdrawn`.
+    - `attempted`: the outcome is not known yet, and the runner resolves it read-only before it classifies
+      anything. It looks for an event under the envelope's idempotency key in a verified read with proven
+      coverage, from the start head of the envelope's run to the current head. The read is a fresh full
+      export or the paged history walk, by the same methods and coverage rules as the seat audit below. The
+      remote store's `byIdempotencyKey()` returns `null` (`packages/mcp-server/src/remote-store.ts:119-121` at
+      `ce2a78cc`), so it is not that read. Then:
+      - An event under the key passes the T7 equality check. The envelope was published: its state becomes
+        `published`, the run has its terminal event, and nothing is withheld.
+      - An event under the key fails the check. The `terminal mismatch` path above applies.
+      - No event is under the key, and coverage is proven. The envelope was not published. It is marked
+        `withdrawn`.
+      - Coverage is not proven (a read error, a walk still truncated, a cached export). The state becomes
+        `unknown`. The runner never claims the envelope is absent and never sends it. Each later run tries the
+        read-only resolution again until it settles.
+  - A change that lands after the configuration read cannot stop that one attempt. Every later attempt reads the
     configuration again.
 - **Reported.**
   - The next run of that project, under a new root, renders a mandatory tier-3 "terminal event withheld" finding
-    for each withheld envelope. The finding cites the run id and the envelope's hash.
-  - When the project has no new root there is no next run. The record of the configuration change then lists
-    the withheld run ids.
-  - A withheld run has no terminal event. T7's "exactly one" has this exception, as it has the mismatch case.
+    for each `withdrawn` envelope. The finding cites the run id and the envelope's hash.
+  - For each `unknown` envelope, the next run renders a mandatory tier-1 "terminal event unknown" finding. It cites
+    the run id, the envelope's hash and the last read attempted. A run that settles the state reports the
+    settled outcome instead.
+  - When the project has no new root there is no next run. The record of the configuration change then lists the
+    `withdrawn` and `unknown` run ids, and an `unknown` envelope is resolved the same read-only way before that
+    record is written.
+  - A withheld run has no terminal event. T7's "exactly one" has this exception, as it has the mismatch case. An
+    `unknown` run is stated as unknown, never as missing.
 - **What stays.** Runs published under the withdrawn root stay rooted in it. That is true: they were authorized
   when they ran. The runner never reads the ledger to decide authorization.
 
@@ -1060,6 +1109,25 @@ Evidence and snapshot
     - The external-observation labels are tiered as before.
   - (x) Doctor's pin off the reference chain: a hash that is not the chain's event hash at that seq.
     - Must trip: the result of case (ii), for doctor's ledger-derived findings only.
+  *Added in fix round 2 (2026-10-08; Codex r2 C-M1):*
+  - (v-b), (vi-b) Inside the bracket. Cases (v) and (vi) are run again with the event inside the bracket:
+    - `H1` = 100, reconcile reads through seq 100 and reports the unacknowledged finding;
+    - the acknowledgement, or the amendment, seals at 101;
+    - `H2` = 101, which is also the reference head.
+
+    Expected: the tail (100, 101] holds the event, reconcile is read again, and the result is that of (v) or (vi).
+    A runner that starts the tail after `H2` fails the case.
+  - (xi) Out-of-range predecessor. The fixture's events:
+    - commit B lies before the saved Git watermark;
+    - an edit of `x` at seq 5;
+    - B's restricted hook witness at 10, with its configured stamp;
+    - the in-range commit A, which changes `x`, sealed at 20;
+    - reconcile reads through 30;
+    - a webhook seal for B that matches the witness lands at 31, before the reference chain.
+
+    Expected: the reconcile row matches the webhook seal (any commit), reconcile is read again, and A's coverage
+    is recomputed without edit 5. A runner whose row matches only seals that name A fails the case.
+  - Case (vii) still holds: its edit events, CI runs and review verdict match no row.
 - **T5 negative findings cite observations.** A missing seal and an unavailable source produce findings
   whose evidence is a retained observation with hash and scope; no ledger id is required or invented.
 - **T6 publication artifact binds bytes.** It lists the hashes of `inputs/*`, the selection manifest and
@@ -1113,6 +1181,17 @@ Failure and publication
     - Expected: the next run does not publish the retained envelope, and it renders the same finding.
   - A runner that publishes either envelope fails the case. "Exactly one terminal event per run id" has this
     exception, as it has the mismatch case.
+  - (d) *Added in fix round 2 (2026-10-08; Codex r2 C-M2).* A lost response, then withdrawal. The Worker seals
+    the frozen envelope, its response is lost, and the state stays `attempted`. Then the root is replaced.
+    - Expected: the next run sends no POST. It finds the event under the key in a verified read with proven
+      coverage, the equality check passes, and the state becomes `published`. No "terminal event withheld"
+      finding is rendered.
+    - Must trip: a fake whose read cannot prove coverage (a walk still truncated). The state becomes `unknown`,
+      a tier-1 "terminal event unknown" finding is rendered, and nothing claims the event is absent.
+    - Must trip: an event under the key that differs in a compared field. The `terminal mismatch` path applies.
+    - A runner that sends a POST after the withdrawal, or marks the envelope `withdrawn` without the read, fails
+      the case. So does one that resolves it through the remote store's `byIdempotencyKey()`, which returns
+      `null`.
 - **T8 unavailable is loud.** Any source unavailable → a tier-1 "source unavailable" finding with the
   source and error, and every dependent finding marked incomplete; NOOA INCONCLUSIVE renders as
   uncertain; an absent NOOA audit renders as unavailable, tier 1.
@@ -1255,7 +1334,8 @@ reconcile's attribution state is unknown or unavailable (§4), every reconcile `
 `incomplete`, so condition (c) fails for that reason too until the §11 reconcile items land.
 *Added 2026-10-08 (fix round 1):* a finding left `incomplete` by the supersession check (§4) counts against (c)
 like any other incomplete finding. A run whose envelope was withheld after a withdrawal (§8) has no terminal
-event; it counts against readiness like a failed run.
+event; it counts against readiness like a failed run. A run whose envelope's publication is `unknown` (§8, fix
+round 2) counts the same way until a later run settles it.
 
 ## 11. Implementation items this note creates (not part of stage 1's claims)
 
@@ -1471,6 +1551,30 @@ will be folded as dated additions.
     - **Found by the coordinator, not a reviewer** (§4, attribution availability): the runner fetches the
       remote's branches and pull-request heads before the reconcile read. A seal can name a commit that a
       main-only checkout lacks (seq 14839, 2026-10-07).
+  - **Fix round 2, 2026-10-08.**
+    - **Who and why.** Written by claude-code (coordinator session 31, `claude-opus-5-5`) on Jordan's go
+      `evt_054df4d9869b4f1bb1a9e117ebff1f60`, after the round-2 escalation `evt_49811392f3d04697b4b25ebdbe67122b`;
+      routing `evt_27e26a97e8814aba903a8678cd38f51f`.
+    - **Round 2 at `c83b43ec`.** Codex (`evt_1d3222badcd64901ab1c08b62f00362b`) re-raised C-M1 and C-M2, and
+      resolved C-M3 and C-M4. Grok r3 (`evt_262101da6c5a4c8d9f9c2172fd696f61`) approved with no findings.
+    - **C-M1** (§4 supersession, T4):
+      - The tail starts after the last event a source actually read. For reconcile that is `range.head_seq`,
+        never a bracket end, on both passes.
+      - The reconcile row now matches every commit or merge record (any commit), every `correction`-tagged event
+        and every attribution amendment, against every per-commit finding. The reason: a late webhook can
+        activate an earlier restricted witness for another commit and move a window.
+      - Edits stay out, with the code that excludes them cited.
+      - T4 gains (v-b), (vi-b) inside the bracket and (xi), the out-of-range predecessor.
+    - **C-M2** (§8 withdrawal, §6 tier 1, §10, T7):
+      - Publication states: `unattempted`, `attempted`, `published`. `attempted` is written before the first
+        POST.
+      - After a withdrawal no POST is sent. An `attempted` envelope is first resolved by its key in a verified
+        read with proven coverage: an equal event means it was published; a different one is the mismatch path;
+        none, with coverage proven, means it is withheld.
+      - Otherwise it is `unknown`, reported at tier 1 and never called absent.
+      - T7 gains (d).
+    - **Codex's precision notes.** The governing list no longer says all source code is class (c). The fetch
+      note states the adapter's fallback to a unique full OID the ledger supplies.
 
 - **v1.4 (2026-09-15)** — reassigned last review (cursor-agent, GPT-5.6 Sol, GitHub review 5206011343):
   the post-publication seat audit could not make an already-sealed `digest` outcome `failed` without
