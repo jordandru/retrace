@@ -228,18 +228,23 @@ export function reconcile(commits: CommitFacts[], events: Event[], opts: Reconci
   // cannot produce that stamp). The one non-forgeable reason an unsealed commit is a warning instead of a failure.
   const webhookMergedHeads = new Map<string, number>();
   for (const e of evs) {
+    // Evaluate the restricted stamp on every event. The shared helper rejects non-commit/non-git shapes;
+    // keeping those diagnostics here prevents capture from silently seeing a broader event domain than reconcile.
+    const restricted = restrictedSealEligibility(e, opts, webhookSeals);
+    if (restricted.eligible) {
+      restrictedDiagnostics.push({ event_id:e.id,seq:e.seq,eligible:true,paths:restricted.paths,dropped:restricted.dropped });
+    } else if (restricted.reason !== "not_restricted") {
+      restrictedDiagnostics.push({ event_id:e.id,seq:e.seq,eligible:false,reason:restricted.reason });
+    }
     if (COMMIT_ACTIONS.has(e.action)) {
       const id = commitIdOf(e); const sha = id && commitSha12(id);
       const isPush = e.tags?.includes("push") === true;
       let producer: "hook" | "webhook" | "legacy" | undefined;
-      const restricted = restrictedSealEligibility(e, opts, webhookSeals);
       if (sha && restricted.eligible) {
         if (!restrictedHookBySha.has(sha)) restrictedHookBySha.set(sha, e);
-        restrictedDiagnostics.push({ event_id:e.id,seq:e.seq,eligible:true,paths:restricted.paths,dropped:restricted.dropped });
       } else if (sha && !restricted.eligible && restricted.reason !== "not_restricted") {
         if (!claimedBySha.has(sha)) claimedBySha.set(sha, e);
         claimReasons.set(sha, restricted.reason);
-        restrictedDiagnostics.push({ event_id:e.id,seq:e.seq,eligible:false,reason:restricted.reason });
       } else if (sha && !isPush && sealedByOf(e) === undefined && e.seq < firstStampedSeq && e.method?.tool === "git") {
         producer = "legacy";
         if (isHookSeal(e)) { if (!hookBySha.has(sha)) hookBySha.set(sha, e); }

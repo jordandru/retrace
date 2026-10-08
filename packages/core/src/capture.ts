@@ -1,7 +1,7 @@
 import type { Event } from "./schema.js";
 
 export type RestrictedStamp = { stamp: string; actor: { type: string; id: string } };
-export type WebhookSeal = { actor: { type: string; id: string }; files: string[] };
+export type WebhookSeal = { sha: string; actor: { type: string; id: string }; files: string[] };
 export type RestrictedTouch = { seq: number; paths: Set<string>; event?: Event; dropped?: string[] };
 export type CaptureTouch = { seq: number; paths: Set<string>; restricted?: RestrictedTouch[] };
 /** One effective boundary per commit and path. Genuine witnesses keep their shared earliest boundary; restricted
@@ -83,8 +83,8 @@ export interface CaptureSeal extends CaptureTouch {
   restricted: RestrictedTouch[];
 }
 export type RestrictedSealEligibility =
-  | { eligible: true; paths: string[]; dropped: string[]; sha12: string }
-  | { eligible: false; reason: "not_restricted" | "no_key" | "key_mismatch" | "commit_mismatch" | "no_webhook" | "actor_mismatch" };
+  | { eligible: true; paths: string[]; dropped: string[]; sha12: string; fullSha: string }
+  | { eligible: false; reason: "not_restricted" | "wrong_action" | "wrong_tool" | "no_key" | "key_mismatch" | "commit_mismatch" | "no_webhook" | "ambiguous_commit" | "actor_mismatch" };
 
 function sealedByOf(e: Event): string | undefined {
   const stamp = e.method?.params?.sealed_by;
@@ -106,6 +106,8 @@ export function restrictedSealEligibility(
 ): RestrictedSealEligibility {
   const entry = (policy.restrictedStamps ?? []).find((candidate) => candidate.stamp === sealedByOf(e));
   if (!entry) return { eligible: false, reason: "not_restricted" };
+  if (e.action !== "committed") return { eligible: false, reason: "wrong_action" };
+  if (e.method?.tool !== "git") return { eligible: false, reason: "wrong_tool" };
   const key = e.idempotency_key;
   if (typeof key !== "string" || !/^git:[0-9a-f]{40,64}$/i.test(key)) return { eligible: false, reason: "no_key" };
   const fullSha = key.slice(4).toLowerCase();
@@ -117,25 +119,27 @@ export function restrictedSealEligibility(
     : null;
   if (!commitMatch || !fullSha.startsWith(commitMatch[1].toLowerCase())) return { eligible: false, reason: "commit_mismatch" };
   const sha12 = fullSha.slice(0, 12);
-  const webhook = webhookSeals.get(sha12);
+  const webhook = webhookSeals.get(fullSha);
   if (!webhook) return { eligible: false, reason: "no_webhook" };
+  if ([...webhookSeals.keys()].filter((sha) => sha.startsWith(sha12)).length !== 1) return { eligible: false, reason: "ambiguous_commit" };
   if (!sameActor(webhook.actor, entry.actor)) return { eligible: false, reason: "actor_mismatch" };
   const named = e.artifacts.filter((artifact) => REPO_ARTIFACT.test(artifact.id)).map((artifact) => artifact.id);
   const paths = named.filter((id) => webhook.files.some((file) => sameArtifact(id, file)));
   const dropped = named.filter((id) => !paths.includes(id));
-  return { eligible: true, paths, dropped, sha12 };
+  return { eligible: true, paths, dropped, sha12, fullSha };
 }
 
-/** Authenticated GitHub push seals indexed by the full-sha prefix used in commit artifacts. */
+/** Authenticated GitHub push seals indexed by exact full SHA. Prefixes are presentation only and never identity. */
 export function webhookSealsFromEvents(events: Event[]): Map<string, WebhookSeal> {
   const seals = new Map<string, WebhookSeal>();
   for (const event of [...events].sort((a, b) => a.seq - b.seq)) {
     if (!event.tags?.includes("push") || sealedByOf(event) !== "webhook:github") continue;
     const sha = event.method?.params?.sha;
     if (typeof sha !== "string" || !/^[0-9a-f]{40,64}$/i.test(sha)) continue;
-    const sha12 = sha.slice(0, 12).toLowerCase();
-    if (!seals.has(sha12)) {
-      seals.set(sha12, {
+    const fullSha = sha.toLowerCase();
+    if (!seals.has(fullSha)) {
+      seals.set(fullSha, {
+        sha: fullSha,
         actor: { type: event.actor.type, id: event.actor.id },
         files: event.artifacts.filter((artifact) => REPO_ARTIFACT.test(artifact.id)).map((artifact) => artifact.id),
       });
