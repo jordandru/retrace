@@ -339,3 +339,23 @@ test("D1 in workerd: NUL hider, decoy and 1001-deep body fall back without movin
     assert.deepEqual(fresh, captureSeals(old.events, policy, () => sha)); assert.equal(fresh[0].event.id, before.id);
   });
 });
+
+test("D1 in workerd: #53 a history text search longer than 48 bytes returns rows instead of a LIKE-pattern error", { timeout: 60_000 }, async () => {
+  await withD1(async (db) => {
+    const store = new D1Store(db);
+    const memory = new MemoryEventStore();
+    const hash = "3de0acb5e7ddc95198d4e0a99987ac854e1e7d57cce02e5fbe80bce9c1806c4c";
+    for (const intent of [`seal ${hash}`, "unrelated", `SEAL ${hash.toUpperCase()}`]) {
+      const input = { project: "p", actor: { type: "agent" as const, id: "A" }, action: "edited" as const, artifacts: [{ id: "repo:o/r#x", role: "generated" as const }], intent };
+      await appendEvent(memory, input);
+      await appendEvent(store, input);
+    }
+    await assert.rejects(db.prepare("SELECT 'x' LIKE ?").bind("%" + hash + "%").all(), /LIKE or GLOB pattern too complex/, "the old form still fails in workerd");
+    const got = await store.history({ project: "p", text: hash });
+    const want = await memory.history({ project: "p", text: hash });
+    assert.deepEqual(got.events.map((e) => e.seq), want.events.map((e) => e.seq), "workerd D1 must match the memory spec");
+    assert.deepEqual(got.events.map((e) => e.seq), [0, 2], "case-insensitive, like LIKE was");
+    const short = await store.history({ project: "p", text: "unrelated" });
+    assert.deepEqual(short.events.map((e) => e.seq), [1]);
+  });
+});

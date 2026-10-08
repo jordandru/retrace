@@ -106,9 +106,16 @@ export function asHistoryPage(body: unknown): HistoryPage {
  *  The wrapped pattern is unbounded: a needle longer than 48 bytes exceeds D1's 50-byte LIKE/GLOB
  *  limit (issue #53). Classify no longer uses LIKE/GLOB; this helper still does. */
 export function likeContains(text: string): { sql: string; pattern: string } {
+  // Issue #53: workerd's SQLite caps a LIKE/GLOB pattern at 50 bytes, so a needle over 48 bytes (a 64-hex hash, the
+  // most natural search) was a 500 from the Worker. `instr` has no pattern limit; `lower()` on both sides keeps the
+  // ASCII case-insensitivity LIKE gave, which is what `pageHistoryNewest` (the spec) does with `toLowerCase`. Short
+  // needles keep the LIKE form byte for byte.
+  if (new TextEncoder().encode(text).length > LIKE_PATTERN_NEEDLE_MAX_BYTES) return { sql: "instr(lower(e.body), ?) > 0", pattern: text.toLowerCase() };
   const pattern = "%" + text.replace(/!/g, "!!").replace(/%/g, "!%").replace(/_/g, "!_") + "%";
   return { sql: "e.body LIKE ? ESCAPE '!'", pattern };
 }
+/** The longest needle that still fits workerd's 50-byte LIKE pattern once wrapped in `%…%` (issue #53). */
+export const LIKE_PATTERN_NEEDLE_MAX_BYTES = 48;
 
 export interface Share {
   id: string;

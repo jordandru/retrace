@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {
   adapterIdempotencyError, AdapterIdempotencyError, CAUSED_BY_UNVERIFIED_TAG, appendEvent,
   EventInput, Event, EventStore, Share, likeContains, clampHistoryLimit, HISTORY_LIMIT_MAX,
-  pageHistoryNewest, collectHistory, asHistoryPage, explainEvent,
+  pageHistoryNewest, collectHistory, asHistoryPage, explainEvent, LIKE_PATTERN_NEEDLE_MAX_BYTES,
   artifactIndexRows, eventsReferencingArtifactKeys, artifactKeyMatchSql, BACKFILL_ARTIFACT_INDEX_SQL, eventsReferencingArtifactsSql, eventsReferencingArtifactsStatements, prefixRangeUpperBound, ARTIFACT_INDEX_MAX_TERMS, D1_MAX_BOUND_PARAMS, D1_MAX_COMPOUND_SELECT_TERMS,
   ARTIFACT_INDEX_DEFAULT_ROW_CAP, D1_LIKE_GLOB_PATTERN_MAX_BYTES, ALIAS_KEY_RANGE_LO, runArtifactIndexStatements,
   InvalidArtifactIdError,
@@ -404,4 +404,14 @@ test("T17 memory atomic consumption, read at U, rollback and concurrent single w
   await assert.rejects(baseInsert({ ...winner, id: "bad" }, { owner_login_consumption: [{ declaration_event_id: "unused" }] }), /UNIQUE/);
   assert.equal(await store.ownerLoginConsumptionRow(f.project, "unused"), null);
   assert.equal(store.events.length, before);
+});
+
+test("#53 likeContains keeps LIKE for needles that fit workerd's 50-byte pattern and switches to instr beyond it", () => {
+  assert.equal(LIKE_PATTERN_NEEDLE_MAX_BYTES, 48);
+  const short = likeContains("a".repeat(48));
+  assert.deepEqual(short, { sql: "e.body LIKE ? ESCAPE '!'", pattern: "%" + "a".repeat(48) + "%" });
+  const hash = "3de0acb5e7ddc95198d4e0a99987ac854e1e7d57cce02e5fbe80bce9c1806c4c";
+  assert.deepEqual(likeContains(hash), { sql: "instr(lower(e.body), ?) > 0", pattern: hash });
+  assert.deepEqual(likeContains("Evt_" + "A".repeat(60)), { sql: "instr(lower(e.body), ?) > 0", pattern: "evt_" + "a".repeat(60) }, "case folds like LIKE and like the memory spec");
+  assert.equal(likeContains("é".repeat(25)).sql, "instr(lower(e.body), ?) > 0", "bytes, not characters, decide (25 × 2 bytes > 48)");
 });
