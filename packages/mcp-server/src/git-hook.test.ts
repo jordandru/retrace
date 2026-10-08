@@ -2,14 +2,14 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, execFile, spawnSync } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtempSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { SqliteStore } from "./sqlite-store.js";
-import { hookScript, hookCommand, isNpxCachePath, probeLine, runningVersion, HOOK_STDERR_REDIRECT, parseTrailers, resolveHookToken, resolveHookProducerKeyFile, retryableHookFailure, ttySurface, guardRemoteWrite, validCausedById, validActorId, commitToEvent } from "./git-hook.js";
+import { hookScript, hookCommand, isNpxCachePath, probeLine, runningVersion, HOOK_STDERR_REDIRECT, HOOK_UNHANDLED_GUARD, HOOK_NPX_BOUNDED, parseTrailers, resolveHookToken, resolveHookProducerKeyFile, retryableHookFailure, ttySurface, guardRemoteWrite, validCausedById, validActorId, commitToEvent } from "./git-hook.js";
 import { appendEvent, generateSigningKey, PRODUCER_SIG_FORMAT_V2, publicFromPrivate, verifyProducerSig, verifyProject, createHandler, MemoryEventStore, EventInput, classifyCommitClaim, InvalidArtifactIdError, ClassificationUnavailableError } from "@retrace-dev/core";
 import { RemoteApiError, RemoteCapabilityError } from "./remote-store.js";
 import { writeProducerPrivateKey } from "./producer-key.js";
@@ -528,7 +528,13 @@ test("two hook commits during a 5xx are queued, then the next run drains them be
 test("hook script preserves retrace-git stderr but never propagates its failure to git", () => {
   const script = hookScript();
   const lines = script.trim().split("\n");
-  const command = lines[lines.length - 1];
+  const command = lines.find((line) => line.includes(" commit --hook"))!;
+  // issue #157: the guard is the last line, after the target; the npx form alone bounds npm's wait
+  assert.equal(lines[lines.length - 1], HOOK_UNHANDLED_GUARD);
+  assert.equal(lines.includes(HOOK_NPX_BOUNDED), false, "the checkout form runs node directly");
+  const npxLines = hookScript("post-commit", "npx -y -p @retrace-dev/cli@0.3.1 retrace-git").trim().split("\n");
+  assert.equal(npxLines[npxLines.indexOf(npxLines.find((line) => line.includes(" commit --hook"))!) - 1], HOOK_NPX_BOUNDED);
+  assert.equal(npxLines[npxLines.length - 1], HOOK_UNHANDLED_GUARD);
   // stdout is discarded, stderr is teed into the hook log AND still reaches the terminal, and the exit is never git's
   assert.ok(command.endsWith(` ${HOOK_STDERR_REDIRECT}`), command);
   assert.match(HOOK_STDERR_REDIRECT, /^2>&1 >\/dev\/null \| awk -v f="\$\(git rev-parse --absolute-git-dir\)\/retrace-hook\.log" '\{ print >> f; print \| "cat >&2" \}' \|\| :$/);
@@ -610,8 +616,41 @@ test("issue #84: --probe answers without a repo, and a hook whose target is gone
   assert.equal(sh(dir, "git", ["log", "--format=%s", "-1"]).trim(), "three");
   const log = readFileSync(join(dir, ".git", "retrace-hook.log"), "utf8");
   assert.match(log, /Cannot find module '.*_npx.*git-hook\.js'/, `the load failure must be in the log: ${log}`);
-  assert.equal(existsSync(join(dir, ".git", "retrace-pending-seal")), false, "nothing ran, so nothing could queue a seal");
+  // issue #157: the target never ran, so the script itself queues the seal and says so; doctor will report it
+  const head = sh(dir, "git", ["rev-parse", "HEAD"]).trim();
+  assert.equal(readFileSync(join(dir, ".git", "retrace-pending-seal"), "utf8"), `${head}\n`, "the unsealed commit is queued, not lost");
+  assert.match(log, new RegExp(`retrace: commit ${head} pending seal \\(the hook target did not run or did not finish`));
+  // and the healthy commit before it was marked handled by the target, so the guard stood down then
+  assert.equal(readFileSync(join(dir, ".git", "retrace-hook-handled"), "utf8").trim(), sh(dir, "git", ["rev-parse", "HEAD~1"]).trim());
 });
+
+test("issue #157: the unhandled guard queues HEAD when the target did not record it, and stands down when it did", () => {
+  const dir = mkdtempSync(join(tmpdir(), "retrace-guard-"));
+  sh(dir, "git", ["init", "-q", "-b", "main"]);
+  writeFileSync(join(dir, "a.txt"), "one\n");
+  sh(dir, "git", ["add", "a.txt"]);
+  sh(dir, "git", ["commit", "-qm", "one"], { GIT_AUTHOR_NAME: "T", GIT_AUTHOR_EMAIL: "t@x", GIT_COMMITTER_NAME: "T", GIT_COMMITTER_EMAIL: "t@x" });
+  const head = sh(dir, "git", ["rev-parse", "HEAD"]).trim();
+  const pending = join(dir, ".git", "retrace-pending-seal"), log = join(dir, ".git", "retrace-hook.log"), handled = join(dir, ".git", "retrace-hook-handled");
+  const run = (target: string) => spawnSync("sh", ["-c", `${target} ${HOOK_STDERR_REDIRECT}\n${HOOK_UNHANDLED_GUARD}`], { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  // the target failed to start (an evicted cache, no network): HEAD is queued, the committer and the log are told, exit 0
+  let r = run("sh -c 'echo \"npm error code EADDRNOTAVAIL\" >&2; exit 1'");
+  assert.equal(r.status, 0);
+  assert.equal(readFileSync(pending, "utf8"), `${head}\n`);
+  assert.match(r.stderr, new RegExp(`^npm error code EADDRNOTAVAIL\nretrace: commit ${head} pending seal \\(the hook target did not run`));
+  assert.match(readFileSync(log, "utf8"), new RegExp(`EADDRNOTAVAIL\nretrace: commit ${head} pending seal`));
+  // a second failure does not queue HEAD twice
+  r = run("false");
+  assert.equal(readFileSync(pending, "utf8"), `${head}\n`);
+  // the target handled HEAD (sealed or queued it): the guard adds nothing and says nothing
+  rmSync(pending); rmSync(log);
+  r = run(`sh -c 'printf %s\\\\n ${head} > ${handled}'`);
+  assert.equal(r.status, 0);
+  assert.equal(r.stderr, "");
+  assert.equal(existsSync(pending), false, "a handled HEAD is not queued");
+  assert.equal(existsSync(log), false);
+});
+
 
 test("keyed hook 503 on GET /api queues pending-seal like POST 5xx", async () => {
   const dir = mkdtempSync(join(tmpdir(), "retrace-git-probe-503-"));

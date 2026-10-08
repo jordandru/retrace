@@ -109,6 +109,15 @@ export function appendHookLog(gitDir: string, line: string): void {
 export function pendingSealPath(gitDir: string): string {
   return join(gitDir, "retrace-pending-seal");
 }
+/** Issue #157: the sha `retrace-git commit --hook` last HANDLED, logged or queued as pending. The hook script's last
+ *  line compares it with HEAD: when the target never ran (a cold npx cache offline, an evicted cache, a crash before
+ *  the ledger), HEAD is not here, and the script queues the seal itself so doctor's pending-seals check reports it. */
+export function hookHandledPath(gitDir: string): string {
+  return join(gitDir, "retrace-hook-handled");
+}
+export function markHookHandled(gitDir: string, sha: string): void {
+  writeFileSync(hookHandledPath(gitDir), `${sha}\n`);
+}
 
 export function readPendingSeals(gitDir: string): string[] {
   const path = pendingSealPath(gitDir);
@@ -356,6 +365,16 @@ export const HOOK_STDERR_REDIRECT = `2>&1 >/dev/null | awk -v f="$(git rev-parse
  *  `--disable-warning` exists from Node 21.3; the hook runs this package, whose `engines.node` is `>=22`
  *  (packages/mcp-server/package.json), so no runtime version check is needed here (NOOA, PR 92 round 1, finding 3). */
 export const HOOK_QUIET_WARNINGS = `NODE_OPTIONS="--disable-warning=ExperimentalWarning\${NODE_OPTIONS:+ \$NODE_OPTIONS}"; export NODE_OPTIONS # node:sqlite's experimental warning is not a hook failure`;
+/** Issue #157: offline with a cold cache, `npx -y -p …` retried the registry for ~70 s before giving up, and the
+ *  committer learned to work around the hook. npm reads its config from `npm_config_*`: prefer the cache when it has
+ *  the package (no staleness check, no network), and when it does not, one retry with a short backoff. The seal that
+ *  cannot be produced is then queued by `HOOK_UNHANDLED_GUARD` within seconds instead of lost after a minute. Only
+ *  the npx form gets this line; the checkout form runs node directly. */
+export const HOOK_NPX_BOUNDED = `npm_config_prefer_offline=true; npm_config_fetch_retries=1; npm_config_fetch_retry_mintimeout=2000; npm_config_fetch_retry_maxtimeout=5000; export npm_config_prefer_offline npm_config_fetch_retries npm_config_fetch_retry_mintimeout npm_config_fetch_retry_maxtimeout # issue #157: bound the wait when the packed CLI is not cached`;
+/** Issue #157: runs after the target. If the target did not record HEAD as handled (sealed or queued), the seal is
+ *  queued here and the committer is told, on stderr and in the hook log, so a commit never silently loses its seal
+ *  while doctor says READY. A target that already queued HEAD is not queued twice. The exit is still never git's. */
+export const HOOK_UNHANDLED_GUARD = `gd="$(git rev-parse --absolute-git-dir)"; sha="$(git rev-parse HEAD)"; if [ "$(cat "$gd/retrace-hook-handled" 2>/dev/null)" != "$sha" ]; then grep -qx "$sha" "$gd/retrace-pending-seal" 2>/dev/null || printf '%s\\n' "$sha" >> "$gd/retrace-pending-seal"; msg="retrace: commit $sha pending seal (the hook target did not run or did not finish; details: $gd/retrace-hook.log)"; printf '%s\\n' "$msg" >> "$gd/retrace-hook.log"; printf '%s\\n' "$msg" >&2; fi # issue #157: a seal the target never produced is queued, not lost`;
 /** Both hooks are the producing process for the commit they see, so both pass --hook (the live path).
  *  post-commit does not fire for `git merge` — git runs post-merge instead — so a repo with only post-commit never
  *  sealed its merge commits (2026-09-05: four checkpoint merges had to be replayed by hand). post-merge also fires after
@@ -370,7 +389,8 @@ export const HOOK_KINDS = ["post-commit", "post-merge"] as const;
 export type HookKind = (typeof HOOK_KINDS)[number];
 export function hookScript(kind: HookKind = "post-commit", command: string = hookCommand(new URL(import.meta.url).pathname, runningVersion())): string {
   const merge = kind === "post-merge" ? `case "$(git reflog -1 --format=%gs 2>/dev/null)" in *"Merge made by"*) ;; *) exit 0 ;; esac # seal only a merge this invocation made; a fast-forward (even onto someone else's merge commit) produced nothing here\n` : "";
-  return `#!/bin/sh\n${HOOK_MARK}\n${merge}${HOOK_QUIET_WARNINGS}\n${command} commit --hook --repo "$(git rev-parse --show-toplevel)" ${HOOK_STDERR_REDIRECT}\n`;
+  const bounded = command.startsWith("npx ") ? `${HOOK_NPX_BOUNDED}\n` : "";
+  return `#!/bin/sh\n${HOOK_MARK}\n${merge}${HOOK_QUIET_WARNINGS}\n${bounded}${command} commit --hook --repo "$(git rev-parse --show-toplevel)" ${HOOK_STDERR_REDIRECT}\n${HOOK_UNHANDLED_GUARD}\n`;
 }
 /** What `retrace-git --probe` prints. `retrace doctor` runs the installed hook's command with this flag to prove the
  *  target actually loads (issue #84); it touches no repo, no ledger, no config. */
@@ -403,6 +423,7 @@ async function main() {
       }
       failedSha = currentSha;
       const r = await logCommit(repo, failedSha, cfg, flags.hook === true);
+      if (flags.hook === true) markHookHandled(gitDir, currentSha); // issue #157: HEAD is sealed; the script's guard stands down
       console.log(`${r.deduped ? "(already logged) " : "logged "}${r.event.id}\n${describeEvent(r.event)}`);
     } catch (e: any) {
       let fullSha = failedSha;
@@ -415,10 +436,14 @@ async function main() {
       if (flags.hook === true && cfg?.url && retryableHookFailure(e)) {
         appendPendingSeal(gitDir, fullSha);
         if (currentSha) appendPendingSeal(gitDir, currentSha);
+        if (currentSha) markHookHandled(gitDir, currentSha); // issue #157: queued counts as handled; the guard must not report it twice
         console.error(`retrace: commit ${fullSha} pending seal; details: ${logPath}`);
         process.exitCode = 1;
         return;
       }
+      // A rejection the server decided (403, a bad credential) is handled too: it is in the hook log and a retry cannot
+      // change it (PR 92), so the script's guard must not queue it. The guard is for a target that never got this far.
+      if (flags.hook === true && currentSha) markHookHandled(gitDir, currentSha);
       throw e;
     }
     return;
