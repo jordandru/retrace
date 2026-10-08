@@ -1267,6 +1267,10 @@ test("issue #84: doctor executes the hook's target and FAILS when the script it 
   assert.match(failLine, /Cannot find module/); // the cause
   assert.ok(failLine.endsWith(`run retrace-git install --repo ${fixture.repo}`), failLine); // the repair
   assert.match(notReady.stdout, /NOT READY/);
+  // bottom line up front: the verdict is the first line, the findings follow, and the same verdict closes the report
+  assert.match(ready.stdout.split("\n")[0], /^READY — \d+ passed, \d+ warnings, 0 failures$/);
+  assert.match(notReady.stdout.split("\n")[0], /^NOT READY — \d+ passed, \d+ warnings, [1-9]\d* failures$/);
+  assert.equal(notReady.stdout.trimEnd().split("\n").at(-1), notReady.stdout.split("\n")[0]);
   // the same evicted hook with the budget overridden: the override changes nothing about a target that fails fast
   const overridden = spawnSync(process.execPath, [doctorBin, "doctor", fixture.repo], { encoding: "utf8", env: { ...env, RETRACE_DOCTOR_PROBE_TIMEOUT_MS: "5000" } });
   assert.equal(overridden.status, 1, overridden.stdout + overridden.stderr);
@@ -1303,7 +1307,7 @@ test("doctor: a local-db repo with installed hooks and a sealed commit is READY 
 
   const doctor = spawnSync(process.execPath, [doctorBin, "doctor", repo], { encoding: "utf8", env });
   assert.equal(doctor.status, 0, doctor.stderr + doctor.stdout);
-  assert.match(doctor.stdout, /READY/);
+  assert.match(doctor.stdout.split("\n")[0], /^READY — /);
   assert.doesNotMatch(doctor.stdout, /no hook token is configured/);
   assert.doesNotMatch(doctor.stdout, /^PASS  credential|^WARN  credential|^FAIL  credential/m);
 });

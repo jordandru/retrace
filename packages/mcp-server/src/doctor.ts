@@ -1055,9 +1055,13 @@ async function main() {
     }
   }
 
-  for (const f of findings) console.log(`${f.level.toUpperCase()}  ${f.label} — ${f.detail}`);
+  // Bottom line up front: the first line says READY or NOT READY so a reader knows whether to dig into the
+  // findings at all. The same line closes the report for anyone who reads only the tail.
   const failed = findings.filter((f) => f.level === "fail").length, warned = findings.filter((f) => f.level === "warn").length;
-  console.log(`\n${failed ? "NOT READY" : "READY"} — ${findings.length - failed - warned} passed, ${warned} warnings, ${failed} failures`);
+  const verdict = `${failed ? "NOT READY" : "READY"} — ${findings.length - failed - warned} passed, ${warned} warnings, ${failed} failures`;
+  console.log(`${verdict}\n`);
+  for (const f of findings) console.log(`${f.level.toUpperCase()}  ${f.label} — ${f.detail}`);
+  console.log(`\n${verdict}`);
   process.exit(failed ? 1 : 0);
 }
 
