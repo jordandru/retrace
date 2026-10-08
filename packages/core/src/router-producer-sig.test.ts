@@ -145,7 +145,7 @@ test("router: #96 a signature whose kid the Worker knows as another credential's
     const res = await post(handle, "/events", body, bearer);
     assert.equal(res.status, 401, label);
     const text = await res.text();
-    assert.match(text, /kid_mismatch/, label);
+    assert.deepEqual(JSON.parse(text), { error: "producer signature key is registered to a different credential (verdict: kid_mismatch); nothing sealed" }, label);
     assert.ok(!text.includes(body.producer_sig!.kid) && !text.includes(body.producer_sig!.sig), `${label}: never echo the kid or the signature`);
     assert.equal(store.events.length, before, `${label}: nothing sealed`);
   };
@@ -159,7 +159,7 @@ test("router: #96 a signature whose kid the Worker knows as another credential's
   let res = await post(handle, "/events", await signProducer(input({ actor: gemini, idempotency_key: "rk-stranger" }), other.privateKey), "cred-nokey-0123456789a");
   assert.equal(res.status, 201);
   assert.equal(verdictOf(store.events.at(-1)!), "unknown_kid");
-  // a seat re-minted with the same key: the live record is among the kid's owners, so its own signature verifies
+  // a seat re-minted with the same key and complete identity still verifies
   res = await post(handle, "/events", await signProducer(input({ actor: { type: "agent", id: "codex" }, idempotency_key: "rk-reminted" }), codexKey.privateKey), "cred-codex-0123456789ab");
   assert.equal(res.status, 201);
   assert.equal(verdictOf(store.events.at(-1)!), "verified");
@@ -167,4 +167,71 @@ test("router: #96 a signature whose kid the Worker knows as another credential's
   res = await post(handle, "/events", await signProducer(input({ idempotency_key: "rk-owner" }), key.privateKey), "owner-tok");
   assert.equal(res.status, 201);
   assert.equal(verdictOf(store.events.at(-1)!), "unknown_kid");
+  // An unsupported format must not bypass the foreign-key refusal (C-M1).
+  const unsupported = (body: EventInput) => ({ ...body, producer_sig: { ...body.producer_sig!, format: "retrace-producer-sig/999" } });
+  await expectRefused(unsupported(await signProducer(input({ actor: gemini, idempotency_key: "rk-foreign-live-999" }), key.privateKey)), "cred-nokey-0123456789a", "foreign live key, unsupported format");
+  await expectRefused(unsupported(await signProducer(input({ actor: gemini, idempotency_key: "rk-foreign-retired-999" }), retired.privateKey)), "cred-nokey-0123456789a", "foreign retired key, unsupported format");
+  await expectRefused(unsupported(await signProducer(input({ actor: { type: "agent", id: "codex" }, idempotency_key: "rk-foreign-keyed-999" }), retired.privateKey)), "cred-codex-0123456789ab", "foreign key on a keyed credential, unsupported format");
+  res = await post(handle, "/events", unsupported(await signProducer(input({ idempotency_key: "rk-own-999" }), key.privateKey)), "cred-claude-0123456789");
+  assert.equal(res.status, 201);
+  assert.equal(verdictOf(store.events.at(-1)!), "invalid");
+  res = await post(handle, "/events", unsupported(await signProducer(input({ actor: gemini, idempotency_key: "rk-stranger-999" }), other.privateKey)), "cred-nokey-0123456789a");
+  assert.equal(res.status, 201);
+  assert.equal(verdictOf(store.events.at(-1)!), "invalid");
+  res = await post(handle, "/events", unsupported(await signProducer(input({ idempotency_key: "rk-owner-999" }), key.privateKey)), "owner-tok");
+  assert.equal(res.status, 201);
+  assert.equal(verdictOf(store.events.at(-1)!), "invalid");
 });
+
+const duplicateKeyIdentities: [string, EventInput["actor"], EventInput["actor"]][] = [
+  ["different actor ids", { type: "agent", id: "actor-a" }, { type: "agent", id: "actor-b" }],
+  ["different actor types", { type: "system", id: "same-id" }, { type: "agent", id: "same-id" }],
+  ["different delegation", { type: "agent", id: "same-id", on_behalf_of: "operator-a@example.com" }, { type: "agent", id: "same-id", on_behalf_of: "operator-b@example.com" }],
+  ["missing delegation", { type: "agent", id: "same-id", on_behalf_of: "operator-a@example.com" }, { type: "agent", id: "same-id" }],
+];
+
+for (const [label, retiredActor, liveActor] of duplicateKeyIdentities) {
+  for (const unsupported of [false, true]) {
+    for (const requireSig of [false, true]) {
+      test(`router: duplicate key with ${label}, ${unsupported ? "unsupported" : "supported"} format, require_signature=${requireSig} refuses without disclosure or append`, async () => {
+        const key = await generateSigningKey();
+        const store = new MemStore();
+        const handle = createHandler(store, {
+          credentials: [
+            { name: "retired-producer", token: "cred-retired-0123456789", actor: retiredActor, trust: "pinned", public_key: key.publicKey, retired_at: "2026-09-01T00:00:00Z" },
+            { name: "live-producer", token: "cred-live-0123456789ab", actor: liveActor, trust: "pinned", public_key: key.publicKey, require_signature: requireSig },
+          ],
+        });
+        const signed = await signProducer(input({ actor: retiredActor.type === liveActor.type ? retiredActor : liveActor }), key.privateKey);
+        const body = unsupported ? { ...signed, producer_sig: { ...signed.producer_sig, format: "retrace-producer-sig/999" } } : signed;
+        const res = await post(handle, "/events", body, "cred-live-0123456789ab");
+        assert.equal(res.status, 401);
+        const text = await res.text();
+        assert.deepEqual(JSON.parse(text), { error: "producer signature key is registered to a different credential (verdict: kid_mismatch); nothing sealed" });
+        for (const secret of [body.producer_sig.kid, body.producer_sig.sig, "retired-producer", "live-producer", retiredActor.id, liveActor.id, retiredActor.on_behalf_of, liveActor.on_behalf_of]) {
+          if (secret !== undefined) assert.ok(!text.includes(secret), "refusal must not disclose producer or credential identity");
+        }
+        assert.equal(store.events.length, 0, "nothing sealed");
+      });
+    }
+  }
+}
+
+for (const requireSig of [false, true]) {
+  test(`router: retired/live remint with the same complete identity and require_signature=${requireSig} still verifies`, async () => {
+    const key = await generateSigningKey();
+    const actor: EventInput["actor"] = { type: "agent", id: "reminted-producer", on_behalf_of: "operator@example.com" };
+    const store = new MemStore();
+    const handle = createHandler(store, {
+      credentials: [
+        { token: "cred-retired-0123456789", actor, trust: "pinned", public_key: key.publicKey, retired_at: "2026-09-01T00:00:00Z" },
+        { token: "cred-live-0123456789ab", actor, trust: "pinned", public_key: key.publicKey, require_signature: requireSig },
+      ],
+    });
+    const res = await post(handle, "/events", await signProducer(input({ actor }), key.privateKey), "cred-live-0123456789ab");
+    assert.equal(res.status, 201);
+    assert.equal(store.events.length, 1);
+    assert.deepEqual(store.events[0].actor, actor);
+    assert.equal(verdictOf(store.events[0]), "verified");
+  });
+}

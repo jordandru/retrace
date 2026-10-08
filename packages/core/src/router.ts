@@ -870,20 +870,22 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
             trustedHookStamps = named.body.trusted_hook_stamps;
           }
         }
+        if (credential && resolvedInput.producer_sig) {
+          // Check every owner, including retired records, before format/signature verification. A duplicate key on
+          // the bearer does not excuse a conflicting identity; only a remint with the same delegation is safe.
+          const owners = (await kidOwners()).get(resolvedInput.producer_sig.kid) ?? [];
+          if (owners.some((owner) =>
+            owner.actor.type !== credential.actor.type
+            || owner.actor.id !== credential.actor.id
+            || owner.actor.on_behalf_of !== credential.actor.on_behalf_of
+          ))
+            return json({ error: "producer signature key is registered to a different credential (verdict: kid_mismatch); nothing sealed" }, 401);
+        }
         const producerCheck = await producerSigCheck(resolvedInput, credential?.public_key ?? null, {
           trustedHookStamps,
           project: resolvedInput.project,
         });
         const producerVerdict = producerCheck.verdict;
-        if (producerVerdict === "unknown_kid" && credential && resolvedInput.producer_sig) {
-          // Issue #96: the kid is not this credential's key. If the Worker knows it as ANOTHER credential's key (retired
-          // or live), sealing would re-label that producer's signature as the bearer's actor with a verdict that reads
-          // like a stranger's key. Refuse and seal nothing; `require_signature` does not matter here. A kid the Worker
-          // has never seen stays `unknown_kid`. The word only, never the kid.
-          const owners = (await kidOwners()).get(resolvedInput.producer_sig.kid) ?? [];
-          if (owners.length && !owners.includes(credential))
-            return json({ error: "producer signature key is registered to a different credential (verdict: kid_mismatch); nothing sealed" }, 401);
-        }
         if (credential?.require_signature && producerVerdict !== "verified")
           // the verdict word only — never echo the signature or any kid
           return json({ error: `producer signature required by this credential (verdict: ${producerVerdict})` }, 401);
