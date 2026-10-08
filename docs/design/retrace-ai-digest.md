@@ -5,9 +5,10 @@ instructions `evt_52f6dae68acc4f66ab39fab04f00ee4f` (author this revision) and
 `evt_40d1e828ec654a2f96bd945453d86136` (his answers to the two questions that held it back). A first draft was
 written on 2026-10-05 on the Omarchy PC by a Claude Code session (claude-opus-5-5) that is not a Retrace seat,
 and relayed by Jordan. claude-code verified it, re-checked every claim it uses at `27f4264`, amended it (§13),
-and answers for it. v1.5 answers the 2026-10-05 cross-check of HEAD `6190d5f` (see §13). It has not been
-reviewed and has not passed the design gate; until it merges, v1.4 is the reviewed revision. The v1.4 status
-follows; only its leading label changed.
+and answers for it. v1.5 answers the 2026-10-05 cross-check of HEAD `6190d5f` (see §13). Review round 1 at
+`e43da144` (2026-10-07): Codex rejected it with four Mediums; Grok and NOOA approved. Fix round 1 (2026-10-08, on
+Jordan's go `evt_7c055bb7e6f44599a0c8223e938cc47f`) answers the four (§13). It has not passed the design gate;
+until it merges, v1.4 is the reviewed revision. The v1.4 status follows; only its leading label changed.
 Effect on the build brief (added 2026-10-05): v1.5 lands in one pull request with the brief's 2026-10-05
 corrections and takes the design gate with them. From that merge the brief's spec is v1.5, and each brief
 correction binds its own point (brief, "Correction 2026-10-05" item 2).
@@ -69,7 +70,7 @@ selection manifest. Nothing new is captured.
 | status | `GET /projects/:p/status` | response bytes + hash, `generated_at`, and the export head (seq, hash) it was read under, **bracketed** by two `GET /projects/:p/head` reads (*Status head bracket*, below; v1.5) | aggregate counts only: **count findings** (§5), never per-event findings |
 | reconcile | `retrace-export reconcile` over a verified export, Git range from the saved Git watermark to main's head (v1.5, 2026-10-05; below) | export head seq/hash, Git range (repo, from-sha, to-sha), output bytes + hash | the eight `ReconcileFindingKind` values, read by their code names from `--json` (`retrace-reconcile/1`) per the kind-name table below (v1.5); the "pending edits" list is **not** a finding and is reported only as a count; `restricted_hook_stamps` is a diagnostic, not a finding (below) |
 | instruction follow-up (v1.5, L4-F7) | a full-project verified export the runner reads itself, by the path reconcile uses against a remote store (`fetchVerifiedRemoteEvents`, scope `{project}`; packages/mcp-server/src/reconcile.ts:4, :110-113). Against a local store reconcile reads `store.all(project)` instead (reconcile.ts:115), which is not a verified export | the signed bundle's bytes + hash and its head; the bytes + hash of the chain-verified tail `#bundleHead+1..#liveHead` that the path appends (packages/mcp-server/src/verified-events.ts:142-182, :200-212); the live head (seq, hash) the events reach, which is the export head this source records; the run's evaluation clock. The path returns events and a note, not bytes, so the runner keeps the bundle and tail bytes itself | tier 3 `export.instruction_without_followup`, one finding per instruction. An instruction is a `human` `instructed` event that no event in the export names in `caused_by`, and whose `timestamp` is older than the evaluation clock by more than the rules-file threshold (default 24h). This uses the status definition (packages/core/src/status.ts:99, :132, :163) and adds the age. `timestamp` is set by the writer when present (packages/core/src/schema.ts:244), so the age is producer testimony. This is a negative finding (§5): its evidence is the instruction event, cited with the live head, plus an observation of the pin above with scope `{project}`, which records that the absence was checked over the whole project through that head. The status field `instructions_without_followup` is an all-time count with no ages (status.ts:61-62, :163), so it is **not** this rule's source. The source is ledger-backed. It is a separate read from reconcile's, so on a ledger taking writes the two usually land on different heads. *Revised 2026-10-06:* under the chain-prefix rule below that is expected; only a head that is not on the run's reference chain is inconsistent |
-| doctor | packed CLI; a structured output mode is implementation work (§11) — stage 1 parses the labelled lines and records the parser version | output bytes + hash, dist version, and whether `--gate` was passed (v1.5: §6 doctor rule); the Git sha of the checkout it ran in (v1.5, 2026-10-05: `doctor.gate: true`, §6) | WARN/FAIL findings incl. the PR 35 review-routing advisories, tiered per (key, level) by the §6 doctor rule; PASS yields no finding. Doctor has no informational or acknowledged level (v1.5, 2026-10-05; `doctor.ts:13` at `6190d5f`) |
+| doctor | packed CLI; a structured output mode is implementation work (§11) — stage 1 parses the labelled lines and records the parser version | output bytes + hash, dist version, and whether `--gate` was passed (v1.5: §6 doctor rule); the Git sha of the checkout it ran in (v1.5, 2026-10-05: `doctor.gate: true`, §6); the verified ledger head (seq, hash) its ledger-derived labels read, which doctor prints under `--gate` (fix round 1, 2026-10-08: §6, *Doctor's ledger view*) | WARN/FAIL findings incl. the PR 35 review-routing advisories, tiered per (key, level) by the §6 doctor rule; PASS yields no finding. Doctor has no informational or acknowledged level (v1.5, 2026-10-05; `doctor.ts:13` at `6190d5f`) |
 | NOOA audit | the latest `independent-audit` event(s) in the ledger under the export head | event ids, export head | PASS → nothing; FAIL → tier 1 (positive evidence of breakage); **INCONCLUSIVE** (an event exists with that outcome) → "source uncertain", header, tier 4 age; **no audit event within the expected interval → tier 1 "source unavailable: NOOA audit"** — absence is never downgraded to uncertainty (Nemotron 8) |
 | checkpoints | `.retrace/checkpoints.jsonl` at a pinned Git sha + the export head | file hash, sha | checkpoint head absent from export → tier 1; age since last checkpoint → count finding |
 | shadow classification | `claim_decision` on sealed commit events (PR 34, when `RETRACE_TRAILER_POLICY=shadow` is deployed and classifying) | event ids, export head | (v1.5) `method.params.claim_decision.decision.status` = `conflicting` (policy `trailer-consistency/1`) → tier 2 **shadow diagnostic** citing decision, read head, policy digest and witnesses; the bullet preserves `actor` vs `would_write` and never describes a rewrite or misconduct. Not deployed or not classifying → "unavailable", never "no conflicts" |
@@ -117,12 +118,37 @@ revision decides both. The sentence above is withdrawn.
   start. Agent-rules 12 classes by consequence, not file type, so no list in the repo exists to read. The
   list stands in for class (a) and is the rules file's, versioned and digest-cited like the rest of it.
   Agent-rules 12(a) names categories, not files (`docs/agent-rules.md:107-109`). The stage-1 value maps
-  each category to the paths that hold it at `6190d5f`. Rules and identity files: `docs/agent-rules.md`,
-  `docs/agent-ops.md`, `docs/team-roles.md`, `docs/owner-protocol.md`, `CLAUDE.md`, `AGENTS.md`, `GROK.md`,
-  `.claude/**`, `.cursor/**`, `.grok/**`. Design notes and briefs: `docs/design/**`. Security, build,
-  deploy and runbook controls: `.github/**`, `.retrace.json`, `.retrace/**`, `.mcp.json`,
-  `apps/worker/wrangler.toml`. Where a path's class is uncertain it is listed, because the higher gate
-  applies (agent-rules 12). A change to the list is a rules-file version bump and class (a).
+  each category to the paths that hold it at `6190d5f`. It was checked against every path at `6190d5f` that is
+  not source code or a test, and re-checked at `ce2a78cc` on 2026-10-08 (fix round 1, Codex r1 C-M4). Paths
+  first present at `ce2a78cc` are marked †.
+  - **Rules and identity files:** `docs/agent-rules.md`, `docs/agent-ops.md`, `docs/team-roles.md`,
+    `docs/owner-protocol.md`, `CLAUDE.md`, `AGENTS.md`, `GROK.md`, `.hermes.md`†, `.claude/**`, `.cursor/**`,
+    `.grok/**`.
+  - **Design notes and briefs:** `docs/design/**`, plus the two plans kept outside it,
+    `docs/producer-signing-plan.md` and `docs/reconciliation-plan.md`.
+  - **Security, build, deploy and runbook controls:**
+    - repository and agent configuration: `.github/**`, `.retrace.json`, `.retrace/**`, `.mcp.json`,
+      `.gitattributes`, `.gitignore`;
+    - scripts: `scripts/**`. This includes the cloud push guard `scripts/cloud/guard-push-main.sh`
+      (`docs/design/cloud-seat.md:308-312`), its launcher and setup, and the deploy check;
+    - Worker deploy and build: `apps/worker/*` (`wrangler.toml`, `schema.sql`, `migrate.mjs`, `migrate.d.mts`,
+      `package.json`, `tsconfig.json`);
+    - build: `package.json`, `package-lock.json`, `tsconfig.base.json`, `packages/*/package.json`,
+      `packages/*/tsconfig.json`, `packages/*/scripts/**`;
+    - seat controls: `packages/hermes-plugin/**`†, `hermes.retrace*.yaml`†, `sandbox/**`†;
+    - adapters: `adapters/**` (plugin manifests, an agent skill, and the Drive adapter's OAuth manifest);
+    - runbooks a user or operator follows: `SETUP-GUIDE.md`, `README.md`, `packages/*/README.md`,
+      `docs/attribution-operator-guide.md`.
+
+  Where a path's class is uncertain it is listed, because the higher gate applies (agent-rules 12). Left out,
+  each for a stated reason:
+  - source code and tests (`packages/*/src/**`, `apps/worker/src/**`, test fixtures), which agent-rules 12
+    classes (c), not this list;
+  - `docs/measurements/**`, `docs/examples.md`, `docs/reference.md`, `docs/second-project-baseline.md`, `claude/**`
+    (a working list and a review record) and the `LICENSE` files, which govern nothing (class (b));
+  - `site/**` and `packages/core/ui/**`, a landing page and a viewer.
+
+  A change to the list is a rules-file version bump and class (a).
 
 `orphan_edit` is not a per-commit finding. It is the length of the report's `orphans` array
 (`reconcile.ts:446`), so the adapter reads `orphans` for it. The JSON `range` carries `head_seq` but no
@@ -166,6 +192,22 @@ misattributions as live tier-2 findings and could not tell. Stage 1 therefore tr
 state as unknown until the JSON report states it, and marks every reconcile `misattributed` finding
 `incomplete` while the state is unknown or unavailable; a reported "unavailable" is also a tier-1 "source
 unavailable: reconcile attribution" finding (§6). Two §11 items are prerequisites for the first live run.
+
+*Added 2026-10-08 (fix round 1; the coordinator's finding, not a reviewer's; measured).* The fix for the seq 10390
+shape is in review (PR #198). That fix alone does not make the context load.
+- The Git-facts adapter resolves the commit refs of every `committed` or `merged` record with `git rev-parse` in
+  the reconciling checkout. When an object is absent, the adapter fails the whole context
+  (`packages/mcp-server/src/attribution.ts:30-41` at `ce2a78cc`).
+- A webhook push seal names the pushed commit, whatever branch it is on.
+- On 2026-10-07 the checkpoint bot's push seal at seq 14839 (`evt_55b573a57a5644f4be6f1198becf4459`) named commit
+  `c47fee54d5b7`, which was on origin's `checkpoint/20261007-14837` only. A reconcile run from a clone that had
+  not fetched that branch reported "attribution evaluation unavailable: context_missing: ambiguous or unknown
+  full OID" for that ref, both at main `ce2a78cc` and at PR #198's head (Grok `evt_8c563fcee5cf4d8297dcaf971a0f2aba`;
+  read `evt_4b301d3ee8ae430cb93506d48912a9cc`).
+
+The runner therefore fetches the remote's branches and pull-request heads before the reconcile read, and it
+records the fetch (remote, refspecs, time) in the selection manifest. A commit in neither still fails the
+context; the second §11 reconcile item covers that case.
 
 **The shadow source while the trailer policy is off (v1.5, 2026-10-06; claude-code, measured).** The shadow row
 above yields "unavailable" whenever the classifier is not classifying. On 2026-10-05, none of the 130 commit
@@ -272,13 +314,15 @@ them rarely share a head, and §10 counts every degraded run against readiness. 
 different heads are not an inconsistency; a fork is.
 
 **Rule (chain-prefix consistency, v1.5, 2026-10-06).** Every ledger-backed source records the head it was read
-under, or, for status and reconcile, its bracket interval (below). After its last ledger-backed read the runner
+under, or, for status and reconcile, its bracket interval (below), or, for doctor, the ledger head it prints (§6,
+*Doctor's ledger view*; fix round 1). After its last ledger-backed read the runner
 takes one **reference chain**: a verified export plus the chain-verified tail to a signed head read after every
 source, by the path reconcile uses against a remote store (`fetchVerifiedRemoteEvents`, scope `{project}`;
 `packages/mcp-server/src/verified-events.ts:142-182`, `:200-212`). The instruction follow-up read serves when it
 is the last ledger-backed read. Every recorded head (seq, hash), and both ends of every bracket, must lie on the
 reference chain: the chain's event at that seq exists and carries that hash. Then the run is consistent, and
-each finding cites the head its source was read under. A recorded head that is not on the reference chain, or
+each finding cites the head its source was read under. Consistent is not current: the supersession check
+below decides whether a finding still holds at the reference head (fix round 1). A recorded head that is not on the reference chain, or
 a bracket whose counts fall outside it, is a tier-1 **"snapshot inconsistent"** finding citing the head and the
 reference chain's event at that seq; every finding that depends on that source is `incomplete`, and the run is
 degraded. A finding that compares values across sources names both heads, and no comparison is made across
@@ -286,6 +330,72 @@ different heads unless both values are computed from the reference chain. This m
 target" in part: the reference chain is the consistency check, not yet the source of every count. Nemotron 3
 (v1.3, accepted) still holds: an inconsistency is tier 1. Only what counts as one is narrowed, to what the
 chain can prove. T4 tests it.
+
+**Supersession inside a run (fix round 1, 2026-10-08; Codex r1 C-M1).** The prefix rule proves that the run's
+heads share one history. It does not prove that a finding read at an earlier head still holds at the reference
+head. An acknowledgement or an effective attribution amendment can land after the reconcile read and before
+the reference chain is taken, and reconcile applies both when it builds its findings (core `reconcile.ts:320-323`,
+`:399-418`, at `6190d5f`, unchanged at `ce2a78cc`). A digest that rendered the earlier finding as live would
+cite an interpretation the ledger has already superseded.
+
+So after the reference chain is taken, the runner checks each source's **reference tail**. That is the
+events on the reference chain after the source's read head (for a bracket, after its upper end `H2`), up to
+the reference head. The tail is checked against the source's row in the **supersession table**:
+- The table is a required part of `digest-rules/1.json`, versioned and digest-cited like the rest of the file.
+  A change to it is a rules-file version bump and class (a).
+- A row names the event shapes that the source's interpretation reads for a finding's subject.
+- Where a row cannot tell whether an event concerns a finding, the event matches, because the higher gate
+  applies.
+
+Stage-1 rows:
+- **reconcile**, for each per-commit finding. The subject is its commit, plus its file when present. A tail
+  event matches when it is one of these:
+  - a `committed` or `merged` record that names the commit in an artifact id or a `derived_from` entry (core
+    `reconcile.ts:231-265`);
+  - a `correction`-tagged event that names the commit. This is reconcile's acknowledgement (`:157-171`,
+    `:266-272`);
+  - any attribution amendment, that is `action: other` with `action_detail: "amended"` (core `attribution.ts:56`).
+    An amendment matches every `misattributed` finding, because which seal it moves is decided inside
+    reconcile's attribution context.
+
+  Commits are matched by prefix, as reconcile matches them (`:159`). `orphan_edit` and the observation counts
+  have no row: they are counts read between the bracket ends and are rendered as such.
+- **instruction follow-up**, for each finding. The subject is the instruction, and an event whose `caused_by`
+  is that instruction matches. When this read serves as the reference chain, its tail is empty.
+- **doctor**, for the ledger-derived labels (§6, *Doctor's ledger view*). Every tail event matches. Some of
+  those labels (`owner-login`, the review-routing labels and `model claim absent`) read the whole verified
+  export, not one subject, so stage 1 does not narrow the row. Doctor is read again instead: that costs seconds,
+  where a reconcile read costs a minute.
+- **NOOA audit**. An `independent-audit` event matches. Revalidation is not a re-read: the runner takes the
+  latest audit at or below the reference head from the reference chain itself.
+- **status**, **shadow classification** and **checkpoints** have no row.
+  - Status yields counts and an integrity result. They are rendered as read between `H1` and `H2` (*Status head
+    bracket*, below), never as present values.
+  - A `claim_decision` is stamped on its seal, and no later event changes it.
+  - The checkpoints source checks its head against the reference chain itself.
+
+What a match does:
+1. Every source with a match, except NOOA (above), is read once more, in a second pass.
+   - Reconcile is re-read by a full bracket, under the bracket retry limit.
+   - Whenever any source is read again, doctor, whose row matches every event, is also read again, last.
+   - The new reads replace those sources' findings and pins.
+   - The runner then takes the reference chain once more. It applies the prefix rule to every recorded head
+     against that chain, and checks every source's tail against it, each from its latest read head.
+2. A finding that still has a match after that is `incomplete`. It cites the matching tail events with the
+   reference head, and the run is degraded. There is no third read. §10 counts the run like any other
+   degraded run.
+3. A tail with no match changes nothing, so unrelated appends do not degrade a run.
+   - A finding with no match is current through the reference head. Its bullet says it was read under its
+     source's head and checked through the reference head.
+   - A count is rendered as observed between its bracket ends.
+
+The selection manifest records, per source:
+- the tail range it checked;
+- the matching event ids;
+- any second read and its pins;
+- both reference heads.
+
+T4 (v) to (viii) test it.
 
 **Status head bracket (v1.5, 2026-10-05; correction, cross-check finding L2-5).** v1.4 pinned status to
 "the export head it was read under", but the status response carries no head. `ProjectStatus` has
@@ -373,7 +483,7 @@ and digest-cited by every run.
 | --- | --- | --- |
 | 1 — integrity | positive evidence the chain or a witness disagrees, or a source that would prove it is unavailable or inconsistent | status integrity not ok; checkpoint head absent from export; reconcile producer-disagreement; NOOA FAIL; source unavailable (incl. absent NOOA audit); snapshot inconsistent; adapter unknown kind; doctor `owner-login` WARN/FAIL while it has one key (v1.5, §6 doctor rule); the runner's own next-run findings: seat wrote outside its envelope, terminal event mismatch, seat audit incomplete, seat key mismatch (v1.5, 2026-10-05; §8 already names each as tier 1; listed here so the table is complete); every other doctor label at tier 1 in the §6 doctor label table (v1.5, 2026-10-05) |
 | 2 — attribution | a record says who and evidence says otherwise | reconcile misattributed; shadow `conflicting` (labelled shadow); doctor FAIL on identity/credential checks, and their WARN where `--gate` alone sets the level (v1.5, §6 doctor rule); "identity/credential checks" are exactly the labels at tier 2 in the §6 doctor label table, at every level listed there (v1.5, 2026-10-05) |
-| 3 — coverage | a record is missing where one should exist | reconcile missing on main, which is every `missing_commit` in the range (§4); uncovered on a governing path (rule 12 class a paths, read as `reconcile.governing_paths`, §4); unlinked-commit count above baseline; instructions without follow-up older than the rules-file threshold (default 24h), from the verified export (§4), never from the status count; the doctor labels at tier 3 in the §6 doctor label table (v1.5, 2026-10-05) |
+| 3 — coverage | a record is missing where one should exist | reconcile missing on main, which is every `missing_commit` in the range (§4); uncovered on a governing path (rule 12 class a paths, read as `reconcile.governing_paths`, §4); unlinked-commit count above baseline; instructions without follow-up older than the rules-file threshold (default 24h), from the verified export (§4), never from the status count; the doctor labels at tier 3 in the §6 doctor label table (v1.5, 2026-10-05); the runner's own next-run finding "terminal event withheld" (root withdrawn before publication; fix round 1, §8) |
 | 4 — hygiene | nothing wrong, something stale | unreachable-seal, orphan paths, loose, non-agent, uncovered off a governing path (v1.5, 2026-10-05; §4), agent events without model, unverified links, NOOA INCONCLUSIVE age; doctor WARN `export-cache` and `model claim absent` (v1.5); reconcile acknowledged, `reconcile.acknowledged` (v1.5, §4); the other doctor labels at tier 4 in the §6 doctor label table (v1.5, 2026-10-05) |
 
 **Doctor rule (v1.5, 2026-10-05).** Doctor findings have three levels only: `pass`, `warn`, `fail`
@@ -506,6 +616,44 @@ adapter parses the stdout finding lines (doctor.ts:1058) only. One more labelled
 repository` goes to stderr before any finding when the checkout is not a Git repository (:920), and doctor
 exits 1. That case, and any run with no `READY`/`NOT READY` summary line on stdout (:1060), yield the
 tier-1 "source unavailable" finding for doctor, not a table row.
+
+**Doctor's ledger view (fix round 1, 2026-10-08; Codex r1 C-M3).** Under `--gate`, doctor derives some of its
+findings from the verified signed export plus the chain-verified tail it reads (`gateRemoteAuthorization` and
+the calls after it, `packages/mcp-server/src/doctor.ts:1008-1023` at `6190d5f`, unchanged at `ce2a78cc`). These are
+the **ledger-derived labels**:
+- `HEAD delivery`, `attribution`, `pin/session`, `instruct root`, `owner-login`, `capture coverage` and
+  `model claim absent`;
+- the review-routing labels: `review routing`, `review routing intent`, `review head mismatch`,
+  `review agent mismatch`, `review model mismatch`, `review effort mismatch`, `review model` and
+  `review reasoning effort`.
+
+Doctor's output names no head for that read (doctor.ts:1058-1060), so these findings had no pin. This design
+gives them one:
+- **Contract.**
+  - Under `--gate`, doctor prints one more line to stdout, after its finding lines and before the summary line:
+    `ledger head <seq> <hash>`. It names the head of the chain its ledger-derived labels read.
+  - The line has no level, so it is not a finding line, and the doctor label table does not change.
+  - Deliverable 2's structured output carries the same pair.
+  - This is a §11 prerequisite for the first live run.
+- **Use.**
+  - The pin is the doctor source's recorded head under the chain-prefix rule (§4). It must lie on the
+    reference chain, and the supersession check applies to its tail (§4, doctor row).
+  - Output under `--gate` with no such line, or with more than one, leaves the ledger-derived findings
+    unpinned. They are then `incomplete`, a tier-1 "snapshot inconsistent" finding names the missing pin, and
+    the run is degraded.
+  - A pin that is not on the reference chain gets the prefix rule's mismatch outcome.
+- **The other labels are external observations.**
+  - The rest of the table checks the checkout, the Worker's endpoints, the credential listing or local
+    configuration, not ledger events.
+  - They are pinned as before (output bytes and hash, dist version, mode, checkout sha). The runner also
+    records its clock before and after the doctor run, and the digest renders them as observed during that
+    run.
+  - They have no ledger head, so the prefix rule and the supersession check do not apply to them, and they
+    cannot make a run inconsistent.
+  - Their completeness is the doctor source's: complete when doctor printed its summary line, otherwise the
+    "source unavailable" finding above.
+
+T4 (ix) and (x) test the pin.
 
 **Tier 1 and tier 2 are never truncated**: every selected finding renders (Nemotron Q2 — attribution
 findings are positive evidence of a false record and must not be pushed into a tail). Tier 3 is capped
@@ -732,6 +880,39 @@ are not built.
   and any causal coverage count must list these events as excluded rather than count them as gaps or as
   covered.
 
+**Withdrawal of a standing instruction (fix round 1, 2026-10-08; Codex r1 C-M2).** A ledger instruction cannot be
+removed, so a withdrawn one still passes the root check's three tests. Those tests establish a structurally valid
+causal link, not continuing authorization. The runner's authorization for a project is therefore its
+configuration, not the ledger: a project runs only while the configuration names a standing instruction for it.
+- **Procedure.**
+  - Jordan withdraws the digest for a project with a signed instruction (owner-protocol).
+  - The configuration is then changed on the host that holds the seat's credential, by Jordan or by a seat acting
+    on that instruction. The change is recorded as an event caused by it.
+  - Removing the project's root is the stop. A configuration without it fails validation at load, before any
+    ledger read (above), so no scheduled or on-demand run starts.
+  - Replacing the root withdraws the old one and designates the new one.
+  - Revoking the `retrace-ai` credential, which is Jordan's to do (§11), stops every project at once. It is the
+    stop to use when the runner's host is not trusted.
+- **Checked again at publication.**
+  - The runner reads the configuration again immediately before every publication attempt: this run's envelope
+    at §7 step 6, and each retained envelope it would publish on the unwritable-ledger path above.
+  - An envelope is published only if the configuration still names, for its project, the root the envelope cites
+    as `caused_by`.
+  - Otherwise it is never published. Its publication state records `withdrawn`, which survives a crash as
+    `terminal mismatch` does, and no later run retries it.
+  - A change that lands after that read cannot stop that one attempt. Every later attempt reads the
+    configuration again.
+- **Reported.**
+  - The next run of that project, under a new root, renders a mandatory tier-3 "terminal event withheld" finding
+    for each withheld envelope. The finding cites the run id and the envelope's hash.
+  - When the project has no new root there is no next run. The record of the configuration change then lists
+    the withheld run ids.
+  - A withheld run has no terminal event. T7's "exactly one" has this exception, as it has the mismatch case.
+- **What stays.** Runs published under the withdrawn root stay rooted in it. That is true: they were authorized
+  when they ran. The runner never reads the ledger to decide authorization.
+
+T7 tests it.
+
 Which projects "each covered project" means depends on the credential's project scope, which Jordan
 sets at the mint (§11). **OPEN QUESTION FOR JORDAN:** which projects does the `retrace-ai` credential
 cover? The root is decided (above); the scope fixes which projects need a standing instruction. This note presupposes no scope. The builder does not pick (build brief
@@ -852,6 +1033,33 @@ Evidence and snapshot
   interval, or a reconcile `range.head_seq` outside its bracket → the same result for that source; a
   runner that pins status or reconcile without the bracket fails this case. (iv) Must trip: a bracket end
   that is not on the reference chain. T4 joins the build brief's list of tests that need a negative case.
+  *Correction, 2026-10-08 (fix round 1; Codex r1 C-M1, C-M3; §4 supersession, §6 doctor's ledger view).* In case
+  (i), the appended events match no supersession row, and none lands after the doctor read. The cases below
+  cover the rest.
+  - (v) Intra-run acknowledgement. After the reconcile bracket and before the reference chain, the store appends
+    a `correction`-tagged event that names the commit of a selected `misattributed` finding.
+    - Expected: the runner re-reads reconcile, and the re-read reports the finding acknowledged. The run selects
+      the tier-4 `reconcile.acknowledged` finding, not the tier-2 one, and is not degraded.
+    - Variant that must trip: the store appends a second matching event after the re-read's bracket. The finding
+      is then `incomplete`, cites that event, and the run is degraded.
+    - A runner that renders the tier-2 finding as current fails both.
+  - (vi) Intra-run amendment. The same as (v), with an effective attribution amendment.
+    - Expected: the re-read reports `amended`, no finding is selected, and the amended count rises.
+    - The variant that must trip is the same as in (v).
+  - (vii) Harmless appends. Twenty events are appended after the reconcile bracket and before the doctor read:
+    edit events on other paths, CI `executed` events that name commits in the range, and a `review` verdict.
+    - Expected: no second read, no `incomplete` finding, and the run is not degraded.
+    - A runner that re-reads or degrades fails the case.
+  - (viii) Doctor. One event is appended after the doctor read.
+    - Expected: doctor is run again, last.
+    - Must trip: one more event appended after the second run leaves doctor's ledger-derived findings
+      `incomplete`, and the run is degraded.
+  - (ix) Doctor's pin missing. The `--gate` output has no `ledger head` line, or has two.
+    - Must trip: doctor's ledger-derived findings are `incomplete`, a tier-1 "snapshot inconsistent" finding
+      names the missing pin, and the run is degraded.
+    - The external-observation labels are tiered as before.
+  - (x) Doctor's pin off the reference chain: a hash that is not the chain's event hash at that seq.
+    - Must trip: the result of case (ii), for doctor's ledger-derived findings only.
 - **T5 negative findings cite observations.** A missing seal and an unavailable source produce findings
   whose evidence is a retained observation with hash and scope; no ledger id is required or invented.
 - **T6 publication artifact binds bytes.** It lists the hashes of `inputs/*`, the selection manifest and
@@ -891,6 +1099,20 @@ Failure and publication
   surviving a crash, the retained envelope never published, non-zero exit, tier-1 "terminal event
   mismatch" in the next run. In that case the run has no terminal event and the finding says so;
   "exactly one" holds in every other case.
+  *Correction, 2026-10-08 (fix round 1; Codex r1 C-M2; §8 withdrawal):* withdrawal and pending publication.
+  - (a) The configuration no longer names the project's standing root.
+    - Expected: refused at load, and nothing is read or published (the existing case).
+    - If the root was replaced instead, the run cites the new id, and the root check runs on it.
+  - (b) The configuration changes between §7 step 5 and step 6.
+    - Expected: the frozen envelope is not published, and its publication state records `withdrawn`.
+    - The state survives a crash, and no later run publishes the envelope.
+    - The next run under a new root renders the tier-3 "terminal event withheld" finding, citing the run id and
+      the envelope hash.
+  - (c) The ledger is unwritable at publication, so the envelope waits (the existing case). The root is then
+    withdrawn and a new one configured.
+    - Expected: the next run does not publish the retained envelope, and it renders the same finding.
+  - A runner that publishes either envelope fails the case. "Exactly one terminal event per run id" has this
+    exception, as it has the mismatch case.
 - **T8 unavailable is loud.** Any source unavailable → a tier-1 "source unavailable" finding with the
   source and error, and every dependent finding marked incomplete; NOOA INCONCLUSIVE renders as
   uncertain; an absent NOOA audit renders as unavailable, tier 1.
@@ -959,7 +1181,8 @@ Determinism, identity and truth-tracking
   rules file whose `reconcile.governing_paths` is the §4 stage-1 value: (i) a `missing_commit` `fail` and a
   `missing_commit` `warn` (the webhook-merged pull-request head) in a range whose to-sha is main's head →
   tier 3 each; (j) `uncovered` at `warn` on `docs/agent-rules.md` → tier 3, and on `packages/core/src/status.ts` →
-  tier 4, and the same two at `info` → the same tiers; (k) negative cases that trip: a rules file without
+  tier 4, and the same two at `info` → the same tiers; `uncovered` at `warn` on the cloud push guard
+  `scripts/cloud/guard-push-main.sh` → tier 3 (fix round 1, Codex r1 C-M4; a list without `scripts/**` fails this row); (k) negative cases that trip: a rules file without
   `reconcile.governing_paths`, and one with an empty list, are refused at start; a run whose to-sha is not
   main's head marks every reconcile finding "incomplete"; and an adapter that tiers every `uncovered` at 3,
   or that leaves either case untiered, fails row (i) or (j).
@@ -1030,6 +1253,9 @@ days are not evidence.
 (§4, the shadow source while the policy is off), so no window can count until the policy is on. While
 reconcile's attribution state is unknown or unavailable (§4), every reconcile `misattributed` finding is
 `incomplete`, so condition (c) fails for that reason too until the §11 reconcile items land.
+*Added 2026-10-08 (fix round 1):* a finding left `incomplete` by the supersession check (§4) counts against (c)
+like any other incomplete finding. A run whose envelope was withheld after a withdrawal (§8) has no terminal
+event; it counts against readiness like a failed run.
 
 ## 11. Implementation items this note creates (not part of stage 1's claims)
 
@@ -1051,6 +1277,12 @@ reconcile's attribution state is unknown or unavailable (§4), every reconcile `
     The §8 audit and T9b keep the credential keys (`sealed_by`, `relayed_by`) beside the actor: they cost
     nothing and catch a credential minted the default way by mistake.
 - Doctor: a structured output mode or a stable line grammar with a version.
+  - *Added 2026-10-08 (fix round 1; Codex r1 C-M3; §6, Doctor's ledger view).* This one is a prerequisite for
+    stage 1's first live run, and it comes before the structured mode if that lands later.
+    - Under `--gate`, doctor prints `ledger head <seq> <hash>` for the verified chain its ledger-derived labels
+      read. The line goes after its finding lines and before the summary line.
+    - Tests: the line present; absent; and carrying a hash that is not the chain's at that seq (digest T4 (ix),
+      (x)).
 - A public listing for PR 34's pending deliveries (only if the digest should report them).
 - Credential-store follow-up: server-enforced per-credential action/tag restrictions (prerequisite for
   stage 2).
@@ -1064,7 +1296,12 @@ reconcile's attribution state is unknown or unavailable (§4), every reconcile `
 - *Added 2026-10-06 (v1.5; claude-code):* rules. No agent-rule text covers a seat that runs no model.
   Agent-rules 1, 4, 7 and 13 assume a harness, and rule 4's `model_source: none` records an unknown model,
   not a seat with none by design. A class (a) rules change says how such a seat records itself before its
-  first live write. It is sequenced after open PR 189, which edits rule 7, and is Jordan's to direct.
+  first live write.
+  - It was sequenced after PR 189, which edited rule 7. PR 189 merged on 2026-10-07
+    (`4e65103848f4991b6ff6060baef62a85618717eb`), so nothing else orders it now (updated in fix round 1, Codex r1).
+  - It remains Jordan's to direct, as a class (a) rules change before the digest's first live write.
+  - It should tell a deliberate model absence from an unknown model, and say how a standing run's causality
+    satisfies agent-rules 1.
 - **OPEN QUESTION FOR JORDAN** (added 2026-10-05, v1.5; L3-4, L4-F9): reserve the `digest:` idempotency
   prefix server-side, in `adapterIdempotencyError` (`store.ts:924-946`), for events with
   `method.tool: "retrace-ai"` and the `digest` tag? It is defence in depth only: like every reservation it
@@ -1093,11 +1330,11 @@ will be folded as dated additions.
 
 ## 13. Revision history (document revisions)
 
-- **v1.5 (2026-10-05, amended 2026-10-06)** — authored by claude-code (coordinator) on Jordan's instructions
+- **v1.5 (2026-10-05, amended 2026-10-06 and 2026-10-08)** — authored by claude-code (coordinator) on Jordan's instructions
   `evt_52f6dae68acc4f66ab39fab04f00ee4f` and `evt_40d1e828ec654a2f96bd945453d86136`, from a first draft written
   on the Omarchy PC by a Claude Code session (claude-opus-5-5) that is not a seat. Answers the 2026-10-05
-  Retrace AI cross-check of HEAD `6190d5f` (Opus-pane findings, each verified by two skeptics). Not reviewed;
-  class (a), design gate pending. Every v1.4 sentence that a finding narrows stays visible, with a dated correction after it,
+  Retrace AI cross-check of HEAD `6190d5f` (Opus-pane findings, each verified by two skeptics). Reviewed in
+  round 1, answered in fix round 1 (below); class (a), design gate pending. Every v1.4 sentence that a finding narrows stays visible, with a dated correction after it,
   except the §8 envelope sentence, §4 doctor/reconcile/shadow rows, §5/§6 doctor wording, the §6 tier-3
   row and the T9 (a) refusal list, which are revised in place and whose v1.4 wording is quoted here (T9 (a)
   v1.4: "(other actions, amendment or correction tags, arbitrary artifacts, other projects)"; §8 envelope
@@ -1198,6 +1435,42 @@ will be folded as dated additions.
     - **Before review, 2026-10-06** (Jordan's go to push, `evt_5e903888d5654a63b32c7f951835b0c6`): §4's attribution
       paragraph now names the actual trigger, the merged record at seq 10390, in place of two non-commit events
       that only yield diagnostics; issue #195 is cited in §4 and §11.
+  - **Fix round 1, 2026-10-08.**
+    - **Who and why.** Written by claude-code (coordinator session 31, `claude-opus-5-5`) on Jordan's go
+      `evt_7c055bb7e6f44599a0c8223e938cc47f`, which came after the round-1 escalation; routing
+      `evt_f91a998d6deb49108157260ec4832107`.
+    - **Round 1.** Codex (`evt_55a8f4c9c6a14f88b49c46c38e5505fb`) rejected v2 at `e43da144` with four Mediums.
+      Grok r2 and NOOA r1 approved.
+    - **How the text was changed.** Text this PR added is edited in place (agent-rules 10 binds merged text;
+      Jordan, `evt_9dc982064d3c432bbd85ff9a64f049da`). Merged text gets dated corrections.
+    - **C-M1** (§4, §10, T4): a supersession table and check after the reference chain.
+      - Each source has a row naming the event shapes that can change a finding read at an earlier head.
+      - A match triggers one second read; a finding still matched after it is `incomplete`, and the run is
+        degraded.
+      - Unrelated appends change nothing.
+      - T4 (i) is narrowed; (v) to (viii) are added.
+    - **C-M2** (§8, §6, §10, T7): withdrawal of a standing instruction.
+      - Withdrawal is a configuration change made on Jordan's signed instruction.
+      - The configuration is read again before every publication.
+      - A frozen envelope whose root is gone is withheld, never published, and reported by the next run as a
+        tier-3 finding.
+      - T7 gains three cases.
+    - **C-M3** (§4, §6, §11, T4): doctor's ledger-derived labels get a pin.
+      - The pin is a `ledger head` line under `--gate`, added as a §11 prerequisite.
+      - A missing pin makes those findings `incomplete`, with a tier-1 finding.
+      - The other labels are external observations, with their consequences stated.
+      - T4 gains (ix) and (x).
+    - **C-M4** (§4, T14): the governing-path list.
+      - It was checked against every non-code path at `6190d5f` and re-checked at `ce2a78cc`.
+      - `scripts/**` (the cloud push guard among them) and the other controls are added, and the exclusions are
+        stated.
+      - T14 row (j) gains the guard.
+    - **Codex's advisories.**
+      - The no-model rule's sequencing sentence is updated, since PR 189 merged (§11).
+      - Q7 stays (A1), as Jordan recorded it. Codex's advice for (A2) on on-demand runs is left to him.
+    - **Found by the coordinator, not a reviewer** (§4, attribution availability): the runner fetches the
+      remote's branches and pull-request heads before the reconcile read. A seal can name a commit that a
+      main-only checkout lacks (seq 14839, 2026-10-07).
 
 - **v1.4 (2026-09-15)** — reassigned last review (cursor-agent, GPT-5.6 Sol, GitHub review 5206011343):
   the post-publication seat audit could not make an already-sealed `digest` outcome `failed` without

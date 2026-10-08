@@ -358,7 +358,9 @@ readable from the tree.
   reconcile uses against a remote store (packages/mcp-server/src/reconcile.ts:4, :110-113). It pins the
   bundle, the chain-verified tail and the live head the events reach (verified-events.ts:142-182,
   :200-212), and takes the age at the run's evaluation clock (digest v1.5 §4, §6). This is a second read,
-  not reconcile's own. On a ledger taking writes the two reads can land on different heads. That raises
+  not reconcile's own. On a ledger taking writes the two reads usually land on different heads. Under the
+  digest's chain-prefix rule (v1.5 §4, revised 2026-10-06; this sentence updated in fix round 1, 2026-10-08)
+  that is consistent when both heads lie on the run's reference chain; only a head off that chain raises
   the tier-1 "snapshot inconsistent" finding and a degraded run (digest §4). T14's fixture gains four
   follow-up rows. One, the status-count row, is another T14 negative case that must trip, under the
   existing §2 requirement (this brief, §2). v1.5 is proposed, not approved. Until v1.5 passes the design
