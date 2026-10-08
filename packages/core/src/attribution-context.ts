@@ -44,8 +44,11 @@ export interface AttributionCaptureContext {
   policy_digest: string; git_facts_digest: string;
   domains: Map<string, AttributionDomain>;
   /** Non-seal commit references that cannot supply a capture identity. Raw events remain unchanged.
-   *  `non_seal_commit_record` (issue #195): a `committed`/`merged` event that no capture policy could accept as a seal
-   *  (not git-hook shaped, not a GitHub push seal) carrying a commit ref that does not resolve; it defines no boundary. */
+   *  `non_seal_commit_record` (issue #195; PR 198 round 1, Codex C-M1): a `committed`/`merged` event carrying a commit
+   *  ref that does not resolve, on a record no capture rule looks at: no `method.tool: "git"`, no `git:` idempotency key
+   *  in any casing, no `push` tag, and a `sealed_by` stamp that is present but trusted by no repository (hook, restricted,
+   *  owner), no non-Git scheme (`capture_stamps`) and is not the GitHub webhook, for the record's sequence. Every other
+   *  shape stays fail-closed (`context_missing`). The live trigger is seq 10390: an MCP-logged merge under a pinned stamp. */
   diagnostics: (
     | { event_id: string; seq: number; artifact_id: string; status: "ignored"; reason: "malformed_commit_ref" | "unavailable_commit_ref" | "non_seal_commit_record" }
     | { event_id: string; seq: number; status: "restricted"; eligible: boolean; reason?: string; paths?: string[]; dropped?: string[] }
