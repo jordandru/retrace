@@ -429,3 +429,15 @@ test("F14 D1: breaker CAS rejects stale failure timestamps", async () => {
   assert.equal(await a.casBreaker(stale, { ...moved, failures: 3 }), false);
   assert.equal((await a.getBreaker("p"))?.failures, 2);
 });
+
+test("#131 history SQL compares since/until as instants and binds each cursor twice (strftime, then the raw fallback)", async () => {
+  const db = new FakeD1();
+  const store = new D1Store(db as unknown as D1Database);
+  await store.history({ project: "retrace", since: "2026-09-26T06:46:00Z", until: "2026-09-26T07:00:00Z", limit: 10 });
+  const stmt = db.last!;
+  const instant = (expr: string) => `COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', ${expr}), ${expr})`;
+  assert.ok(stmt.sql.includes(`${instant("e.timestamp")} >= ${instant("?")}`), stmt.sql);
+  assert.ok(stmt.sql.includes(`${instant("e.timestamp")} <= ${instant("?")}`), stmt.sql);
+  assert.ok(!/e\.timestamp >= \?|e\.timestamp <= \?/.test(stmt.sql), "no byte compare on the timestamp is left");
+  assert.deepEqual(stmt.params.filter((p) => typeof p === "string" && String(p).startsWith("2026-09-26")), ["2026-09-26T06:46:00Z", "2026-09-26T06:46:00Z", "2026-09-26T07:00:00Z", "2026-09-26T07:00:00Z"]);
+});

@@ -27,6 +27,20 @@ export interface HistoryQuery {
   before_seq?: number;
 }
 
+/** Order two timestamps by the instant they name, not by their bytes (issue #131). A push-webhook commit seal carries
+ *  the committer's own offset (`2026-09-26T00:46:49-06:00`), which a string compare puts six hours early against a
+ *  `Z` cursor; parsed, it is the same instant as the hook seal's `2026-09-26T06:46:49.000Z`. When either side does not
+ *  parse, the byte order is kept so no row disappears. The SQL stores apply the same rule (`TIMESTAMP_INSTANT_SQL`). */
+export function compareInstants(a: string, b: string): number {
+  const ta = Date.parse(a), tb = Date.parse(b);
+  if (Number.isFinite(ta) && Number.isFinite(tb)) return ta === tb ? 0 : ta < tb ? -1 : 1;
+  return a === b ? 0 : a < b ? -1 : 1;
+}
+/** SQLite expression that renders a timestamp column or parameter as a UTC `YYYY-MM-DDTHH:MM:SS.SSSZ` instant, so that
+ *  `since`/`until` compare instants across offsets; a value SQLite cannot parse falls back to its own bytes, matching
+ *  `compareInstants`. Both SQL stores bind the same cursor twice (once inside strftime, once as the fallback). */
+export const TIMESTAMP_INSTANT_SQL = (expr: string) => `COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', ${expr}), ${expr})`;
+
 /** One page of history. `events` are ascending by seq; they are the *newest* `limit` matches, not genesis. */
 export interface HistoryPage {
   events: Event[];
@@ -57,8 +71,8 @@ export function pageHistoryNewest(events: Event[], q: HistoryQuery): HistoryPage
   if (q.actor_id) rows = rows.filter((e) => e.actor.id === q.actor_id);
   if (q.actor_type) rows = rows.filter((e) => e.actor.type === q.actor_type);
   if (q.action) rows = rows.filter((e) => e.action === q.action);
-  if (q.since) rows = rows.filter((e) => e.timestamp >= q.since!);
-  if (q.until) rows = rows.filter((e) => e.timestamp <= q.until!);
+  if (q.since) rows = rows.filter((e) => compareInstants(e.timestamp, q.since!) >= 0);
+  if (q.until) rows = rows.filter((e) => compareInstants(e.timestamp, q.until!) <= 0);
   if (q.text) {
     const needle = q.text.toLowerCase();
     rows = rows.filter((e) => JSON.stringify(e).toLowerCase().includes(needle));

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {
   adapterIdempotencyError, AdapterIdempotencyError, CAUSED_BY_UNVERIFIED_TAG, appendEvent,
   EventInput, Event, EventStore, Share, likeContains, clampHistoryLimit, HISTORY_LIMIT_MAX,
-  pageHistoryNewest, collectHistory, asHistoryPage, explainEvent,
+  pageHistoryNewest, collectHistory, asHistoryPage, explainEvent, compareInstants, TIMESTAMP_INSTANT_SQL,
   artifactIndexRows, eventsReferencingArtifactKeys, artifactKeyMatchSql, BACKFILL_ARTIFACT_INDEX_SQL, eventsReferencingArtifactsSql, eventsReferencingArtifactsStatements, prefixRangeUpperBound, ARTIFACT_INDEX_MAX_TERMS, D1_MAX_BOUND_PARAMS, D1_MAX_COMPOUND_SELECT_TERMS,
   ARTIFACT_INDEX_DEFAULT_ROW_CAP, D1_LIKE_GLOB_PATTERN_MAX_BYTES, ALIAS_KEY_RANGE_LO, runArtifactIndexStatements,
   InvalidArtifactIdError,
@@ -404,4 +404,18 @@ test("T17 memory atomic consumption, read at U, rollback and concurrent single w
   await assert.rejects(baseInsert({ ...winner, id: "bad" }, { owner_login_consumption: [{ declaration_event_id: "unused" }] }), /UNIQUE/);
   assert.equal(await store.ownerLoginConsumptionRow(f.project, "unused"), null);
   assert.equal(store.events.length, before);
+});
+
+test("#131 since/until compare instants, so an offset-bearing timestamp inside the window is returned", () => {
+  const mk = (seq: number, timestamp: string): Event => ({ id: `evt_${seq}`, seq, project: "p", actor: { type: "agent", id: "a" }, action: "edited", artifacts: [{ id: "x" }], timestamp, received_at: timestamp, prev_hash: "", hash: `h${seq}`, hash_v: 2 } as Event);
+  const hook = mk(8702, "2026-09-26T06:46:49.000Z"), webhook = mk(8703, "2026-09-26T00:46:49-06:00"), later = mk(8704, "2026-09-26T07:00:00.000Z"), earlier = mk(8701, "2026-09-26T06:40:00.000Z");
+  const events = [earlier, hook, webhook, later];
+  assert.deepEqual(pageHistoryNewest(events, { project: "p", since: "2026-09-26T06:46:00Z" }).events.map((e) => e.seq), [8702, 8703, 8704], "the webhook seal's instant is after the cursor");
+  assert.deepEqual(pageHistoryNewest(events, { project: "p", since: "2026-09-26T06:47:00Z" }).events.map((e) => e.seq), [8704]);
+  assert.deepEqual(pageHistoryNewest(events, { project: "p", until: "2026-09-26T06:46:49Z" }).events.map((e) => e.seq), [8701, 8702, 8703], "until is inclusive on the instant");
+  assert.equal(compareInstants("2026-09-26T00:46:49-06:00", "2026-09-26T06:46:49.000Z"), 0);
+  assert.equal(compareInstants("not-a-date", "2026-09-26T06:46:49.000Z"), "not-a-date" < "2026-09-26T06:46:49.000Z" ? -1 : 1, "an unparseable side keeps the byte order");
+  const odd = mk(8705, "not-a-date");
+  assert.deepEqual(pageHistoryNewest([...events, odd], { project: "p", since: "n" }).events.map((e) => e.seq), [8705], "a row that does not parse is still reachable by its bytes");
+  assert.equal(TIMESTAMP_INSTANT_SQL("e.timestamp"), "COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', e.timestamp), e.timestamp)");
 });

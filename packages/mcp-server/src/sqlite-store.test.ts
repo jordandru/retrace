@@ -687,3 +687,15 @@ for (const failure of ["ingress", "eventsReferencingArtifacts", "ownerLoginConsu
     } finally { (store as any).db.close(); }
   });
 }
+
+test("#131 SqliteStore.history since/until compare instants across offsets, in SQL", async () => {
+  const store = new SqliteStore(":memory:");
+  const hook = await appendEvent(store, ev({ project: "w", timestamp: "2026-09-26T06:46:49.000Z", artifacts: [{ id: "commit:r@abc" }] }));
+  const webhook = await appendEvent(store, ev({ project: "w", timestamp: "2026-09-26T00:46:49-06:00", artifacts: [{ id: "commit:r@abc" }] }));
+  const later = await appendEvent(store, ev({ project: "w", timestamp: "2026-09-26T07:00:00.000Z" }));
+  const seqs = async (q: { since?: string; until?: string }) => (await store.history({ project: "w", ...q })).events.map((e) => e.seq);
+  assert.deepEqual(await seqs({ since: "2026-09-26T06:46:00Z" }), [hook.event.seq, webhook.event.seq, later.event.seq], "the webhook seal (committer offset -06:00) is inside the window");
+  assert.deepEqual(await seqs({ since: "2026-09-26T06:47:00Z" }), [later.event.seq]);
+  assert.deepEqual(await seqs({ until: "2026-09-26T06:46:49Z" }), [hook.event.seq, webhook.event.seq]);
+  assert.deepEqual(await seqs({ since: "2026-09-26T00:46:49-06:00", until: "2026-09-26T06:46:49.000Z" }), [hook.event.seq, webhook.event.seq], "cursors with offsets work too");
+});
