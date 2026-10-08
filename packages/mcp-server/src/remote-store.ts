@@ -48,12 +48,37 @@ export function retraceHeaders(token?: string): Record<string, string> {
   };
 }
 
+/** Issue #163: after a long CPU-bound step (a multi-minute ledger verification in `doctor --gate`) the next fetch
+ *  failed with `TypeError: fetch failed`, most likely a keep-alive socket the server had closed while the event loop
+ *  was blocked. The failure is socket-level, before any response, so an idempotent GET can be sent again: undici drops
+ *  the dead socket on the error and the retry opens a fresh connection. One retry, GET only (a POST that may have
+ *  reached the server is never repeated), and the thrown error names the cause instead of the bare "fetch failed". */
+const SOCKET_FAILURE = /ECONNRESET|EPIPE|UND_ERR_SOCKET|other side closed|socket hang up|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN/i;
+function describeFetchFailure(e: unknown): string {
+  const cause = (e as { cause?: unknown })?.cause as { code?: unknown; message?: unknown } | undefined;
+  const code = typeof cause?.code === "string" ? cause.code : undefined;
+  const msg = typeof cause?.message === "string" ? cause.message : undefined;
+  return `${(e as Error)?.message ?? e}${code || msg ? ` (cause: ${[code, msg].filter(Boolean).join(" ")})` : ""}`;
+}
+export async function fetchRetryingSocketFailure(url: string, init: RequestInit & { method: string }, attempts = 2): Promise<Response> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await fetch(url, init);
+    } catch (e) {
+      const detail = describeFetchFailure(e);
+      const retryable = init.method === "GET" && e instanceof TypeError && SOCKET_FAILURE.test(detail) && attempt < attempts;
+      if (!retryable) throw new Error(`Retrace API ${init.method} ${url}: ${detail}`, { cause: e });
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
+}
+
 export class RemoteStore implements EventStore {
   constructor(private baseUrl: string, private token?: string, private options: { deadlineMs?: number } = {}) {
     this.baseUrl = baseUrl.replace(/\/$/, "");
   }
   private async req<T>(method: string, path: string, body?: unknown): Promise<T> {
-    const res = await fetch(this.baseUrl + path, {
+    const res = await fetchRetryingSocketFailure(this.baseUrl + path, {
       method,
       headers: retraceHeaders(this.token),
       body: body ? JSON.stringify(body) : undefined,
@@ -88,7 +113,7 @@ export class RemoteStore implements EventStore {
     if (opts.fresh) p.set("fresh", "1");
     if (opts.cached) p.set("cached", "1");
     const path = `/projects/${encodeURIComponent(scope.project)}/export?${p}`;
-    const res = await fetch(this.baseUrl + path, {
+    const res = await fetchRetryingSocketFailure(this.baseUrl + path, {
       method: "GET",
       headers: retraceHeaders(this.token),
       signal: this.options.deadlineMs === undefined ? undefined : AbortSignal.timeout(this.options.deadlineMs),
@@ -120,7 +145,7 @@ export class RemoteStore implements EventStore {
     return null;
   }
   async get(id: string) {
-    const res = await fetch(this.baseUrl + `/events/${encodeURIComponent(id)}`, {
+    const res = await fetchRetryingSocketFailure(this.baseUrl + `/events/${encodeURIComponent(id)}`, {
       method: "GET",
       headers: retraceHeaders(this.token),
     });
