@@ -97,14 +97,28 @@ export async function prepareAttributionContext(snapshot: AttributionSnapshot, p
     if (mappings.length > 1) throw new Error("context_conflict: overlapping non-Git policy");
     return mappings.length === 1 ? id : undefined;
   };
-  // A commit or merge record is seal-shaped when some capture policy could accept it as a seal: a git-hook record
-  // (`method.tool: "git"` or a `git:` idempotency key; `captureSealEligible`, `restrictedSealEligibility`) or an
-  // authenticated GitHub push seal. Anything else, such as a merge logged through MCP, can never define a capture
-  // boundary, so an unresolvable commit ref on it is recorded as a diagnostic instead of failing the whole context
-  // (issue #195: one such record, seq 10390 in project retrace, made attribution evaluation unavailable on every run).
-  const sealShaped = (e: Event) => e.method?.tool === "git"
-    || (typeof e.idempotency_key === "string" && e.idempotency_key.startsWith("git:"))
-    || (e.tags?.includes("push") === true && e.method?.params?.sealed_by === "webhook:github");
+  // A commit or merge record is seal-shaped when any capture rule could accept it, and then its identity stays
+  // fail-closed. The rules (`capture.ts` `captureSealEligible`, `restrictedSealEligibility`; the non-Git touches
+  // below) look at: `method.tool: "git"`; a `git:` idempotency key, case-insensitive; the `push` tag; and the server
+  // stamp `sealed_by`, when it is one this policy trusts for the record's sequence (a repository's hook or restricted
+  // stamps, `owner` where owner seals are allowed, a non-Git scheme's capture stamps, the GitHub webhook). An unstamped
+  // record is kept fail-closed too. Only a record that carries none of these, such as a merge logged through MCP under
+  // an untrusted pinned stamp, can never define a capture boundary, so an unresolvable commit ref on it is recorded as
+  // a diagnostic instead of failing the whole context (issue #195: one such record, seq 10390 in project retrace, made
+  // attribution evaluation unavailable on every run; the predicate's width is PR 198 round 1, Codex C-M1).
+  const trustedStamps = (seq: number) => new Set<string>([
+    ...policy.repositories.filter(p => inInterval(p,seq)).flatMap(p => [...p.hook_sealed_by, ...(p.restricted_hook_stamps ?? []).map(r => r.stamp), ...(p.owner_seals ? ["owner"] : [])]),
+    ...policy.non_git.filter(p => inInterval(p,seq)).flatMap(p => p.capture_stamps),
+    "webhook:github",
+  ]);
+  const sealShaped = (e: Event) => {
+    const stamp = e.method?.params?.sealed_by;
+    return e.method?.tool === "git"
+      || (typeof e.idempotency_key === "string" && /^git:/i.test(e.idempotency_key))
+      || e.tags?.includes("push") === true
+      || typeof stamp !== "string"
+      || trustedStamps(e.seq).has(stamp);
+  };
   // Historical coverage is mandatory for every reference using a declared repository alias.
   for (const e of snapshot.events) for (const a of e.artifacts) {
     if (a.id.startsWith("commit:")) {

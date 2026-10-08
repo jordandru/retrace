@@ -502,4 +502,18 @@ test("#195 a non-seal merge record with a bare commit ref is a diagnostic, not a
   await assert.rejects(prepare([root(),pushShaped,ev("G",C),ev("E",B),ev("T"),amendment("A")]),/context_missing: full commit identity/);
   const gitKey={...mcpMerge,id:"K",idempotency_key:`git:${oid}`};
   await assert.rejects(prepare([root(),gitKey,ev("G",C),ev("E",B),ev("T"),amendment("A")]),/context_missing: full commit identity/);
+  // PR 198 round 1, Codex C-M1: the predicate covers what the capture rules accept
+  const upperKey={...mcpMerge,id:"U",idempotency_key:`GIT:${oid.toUpperCase()}`};
+  await assert.rejects(prepare([root(),upperKey,ev("G",C),ev("E",B),ev("T"),amendment("A")]),/context_missing: full commit identity/,"restricted capture reads git: keys case-insensitively");
+  const nonGitCapture={...ev("N",O,[{id:"doc:a",role:"generated" as const},{id:bare,role:"generated" as const}],"merged"),idempotency_key:"n-mcp",method:{params:{sealed_by:"assert:capture"}}};
+  await assert.rejects(prepare([root(),nonGitCapture,ev("G",C),ev("E",B),ev("T"),amendment("A")]),/context_missing: full commit identity/,"a policy-trusted non-Git capture stamp keeps the record fail-closed");
+  const hookStamped={...mcpMerge,id:"S",method:{params:{sealed_by:"assert:hook"}}};
+  await assert.rejects(prepare([root(),hookStamped,ev("G",C),ev("E",B),ev("T"),amendment("A")]),/context_missing: full commit identity/,"a repository's hook stamp keeps the record fail-closed without method.tool");
+  const unstamped={...mcpMerge,id:"X",method:{params:{}}};
+  await assert.rejects(prepare([root(),unstamped,ev("G",C),ev("E",B),ev("T"),amendment("A")]),/context_missing: full commit identity/,"an unstamped record is not exempt");
+  const pushTagged={...mcpMerge,id:"W",tags:["push"]};
+  await assert.rejects(prepare([root(),pushTagged,ev("G",C),ev("E",B),ev("T"),amendment("A")]),/context_missing: full commit identity/,"the push tag alone keeps the record fail-closed");
+  // and the seq-10390 shape, an untrusted pinned stamp with no Git fields, is still the one case that is exempt
+  const r2=await prepare([root(),mcpMerge,ev("G",C),ev("E",B),ev("T"),amendment("A")]);
+  assert.equal(r2.options.context!.diagnostics.filter(d=>d.status==="ignored").length,1);
 });
