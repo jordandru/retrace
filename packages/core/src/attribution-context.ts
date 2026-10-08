@@ -112,11 +112,18 @@ export async function prepareAttributionContext(snapshot: AttributionSnapshot, p
   }
   const seals = new Map<string, CaptureTouch & { key: string }>();
   const webhookSeals = webhookSealsFromEvents(snapshot.events);
+  const restrictedDiagnosticEvents = new Set<string>();
   for (const p of policy.repositories) {
     const events = snapshot.events.filter(e => isCommitEvent(e) && inInterval(p,e.seq) && e.artifacts.some(a => a.id.startsWith("commit:") && facts.resolutions[a.id]?.repo === p.name));
     const capturePolicy = { repoName:p.name, hookSealedBy:p.hook_sealed_by, restrictedStamps:p.restricted_hook_stamps, webhookSeals, ownerSeals:p.owner_seals, allowUnstampedSeals:p.allow_unstamped_seals, unreachableShas:facts.excluded };
     const boundedPolicy = { ...capturePolicy, firstStampedSeq:firstStampedSeq(snapshot.events,capturePolicy) };
-    for (const event of events) {
+    // Diagnose every event bearing this repository's restricted stamp. The shared eligibility helper rejects
+    // non-commit/non-git shapes, while capture below remains limited to actual commit/merge events.
+    const restrictedEvents = snapshot.events.filter((event) => inInterval(p,event.seq)
+      && (p.restricted_hook_stamps ?? []).some((entry) => entry.stamp === event.method?.params?.sealed_by));
+    for (const event of restrictedEvents) {
+      if (restrictedDiagnosticEvents.has(event.id)) continue;
+      restrictedDiagnosticEvents.add(event.id);
       const restricted = restrictedSealEligibility(event,boundedPolicy,webhookSeals);
       if (restricted.eligible) diagnostics.push({event_id:event.id,seq:event.seq,status:"restricted",eligible:true,paths:restricted.paths,dropped:restricted.dropped});
       else if (restricted.reason !== "not_restricted") diagnostics.push({event_id:event.id,seq:event.seq,status:"restricted",eligible:false,reason:restricted.reason});

@@ -68,6 +68,51 @@ test("T3 reconcile consumes every restricted eligibility outcome and reports dro
   }
 });
 
+test("restricted witnesses require an exact, unambiguous full webhook identity", () => {
+  const full = "abcdef123456" + "a".repeat(28);
+  const other = "abcdef123456" + "b".repeat(28);
+  const ref = `commit:${REPO}@${full.slice(0, 12)}`;
+  const candidate = ev(10, cloud, "committed", [ref, `repo:${REPO}#x.ts`], {
+    method: { tool: "git", params: { sealed_by: RESTRICTED, sha: other } },
+    idempotency_key: `git:${other}`,
+  });
+  const webhook = ev(20, cloud, "committed", [ref, `repo:${REPO}#x.ts`], {
+    tags: ["github", "push"],
+    method: { tool: "git", params: { sealed_by: "webhook:github", sha: full } },
+    idempotency_key: `gh:push:${REPO}:${full}`,
+  });
+  const facts: CommitFacts[] = [{ ...commit("a", ["x.ts"]), sha: full }];
+
+  const mismatch = reconcileCore(facts, [candidate, webhook], { repoName: REPO, restrictedStamps: restrictedPolicy });
+  assert.deepEqual(mismatch.restricted_hook_stamps, [{ event_id: candidate.id, seq: 10, eligible: false, reason: "no_webhook" }]);
+  assert.deepEqual(mismatch.commits[0].coverage["x.ts"].window, { after: -1, before: 20 });
+
+  const exact = { ...candidate, idempotency_key: `git:${full}`, method: { tool: "git", params: { sealed_by: RESTRICTED, sha: full } } };
+  const collidingWebhook = ev(21, cloud, "committed", [`commit:${REPO}@${other}`, `repo:${REPO}#x.ts`], {
+    tags: ["github", "push"],
+    method: { tool: "git", params: { sealed_by: "webhook:github", sha: other } },
+    idempotency_key: `gh:push:${REPO}:${other}`,
+  });
+  const ambiguous = reconcileCore(facts, [exact, webhook, collidingWebhook], { repoName: REPO, restrictedStamps: restrictedPolicy });
+  assert.deepEqual(ambiguous.restricted_hook_stamps, [{ event_id: candidate.id, seq: 10, eligible: false, reason: "ambiguous_commit" }]);
+  assert.deepEqual(ambiguous.commits[0].coverage["x.ts"].window, { after: -1, before: 20 });
+});
+
+test("restricted capture rejects non-commit and non-git shapes and diagnoses both", () => {
+  const webhook = pushed(20, "c", cloud, ["x.ts"]);
+  const wrongAction = { ...restricted(10, "c", cloud, ["x.ts"]), action: "edited" as const };
+  const wrongTool = { ...restricted(11, "c", cloud, ["x.ts"]), method: { tool: "mcp", params: { sealed_by: RESTRICTED, sha: sha("c") } } };
+  const report = reconcileCore([commit("c", ["x.ts"])], [wrongAction, wrongTool, webhook], {
+    repoName: REPO,
+    restrictedStamps: restrictedPolicy,
+  });
+  assert.deepEqual(report.restricted_hook_stamps, [
+    { event_id: wrongAction.id, seq: 10, eligible: false, reason: "wrong_action" },
+    { event_id: wrongTool.id, seq: 11, eligible: false, reason: "wrong_tool" },
+  ]);
+  assert.deepEqual(report.commits[0].coverage["x.ts"].window, { after: -1, before: 20 });
+});
+
 test("T4 reconcile keeps Codex's poisoned B boundary out for no-key and keyed actor-mismatch variants", () => {
   const run = (candidate: Event, reason: "no_key" | "actor_mismatch") => {
     const events = [

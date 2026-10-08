@@ -79,9 +79,13 @@ test("T3 prepareAttributionContext consumes every restricted eligibility outcome
 
   const twoCommits=restricted();
   twoCommits.artifacts.push({id:cidD,role:"generated"});
+  const otherFull=oidC.slice(0,12)+"f".repeat(28);
   const cases:{event:Event;webhooks:Event[];reason:string;after:number}[]=[
+    {event:{...restricted(),action:"edited" as const},webhooks:[webhook()],reason:"wrong_action",after:2},
+    {event:{...restricted(),method:{tool:"mcp",params:{sealed_by:restrictedStamp,sha:oidC}}},webhooks:[webhook()],reason:"wrong_tool",after:2},
     {event:{...restricted(),idempotency_key:undefined},webhooks:[webhook()],reason:"no_key",after:2},
     {event:{...restricted(),idempotency_key:`git:${oidD}`},webhooks:[webhook()],reason:"key_mismatch",after:2},
+    {event:{...restricted(),idempotency_key:`git:${otherFull}`,method:{tool:"git",params:{sealed_by:restrictedStamp,sha:otherFull}}},webhooks:[webhook()],reason:"no_webhook",after:2},
     {event:twoCommits,webhooks:[webhook()],reason:"commit_mismatch",after:2},
     {event:restricted(),webhooks:[],reason:"no_webhook",after:-1},
     {event:restricted(),webhooks:[webhook(codex)],reason:"actor_mismatch",after:2},
