@@ -16,10 +16,10 @@
     "@retrace-dev/core": "*"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261008.1",
     "@modelcontextprotocol/client": "^2.0.0",
-    "@cloudflare/workers-types": "^4.20250101.0",
     "esbuild": "^0.28.1",
-    "miniflare": "5.20260811.1-alpha",
-    "wrangler": "^4.0.0"
+    "miniflare": "^5.20261006.0-alpha",
+    "wrangler": "^4.148.0"
   }
 }
