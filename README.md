@@ -94,6 +94,8 @@ npx -p @retrace-dev/cli retrace-export verify retrace.json \
   --pubkey https://retrace-api.slcwitit.workers.dev/.well-known/retrace-pubkey
 ```
 
+*Correction, 2026-10-08 (issue #87; claude-code, measured with CLI 0.3.1): on the local quick start, `retrace-export reconcile` reports every hook-sealed commit as `missing_commit` ("sealed as unstamped … pass --allow-unstamped-seals") unless you pass `--allow-unstamped-seals`. A local ledger has no server to stamp the hook's seals, so on a local ledger that flag is the normal mode, not a concession for pre-stamp history; on a hosted ledger leave it off, where the strictness is the point. Commits made before `retrace-git install` are `missing_commit` either way until `retrace-git backfill`.*
+
 Commits, GitHub PRs and Google Drive become events through adapters; the hosted mode is a Cloudflare Worker + D1 with per-team scoped credentials. All of it is in the [reference](docs/reference.md): [git adapter](docs/reference.md#git-adapter--commits-become-events-automatically) · [proof & exports](docs/reference.md#prove--signed-exports-printable-reports-share-links) · [cloud mode](docs/reference.md#cloud-mode-cloudflare-worker--d1) · [hosting teams](docs/reference.md#hosting-teams-on-one-worker) · [event shape](docs/reference.md#event-shape-short) · [status & roadmap](docs/reference.md#status--next).
 
 ## What it deliberately does not do
