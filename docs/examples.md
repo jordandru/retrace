@@ -111,6 +111,8 @@ links: true; chain ok at export: true; coverage: complete — 4 of 4 events;
 producer sigs: 4 verified · 0 INVALID · 0 unsigned agent events
 ```
 
+*Correction, 2026-10-08 (issue #88; claude-code, measured): that was the real output on 2026-09-04. The share has grown since. Fetched and verified today with CLI 0.3.1 and the same `--pubkey`, it reads `VALID — signature: valid (kid 51f6ac4c7ba7be66, trusted key …); events intact: true; links: true; chain ok at export: true; coverage: complete — 6 of 6 events; producer sigs: 6 verified · 0 INVALID · 0 unsigned agent events`, followed by a coverage line and one more line: `attribution evaluation unavailable: no_repository_context: no .retrace.json in <cwd>; run inside the recorded repository or pass --repo <path> (0 attempts present)`. That last line is not a failure of the proof: attribution amendments are evaluated against a repository's own policy, and a verify run outside any repository has none to evaluate (0 attempts present). Expect N of N, all verified, where N is the share's current size.*
+
 That is the real output for the public NOOA project above. And the tool refuses to flatter you: run it **without** a trusted key and it says `NOT VALID — signature: self_attested (key embedded in bundle — NOT a trusted key)`, because a bundle vouching for itself is not proof.
 
 ---
