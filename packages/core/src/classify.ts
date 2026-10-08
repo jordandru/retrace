@@ -466,6 +466,11 @@ function emptyReadMetrics(statement_rows = 0, distinct_events = statement_rows):
   return { statement_rows, distinct_events, body_chars: 0, sql_ms: null, statements: 0 };
 }
 
+/** Issue #62: a classification that ran out of its budget (`Error("deadline")`, thrown by the bounded reads) is a
+ *  different fault from a store failure and points operators the other way; it must not be reported as `store_error`. */
+function unavailableReason(error: unknown): "deadline" | "store_error" {
+  return (error instanceof Error ? error.message : String(error)) === "deadline" ? "deadline" : "store_error";
+}
 function storeFailure(error: unknown): OwnerLoginFailure {
   const match = /owner-login (deadline|budget|store_error)/.exec(String((error as Error)?.message ?? error));
   return match?.[1] as OwnerLoginFailure | undefined ?? "store_error";
@@ -721,8 +726,8 @@ export async function evaluateAmendmentsAtU(opts: {
     candidates = await measure("amendment_rows",
       (metrics) => opts.store.amendmentEventsUpTo!(opts.project, opts.U, CLASSIFY_ROW_CAP + 1, metrics),
       (events) => emptyReadMetrics(events.length));
-  } catch {
-    return fail("store_error");
+  } catch (error) {
+    return fail(unavailableReason(error));
   }
   if (opts.now() >= opts.deadline) return fail("deadline");
   if (candidates.length > CLASSIFY_ROW_CAP) return fail("budget");
@@ -756,8 +761,8 @@ export async function evaluateAmendmentsAtU(opts: {
       snapshotJson: amendmentSnapshotJson(effectiveAmendmentRecord(collection)),
       captureSeals: captures.seals,
     };
-  } catch {
-    return fail("store_error");
+  } catch (error) {
+    return fail(unavailableReason(error));
   }
 }
 
@@ -1264,7 +1269,7 @@ export async function classifyCommitClaim(opts: ClassifyOpts): Promise<ClassifyR
     return await classifyCommitClaimInner(opts);
   } catch (error) {
     if (error instanceof InvalidArtifactIdError) throw error;
-    return { kind: "unavailable", reason: "store_error" };
+    return { kind: "unavailable", reason: unavailableReason(error) };
   }
 }
 
