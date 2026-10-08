@@ -9,7 +9,9 @@ and answers for it. v1.5 answers the 2026-10-05 cross-check of HEAD `6190d5f` (s
 `e43da144` (2026-10-07): Codex rejected it with four Mediums; Grok and NOOA approved. Fix round 1 (2026-10-08, on
 Jordan's go `evt_7c055bb7e6f44599a0c8223e938cc47f`) answers the four (§13). Round 2 at `c83b43ec`: Codex re-raised
 C-M1 and C-M2, and Grok approved. Fix round 2 (2026-10-08, Jordan's go `evt_054df4d9869b4f1bb1a9e117ebff1f60`)
-answers both (§13). It has not passed the design gate;
+answers both (§13). Round 3 at `81ccf050`: Codex kept C-M1 and C-M2 on one remaining case each, and Grok approved.
+Fix round 3 (2026-10-08, Jordan's go `evt_9d49674669e04b9b98617b05018e316a`) removes the two claims behind those
+cases (§13). It has not passed the design gate;
 until it merges, v1.4 is the reviewed revision. The v1.4 status follows; only its leading label changed.
 Effect on the build brief (added 2026-10-05): v1.5 lands in one pull request with the brief's 2026-10-05
 corrections and takes the design gate with them. From that merge the brief's spec is v1.5, and each brief
@@ -328,8 +330,9 @@ source, by the path reconcile uses against a remote store (`fetchVerifiedRemoteE
 `packages/mcp-server/src/verified-events.ts:142-182`, `:200-212`). The instruction follow-up read serves when it
 is the last ledger-backed read. Every recorded head (seq, hash), and both ends of every bracket, must lie on the
 reference chain: the chain's event at that seq exists and carries that hash. Then the run is consistent, and
-each finding cites the head its source was read under. Consistent is not current: the supersession check
-below decides whether a finding still holds at the reference head (fix round 1). A recorded head that is not on the reference chain, or
+each finding cites the head its source was read under. Consistent is not current: each finding is stated as read
+at its source's head. When a known superseding event lands after that head, the supersession check below reads the
+source again and, if the event still applies, marks the finding `incomplete` (fix rounds 1 and 3). A recorded head that is not on the reference chain, or
 a bracket whose counts fall outside it, is a tier-1 **"snapshot inconsistent"** finding citing the head and the
 reference chain's event at that seq; every finding that depends on that source is `incomplete`, and the run is
 degraded. A finding that compares values across sources names both heads, and no comparison is made across
@@ -344,6 +347,26 @@ head. An acknowledgement or an effective attribution amendment can land after th
 the reference chain is taken, and reconcile applies both when it builds its findings (core `reconcile.ts:320-323`,
 `:399-418`, at `6190d5f`, unchanged at `ce2a78cc`). A digest that rendered the earlier finding as live would
 cite an interpretation the ledger has already superseded.
+
+**What the check claims, and what it does not (fix round 3, 2026-10-08; Codex r3 C-M1).** The rows below list
+the known ways a later event supersedes a finding. They are not every way a fresh read could differ.
+- For example, the attribution context checks the repository reference of every event, not only seals (core
+  `attribution-context.ts:98-111`, at `ce2a78cc`).
+- So a later ordinary edit that names an expired repository alias makes a fresh context fail. The amendments a
+  fresh reconcile would apply then go with it (`packages/mcp-server/src/reconcile.ts:128-132`).
+
+The digest therefore never states a finding as current. Each finding is stated as read at its source's head, with
+the known shapes checked through the reference head. This is the alternative Codex accepted in round 1: historical
+(as-of) semantics, with the treatment of known supersession defined for completeness and promotion. That treatment:
+- **Known supersession** is a match in the source's row that survives the second read. It makes the finding
+  `incomplete` and the run degraded (below; §10 (c)).
+- **A later event outside every row** changes neither the finding nor its completeness.
+  - The finding is true as read.
+  - The next run reads fresh (§5, stateless per run).
+  - The recall audit replays from retained inputs, so it judges the digest against what its sources returned
+    (§10 (b)).
+- **The attribution state is stated as of `range.head_seq`**, like the findings that depend on it: `evaluated`,
+  `unavailable` or unknown, as read (§4).
 
 So after the reference chain is taken, the runner checks each source's **reference tail**. That is the
 events on the reference chain after the last event the source actually read, up to the reference head, on both
@@ -373,10 +396,14 @@ Stage-1 rows:
   - a `correction`-tagged event: reconcile's acknowledgement (`:157-171`, `:266-272`);
   - an attribution amendment, that is `action: other` with `action_detail: "amended"` (core `attribution.ts:56`).
 
-  Edit events have no row. An edit sealed after a commit's seal falls outside that commit's window: coverage
-  skips every edit at or above the commit's own seal (`reconcile.ts:368-372`, at `ce2a78cc`). An unsealed commit's
-  finding reads only commit and merge records (`:326-337`). `orphan_edit` and the observation counts have no row:
-  they are counts read up to `range.head_seq` and are rendered as such.
+  Edit events have no row.
+  - An edit sealed after a commit's seal falls outside that commit's window: coverage skips every edit at or above
+    the commit's own seal (`reconcile.ts:368-372`, at `ce2a78cc`).
+  - An unsealed commit's finding reads only commit and merge records (`:326-337`).
+  - An edit can still change whether a fresh read's attribution context loads (*What the check claims*, above). No
+    row covers that, so the findings are stated as of `range.head_seq` instead of as current (fix round 3).
+  - `orphan_edit` and the observation counts have no row either: they are counts read up to `range.head_seq` and are
+    rendered as such.
 
   The cost, from the measured rate: the ledger took 130 commit and merge seals in 46 hours (§4, the shadow
   source), about three an hour. A tail of a few minutes seldom holds one. When it does, reconcile is read once
@@ -407,8 +434,9 @@ What a match does:
    reference head, and the run is degraded. There is no third read. §10 counts the run like any other
    degraded run.
 3. A tail with no match changes nothing, so unrelated appends do not degrade a run.
-   - A finding with no match is current through the reference head. Its bullet says it was read under its
-     source's head and checked through the reference head.
+   - A finding with no match is stated as read. Its bullet names the head its source was read under, and says
+     the known superseding shapes were checked through the reference head. It never says the finding is current
+     (fix round 3).
    - A count is rendered as observed between its bracket ends.
 
 The selection manifest records, per source:
@@ -939,11 +967,19 @@ configuration, not the ledger: a project runs only while the configuration names
       - An event under the key passes the T7 equality check. The envelope was published: its state becomes
         `published`, the run has its terminal event, and nothing is withheld.
       - An event under the key fails the check. The `terminal mismatch` path above applies.
-      - No event is under the key, and coverage is proven. The envelope was not published. It is marked
-        `withdrawn`.
+      - No event is under the key, even with coverage proven. The state becomes `unknown`, a provisional absence
+        (revised in fix round 3, Codex r3 C-M2). The absence holds only through the read's head. A POST sent
+        earlier may still seal after it: the Worker awaits the append inside that request (`router.ts:928-936`,
+        `store.ts:1047-1065`, at `ce2a78cc`), and a separate read neither waits for it nor cancels it.
       - Coverage is not proven (a read error, a walk still truncated, a cached export). The state becomes
-        `unknown`. The runner never claims the envelope is absent and never sends it. Each later run tries the
-        read-only resolution again until it settles.
+        `unknown` too.
+
+      An `unknown` envelope settles only positively. A later read that finds an event under its key applies the
+      two checks above: equal means `published`; different means the mismatch path. Absence never settles it. The
+      runner never claims the envelope is absent and never sends it. Each later run tries the read-only resolution
+      again. Only an `unattempted` envelope, which was never sent, becomes `withdrawn`. **OPEN QUESTION FOR JORDAN**
+      (fix round 3): whether, and how, an owner decision may close an `unknown` envelope that never settles. This
+      note does not decide it.
   - A change that lands after the configuration read cannot stop that one attempt. Every later attempt reads the
     configuration again.
 - **Reported.**
@@ -1091,7 +1127,8 @@ Evidence and snapshot
       the tier-4 `reconcile.acknowledged` finding, not the tier-2 one, and is not degraded.
     - Variant that must trip: the store appends a second matching event after the re-read's bracket. The finding
       is then `incomplete`, cites that event, and the run is degraded.
-    - A runner that renders the tier-2 finding as current fails both.
+    - A runner that renders the tier-2 finding with neither the second read's result nor the `incomplete` mark
+      fails both.
   - (vi) Intra-run amendment. The same as (v), with an effective attribution amendment.
     - Expected: the re-read reports `amended`, no finding is selected, and the amended count rises.
     - The variant that must trip is the same as in (v).
@@ -1128,6 +1165,19 @@ Evidence and snapshot
     Expected: the reconcile row matches the webhook seal (any commit), reconcile is read again, and A's coverage
     is recomputed without edit 5. A runner whose row matches only seals that name A fails the case.
   - Case (vii) still holds: its edit events, CI runs and review verdict match no row.
+  *Added in fix round 3 (2026-10-08; Codex r3 C-M1):*
+  - (xii) A late edit with an expired alias. The fixture:
+    - the policy maps alias `old` through seq 100;
+    - reconcile reads through 100, its attribution context loads, and an amendment applies;
+    - an ordinary `edited` event at 101 names `repo:old#x`.
+
+    Expected:
+    - no row matches, so there is no second read;
+    - the reconcile findings and the attribution state are rendered as of seq 100 and stay complete;
+    - no bullet or header line states them as current.
+
+    A runner whose report claims them current fails the case. Truth-tracking: the next run's reconcile read
+    includes seq 101, so its attribution state is `unavailable`, with the tier-1 finding (§4).
 - **T5 negative findings cite observations.** A missing seal and an unavailable source produce findings
   whose evidence is a retained observation with hash and scope; no ledger id is required or invented.
 - **T6 publication artifact binds bytes.** It lists the hashes of `inputs/*`, the selection manifest and
@@ -1178,7 +1228,10 @@ Failure and publication
       the envelope hash.
   - (c) The ledger is unwritable at publication, so the envelope waits (the existing case). The root is then
     withdrawn and a new one configured.
-    - Expected: the next run does not publish the retained envelope, and it renders the same finding.
+    - Expected (revised in fix round 3): the next run sends no POST and resolves the envelope read-only.
+    - Its POST was sent, so it is `attempted`. With no event under the key, its state is `unknown`, and the run
+      renders the tier-1 "terminal event unknown" finding, not "withheld".
+    - A later read that finds the event settles it, as in (d).
   - A runner that publishes either envelope fails the case. "Exactly one terminal event per run id" has this
     exception, as it has the mismatch case.
   - (d) *Added in fix round 2 (2026-10-08; Codex r2 C-M2).* A lost response, then withdrawal. The Worker seals
@@ -1189,9 +1242,12 @@ Failure and publication
     - Must trip: a fake whose read cannot prove coverage (a walk still truncated). The state becomes `unknown`,
       a tier-1 "terminal event unknown" finding is rendered, and nothing claims the event is absent.
     - Must trip: an event under the key that differs in a compared field. The `terminal mismatch` path applies.
-    - A runner that sends a POST after the withdrawal, or marks the envelope `withdrawn` without the read, fails
-      the case. So does one that resolves it through the remote store's `byIdempotencyKey()`, which returns
-      `null`.
+    - Must trip (fix round 3, Codex r3 C-M2): the earlier POST seals after the covered recovery read.
+      - At the read the state is `unknown`, never `withdrawn`.
+      - The next run's read finds the event and settles it: `published` when equal, the mismatch path otherwise.
+      - A runner that marks the envelope `withdrawn` after a complete read with no event fails the case.
+    - A runner that sends a POST after the withdrawal, or marks an `attempted` envelope `withdrawn`, fails the
+      case. So does one that resolves it through the remote store's `byIdempotencyKey()`, which returns `null`.
 - **T8 unavailable is loud.** Any source unavailable → a tier-1 "source unavailable" finding with the
   source and error, and every dependent finding marked incomplete; NOOA INCONCLUSIVE renders as
   uncertain; an absent NOOA audit renders as unavailable, tier 1.
@@ -1575,6 +1631,30 @@ will be folded as dated additions.
       - T7 gains (d).
     - **Codex's precision notes.** The governing list no longer says all source code is class (c). The fetch
       note states the adapter's fallback to a unique full OID the ledger supplies.
+  - **Fix round 3, 2026-10-08** (the last, as recommended).
+    - **Who and why.** Written by claude-code (coordinator session 31, `claude-opus-5-5`) on Jordan's go
+      `evt_9d49674669e04b9b98617b05018e316a`, after the round-3 escalation `evt_49194ae44ddc414b81e6a66b1045ad7b`;
+      routing `evt_2c4fca9570394967a6fa48ebb6d689ee`.
+    - **Round 3 at `81ccf050`.** Codex (`evt_9c35c8e1b27f45c7b39227560b2286a4`) accepted the round-2 repairs and
+      kept C-M1 and C-M2 on one remaining case each. Grok r4 (`evt_4acd8d0ab5fe45fcbbc9b68f5ac3d5ec`) approved
+      with no findings.
+    - **The approach.** The first two rounds added rules, and each round found a case the rules missed. This
+      round removes the two claims instead.
+    - **C-M1** (§4 prefix rule, *What the check claims*, reconcile row, step 3; T4):
+      - The digest no longer states any finding as current.
+      - Each finding is stated as read at its source's head, with the known superseding shapes checked through
+        the reference head. A known supersession makes it `incomplete`; a later event outside every row changes
+        nothing.
+      - This is Codex's round-1 alternative: as-of semantics, with known supersession defined for completeness
+        and promotion.
+      - The late edit with an expired alias is named and tested (T4 (xii)). T4 (v)'s failing runner is
+        reworded.
+    - **C-M2** (§8 withdrawal; T7):
+      - An `attempted` envelope found absent stays `unknown`, because a POST sent earlier can still seal after
+        the read. It settles only positively.
+      - Only an `unattempted` envelope becomes `withdrawn`.
+      - T7 (c) now expects `unknown`, and T7 (d) gains the delayed-seal case.
+      - How an owner decision may close an `unknown` envelope is an open question for Jordan.
 
 - **v1.4 (2026-09-15)** — reassigned last review (cursor-agent, GPT-5.6 Sol, GitHub review 5206011343):
   the post-publication seat audit could not make an already-sealed `digest` outcome `failed` without
