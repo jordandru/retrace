@@ -37,5 +37,10 @@
     "supports_effort": false,
     "levels": [],
     "aliases": []
+  },
+  "gpt-daybreak-blue-latest": {
+    "supports_effort": true,
+    "levels": ["low", "medium", "high", "xhigh", "max", "ultra"],
+    "aliases": ["Daybreak Blue", "Codex Daybreak Blue"]
   }
 }
