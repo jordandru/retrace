@@ -133,6 +133,11 @@ test("review effort R2/R3: registry has the specified capability shape and skill
   assert.ok(models["claude-opus-5-5"]?.levels.includes("max"));
   assert.deepEqual(models["grok-4.6"]?.aliases, ["Cursor Grok 4.6", "Grok 4.6"]);
   assert.deepEqual(models["gpt-5.6-sol"]?.aliases, ["GPT-5.6 Sol"]);
+  assert.deepEqual(models["gpt-daybreak-blue-latest"], {
+    supports_effort: true,
+    levels: ["low", "medium", "high", "xhigh", "max", "ultra"],
+    aliases: ["Daybreak Blue", "Codex Daybreak Blue"],
+  });
   const skill = read("SKILL.md").toString("utf8");
   assert.match(skill, /recorded before launch/i);
   assert.match(skill, /reasoning_effort/);
