@@ -442,14 +442,16 @@ test("#131 the timestamp grammar: refused at append and as a history cursor, nev
   assert.equal(instantFromText("2026-01-01"), "2026-01-01T00:00:00.000Z", "zone-less date: UTC, as SQLite");
   assert.equal(instantFromText("2026-01-01T00:00"), "2026-01-01T00:00:00.000Z");
   assert.equal(instantFromText("2026-01-01 00:00:00.5"), "2026-01-01T00:00:00.500Z");
-  for (const bad of ["2026-01-01T00:00:00+0530", "2026-01-01T00:00:00.0045Z", "2026-02-30T00:00:00Z", "2026-13-01T00:00:00Z", "2026-01-01T24:00:00Z", "2026-01-01T00:00:00+24:00", "2460000", "now", "not-a-date", "2026-01-01T00:00:00.123z", ""])
+  assert.equal(instantFromText("2026-01-01T00:00:00+14:59"), "2025-12-31T09:01:00.000Z", "the last offset SQLite parses");
+  assert.equal(instantFromText("2026-01-01T00:00:00-14:59"), "2026-01-01T14:59:00.000Z");
+  for (const bad of ["2026-01-01T00:00:00+0530", "2026-01-01T00:00:00.0045Z", "2026-02-30T00:00:00Z", "2026-13-01T00:00:00Z", "2026-01-01T24:00:00Z", "2026-01-01T00:00:00+24:00", "2026-01-01T00:00:00+15:00", "2026-01-01T00:00:00-15:00", "2460000", "now", "not-a-date", "2026-01-01T00:00:00.123z", ""])
     assert.equal(instantFromText(bad), undefined, bad);
   // append: the schema (TIMESTAMP_RE is the narrower grammar: date-time with a zone, always)
   assert.equal(TIMESTAMP_RE.test("2026-01-01"), false);
   const base = { project: "p", actor: { type: "agent", id: "a" }, action: "edited", artifacts: [{ id: "x" }] };
   for (const ok of ["2026-01-01T00:00:00.123Z", "2026-01-01T00:00:00Z", "2026-09-26T00:46:49-06:00", "2026-09-26T00:46:49.123-06:00"])
     assert.equal(EventInput.safeParse({ ...base, timestamp: ok }).success, true, ok);
-  for (const bad of ["2026-01-01T00:00:00.0045Z", "2026-01-01T00:00:00+0530", "2026-01-01T00:00:00.123+0530", "2026-02-30T00:00:00Z", "2026-01-01T00:00:00", "2026-01-01"]) {
+  for (const bad of ["2026-01-01T00:00:00.0045Z", "2026-01-01T00:00:00+0530", "2026-01-01T00:00:00.123+0530", "2026-02-30T00:00:00Z", "2026-01-01T00:00:00", "2026-01-01", "2026-01-01T00:00:00+15:00"]) {
     const r = EventInput.safeParse({ ...base, timestamp: bad });
     assert.equal(r.success, false, bad);
     if (bad === "2026-01-01T00:00:00+0530") assert.match(JSON.stringify(r.success ? "" : r.error.issues), /colon offset/);

@@ -712,16 +712,36 @@ test("#131 SqliteStore.history since/until compare instants across offsets, in S
 
 test("#131 for every text the grammar accepts, instantKey renders exactly what SQLite's strftime renders", () => {
   const db = new DatabaseSync(":memory:");
-  const render = db.prepare(`select ${TIMESTAMP_INSTANT_SQL("?")} as v`);
+  const render = db.prepare(`select ${TIMESTAMP_INSTANT_SQL("?")} as v`); // two placeholders: strftime(?) then the COALESCE fallback ?, bound to the same text as the stores do
   const accepted = [
     "2026-01-01T00:00:00Z", "2026-01-01T00:00:00.5Z", "2026-01-01T00:00:00.50Z", "2026-01-01T00:00:00.123Z", "2026-01-01T23:59:59.999Z",
     "2026-09-26T00:46:49-06:00", "2026-09-26T00:46:49.123-06:00", "2026-01-01T00:00:00.123+05:30", "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00-00:00",
     "2026-12-31T23:59:59.999+14:00", "2026-01-01T00:00:00-12:00", "2024-02-29T12:00:00Z", "2026-01-01", "2026-01-01T00:00", "2026-01-01 00:00:00", "2026-01-01 00:00:00.5", "2026-01-01T00:00:00.001", "0001-01-01T00:00:00Z", "9999-12-31T23:59:59.999Z",
   ];
   for (const text of accepted) {
-    const sqlite = (render.get(text) as { v: string }).v;
+    const sqlite = (render.get(text, text) as { v: string }).v;
     assert.equal(instantKey(text), sqlite, text);
     assert.match(sqlite, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/, `${text} was rendered by strftime, not passed through by COALESCE`);
+  }
+  // every offset the grammar accepts, exhaustively: -14:59 .. +14:59 (Codex round 4: SQLite stops at hour 14, the
+  // round-3 parser allowed 23), on a date-time with and without a fraction
+  let swept = 0;
+  for (const sign of ["+", "-"]) for (let hh = 0; hh <= 14; hh++) for (let mm = 0; mm <= 59; mm++) {
+    const zone = `${sign}${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
+    for (const text of [`2026-03-01T12:34:56${zone}`, `2026-03-01T12:34:56.789${zone}`]) {
+      const sqlite = (render.get(text, text) as { v: string }).v;
+      assert.equal(instantKey(text), sqlite, text);
+      assert.match(sqlite, /Z$/, `${text} rendered by strftime`);
+      swept++;
+    }
+  }
+  assert.equal(swept, 2 * 15 * 60 * 2);
+  // and the first offsets past the bound are refused on this side, where SQLite would have fallen back to bytes
+  for (const zone of ["+15:00", "-15:00", "+23:59", "-23:59"]) {
+    const text = `2026-03-01T12:34:56${zone}`;
+    assert.equal((render.get(text, text) as { v: string | null }).v, text, `${text}: SQLite cannot parse it, COALESCE returns the bytes`);
+    assert.equal(instantKey(text), text, `${text}: raw bytes on the JavaScript side too`);
+    assert.throws(() => assertHistoryCursors({ since: text }), InvalidHistoryCursorError, `${text}: refused as a cursor`);
   }
   // and for text the grammar refuses, SQLite would have answered on its own terms; the cursor never gets there
   for (const refused of ["2026-01-01T00:00:00+0530", "2460000", "now", "2026-02-30T00:00:00Z"]) {

@@ -51,7 +51,7 @@ export function instantKey(s: string): string {
 export class InvalidHistoryCursorError extends Error {
   readonly status = 400;
   constructor(public readonly cursor: "since" | "until", public readonly value: string) {
-    super(`${cursor} is not an accepted timestamp: YYYY-MM-DD[THH:MM[:SS[.SSS]]][Z|±HH:MM], a real calendar instant with millisecond precision and a colon offset (got ${JSON.stringify(value)})`);
+    super(`${cursor} is not an accepted timestamp: YYYY-MM-DD[THH:MM[:SS[.SSS]]][Z|±HH:MM], a real calendar instant with millisecond precision and a colon offset within ±14:59 (got ${JSON.stringify(value)})`);
     this.name = "InvalidHistoryCursorError";
   }
 }

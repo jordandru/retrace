@@ -32,8 +32,10 @@ export const TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(
 export const INSTANT_RE = /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?(Z|[+-]\d{2}:\d{2})?)?$/;
 /** The UTC instant (`YYYY-MM-DDTHH:MM:SS.SSSZ`) a text in `INSTANT_RE` names, computed from its fields, not by
  *  `Date.parse`; `undefined` for text outside the grammar or naming no real calendar instant (`2026-02-30`, `24:00`,
- *  an offset past `23:59`). This is what SQLite's `strftime('%Y-%m-%dT%H:%M:%fZ', x)` renders for the same text, so the
+ *  an offset past `±14:59`). This is what SQLite's `strftime('%Y-%m-%dT%H:%M:%fZ', x)` renders for the same text, so the
  *  memory store and the SQL stores order every accepted value identically (`TIMESTAMP_INSTANT_SQL`). */
+/** The largest offset hour SQLite's date parser accepts (`±14:59` parses, `±15:00` does not); the grammar stops there too. */
+export const TIMESTAMP_OFFSET_MAX_HOURS = 14;
 export function instantFromText(s: string): string | undefined {
   const m = INSTANT_RE.exec(s);
   if (!m) return undefined;
@@ -48,7 +50,9 @@ export function instantFromText(s: string): string | undefined {
   let t = probe.getTime();
   if (zone !== "Z") {
     const oh = Number(zone.slice(1, 3)), om = Number(zone.slice(4, 6));
-    if (oh > 23 || om > 59) return undefined;
+    // SQLite parses an offset only up to hour 14 (any minutes; +14:59 yes, +15:00 NULL): the same bound here, so no
+    // accepted offset is normalized on one side and compared by bytes on the other (Codex, round 4, 2026-10-10)
+    if (oh > TIMESTAMP_OFFSET_MAX_HOURS || om > 59) return undefined;
     t -= (zone[0] === "-" ? -1 : 1) * (oh * 60 + om) * 60_000;
   }
   return new Date(t).toISOString();
@@ -56,7 +60,7 @@ export function instantFromText(s: string): string | undefined {
 /** An event timestamp: `TIMESTAMP_RE` and a real calendar instant. zod's own datetime check stays underneath. */
 export const Timestamp = z.string().datetime({ offset: true }).refine(
   (s) => TIMESTAMP_RE.test(s) && instantFromText(s) !== undefined,
-  { message: `timestamp is YYYY-MM-DDTHH:MM:SS[.SSS] followed by Z or ±HH:MM: a real calendar instant, millisecond precision (at most ${TIMESTAMP_MAX_FRACTION_DIGITS} fractional digits), colon offset` },
+  { message: `timestamp is YYYY-MM-DDTHH:MM:SS[.SSS] followed by Z or ±HH:MM: a real calendar instant, millisecond precision (at most ${TIMESTAMP_MAX_FRACTION_DIGITS} fractional digits), colon offset within ±${TIMESTAMP_OFFSET_MAX_HOURS}:59` },
 );
 
 export const ActorType = z.enum(["human", "agent", "system"]);
