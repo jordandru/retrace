@@ -34,7 +34,7 @@
  */
 import { z } from "zod";
 import { Actor, ActorType, EventInput, GENESIS_HASH, schemaSurface } from "./schema.js";
-import { EventStore, appendEvent, AdapterIdempotencyError, AppendDeadlineExceededError, CausedByError, verifyProject, explainEvent, newShareId, shareIsLive, Share, isHeadMovedError, SEALED_BY_PARAM, SEALED_BY_OWNER, SEALED_BY_UNAUTHENTICATED, SEALED_BY_GITHUB_WEBHOOK } from "./store.js";
+import { EventStore, appendEvent, assertHistoryCursors, InvalidHistoryCursorError, AdapterIdempotencyError, AppendDeadlineExceededError, CausedByError, verifyProject, explainEvent, newShareId, shareIsLive, Share, isHeadMovedError, SEALED_BY_PARAM, SEALED_BY_OWNER, SEALED_BY_UNAUTHENTICATED, SEALED_BY_GITHUB_WEBHOOK } from "./store.js";
 import {
   OwnerPrincipal, PolicyError, RouteConflictError, canonicalGithubRepo, missingPolicyDisposition, parseOwnerPrincipal, planPolicyPut,
   routeGithubDelivery,
@@ -1025,6 +1025,8 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
             }
             const limit = q.limit ? Number(q.limit) : undefined;
             if (q.limit && (!Number.isFinite(limit) || (limit as number) < 1)) return json({ error: "limit must be a positive number" }, 400);
+            // Issue #131: a sub-millisecond cursor is refused, not compared (every store throws the same error first).
+            try { assertHistoryCursors(q); } catch (e) { if (e instanceof InvalidHistoryCursorError) return json({ error: e.message }, 400); throw e; }
             return json(await store.history({
               project,
               artifact_id: q.artifact_id,

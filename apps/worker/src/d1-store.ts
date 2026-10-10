@@ -1,4 +1,4 @@
-import { CaptureIndexHit, CaptureIndexResult, runCaptureIndexStatements, InsertExtras, OwnerLoginConsumption, readOwnerLoginConsumption, ArtifactIndexQuery, ArtifactIndexResult, ChainHead, Event, EventStore, HeadMovedError, HistoryQuery, HistoryPage, PendingDelivery, Share, artifactIndexRows, clampHistoryLimit, runArtifactIndexStatements, ArtifactIndexHit, historyPageFromNewestFirst, likeContains, policyDocumentFromRow, policySnapshotFromIndex, assertRouteWriteConsistent, RouteConflictError, parseEventBodyRows } from "@retrace-dev/core";
+import { TIMESTAMP_INSTANT_SQL, assertHistoryCursors, CaptureIndexHit, CaptureIndexResult, runCaptureIndexStatements, InsertExtras, OwnerLoginConsumption, readOwnerLoginConsumption, ArtifactIndexQuery, ArtifactIndexResult, ChainHead, Event, EventStore, HeadMovedError, HistoryQuery, HistoryPage, PendingDelivery, Share, artifactIndexRows, clampHistoryLimit, runArtifactIndexStatements, ArtifactIndexHit, historyPageFromNewestFirst, likeContains, policyDocumentFromRow, policySnapshotFromIndex, assertRouteWriteConsistent, RouteConflictError, parseEventBodyRows } from "@retrace-dev/core";
 import type { StoreReadMetricsSink } from "@retrace-dev/core";
 import type { BreakerRow, ClassificationContextRow, PolicyRouteRow, PolicySnapshot, PolicySnapshotBudget, PolicyWrite } from "@retrace-dev/core";
 
@@ -137,6 +137,7 @@ export class D1Store implements EventStore {
   }
 
   async history(q: HistoryQuery): Promise<HistoryPage> {
+    assertHistoryCursors(q);
     const where: string[] = ["e.project = ?"];
     const params: (string | number)[] = [q.project];
     let join = "";
@@ -144,8 +145,9 @@ export class D1Store implements EventStore {
     if (q.actor_id) { where.push("e.actor_id = ?"); params.push(q.actor_id); }
     if (q.actor_type) { where.push("e.actor_type = ?"); params.push(q.actor_type); }
     if (q.action) { where.push("e.action = ?"); params.push(q.action); }
-    if (q.since) { where.push("e.timestamp >= ?"); params.push(q.since); }
-    if (q.until) { where.push("e.timestamp <= ?"); params.push(q.until); }
+    // Instants, not bytes (issue #131): a push-webhook seal's offset-bearing timestamp must not sort six hours early.
+    if (q.since) { where.push(`${TIMESTAMP_INSTANT_SQL("e.timestamp")} >= ${TIMESTAMP_INSTANT_SQL("?")}`); params.push(q.since, q.since); }
+    if (q.until) { where.push(`${TIMESTAMP_INSTANT_SQL("e.timestamp")} <= ${TIMESTAMP_INSTANT_SQL("?")}`); params.push(q.until, q.until); }
     if (q.text) { const like = likeContains(q.text); where.push(like.sql); params.push(like.pattern); }
     if (typeof q.before_seq === "number" && Number.isFinite(q.before_seq)) { where.push("e.seq < ?"); params.push(q.before_seq); }
     const limit = clampHistoryLimit(q.limit);

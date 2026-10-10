@@ -5,9 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   appendEvent, sealEvent, verifyProject, EventInput, HeadMovedError, createHandler, POLICY_PROFILE,
-  eventsReferencingArtifactsSql, eventsReferencingArtifactsStatements, MemoryEventStore, recordWebhookClassifyOutcome,
+  eventsReferencingArtifactsSql, eventsReferencingArtifactsStatements, MemoryEventStore, recordWebhookClassifyOutcome, InvalidHistoryCursorError, instantKey, TIMESTAMP_INSTANT_SQL, assertHistoryCursors,
 } from "@retrace-dev/core";
 import { SqliteStore } from "./sqlite-store.js";
+import { DatabaseSync } from "node:sqlite";
 
 const ev = (over: Partial<EventInput>): EventInput => ({ project: "junk", actor: { type: "agent", id: "claude" }, action: "edited", artifacts: [{ id: "a" }], ...over });
 const audit = (store: SqliteStore) => store.head("ops").then((h) => sealEvent(ev({ project: "ops", action: "deleted", artifacts: [{ id: "project:junk" }] }), h));
@@ -687,3 +688,75 @@ for (const failure of ["ingress", "eventsReferencingArtifacts", "ownerLoginConsu
     } finally { (store as any).db.close(); }
   });
 }
+
+test("#131 SqliteStore.history since/until compare instants across offsets, in SQL", async () => {
+  const store = new SqliteStore(":memory:");
+  const hook = await appendEvent(store, ev({ project: "w", timestamp: "2026-09-26T06:46:49.000Z", artifacts: [{ id: "commit:r@abc" }] }));
+  const webhook = await appendEvent(store, ev({ project: "w", timestamp: "2026-09-26T00:46:49-06:00", artifacts: [{ id: "commit:r@abc" }] }));
+  const later = await appendEvent(store, ev({ project: "w", timestamp: "2026-09-26T07:00:00.000Z" }));
+  const seqs = async (q: { since?: string; until?: string }) => (await store.history({ project: "w", ...q })).events.map((e) => e.seq);
+  assert.deepEqual(await seqs({ since: "2026-09-26T06:46:00Z" }), [hook.event.seq, webhook.event.seq, later.event.seq], "the webhook seal (committer offset -06:00) is inside the window");
+  assert.deepEqual(await seqs({ since: "2026-09-26T06:47:00Z" }), [later.event.seq]);
+  assert.deepEqual(await seqs({ until: "2026-09-26T06:46:49Z" }), [hook.event.seq, webhook.event.seq]);
+  assert.deepEqual(await seqs({ since: "2026-09-26T00:46:49-06:00", until: "2026-09-26T06:46:49.000Z" }), [hook.event.seq, webhook.event.seq], "cursors with offsets work too");
+  // #131 millisecond contract: a sub-millisecond cursor is refused before any SQL runs, so SQLite's %f never rounds one
+  await assert.rejects(store.history({ project: "w", since: "2026-09-26T06:46:49.0005Z" }), InvalidHistoryCursorError);
+  await assert.rejects(store.history({ project: "w", until: "2026-09-26T06:46:49.0005Z" }), InvalidHistoryCursorError);
+  await assert.rejects(appendEvent(store, ev({ project: "w", timestamp: "2026-09-26T06:46:49.0005Z" })), /millisecond precision/, "and the schema refuses such a timestamp at append");
+  assert.deepEqual(await seqs({ since: "2026-09-26T06:46:49.001Z" }), [later.event.seq], "a millisecond cursor compares exactly");
+  // #131 round 3: a compact offset parses in JavaScript but not in SQLite's strftime; the grammar refuses it on both paths
+  await assert.rejects(store.history({ project: "w", since: "2026-09-26T12:16:49+0530" }), InvalidHistoryCursorError);
+  await assert.rejects(appendEvent(store, ev({ project: "w", timestamp: "2026-09-26T12:16:49+0530" })), /colon offset/);
+  for (const bad of ["2460000", "now", "2026-02-30"]) await assert.rejects(store.history({ project: "w", since: bad }), InvalidHistoryCursorError, bad);
+});
+
+test("#131 for every text the grammar accepts, instantKey renders exactly what SQLite's strftime renders", () => {
+  const db = new DatabaseSync(":memory:");
+  const render = db.prepare(`select ${TIMESTAMP_INSTANT_SQL("?")} as v`); // two placeholders: strftime(?) then the COALESCE fallback ?, bound to the same text as the stores do
+  const accepted = [
+    "2026-01-01T00:00:00Z", "2026-01-01T00:00:00.5Z", "2026-01-01T00:00:00.50Z", "2026-01-01T00:00:00.123Z", "2026-01-01T23:59:59.999Z",
+    "2026-09-26T00:46:49-06:00", "2026-09-26T00:46:49.123-06:00", "2026-01-01T00:00:00.123+05:30", "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00-00:00",
+    "2026-12-31T23:59:59.999+14:00", "2026-01-01T00:00:00-12:00", "2024-02-29T12:00:00Z", "2026-01-01", "2026-01-01T00:00", "2026-01-01 00:00:00", "2026-01-01 00:00:00.5", "2026-01-01T00:00:00.001", "0001-01-01T00:00:00Z", "9999-12-31T23:59:59.999Z",
+  ];
+  for (const text of accepted) {
+    const sqlite = (render.get(text, text) as { v: string }).v;
+    assert.equal(instantKey(text), sqlite, text);
+    assert.match(sqlite, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/, `${text} was rendered by strftime, not passed through by COALESCE`);
+  }
+  // every offset the grammar accepts, exhaustively: -14:59 .. +14:59 (Codex round 4: SQLite stops at hour 14, the
+  // round-3 parser allowed 23), on a date-time with and without a fraction
+  let swept = 0;
+  for (const sign of ["+", "-"]) for (let hh = 0; hh <= 14; hh++) for (let mm = 0; mm <= 59; mm++) {
+    const zone = `${sign}${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
+    for (const text of [`2026-03-01T12:34:56${zone}`, `2026-03-01T12:34:56.789${zone}`]) {
+      const sqlite = (render.get(text, text) as { v: string }).v;
+      assert.equal(instantKey(text), sqlite, text);
+      assert.match(sqlite, /Z$/, `${text} rendered by strftime`);
+      swept++;
+    }
+  }
+  assert.equal(swept, 2 * 15 * 60 * 2);
+  // the year boundary after the offset (Codex round 5): the last accepted instants on both edges agree, the first
+  // instant past year 9999 is bytes on both sides and refused as a cursor
+  for (const edge of ["9999-12-31T23:59:59.999Z", "9999-12-31T23:59:59.999+00:00", "9999-12-31T09:00:00+14:59", "0001-01-01T00:00:00+14:59", "0001-01-01T00:00:00-14:59", "0000-01-01T00:00:00Z"]) {
+    assert.equal(instantKey(edge), (render.get(edge, edge) as { v: string }).v, edge);
+  }
+  for (const past of ["9999-12-31T23:00:00-05:00", "9999-12-31T23:59:59.999-00:01", "9999-12-31T10:00:00-14:00"]) {
+    assert.equal((render.get(past, past) as { v: string | null }).v, past, `${past}: SQLite cannot render year 10000, COALESCE returns the bytes`);
+    assert.equal(instantKey(past), past, `${past}: raw bytes on the JavaScript side too`);
+    assert.throws(() => assertHistoryCursors({ since: past }), InvalidHistoryCursorError, `${past}: refused as a cursor`);
+  }
+  // and the first offsets past the bound are refused on this side, where SQLite would have fallen back to bytes
+  for (const zone of ["+15:00", "-15:00", "+23:59", "-23:59"]) {
+    const text = `2026-03-01T12:34:56${zone}`;
+    assert.equal((render.get(text, text) as { v: string | null }).v, text, `${text}: SQLite cannot parse it, COALESCE returns the bytes`);
+    assert.equal(instantKey(text), text, `${text}: raw bytes on the JavaScript side too`);
+    assert.throws(() => assertHistoryCursors({ since: text }), InvalidHistoryCursorError, `${text}: refused as a cursor`);
+  }
+  // and for text the grammar refuses, SQLite would have answered on its own terms; the cursor never gets there
+  for (const refused of ["2026-01-01T00:00:00+0530", "2460000", "now", "2026-02-30T00:00:00Z"]) {
+    assert.equal(instantKey(refused), refused, `${refused}: raw bytes on the JavaScript side`);
+    assert.throws(() => assertHistoryCursors({ since: refused }), InvalidHistoryCursorError, `${refused}: refused as a cursor before SQLite sees it`);
+  }
+  db.close();
+});

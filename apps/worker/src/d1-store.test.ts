@@ -4,7 +4,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Event } from "@retrace-dev/core";
-import { POLICY_PROFILE, SCHEMA_PENDING_EVENT_COLUMNS_SQL, SCHEMA_PENDING_LEASE_COLUMNS_SQL, SCHEMA_SQL, RouteConflictError, planPolicyPut } from "@retrace-dev/core";
+import { InvalidHistoryCursorError, POLICY_PROFILE, SCHEMA_PENDING_EVENT_COLUMNS_SQL, SCHEMA_PENDING_LEASE_COLUMNS_SQL, SCHEMA_SQL, RouteConflictError, planPolicyPut } from "@retrace-dev/core";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { D1Store } from "./d1-store.js";
 
@@ -428,4 +428,21 @@ test("F14 D1: breaker CAS rejects stale failure timestamps", async () => {
   assert.equal(await b.casBreaker(stale, moved), true);
   assert.equal(await a.casBreaker(stale, { ...moved, failures: 3 }), false);
   assert.equal((await a.getBreaker("p"))?.failures, 2);
+});
+
+test("#131 history SQL compares since/until as instants and binds each cursor twice (strftime, then the raw fallback)", async () => {
+  const db = new FakeD1();
+  const store = new D1Store(db as unknown as D1Database);
+  await store.history({ project: "retrace", since: "2026-09-26T06:46:00Z", until: "2026-09-26T07:00:00Z", limit: 10 });
+  const stmt = db.last!;
+  const instant = (expr: string) => `COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', ${expr}), ${expr})`;
+  assert.ok(stmt.sql.includes(`${instant("e.timestamp")} >= ${instant("?")}`), stmt.sql);
+  assert.ok(stmt.sql.includes(`${instant("e.timestamp")} <= ${instant("?")}`), stmt.sql);
+  assert.ok(!/e\.timestamp >= \?|e\.timestamp <= \?/.test(stmt.sql), "no byte compare on the timestamp is left");
+  assert.deepEqual(stmt.params.filter((p) => typeof p === "string" && String(p).startsWith("2026-09-26")), ["2026-09-26T06:46:00Z", "2026-09-26T06:46:00Z", "2026-09-26T07:00:00Z", "2026-09-26T07:00:00Z"]);
+  // #131 millisecond contract: a sub-millisecond cursor is refused before any statement is prepared
+  const before = db.last;
+  await assert.rejects(store.history({ project: "retrace", since: "2026-09-26T06:46:00.0005Z", limit: 10 }), InvalidHistoryCursorError);
+  await assert.rejects(store.history({ project: "retrace", until: "2026-09-26T06:46:00.0005Z", limit: 10 }), InvalidHistoryCursorError);
+  assert.equal(db.last, before, "no SQL ran for the refused cursors");
 });

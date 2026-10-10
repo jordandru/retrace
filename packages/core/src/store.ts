@@ -2,7 +2,7 @@
  * Storage interface — implemented by SQLite (MCP server) and D1 (Worker).
  * SQL schema shared by both lives in SCHEMA_SQL.
  */
-import { Action, Event, EventInput } from "./schema.js";
+import { Action, Event, EventInput, instantFromText } from "./schema.js";
 import { sealEvent, verifyChain, VerifyResult } from "./chain.js";
 import { markUntrustedText } from "./explain.js";
 import { artifactKey, artifactLookup, sameArtifact } from "./capture.js";
@@ -26,6 +26,46 @@ export interface HistoryQuery {
   /** Exclusive upper bound: only events with `seq < before_seq`. Walks older pages of a newest-first window. */
   before_seq?: number;
 }
+
+/** Order two timestamps by the instant they name, not by their bytes (issue #131). A push-webhook commit seal carries
+ *  the committer's own offset (`2026-09-26T00:46:49-06:00`), which a string compare puts six hours early against a
+ *  `Z` cursor; parsed, it is the same instant as the hook seal's `2026-09-26T06:46:49.000Z`. When either side does not
+ *  parse, the byte order is kept so no row disappears. The SQL stores apply the same rule (`TIMESTAMP_INSTANT_SQL`). */
+export function compareInstants(a: string, b: string): number {
+  const ka = instantKey(a), kb = instantKey(b);
+  return ka === kb ? 0 : ka < kb ? -1 : 1;
+}
+/** The key `compareInstants` orders by: the UTC instant the text names under the stated grammar (`instantFromText`,
+ *  schema.ts), or the raw bytes for text outside it, so that the memory store and the SQL stores put every row in the
+ *  same order: for every accepted text, `instantFromText` renders exactly what SQLite's
+ *  `strftime('%Y-%m-%dT%H:%M:%fZ', x)` renders (`TIMESTAMP_INSTANT_SQL`), and text outside the grammar never reaches a
+ *  comparison, because the schema refuses it at append and `assertHistoryCursors` refuses it as a cursor. History of the
+ *  rule (Codex, 2026-10-10): round 1 compared `Date.parse` results and lost on zone-less text (local vs UTC); round 2
+ *  rounded sub-millisecond fractions half-up where `%f` rounds in floating point; round 3 accepted compact `+0530`
+ *  offsets that SQLite does not parse. Each time the remedy was to narrow the accepted input, not to model the parser. */
+export function instantKey(s: string): string {
+  return instantFromText(s) ?? s;
+}
+/** A `since`/`until` cursor outside the accepted grammar (issue #131). The Worker answers 400, the MCP tool reports it,
+ *  and every store refuses it before reading a row. */
+export class InvalidHistoryCursorError extends Error {
+  readonly status = 400;
+  constructor(public readonly cursor: "since" | "until", public readonly value: string) {
+    super(`${cursor} is not an accepted timestamp: YYYY-MM-DD[THH:MM[:SS[.SSS]]][Z|±HH:MM], a real calendar instant with millisecond precision and a colon offset within ±14:59 (got ${JSON.stringify(value)})`);
+    this.name = "InvalidHistoryCursorError";
+  }
+}
+/** Fail closed on a cursor outside the grammar; the three stores call this first, the Worker route maps the throw to 400. */
+export function assertHistoryCursors(q: Pick<HistoryQuery, "since" | "until">): void {
+  for (const cursor of ["since", "until"] as const) {
+    const value = q[cursor];
+    if (value !== undefined && instantFromText(value) === undefined) throw new InvalidHistoryCursorError(cursor, value);
+  }
+}
+/** SQLite expression that renders a timestamp column or parameter as a UTC `YYYY-MM-DDTHH:MM:SS.SSSZ` instant, so that
+ *  `since`/`until` compare instants across offsets; a value SQLite cannot parse falls back to its own bytes, matching
+ *  `compareInstants`. Both SQL stores bind the same cursor twice (once inside strftime, once as the fallback). */
+export const TIMESTAMP_INSTANT_SQL = (expr: string) => `COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', ${expr}), ${expr})`;
 
 /** One page of history. `events` are ascending by seq; they are the *newest* `limit` matches, not genesis. */
 export interface HistoryPage {
@@ -52,13 +92,14 @@ export function historyPageFromNewestFirst(newestFirst: Event[], limit: number):
 
 /** In-memory history: newest `limit` matches, ascending. Used by tests and as the spec SQL stores must match. */
 export function pageHistoryNewest(events: Event[], q: HistoryQuery): HistoryPage {
+  assertHistoryCursors(q);
   let rows = events.filter((e) => e.project === q.project);
   if (q.artifact_id) rows = rows.filter((e) => e.artifacts.some((a) => a.id === q.artifact_id));
   if (q.actor_id) rows = rows.filter((e) => e.actor.id === q.actor_id);
   if (q.actor_type) rows = rows.filter((e) => e.actor.type === q.actor_type);
   if (q.action) rows = rows.filter((e) => e.action === q.action);
-  if (q.since) rows = rows.filter((e) => e.timestamp >= q.since!);
-  if (q.until) rows = rows.filter((e) => e.timestamp <= q.until!);
+  if (q.since) rows = rows.filter((e) => compareInstants(e.timestamp, q.since!) >= 0);
+  if (q.until) rows = rows.filter((e) => compareInstants(e.timestamp, q.until!) <= 0);
   if (q.text) {
     const needle = q.text.toLowerCase();
     rows = rows.filter((e) => JSON.stringify(e).toLowerCase().includes(needle));

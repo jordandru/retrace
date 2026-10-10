@@ -8,6 +8,65 @@
  */
 import { z } from "zod";
 
+/** WHEN carries at most millisecond precision (issue #131). Every store orders `since`/`until` by the instant a
+ *  timestamp names; the memory store parses it and SQLite renders it with `strftime('%f')`, which computes in floating
+ *  point and can round an exact half-millisecond the other way. Rather than imitate that arithmetic, the contract
+ *  excludes the input: a timestamp or cursor with more than three fractional second digits is refused at append and at
+ *  query, so both sides see only values they render identically. The live ledger held 0 such rows in 16913 at
+ *  2026-10-10 (coordinator scan). */
+export const TIMESTAMP_MAX_FRACTION_DIGITS = 3;
+/** Fractional second digits of an ISO 8601 timestamp (`.123Z` → 3, `.1234-06:00` → 4, no fraction → 0). */
+export function timestampFractionDigits(s: string): number {
+  const m = /\.(\d+)(?=(?:Z|[+-]\d{2}:?\d{2})?$)/.exec(s);
+  return m ? m[1]!.length : 0;
+}
+/** The timestamp grammar every store agrees on (issue #131, round 3). `YYYY-MM-DDTHH:MM:SS[.SSS]` then `Z` or `±HH:MM`:
+ *  a real calendar instant, millisecond precision, colon offset. Anything else is refused at append. The grammar is
+ *  stated rather than inherited from a parser because the parsers disagree at the edges: zod's `datetime({ offset })`
+ *  and `Date.parse` accept a compact `+0530`, SQLite's `strftime` does not (Codex, round 3, 2026-10-10); SQLite reads a
+ *  bare number as a Julian day and the word `now` as the clock, `Date.parse` does not. The live ledger's 16913 rows all
+ *  fit this grammar (scan 2026-10-10: `.SSSZ`, `Z`, `-HH:MM`, `.SSS-HH:MM`). */
+export const TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/;
+/** The wider grammar a history cursor may use: the timestamp grammar, or a zone-less date or date-time
+ *  (`2026-01-01`, `2026-01-01T00:00`, `2026-01-01 00:00:00.5`), which SQLite and this code both read as UTC. */
+export const INSTANT_RE = /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?(Z|[+-]\d{2}:\d{2})?)?$/;
+/** The UTC instant (`YYYY-MM-DDTHH:MM:SS.SSSZ`) a text in `INSTANT_RE` names, computed from its fields, not by
+ *  `Date.parse`; `undefined` for text outside the grammar or naming no real calendar instant (`2026-02-30`, `24:00`,
+ *  an offset past `±14:59`, an instant that leaves years 0000–9999 once the offset is applied). This is what SQLite's `strftime('%Y-%m-%dT%H:%M:%fZ', x)` renders for the same text, so the
+ *  memory store and the SQL stores order every accepted value identically (`TIMESTAMP_INSTANT_SQL`). */
+/** The largest offset hour SQLite's date parser accepts (`±14:59` parses, `±15:00` does not); the grammar stops there too. */
+export const TIMESTAMP_OFFSET_MAX_HOURS = 14;
+export function instantFromText(s: string): string | undefined {
+  const m = INSTANT_RE.exec(s);
+  if (!m) return undefined;
+  const [, Y, Mo, D, h = "00", mi = "00", sec = "00", frac = "", zone = "Z"] = m;
+  const y = Number(Y), mo = Number(Mo), d = Number(D), hh = Number(h), mm = Number(mi), ss = Number(sec);
+  const ms = Number((frac + "000").slice(0, 3));
+  if (mo < 1 || mo > 12 || d < 1 || d > 31 || hh > 23 || mm > 59 || ss > 59) return undefined;
+  const probe = new Date(0);
+  probe.setUTCFullYear(y, mo - 1, d); // not Date.UTC: it reads a year below 100 as 19xx
+  probe.setUTCHours(hh, mm, ss, ms);
+  if (probe.getUTCFullYear() !== y || probe.getUTCMonth() !== mo - 1 || probe.getUTCDate() !== d) return undefined;
+  let t = probe.getTime();
+  if (zone !== "Z") {
+    const oh = Number(zone.slice(1, 3)), om = Number(zone.slice(4, 6));
+    // SQLite parses an offset only up to hour 14 (any minutes; +14:59 yes, +15:00 NULL): the same bound here, so no
+    // accepted offset is normalized on one side and compared by bytes on the other (Codex, round 4, 2026-10-10)
+    if (oh > TIMESTAMP_OFFSET_MAX_HOURS || om > 59) return undefined;
+    t -= (zone[0] === "-" ? -1 : 1) * (oh * 60 + om) * 60_000;
+  }
+  // the instant must stay in the four-digit year range after the offset: 9999-12-31T23:00:00-05:00 names year 10000,
+  // which JavaScript renders as an extended year and SQLite cannot render at all (Codex, round 5, 2026-10-10)
+  const utc = new Date(t);
+  if (utc.getUTCFullYear() < 0 || utc.getUTCFullYear() > 9999) return undefined;
+  return utc.toISOString();
+}
+/** An event timestamp: `TIMESTAMP_RE` and a real calendar instant. zod's own datetime check stays underneath. */
+export const Timestamp = z.string().datetime({ offset: true }).refine(
+  (s) => TIMESTAMP_RE.test(s) && instantFromText(s) !== undefined,
+  { message: `timestamp is YYYY-MM-DDTHH:MM:SS[.SSS] followed by Z or ±HH:MM: a real calendar instant, millisecond precision (at most ${TIMESTAMP_MAX_FRACTION_DIGITS} fractional digits), colon offset within ±${TIMESTAMP_OFFSET_MAX_HOURS}:59` },
+);
+
 export const ActorType = z.enum(["human", "agent", "system"]);
 export type ActorType = z.infer<typeof ActorType>;
 
@@ -241,7 +300,7 @@ export const EventInput = z.object({
   action_detail: z.string().optional(),
   artifacts: z.array(ArtifactRef).min(1),
   change: Change.optional(),
-  timestamp: z.string().datetime({ offset: true }).optional(),
+  timestamp: Timestamp.optional(),
   duration_ms: z.number().int().nonnegative().optional(),
   location: Location.optional(),
   /** WHY — free text reason */
@@ -266,10 +325,10 @@ export type EventInput = z.infer<typeof EventInput>;
 export const Event = EventInput.extend({
   id: z.string().min(1),
   seq: z.number().int().nonnegative(),
-  timestamp: z.string().datetime({ offset: true }),
+  timestamp: Timestamp,
   prev_hash: z.string(),
   hash: z.string(),
-  received_at: z.string().datetime({ offset: true }),
+  received_at: Timestamp,
   /** Hash rule the seal used. 2 = the digest covers `received_at` and this field; absent = legacy seal (pre-2026-08-30),
    *  whose digest may or may not cover `received_at`. Covered by the hash, so it cannot be stripped to downgrade a verifier. */
   hash_v: z.literal(2).optional(),
