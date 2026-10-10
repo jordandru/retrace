@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {
   adapterIdempotencyError, AdapterIdempotencyError, CAUSED_BY_UNVERIFIED_TAG, appendEvent,
   EventInput, Event, EventStore, Share, likeContains, clampHistoryLimit, HISTORY_LIMIT_MAX,
-  pageHistoryNewest, collectHistory, asHistoryPage, explainEvent, LIKE_PATTERN_NEEDLE_MAX_BYTES,
+  pageHistoryNewest, collectHistory, asHistoryPage, explainEvent, LIKE_PATTERN_NEEDLE_MAX_BYTES, asciiLower,
   artifactIndexRows, eventsReferencingArtifactKeys, artifactKeyMatchSql, BACKFILL_ARTIFACT_INDEX_SQL, eventsReferencingArtifactsSql, eventsReferencingArtifactsStatements, prefixRangeUpperBound, ARTIFACT_INDEX_MAX_TERMS, D1_MAX_BOUND_PARAMS, D1_MAX_COMPOUND_SELECT_TERMS,
   ARTIFACT_INDEX_DEFAULT_ROW_CAP, D1_LIKE_GLOB_PATTERN_MAX_BYTES, ALIAS_KEY_RANGE_LO, runArtifactIndexStatements,
   InvalidArtifactIdError,
@@ -414,4 +414,8 @@ test("#53 likeContains keeps LIKE for needles that fit workerd's 50-byte pattern
   assert.deepEqual(likeContains(hash), { sql: "instr(lower(e.body), ?) > 0", pattern: hash });
   assert.deepEqual(likeContains("Evt_" + "A".repeat(60)), { sql: "instr(lower(e.body), ?) > 0", pattern: "evt_" + "a".repeat(60) }, "case folds like LIKE and like the memory spec");
   assert.equal(likeContains("é".repeat(25)).sql, "instr(lower(e.body), ?) > 0", "bytes, not characters, decide (25 × 2 bytes > 48)");
+  // the fold is ASCII-only, as SQLite's lower() and LIKE are: a non-ASCII capital in a long needle is kept, so a body
+  // that LIKE would have matched byte for byte is still matched by instr(lower(body), needle)
+  assert.equal(likeContains("É" + "A".repeat(60)).pattern, "É" + "a".repeat(60), "non-ASCII letters are not folded");
+  assert.equal(asciiLower("ÉVT_Ab"), "Évt_ab");
 });
