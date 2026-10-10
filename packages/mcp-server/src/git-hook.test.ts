@@ -2,14 +2,14 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, execFile, spawnSync } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { SqliteStore } from "./sqlite-store.js";
-import { hookScript, hookCommand, isNpxCachePath, probeLine, runningVersion, HOOK_STDERR_REDIRECT, HOOK_UNHANDLED_GUARD, HOOK_NPX_BOUNDED, parseTrailers, resolveHookToken, resolveHookProducerKeyFile, retryableHookFailure, ttySurface, guardRemoteWrite, validCausedById, validActorId, commitToEvent } from "./git-hook.js";
+import { hookScript, hookCommand, isNpxCachePath, probeLine, runningVersion, HOOK_STDERR_REDIRECT, HOOK_UNHANDLED_GUARD, HOOK_NPX_BOUNDED, parseTrailers, resolveHookToken, resolveHookProducerKeyFile, retryableHookFailure, decidedHookRejection, ttySurface, guardRemoteWrite, validCausedById, validActorId, commitToEvent } from "./git-hook.js";
 import { appendEvent, generateSigningKey, PRODUCER_SIG_FORMAT_V2, publicFromPrivate, verifyProducerSig, verifyProject, createHandler, MemoryEventStore, EventInput, classifyCommitClaim, InvalidArtifactIdError, ClassificationUnavailableError } from "@retrace-dev/core";
 import { RemoteApiError, RemoteCapabilityError } from "./remote-store.js";
 import { writeProducerPrivateKey } from "./producer-key.js";
@@ -651,6 +651,77 @@ test("issue #157: the unhandled guard queues HEAD when the target did not record
   assert.equal(existsSync(log), false);
 });
 
+
+test("issue #157 (fresh round): a locked local ledger queues the seal and the next hook run drains it; a decided 4xx is the only handled-without-queue case", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "retrace-git-locked-"));
+  const db = join(dir, "ledger.db");
+  sh(dir, "git", ["init", "-q", "-b", "main"]);
+  writeFileSync(join(dir, "a.txt"), "one\n");
+  sh(dir, "git", ["add", "a.txt"]);
+  sh(dir, "git", ["commit", "-qm", "one"]);
+  sh(dir, "node", [bin, "install", "--repo", dir, "--project", "rpg"], { RETRACE_DB: db });
+  writeFileSync(join(dir, "a.txt"), "two\n");
+  sh(dir, "git", ["commit", "-qam", "two"], { RETRACE_DB: db }); // healthy: creates the ledger and seals "two" (RETRACE_DB on every commit: issue #182)
+  // another process holds the ledger: node:sqlite in this process takes a write lock the hook cannot get
+  const { DatabaseSync } = await import("node:sqlite");
+  const holder = new DatabaseSync(db);
+  holder.exec("BEGIN IMMEDIATE");
+  writeFileSync(join(dir, "a.txt"), "three\n");
+  const out = await shAsync(dir, "git", ["commit", "-qam", "three"], { RETRACE_DB: db });
+  assert.equal(out, "", "the commit itself succeeds; the hook never fails git");
+  const three = sh(dir, "git", ["rev-parse", "HEAD"]).trim();
+  const log = readFileSync(join(dir, ".git", "retrace-hook.log"), "utf8");
+  assert.match(log, /NOT logged: .*locked/i, `the lock must be in the hook log: ${log}`);
+  assert.equal(readFileSync(join(dir, ".git", "retrace-pending-seal"), "utf8"), `${three}\n`, "a transient local failure is QUEUED, not recorded as handled and lost");
+  assert.equal(readFileSync(join(dir, ".git", "retrace-hook-handled"), "utf8").trim(), three, "queued counts as handled, so the guard does not queue it twice");
+  holder.exec("ROLLBACK"); holder.close();
+  writeFileSync(join(dir, "a.txt"), "four\n");
+  sh(dir, "git", ["commit", "-qam", "four"], { RETRACE_DB: db });
+  const four = sh(dir, "git", ["rev-parse", "HEAD"]).trim();
+  assert.equal(readFileSync(join(dir, ".git", "retrace-pending-seal"), "utf8"), "", "the queue drained on the next run");
+  const sealed = new SqliteStore(db);
+  const subjects = (await sealed.all("rpg")).filter((e) => e.action === "committed").map((e) => String(e.intent ?? "").split("\n")[0]).sort();
+  assert.deepEqual(subjects, ["four", "three", "two"], "the commit made under the lock was recovered by the drain");
+  const committed = (await sealed.all("rpg")).filter((e) => e.action === "committed");
+  for (const sha of [three, four]) assert.ok(committed.some((e) => (e.artifacts ?? []).some((a) => a.id.includes(sha.slice(0, 12)))), `commit ${sha.slice(0, 12)} is sealed`);
+  // the classification itself
+  const locked = Object.assign(new Error("database is locked"), { code: "ERR_SQLITE_ERROR" });
+  assert.equal(retryableHookFailure(locked), true);
+  assert.equal(decidedHookRejection(new RemoteApiError("POST", "/events", 403, new Headers(), "nope")), true, "a 403 is decided: handled without a queue");
+  assert.equal(decidedHookRejection(new RemoteApiError("POST", "/events", 426, new Headers(), "upgrade")), false, "426 is the retryable upgrade signal");
+  assert.equal(decidedHookRejection(new RemoteApiError("POST", "/events", 503, new Headers(), "busy")), false);
+  assert.equal(decidedHookRejection(locked), false, "a local lock is never 'decided'");
+});
+
+test("issue #157 (fresh round): the npx hook form gives up on a registry that accepts and never answers, and the guard queues HEAD", async () => {
+  // Codex's probe (2026-10-10): with fetch-retries bounded but npm's 300 s fetch-timeout untouched, the hook still sat on
+  // a stalled registry for minutes. fetch-timeout is now 10 s; one retry with a 2-5 s backoff bounds the whole wait.
+  const stalled = createServer(() => { /* accept, never respond */ });
+  await new Promise<void>((resolve) => stalled.listen(0, "127.0.0.1", resolve));
+  const dir = mkdtempSync(join(tmpdir(), "retrace-git-stalled-"));
+  const cache = mkdtempSync(join(tmpdir(), "retrace-npm-cache-"));
+  try {
+    sh(dir, "git", ["init", "-q", "-b", "main"]);
+    writeFileSync(join(dir, "a.txt"), "one\n");
+    sh(dir, "git", ["add", "a.txt"]);
+    sh(dir, "git", ["commit", "-qm", "one"]);
+    mkdirSync(join(dir, ".git", "hooks"), { recursive: true });
+    const hookPath = join(dir, ".git", "hooks", "post-commit");
+    writeFileSync(hookPath, hookScript("post-commit", "npx -y -p @retrace-dev/cli@0.0.0-never-published retrace-git"), { mode: 0o755 });
+    assert.match(readFileSync(hookPath, "utf8"), /npm_config_fetch_timeout=10000/);
+    writeFileSync(join(dir, "a.txt"), "two\n");
+    const registry = `http://127.0.0.1:${(stalled.address() as AddressInfo).port}/`;
+    const started = performance.now();
+    const r = await shAsync(dir, "git", ["commit", "-qam", "two"], { npm_config_registry: registry, npm_config_cache: cache, npm_config_userconfig: join(cache, "empty.npmrc"), npm_config_update_notifier: "false" });
+    const elapsed = performance.now() - started;
+    assert.equal(r, "", "git itself succeeds");
+    const head = sh(dir, "git", ["rev-parse", "HEAD"]).trim();
+    assert.equal(readFileSync(join(dir, ".git", "retrace-pending-seal"), "utf8"), `${head}\n`, "the guard queued HEAD after npm gave up");
+    assert.ok(elapsed < 90_000, `the stalled registry must be abandoned within the bounded wait, took ${Math.round(elapsed)} ms`);
+  } finally {
+    stalled.closeAllConnections?.(); stalled.close();
+  }
+});
 
 test("keyed hook 503 on GET /api queues pending-seal like POST 5xx", async () => {
   const dir = mkdtempSync(join(tmpdir(), "retrace-git-probe-503-"));
