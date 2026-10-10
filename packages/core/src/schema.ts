@@ -32,7 +32,7 @@ export const TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(
 export const INSTANT_RE = /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?(Z|[+-]\d{2}:\d{2})?)?$/;
 /** The UTC instant (`YYYY-MM-DDTHH:MM:SS.SSSZ`) a text in `INSTANT_RE` names, computed from its fields, not by
  *  `Date.parse`; `undefined` for text outside the grammar or naming no real calendar instant (`2026-02-30`, `24:00`,
- *  an offset past `±14:59`). This is what SQLite's `strftime('%Y-%m-%dT%H:%M:%fZ', x)` renders for the same text, so the
+ *  an offset past `±14:59`, an instant that leaves years 0000–9999 once the offset is applied). This is what SQLite's `strftime('%Y-%m-%dT%H:%M:%fZ', x)` renders for the same text, so the
  *  memory store and the SQL stores order every accepted value identically (`TIMESTAMP_INSTANT_SQL`). */
 /** The largest offset hour SQLite's date parser accepts (`±14:59` parses, `±15:00` does not); the grammar stops there too. */
 export const TIMESTAMP_OFFSET_MAX_HOURS = 14;
@@ -55,7 +55,11 @@ export function instantFromText(s: string): string | undefined {
     if (oh > TIMESTAMP_OFFSET_MAX_HOURS || om > 59) return undefined;
     t -= (zone[0] === "-" ? -1 : 1) * (oh * 60 + om) * 60_000;
   }
-  return new Date(t).toISOString();
+  // the instant must stay in the four-digit year range after the offset: 9999-12-31T23:00:00-05:00 names year 10000,
+  // which JavaScript renders as an extended year and SQLite cannot render at all (Codex, round 5, 2026-10-10)
+  const utc = new Date(t);
+  if (utc.getUTCFullYear() < 0 || utc.getUTCFullYear() > 9999) return undefined;
+  return utc.toISOString();
 }
 /** An event timestamp: `TIMESTAMP_RE` and a real calendar instant. zod's own datetime check stays underneath. */
 export const Timestamp = z.string().datetime({ offset: true }).refine(

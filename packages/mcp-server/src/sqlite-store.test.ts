@@ -736,6 +736,16 @@ test("#131 for every text the grammar accepts, instantKey renders exactly what S
     }
   }
   assert.equal(swept, 2 * 15 * 60 * 2);
+  // the year boundary after the offset (Codex round 5): the last accepted instants on both edges agree, the first
+  // instant past year 9999 is bytes on both sides and refused as a cursor
+  for (const edge of ["9999-12-31T23:59:59.999Z", "9999-12-31T23:59:59.999+00:00", "9999-12-31T09:00:00+14:59", "0001-01-01T00:00:00+14:59", "0001-01-01T00:00:00-14:59", "0000-01-01T00:00:00Z"]) {
+    assert.equal(instantKey(edge), (render.get(edge, edge) as { v: string }).v, edge);
+  }
+  for (const past of ["9999-12-31T23:00:00-05:00", "9999-12-31T23:59:59.999-00:01", "9999-12-31T10:00:00-14:00"]) {
+    assert.equal((render.get(past, past) as { v: string | null }).v, past, `${past}: SQLite cannot render year 10000, COALESCE returns the bytes`);
+    assert.equal(instantKey(past), past, `${past}: raw bytes on the JavaScript side too`);
+    assert.throws(() => assertHistoryCursors({ since: past }), InvalidHistoryCursorError, `${past}: refused as a cursor`);
+  }
   // and the first offsets past the bound are refused on this side, where SQLite would have fallen back to bytes
   for (const zone of ["+15:00", "-15:00", "+23:59", "-23:59"]) {
     const text = `2026-03-01T12:34:56${zone}`;
