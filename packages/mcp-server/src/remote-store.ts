@@ -67,7 +67,20 @@ export async function fetchRetryingSocketFailure(url: string, init: RequestInit 
     } catch (e) {
       const detail = describeFetchFailure(e);
       const retryable = init.method === "GET" && e instanceof TypeError && SOCKET_FAILURE.test(detail) && attempt < attempts;
-      if (!retryable) throw new Error(`Retrace API ${init.method} ${url}: ${detail}`, { cause: e });
+      if (!retryable) {
+        // Rethrow the ORIGINAL error with the method, URL and cause written into its message. The git hook classifies a
+        // failure by its type and name (`retryableHookFailure`: TypeError, AbortError, TimeoutError are queued for a
+        // later seal); a fresh `Error` wrapper hid those and a commit's seal was lost instead of queued (Codex, fresh
+        // round, 2026-10-10). The message carries the diagnosis; the object keeps its identity.
+        if (e instanceof Error) {
+          // a DOMException (AbortError, TimeoutError) has a read-only message: the diagnosis then rides on `cause`
+          const described = `Retrace API ${init.method} ${url}: ${detail}`;
+          try { e.message = described; } catch {}
+          if (e.message !== described) { try { Object.defineProperty(e, "cause", { value: described, configurable: true, writable: true }); } catch {} }
+          throw e;
+        }
+        throw new Error(`Retrace API ${init.method} ${url}: ${detail}`, { cause: e });
+      }
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
   }

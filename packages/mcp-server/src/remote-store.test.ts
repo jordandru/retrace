@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { RemoteStore, fetchRetryingSocketFailure } from "./remote-store.js";
+import { retryableHookFailure } from "./git-hook.js";
 
 test("F2b: duplicate key in a fetched export bundle is refused", async () => {
   const saved = globalThis.fetch;
@@ -55,7 +56,14 @@ test("#163 an idempotent GET whose socket the server closed is sent once more on
     assert.equal(seen.filter((k) => k === "GET /projects/p/head").length, 2);
     await assert.rejects(
       () => store.append({ project: "p", actor: { type: "agent", id: "a" }, action: "edited", artifacts: [{ id: "x" }] }),
-      (e: unknown) => { assert.match((e as Error).message, /Retrace API POST .*\/events: fetch failed \(cause: /); return true; },
+      (e: unknown) => {
+        assert.match((e as Error).message, /Retrace API POST .*\/events: fetch failed \(cause: /);
+        // the ORIGINAL error is rethrown, not a wrapper: the git hook classifies a transport failure by its type and
+        // queues the seal; a plain Error wrapper hid the TypeError and the seal was lost (Codex, fresh round, 2026-10-10)
+        assert.ok(e instanceof TypeError, "the socket failure keeps its TypeError identity");
+        assert.equal(retryableHookFailure(e), true, "the hook still queues it for a later seal");
+        return true;
+      },
     );
     assert.equal(seen.filter((k) => k === "POST /events").length, 1, "a POST is never repeated: it may have reached the server");
     // a second socket failure in a row is reported, with its cause, not retried forever
@@ -64,6 +72,16 @@ test("#163 an idempotent GET whose socket the server closed is sent once more on
     try {
       const dead = `http://127.0.0.1:${(twice.address() as AddressInfo).port}`;
       await assert.rejects(() => fetchRetryingSocketFailure(`${dead}/x`, { method: "GET" }), /Retrace API GET .*\/x: fetch failed \(cause: /);
+      // a deadline keeps its name too: AbortSignal.timeout rejects with a TimeoutError the hook recognises
+      const slow = createServer(() => { /* never answers */ });
+      await new Promise<void>((resolve) => slow.listen(0, "127.0.0.1", resolve));
+      try {
+        const stuck = `http://127.0.0.1:${(slow.address() as AddressInfo).port}`;
+        await assert.rejects(
+          () => fetchRetryingSocketFailure(`${stuck}/y`, { method: "POST", signal: AbortSignal.timeout(100) }),
+          (e: unknown) => { assert.equal((e as Error).name, "TimeoutError"); assert.equal(retryableHookFailure(e), true); assert.match(String((e as Error).cause), /Retrace API POST .*\/y: /, "a read-only DOMException message: the diagnosis rides on cause"); return true; },
+        );
+      } finally { slow.closeAllConnections?.(); slow.close(); }
     } finally { twice.close(); }
   } finally {
     server.close();
