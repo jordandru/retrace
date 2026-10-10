@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { execFileSync, execFile, spawnSync } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync } from "node:fs";
-import { hostname, tmpdir } from "node:os";
+import { homedir, hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createServer } from "node:http";
@@ -30,7 +30,11 @@ const bin = fileURLToPath(new URL("./git-hook.js", import.meta.url));
 // and ORCA_* go for the same reason: this suite runs inside Claude Code (and may run inside an Orca pane), so leaving
 // them inherited would stamp a session/ide here and none in CI.
 const HOST_VARS = /^(RETRACE_|ORCA_|CLAUDE_CODE_SESSION_ID$|GROK_SESSION_ID$)/;
-const baseEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => !HOST_VARS.test(k))) as Record<string, string>;
+// Issue #182: with no RETRACE_DB the hook does not have "no ledger", it opens the developer's real default store
+// (~/.retrace/retrace.db) and seals the fixture commits there. Every spawn in this file therefore gets a scratch
+// default store; a test that wants its own ledger still passes RETRACE_DB explicitly and overrides this.
+const SCRATCH_DEFAULT_DB = join(mkdtempSync(join(tmpdir(), "retrace-git-default-store-")), "default-store.db");
+const baseEnv = { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !HOST_VARS.test(k))), RETRACE_DB: SCRATCH_DEFAULT_DB } as Record<string, string>;
 const sh = (cwd: string, cmd: string, args: string[], env: Record<string, string> = {}) =>
   execFileSync(cmd, args, { cwd, encoding: "utf8", env: { ...baseEnv, GIT_AUTHOR_NAME: "Jordan", GIT_AUTHOR_EMAIL: "jordan@slcwitit.com", GIT_COMMITTER_NAME: "Jordan", GIT_COMMITTER_EMAIL: "jordan@slcwitit.com", ...env } });
 // Async variant for tests that host an HTTP server in-process: execFileSync blocks the event loop, so that server could
@@ -1226,7 +1230,7 @@ test("git adapter: install writes post-merge too; a real merge is sealed live as
   sh(dir, "git", ["checkout", "-qb", "ff"]);
   writeFileSync(join(dir, "c.ts"), "3\n");
   sh(dir, "git", ["add", "."]);
-  sh(dir, "git", ["commit", "-qm", "ff work"]); // no env → post-commit has no ledger and logs nothing (hook is non-fatal)
+  sh(dir, "git", ["commit", "-qm", "ff work"]); // no ledger env → the hook seals into the scratch default store, never into `db` (hook is non-fatal)
   sh(dir, "git", ["checkout", "-q", "main"]);
   sh(dir, "git", ["merge", "-q", "--ff-only", "ff"], agentEnv);
   events = await new SqliteStore(db).all("rpg");
@@ -1241,7 +1245,7 @@ test("git adapter: install writes post-merge too; a real merge is sealed live as
   sh(dir, "git", ["add", "."]);
   sh(dir, "git", ["commit", "-qm", "their topic"]);
   sh(dir, "git", ["checkout", "-q", "theirs"]);
-  sh(dir, "git", ["merge", "-q", "--no-ff", "-m", "their merge", "theirs-topic"]); // no ledger env → nothing sealed
+  sh(dir, "git", ["merge", "-q", "--no-ff", "-m", "their merge", "theirs-topic"]); // no ledger env → sealed into the scratch default store, not `db`
   const theirMerge = sh(dir, "git", ["rev-parse", "HEAD"]).trim();
   sh(dir, "git", ["checkout", "-q", "main"]);
   sh(dir, "git", ["merge", "-q", "--ff-only", "theirs"], agentEnv);
@@ -1345,4 +1349,20 @@ test("F12: actual hook path — unbootstrapped project /2 seal queues under shad
   await run("off");
   await run("shadow");
   await run("enforce");
+});
+
+test("issue #182: a hook run with no RETRACE_DB in this suite lands in the scratch default store, never in ~/.retrace/retrace.db", async () => {
+  assert.ok(SCRATCH_DEFAULT_DB.startsWith(tmpdir()), SCRATCH_DEFAULT_DB);
+  assert.ok(!SCRATCH_DEFAULT_DB.startsWith(join(homedir(), ".retrace")), "the suite's fallback store must not be the developer's");
+  const dir = mkdtempSync(join(tmpdir(), "retrace-git-no-env-"));
+  sh(dir, "git", ["init", "-q", "-b", "main"]);
+  writeFileSync(join(dir, "a.txt"), "one\n");
+  sh(dir, "git", ["add", "a.txt"]);
+  sh(dir, "git", ["commit", "-qm", "one"]);
+  sh(dir, "node", [bin, "install", "--repo", dir, "--project", "no-env-project"]); // no RETRACE_DB: .retrace.json carries no db (git-hook.ts `install`)
+  writeFileSync(join(dir, "a.txt"), "two\n");
+  sh(dir, "git", ["commit", "-qam", "two"]); // no RETRACE_DB either: the hook falls back to the default store
+  const sealed = await new SqliteStore(SCRATCH_DEFAULT_DB).all("no-env-project");
+  assert.equal(sealed.length, 1, "the fallback store is the scratch one, so the seal is observable here and nowhere else");
+  assert.equal(sealed[0].action, "committed");
 });
