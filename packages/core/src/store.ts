@@ -32,9 +32,25 @@ export interface HistoryQuery {
  *  `Z` cursor; parsed, it is the same instant as the hook seal's `2026-09-26T06:46:49.000Z`. When either side does not
  *  parse, the byte order is kept so no row disappears. The SQL stores apply the same rule (`TIMESTAMP_INSTANT_SQL`). */
 export function compareInstants(a: string, b: string): number {
-  const ta = Date.parse(a), tb = Date.parse(b);
-  if (Number.isFinite(ta) && Number.isFinite(tb)) return ta === tb ? 0 : ta < tb ? -1 : 1;
-  return a === b ? 0 : a < b ? -1 : 1;
+  const ka = instantKey(a), kb = instantKey(b);
+  return ka === kb ? 0 : ka < kb ? -1 : 1;
+}
+/** The key `compareInstants` orders by: what SQLite's `strftime('%Y-%m-%dT%H:%M:%fZ', x)` renders for a parseable value
+ *  (`TIMESTAMP_INSTANT_SQL`), or the raw bytes for one it cannot parse, so that the memory store and the SQL stores put
+ *  every row in the same order (Codex, fresh round, 2026-10-10). Two rules make the JavaScript side match SQLite where
+ *  `Date.parse` alone would not: a value with no zone designator (`2026-01-01T00:00:00`, `2026-01-01 00:00:00`,
+ *  `2026-01-01`) is UTC, as SQLite reads it, not local time; and a fraction longer than three digits is rounded half-up
+ *  to the millisecond, as `%f` rounds it, not truncated. Known edge, stated: SQLite computes `%f` in floating point and
+ *  can round an exact half-microsecond (`.1235`) down where this rounds up; no Retrace producer writes sub-millisecond
+ *  timestamps, and a cursor with one is a caller's choice. */
+export function instantKey(s: string): string {
+  const naive = /^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)?$/.test(s);
+  const iso = naive ? (s.length === 10 ? `${s}T00:00:00Z` : `${s.replace(" ", "T")}Z`) : s;
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return s;
+  const frac = /\.(\d+)(?=Z|[+-]\d{2}:?\d{2}$|$)/.exec(iso)?.[1];
+  const up = frac !== undefined && frac.length > 3 && frac.charCodeAt(3) >= 53 /* "5" */ ? 1 : 0; // Date.parse truncated; %f rounds
+  return new Date(t + up).toISOString();
 }
 /** SQLite expression that renders a timestamp column or parameter as a UTC `YYYY-MM-DDTHH:MM:SS.SSSZ` instant, so that
  *  `since`/`until` compare instants across offsets; a value SQLite cannot parse falls back to its own bytes, matching

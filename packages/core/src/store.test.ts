@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {
   adapterIdempotencyError, AdapterIdempotencyError, CAUSED_BY_UNVERIFIED_TAG, appendEvent,
   EventInput, Event, EventStore, Share, likeContains, clampHistoryLimit, HISTORY_LIMIT_MAX,
-  pageHistoryNewest, collectHistory, asHistoryPage, explainEvent, compareInstants, TIMESTAMP_INSTANT_SQL,
+  pageHistoryNewest, collectHistory, asHistoryPage, explainEvent, compareInstants, instantKey, TIMESTAMP_INSTANT_SQL,
   artifactIndexRows, eventsReferencingArtifactKeys, artifactKeyMatchSql, BACKFILL_ARTIFACT_INDEX_SQL, eventsReferencingArtifactsSql, eventsReferencingArtifactsStatements, prefixRangeUpperBound, ARTIFACT_INDEX_MAX_TERMS, D1_MAX_BOUND_PARAMS, D1_MAX_COMPOUND_SELECT_TERMS,
   ARTIFACT_INDEX_DEFAULT_ROW_CAP, D1_LIKE_GLOB_PATTERN_MAX_BYTES, ALIAS_KEY_RANGE_LO, runArtifactIndexStatements,
   InvalidArtifactIdError,
@@ -418,4 +418,18 @@ test("#131 since/until compare instants, so an offset-bearing timestamp inside t
   const odd = mk(8705, "not-a-date");
   assert.deepEqual(pageHistoryNewest([...events, odd], { project: "p", since: "n" }).events.map((e) => e.seq), [8705], "a row that does not parse is still reachable by its bytes");
   assert.equal(TIMESTAMP_INSTANT_SQL("e.timestamp"), "COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', e.timestamp), e.timestamp)");
+  // the memory key is what SQLite's strftime renders (Codex, fresh round, 2026-10-10): sub-millisecond fractions round
+  // half-up to the millisecond as %f does, and a zone-less value is UTC as SQLite reads it, not local time
+  assert.equal(instantKey("2026-01-01T00:00:00.0004Z"), "2026-01-01T00:00:00.000Z");
+  assert.equal(instantKey("2026-01-01T00:00:00.0005Z"), "2026-01-01T00:00:00.001Z");
+  assert.equal(instantKey("2026-01-01T00:00:00.9999Z"), "2026-01-01T00:00:01.000Z");
+  assert.equal(instantKey("2026-01-01T00:00:00.1236Z"), "2026-01-01T00:00:00.124Z");
+  assert.equal(instantKey("2026-01-01T00:00:00"), "2026-01-01T00:00:00.000Z", "no zone: UTC, as SQLite");
+  assert.equal(instantKey("2026-01-01 00:00:00"), "2026-01-01T00:00:00.000Z");
+  assert.equal(instantKey("2026-01-01"), "2026-01-01T00:00:00.000Z");
+  assert.equal(instantKey("2026-01-01T00:00:00-06:00"), "2026-01-01T06:00:00.000Z");
+  assert.equal(instantKey("not-a-date"), "not-a-date", "unparseable: the raw bytes, as COALESCE falls back");
+  assert.equal(compareInstants("2026-01-01T00:00:00.0004Z", "2026-01-01T00:00:00.0005Z"), -1, "0.000 < 0.001 after rounding, as SQLite orders them");
+  assert.equal(compareInstants("2026-01-01T00:00:00.0004Z", "2026-01-01T00:00:00.0001Z"), 0, "both 0.000");
+  assert.equal(compareInstants("2026-01-01T00:00:00", "2026-01-01T00:00:00.000Z"), 0, "zone-less equals the same UTC instant");
 });
