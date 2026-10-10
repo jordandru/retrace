@@ -1571,3 +1571,18 @@ test("T16 agent-address/1 decision records use only producer-authenticated princ
     type: "agent", id: "claude-code", on_behalf_of: "credential:claude-code",
   });
 });
+
+test("#62 a rejected deadline is reported as deadline, not store_error, at the candidate read and the outer catch", async () => {
+  const store = new MemoryEventStore();
+  await putPolicy(store);
+  let allCalls = 0;
+  store.all = async () => { allCalls++; return []; };
+  // the bounded candidate read ran out of its budget: the store says so by throwing "deadline"
+  (store as unknown as { amendmentEventsUpTo?: unknown }).amendmentEventsUpTo = async () => { throw new Error("deadline"); };
+  const atRead = await classify(store, commitInput({ files: ["a.ts"] }));
+  assert.deepEqual(atRead, { kind: "unavailable", reason: "deadline" });
+  assert.equal(allCalls, 0);
+  // and a store fault is still a store fault
+  (store as unknown as { amendmentEventsUpTo?: unknown }).amendmentEventsUpTo = async () => { throw new Error("boom"); };
+  assert.deepEqual(await classify(store, commitInput({ files: ["a.ts"] })), { kind: "unavailable", reason: "store_error" });
+});
