@@ -262,6 +262,18 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
   const opts: RouterOptions = typeof tokenOrOpts === "string" ? { token: tokenOrOpts } : tokenOrOpts ?? {};
   const { token } = opts;
   const credentials = opts.credentials ?? [];
+  // Issue #96: every registered producer key, retired records included, indexed by kid. A signature whose kid the
+  // Worker knows as another credential's key must never be sealed under the bearer's actor (below). Computed once;
+  // keyId is a cheap sha256. A list per kid, because a re-minted seat may keep its key on a retired and a live record.
+  let kidOwnersCache: Promise<Map<string, Credential[]>> | undefined;
+  const kidOwners = () => (kidOwnersCache ??= (async () => {
+    const owners = new Map<string, Credential[]>();
+    for (const c of credentials) if (c.public_key) {
+      const kid = await keyId(c.public_key);
+      owners.set(kid, [...(owners.get(kid) ?? []), c]);
+    }
+    return owners;
+  })());
   const authConfigured = !!token || credentials.length > 0;
   type Principal = { kind: "owner" } | { kind: "credential"; credential: Credential } | null;
   const shareHits = new Map<string, { n: number; t: number }>();
@@ -857,6 +869,17 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
             if (!named) return json({ error: "policy unavailable" }, 501);
             trustedHookStamps = named.body.trusted_hook_stamps;
           }
+        }
+        if (credential && resolvedInput.producer_sig) {
+          // Check every owner, including retired records, before format/signature verification. A duplicate key on
+          // the bearer does not excuse a conflicting identity; only a remint with the same delegation is safe.
+          const owners = (await kidOwners()).get(resolvedInput.producer_sig.kid) ?? [];
+          if (owners.some((owner) =>
+            owner.actor.type !== credential.actor.type
+            || owner.actor.id !== credential.actor.id
+            || owner.actor.on_behalf_of !== credential.actor.on_behalf_of
+          ))
+            return json({ error: "producer signature key is registered to a different credential (verdict: kid_mismatch); nothing sealed" }, 401);
         }
         const producerCheck = await producerSigCheck(resolvedInput, credential?.public_key ?? null, {
           trustedHookStamps,
