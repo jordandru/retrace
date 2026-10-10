@@ -418,4 +418,9 @@ test("#53 likeContains keeps LIKE for needles that fit workerd's 50-byte pattern
   // that LIKE would have matched byte for byte is still matched by instr(lower(body), needle)
   assert.equal(likeContains("É" + "A".repeat(60)).pattern, "É" + "a".repeat(60), "non-ASCII letters are not folded");
   assert.equal(asciiLower("ÉVT_Ab"), "Évt_ab");
+  // escaping adds a byte per `!`, `%` or `_`: the decision is on the bound pattern, so a short all-wildcard needle
+  // that would escape past the limit switches to instr instead of binding a 52-byte LIKE pattern (Codex, 2026-10-10)
+  assert.equal(likeContains("%".repeat(25)).sql, "instr(lower(e.body), ?) > 0", "25 × '!%' + 2 = 52 bytes > 50");
+  assert.equal(likeContains("_".repeat(24)).sql, "e.body LIKE ? ESCAPE '!'", "24 × '!_' + 2 = 50 bytes fits");
+  assert.equal(likeContains("!".repeat(24) + "a").sql, "instr(lower(e.body), ?) > 0", "24 × '!!' + 1 + 2 = 51 bytes");
 });
