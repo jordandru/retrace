@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {
   adapterIdempotencyError, AdapterIdempotencyError, CAUSED_BY_UNVERIFIED_TAG, appendEvent,
   EventInput, Event, EventStore, Share, likeContains, clampHistoryLimit, HISTORY_LIMIT_MAX,
-  pageHistoryNewest, collectHistory, asHistoryPage, explainEvent, compareInstants, instantKey, TIMESTAMP_INSTANT_SQL, assertHistoryCursors, InvalidHistoryCursorError, TIMESTAMP_MAX_FRACTION_DIGITS, timestampFractionDigits, instantFromText, TIMESTAMP_RE,
+  pageHistoryNewest, collectHistory, asHistoryPage, explainEvent, compareInstants, instantKey, TIMESTAMP_INSTANT_SQL, assertHistoryCursors, InvalidHistoryCursorError, TIMESTAMP_MAX_FRACTION_DIGITS, timestampFractionDigits, instantFromText, TIMESTAMP_RE, LIKE_PATTERN_NEEDLE_MAX_BYTES, asciiLower,
   artifactIndexRows, eventsReferencingArtifactKeys, artifactKeyMatchSql, BACKFILL_ARTIFACT_INDEX_SQL, eventsReferencingArtifactsSql, eventsReferencingArtifactsStatements, prefixRangeUpperBound, ARTIFACT_INDEX_MAX_TERMS, D1_MAX_BOUND_PARAMS, D1_MAX_COMPOUND_SELECT_TERMS,
   ARTIFACT_INDEX_DEFAULT_ROW_CAP, D1_LIKE_GLOB_PATTERN_MAX_BYTES, ALIAS_KEY_RANGE_LO, runArtifactIndexStatements,
   InvalidArtifactIdError,
@@ -471,4 +471,23 @@ test("#131 the timestamp grammar: refused at append and as a history cursor, nev
   assert.throws(() => pageHistoryNewest([mk(1, "2026-01-01T00:00:00.004Z")], { project: "p", since: "2026-01-01T05:30:00+0530" }), InvalidHistoryCursorError, "and the compact offset Codex's round 3 used");
   assert.deepEqual(pageHistoryNewest([mk(1, "2026-01-01T00:00:00.004Z"), mk(2, "2026-01-01T00:00:00.005Z")], { project: "p", since: "2026-01-01T00:00:00.005Z" }).events.map((e) => e.seq), [2], "millisecond cursors compare exactly");
   assert.equal(instantKey("2026-01-01T00:00:00+0530"), "2026-01-01T00:00:00+0530", "outside the grammar: the raw bytes, as COALESCE falls back; such a row cannot be appended");
+});
+
+test("#53 likeContains keeps LIKE for needles that fit workerd's 50-byte pattern and switches to instr beyond it", () => {
+  assert.equal(LIKE_PATTERN_NEEDLE_MAX_BYTES, 48);
+  const short = likeContains("a".repeat(48));
+  assert.deepEqual(short, { sql: "e.body LIKE ? ESCAPE '!'", pattern: "%" + "a".repeat(48) + "%" });
+  const hash = "3de0acb5e7ddc95198d4e0a99987ac854e1e7d57cce02e5fbe80bce9c1806c4c";
+  assert.deepEqual(likeContains(hash), { sql: "instr(lower(e.body), ?) > 0", pattern: hash });
+  assert.deepEqual(likeContains("Evt_" + "A".repeat(60)), { sql: "instr(lower(e.body), ?) > 0", pattern: "evt_" + "a".repeat(60) }, "case folds like LIKE and like the memory spec");
+  assert.equal(likeContains("é".repeat(25)).sql, "instr(lower(e.body), ?) > 0", "bytes, not characters, decide (25 × 2 bytes > 48)");
+  // the fold is ASCII-only, as SQLite's lower() and LIKE are: a non-ASCII capital in a long needle is kept, so a body
+  // that LIKE would have matched byte for byte is still matched by instr(lower(body), needle)
+  assert.equal(likeContains("É" + "A".repeat(60)).pattern, "É" + "a".repeat(60), "non-ASCII letters are not folded");
+  assert.equal(asciiLower("ÉVT_Ab"), "Évt_ab");
+  // escaping adds a byte per `!`, `%` or `_`: the decision is on the bound pattern, so a short all-wildcard needle
+  // that would escape past the limit switches to instr instead of binding a 52-byte LIKE pattern (Codex, 2026-10-10)
+  assert.equal(likeContains("%".repeat(25)).sql, "instr(lower(e.body), ?) > 0", "25 × '!%' + 2 = 52 bytes > 50");
+  assert.equal(likeContains("_".repeat(24)).sql, "e.body LIKE ? ESCAPE '!'", "24 × '!_' + 2 = 50 bytes fits");
+  assert.equal(likeContains("!".repeat(24) + "a").sql, "instr(lower(e.body), ?) > 0", "24 × '!!' + 1 + 2 = 51 bytes");
 });

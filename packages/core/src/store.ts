@@ -147,9 +147,27 @@ export function asHistoryPage(body: unknown): HistoryPage {
  *  The wrapped pattern is unbounded: a needle longer than 48 bytes exceeds D1's 50-byte LIKE/GLOB
  *  limit (issue #53). Classify no longer uses LIKE/GLOB; this helper still does. */
 export function likeContains(text: string): { sql: string; pattern: string } {
+  // Issue #53: workerd's SQLite caps a LIKE/GLOB pattern at 50 bytes, so a needle over 48 bytes (a 64-hex hash, the
+  // most natural search) was a 500 from the Worker. `instr` has no pattern limit; `lower()` on the body and an
+  // ASCII-only fold of the needle keep exactly the case-insensitivity LIKE gave: SQLite's LIKE and `lower()` fold
+  // A–Z only, so the needle is folded with the same rule, not with `toLowerCase`, which would also fold non-ASCII
+  // letters (`É` → `é`) and then miss a body LIKE would have matched. (`pageHistoryNewest`, the memory spec, folds
+  // both sides with `toLowerCase`, so the memory and SQL paths differ for non-ASCII letters; that difference predates
+  // this change and is not widened by it.) Short needles keep the LIKE form byte for byte.
+  // The limit is on the bound pattern, after escaping and wrapping: each escaped `!`, `%` or `_` adds a byte, so a
+  // 25-byte needle of `%` would bind 52 bytes under a raw-length test (Codex, fresh round, 2026-10-10). Decide on the
+  // escaped pattern's bytes; LIKE_PATTERN_NEEDLE_MAX_BYTES stays as the longest unescaped needle that fits.
   const pattern = "%" + text.replace(/!/g, "!!").replace(/%/g, "!%").replace(/_/g, "!_") + "%";
+  if (new TextEncoder().encode(pattern).length > LIKE_PATTERN_MAX_BYTES) return { sql: "instr(lower(e.body), ?) > 0", pattern: asciiLower(text) };
   return { sql: "e.body LIKE ? ESCAPE '!'", pattern };
 }
+/** workerd refuses a LIKE or GLOB pattern over 50 bytes (`LIKE or GLOB pattern too complex`); the bound pattern, escaped
+ *  and wrapped in `%…%`, must fit this (issue #53). */
+export const LIKE_PATTERN_MAX_BYTES = 50;
+/** The longest needle with nothing to escape that still fits once wrapped in `%…%` (issue #53). */
+export const LIKE_PATTERN_NEEDLE_MAX_BYTES = LIKE_PATTERN_MAX_BYTES - 2;
+/** SQLite's `lower()` and LIKE fold ASCII A–Z only; the `instr` needle is folded with the same rule. */
+export function asciiLower(s: string): string { return s.replace(/[A-Z]/g, (c) => c.toLowerCase()); }
 
 export interface Share {
   id: string;
