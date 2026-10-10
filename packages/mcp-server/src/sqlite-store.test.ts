@@ -5,9 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   appendEvent, sealEvent, verifyProject, EventInput, HeadMovedError, createHandler, POLICY_PROFILE,
-  eventsReferencingArtifactsSql, eventsReferencingArtifactsStatements, MemoryEventStore, recordWebhookClassifyOutcome, InvalidHistoryCursorError,
+  eventsReferencingArtifactsSql, eventsReferencingArtifactsStatements, MemoryEventStore, recordWebhookClassifyOutcome, InvalidHistoryCursorError, instantKey, TIMESTAMP_INSTANT_SQL, assertHistoryCursors,
 } from "@retrace-dev/core";
 import { SqliteStore } from "./sqlite-store.js";
+import { DatabaseSync } from "node:sqlite";
 
 const ev = (over: Partial<EventInput>): EventInput => ({ project: "junk", actor: { type: "agent", id: "claude" }, action: "edited", artifacts: [{ id: "a" }], ...over });
 const audit = (store: SqliteStore) => store.head("ops").then((h) => sealEvent(ev({ project: "ops", action: "deleted", artifacts: [{ id: "project:junk" }] }), h));
@@ -703,4 +704,29 @@ test("#131 SqliteStore.history since/until compare instants across offsets, in S
   await assert.rejects(store.history({ project: "w", until: "2026-09-26T06:46:49.0005Z" }), InvalidHistoryCursorError);
   await assert.rejects(appendEvent(store, ev({ project: "w", timestamp: "2026-09-26T06:46:49.0005Z" })), /millisecond precision/, "and the schema refuses such a timestamp at append");
   assert.deepEqual(await seqs({ since: "2026-09-26T06:46:49.001Z" }), [later.event.seq], "a millisecond cursor compares exactly");
+  // #131 round 3: a compact offset parses in JavaScript but not in SQLite's strftime; the grammar refuses it on both paths
+  await assert.rejects(store.history({ project: "w", since: "2026-09-26T12:16:49+0530" }), InvalidHistoryCursorError);
+  await assert.rejects(appendEvent(store, ev({ project: "w", timestamp: "2026-09-26T12:16:49+0530" })), /colon offset/);
+  for (const bad of ["2460000", "now", "2026-02-30"]) await assert.rejects(store.history({ project: "w", since: bad }), InvalidHistoryCursorError, bad);
+});
+
+test("#131 for every text the grammar accepts, instantKey renders exactly what SQLite's strftime renders", () => {
+  const db = new DatabaseSync(":memory:");
+  const render = db.prepare(`select ${TIMESTAMP_INSTANT_SQL("?")} as v`);
+  const accepted = [
+    "2026-01-01T00:00:00Z", "2026-01-01T00:00:00.5Z", "2026-01-01T00:00:00.50Z", "2026-01-01T00:00:00.123Z", "2026-01-01T23:59:59.999Z",
+    "2026-09-26T00:46:49-06:00", "2026-09-26T00:46:49.123-06:00", "2026-01-01T00:00:00.123+05:30", "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00-00:00",
+    "2026-12-31T23:59:59.999+14:00", "2026-01-01T00:00:00-12:00", "2024-02-29T12:00:00Z", "2026-01-01", "2026-01-01T00:00", "2026-01-01 00:00:00", "2026-01-01 00:00:00.5", "2026-01-01T00:00:00.001", "0001-01-01T00:00:00Z", "9999-12-31T23:59:59.999Z",
+  ];
+  for (const text of accepted) {
+    const sqlite = (render.get(text) as { v: string }).v;
+    assert.equal(instantKey(text), sqlite, text);
+    assert.match(sqlite, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/, `${text} was rendered by strftime, not passed through by COALESCE`);
+  }
+  // and for text the grammar refuses, SQLite would have answered on its own terms; the cursor never gets there
+  for (const refused of ["2026-01-01T00:00:00+0530", "2460000", "now", "2026-02-30T00:00:00Z"]) {
+    assert.equal(instantKey(refused), refused, `${refused}: raw bytes on the JavaScript side`);
+    assert.throws(() => assertHistoryCursors({ since: refused }), InvalidHistoryCursorError, `${refused}: refused as a cursor before SQLite sees it`);
+  }
+  db.close();
 });

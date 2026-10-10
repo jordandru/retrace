@@ -1047,7 +1047,9 @@ test("GET /projects/:p/events returns a newest-window page, not a genesis prefix
   // #131 millisecond contract: a sub-millisecond since/until is a 400 with the reason, not a 500 and not a different answer from SQLite
   const fine = await get(h, "/projects/p/events?since=2026-01-01T00:00:00.0005Z", "tok");
   assert.equal(fine.status, 400);
-  assert.match((await fine.json()).error, /since carries 4 fractional second digits.*at most 3/);
+  assert.match((await fine.json()).error, /since is not an accepted timestamp/);
+  assert.equal((await get(h, "/projects/p/events?since=2026-01-01T05:30:00%2B0530", "tok")).status, 400, "a compact offset is refused too");
+  assert.equal((await get(h, "/projects/p/events?since=now", "tok")).status, 400);
   assert.equal((await get(h, "/projects/p/events?until=2026-01-01T00:00:00.0005Z", "tok")).status, 400);
   assert.equal((await get(h, "/projects/p/events?since=2026-01-01T00:00:00.000Z&until=2030-01-01T00:00:00Z", "tok")).status, 200);
 });

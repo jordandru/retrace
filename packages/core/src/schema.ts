@@ -20,10 +20,43 @@ export function timestampFractionDigits(s: string): number {
   const m = /\.(\d+)(?=(?:Z|[+-]\d{2}:?\d{2})?$)/.exec(s);
   return m ? m[1]!.length : 0;
 }
-/** An ISO 8601 timestamp with an offset or `Z`, at most millisecond precision. */
+/** The timestamp grammar every store agrees on (issue #131, round 3). `YYYY-MM-DDTHH:MM:SS[.SSS]` then `Z` or `±HH:MM`:
+ *  a real calendar instant, millisecond precision, colon offset. Anything else is refused at append. The grammar is
+ *  stated rather than inherited from a parser because the parsers disagree at the edges: zod's `datetime({ offset })`
+ *  and `Date.parse` accept a compact `+0530`, SQLite's `strftime` does not (Codex, round 3, 2026-10-10); SQLite reads a
+ *  bare number as a Julian day and the word `now` as the clock, `Date.parse` does not. The live ledger's 16913 rows all
+ *  fit this grammar (scan 2026-10-10: `.SSSZ`, `Z`, `-HH:MM`, `.SSS-HH:MM`). */
+export const TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/;
+/** The wider grammar a history cursor may use: the timestamp grammar, or a zone-less date or date-time
+ *  (`2026-01-01`, `2026-01-01T00:00`, `2026-01-01 00:00:00.5`), which SQLite and this code both read as UTC. */
+export const INSTANT_RE = /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?(Z|[+-]\d{2}:\d{2})?)?$/;
+/** The UTC instant (`YYYY-MM-DDTHH:MM:SS.SSSZ`) a text in `INSTANT_RE` names, computed from its fields, not by
+ *  `Date.parse`; `undefined` for text outside the grammar or naming no real calendar instant (`2026-02-30`, `24:00`,
+ *  an offset past `23:59`). This is what SQLite's `strftime('%Y-%m-%dT%H:%M:%fZ', x)` renders for the same text, so the
+ *  memory store and the SQL stores order every accepted value identically (`TIMESTAMP_INSTANT_SQL`). */
+export function instantFromText(s: string): string | undefined {
+  const m = INSTANT_RE.exec(s);
+  if (!m) return undefined;
+  const [, Y, Mo, D, h = "00", mi = "00", sec = "00", frac = "", zone = "Z"] = m;
+  const y = Number(Y), mo = Number(Mo), d = Number(D), hh = Number(h), mm = Number(mi), ss = Number(sec);
+  const ms = Number((frac + "000").slice(0, 3));
+  if (mo < 1 || mo > 12 || d < 1 || d > 31 || hh > 23 || mm > 59 || ss > 59) return undefined;
+  const probe = new Date(0);
+  probe.setUTCFullYear(y, mo - 1, d); // not Date.UTC: it reads a year below 100 as 19xx
+  probe.setUTCHours(hh, mm, ss, ms);
+  if (probe.getUTCFullYear() !== y || probe.getUTCMonth() !== mo - 1 || probe.getUTCDate() !== d) return undefined;
+  let t = probe.getTime();
+  if (zone !== "Z") {
+    const oh = Number(zone.slice(1, 3)), om = Number(zone.slice(4, 6));
+    if (oh > 23 || om > 59) return undefined;
+    t -= (zone[0] === "-" ? -1 : 1) * (oh * 60 + om) * 60_000;
+  }
+  return new Date(t).toISOString();
+}
+/** An event timestamp: `TIMESTAMP_RE` and a real calendar instant. zod's own datetime check stays underneath. */
 export const Timestamp = z.string().datetime({ offset: true }).refine(
-  (s) => timestampFractionDigits(s) <= TIMESTAMP_MAX_FRACTION_DIGITS,
-  { message: `timestamp carries at most ${TIMESTAMP_MAX_FRACTION_DIGITS} fractional second digits (millisecond precision)` },
+  (s) => TIMESTAMP_RE.test(s) && instantFromText(s) !== undefined,
+  { message: `timestamp is YYYY-MM-DDTHH:MM:SS[.SSS] followed by Z or ±HH:MM: a real calendar instant, millisecond precision (at most ${TIMESTAMP_MAX_FRACTION_DIGITS} fractional digits), colon offset` },
 );
 
 export const ActorType = z.enum(["human", "agent", "system"]);
