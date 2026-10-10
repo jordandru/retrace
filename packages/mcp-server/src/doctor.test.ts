@@ -1271,6 +1271,7 @@ test("issue #84: doctor executes the hook's target and FAILS when the script it 
   assert.match(ready.stdout.split("\n")[0], /^READY — \d+ passed, \d+ warnings, 0 failures$/);
   assert.match(notReady.stdout.split("\n")[0], /^NOT READY — \d+ passed, \d+ warnings, [1-9]\d* failures$/);
   assert.equal(notReady.stdout.trimEnd().split("\n").at(-1), notReady.stdout.split("\n")[0]);
+  assert.equal(ready.stdout.trimEnd().split("\n").at(-1), ready.stdout.split("\n")[0]);
   // the same evicted hook with the budget overridden: the override changes nothing about a target that fails fast
   const overridden = spawnSync(process.execPath, [doctorBin, "doctor", fixture.repo], { encoding: "utf8", env: { ...env, RETRACE_DOCTOR_PROBE_TIMEOUT_MS: "5000" } });
   assert.equal(overridden.status, 1, overridden.stdout + overridden.stderr);
