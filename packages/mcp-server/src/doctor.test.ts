@@ -67,6 +67,20 @@ test("doctor: review effort warns only when the model supports effort, routing i
   })], models);
   assert.equal(unsupported[0]?.label, "review model mismatch");
 
+  // issue #162: routed to a model with no effort control, which reports not_applicable: no effort warning
+  const routingNemotron = commitEvt({
+    id: "evt_route_nemotron", seq: 1, action: "other", action_detail: "routed",
+    actor: { type: "agent", id: "claude-code" },
+    method: { tool: "routing", params: { target: { agent: "nooa", model: "nvidia/nemotron-3-ultra", effort: "high" } } },
+  });
+  const nemotronReview = commitEvt({
+    id: "evt_nemotron_ok", seq: 2, action: "approved", actor: { type: "agent", id: "nooa", model: "nvidia/nemotron-3-ultra", model_source: "harness-runtime" },
+    tags: ["review"], method: { tool: "review", params: { reasoning_effort: "not_applicable — nvidia/nemotron-3-ultra exposes no effort control", routing_event_id: routingNemotron.id } },
+  });
+  assert.deepEqual(reviewEffortFindings([routingNemotron, nemotronReview], models), [], "no effort control, no effort mismatch");
+  // and a model WITH effort control still warns on a real difference
+  assert.equal(mismatch.length, 1);
+
   const wrongTarget = reviewEffortFindings([routing, {
     ...review("evt_wrong", "unlisted-model", { reasoning_effort: "high", routing_event_id: routing.id }),
     actor: { type: "agent", id: "other-reviewer", model: "unlisted-model" },

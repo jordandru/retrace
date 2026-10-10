@@ -32,7 +32,7 @@ import { attributionViewForStore, attributionStatusForStore } from "./attributio
 import { McpServer } from "@modelcontextprotocol/server";
 import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
 import { z } from "zod";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -169,8 +169,16 @@ export function makeStore() {
   return new SqliteStore(path);
 }
 
+/** The version this package declares, read from its own package.json (issue #156: `serverInfo.version` was the literal
+ *  "0.1.0" in every release; the server's claim about itself has to be the truth, like every other self-report here). */
+export function packageVersion(moduleUrl: string = import.meta.url): string {
+  const pkg = JSON.parse(readFileSync(new URL("../package.json", moduleUrl), "utf8")) as { version?: unknown };
+  if (typeof pkg.version !== "string" || !pkg.version) throw new Error("cannot read the running package's version from package.json");
+  return pkg.version;
+}
+
 export function buildServer(store = makeStore(), opts: { pinnedProject?: string; lock?: boolean; commitLock?: boolean; actorLock?: boolean } = {}) {
-  const server = new McpServer({ name: "retrace", version: "0.1.0" });
+  const server = new McpServer({ name: "retrace", version: packageVersion() });
   const remote = store instanceof RemoteStore ? store : null;
   const pinned = opts.pinnedProject ?? env.RETRACE_PROJECT;
   const lock = opts.lock ?? env.RETRACE_PROJECT_LOCK !== "0";

@@ -422,7 +422,9 @@ export function reviewEffortFindings(events: Event[], models: RoutingModelRegist
     if (routedModelId && reviewModelId && routedModelId !== reviewModelId) {
       findings.push(result("warn", "review model mismatch", `${review.id}: routed ${routedModel} · ran ${model} (${routingId})`));
     }
-    if (effort && routedEffort && effort !== routedEffort) {
+    // Issue #162: a model with no effort control (models.json supports_effort:false) truthfully reports
+    // `not_applicable`; comparing that with the rubric level the routing recorded is a false warning.
+    if (effort && routedEffort && effort !== routedEffort && capability?.supports_effort !== false) {
       const fromDisplay = effortFromDisplay ? " (effort from display string)" : "";
       findings.push(result("warn", "review effort mismatch", `${review.id}: routed ${routedEffort} · ran ${effort}${fromDisplay} (${routingId})`));
     }

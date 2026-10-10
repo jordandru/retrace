@@ -1,7 +1,8 @@
 import { test } from "node:test";
+import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
-import { buildServer, enrichLocation, clientSystem, detectIde, harnessSession, confinedWritePath } from "./index.js";
+import { buildServer, enrichLocation, clientSystem, detectIde, harnessSession, confinedWritePath, packageVersion } from "./index.js";
 import { appendEvent, generateSigningKey, publicFromPrivate, verifyProducerSig } from "@retrace-dev/core";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
@@ -764,5 +765,17 @@ test("producer key: retrace_log, retrace_instruct and retrace_amend all carry a 
       assert.ok(event!.timestamp);
       assert.ok(event!.idempotency_key);
     }
+  });
+});
+
+test("issue #156: serverInfo.version is the running package's version, not a literal", async () => {
+  await withActorEnv(ENV, async () => {
+    const store = new SqliteStore(":memory:");
+    const client = await connect(store);
+    const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string };
+    assert.match(pkg.version, /^\d+\.\d+\.\d+/);
+    assert.equal(packageVersion(), pkg.version);
+    assert.deepEqual(client.getServerVersion(), { name: "retrace", version: pkg.version });
+    assert.notEqual(client.getServerVersion()?.version, "0.1.0", "the literal every release carried until now");
   });
 });
