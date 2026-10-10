@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {
   adapterIdempotencyError, AdapterIdempotencyError, CAUSED_BY_UNVERIFIED_TAG, appendEvent,
   EventInput, Event, EventStore, Share, likeContains, clampHistoryLimit, HISTORY_LIMIT_MAX,
-  pageHistoryNewest, collectHistory, asHistoryPage, explainEvent, compareInstants, instantKey, TIMESTAMP_INSTANT_SQL,
+  pageHistoryNewest, collectHistory, asHistoryPage, explainEvent, compareInstants, instantKey, TIMESTAMP_INSTANT_SQL, assertHistoryCursors, InvalidHistoryCursorError, TIMESTAMP_MAX_FRACTION_DIGITS, timestampFractionDigits,
   artifactIndexRows, eventsReferencingArtifactKeys, artifactKeyMatchSql, BACKFILL_ARTIFACT_INDEX_SQL, eventsReferencingArtifactsSql, eventsReferencingArtifactsStatements, prefixRangeUpperBound, ARTIFACT_INDEX_MAX_TERMS, D1_MAX_BOUND_PARAMS, D1_MAX_COMPOUND_SELECT_TERMS,
   ARTIFACT_INDEX_DEFAULT_ROW_CAP, D1_LIKE_GLOB_PATTERN_MAX_BYTES, ALIAS_KEY_RANGE_LO, runArtifactIndexStatements,
   InvalidArtifactIdError,
@@ -418,18 +418,43 @@ test("#131 since/until compare instants, so an offset-bearing timestamp inside t
   const odd = mk(8705, "not-a-date");
   assert.deepEqual(pageHistoryNewest([...events, odd], { project: "p", since: "n" }).events.map((e) => e.seq), [8705], "a row that does not parse is still reachable by its bytes");
   assert.equal(TIMESTAMP_INSTANT_SQL("e.timestamp"), "COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', e.timestamp), e.timestamp)");
-  // the memory key is what SQLite's strftime renders (Codex, fresh round, 2026-10-10): sub-millisecond fractions round
-  // half-up to the millisecond as %f does, and a zone-less value is UTC as SQLite reads it, not local time
-  assert.equal(instantKey("2026-01-01T00:00:00.0004Z"), "2026-01-01T00:00:00.000Z");
-  assert.equal(instantKey("2026-01-01T00:00:00.0005Z"), "2026-01-01T00:00:00.001Z");
-  assert.equal(instantKey("2026-01-01T00:00:00.9999Z"), "2026-01-01T00:00:01.000Z");
-  assert.equal(instantKey("2026-01-01T00:00:00.1236Z"), "2026-01-01T00:00:00.124Z");
+  // the memory key is what SQLite's strftime renders (Codex, fresh round, 2026-10-10): a zone-less value is UTC as
+  // SQLite reads it, not local time
   assert.equal(instantKey("2026-01-01T00:00:00"), "2026-01-01T00:00:00.000Z", "no zone: UTC, as SQLite");
   assert.equal(instantKey("2026-01-01 00:00:00"), "2026-01-01T00:00:00.000Z");
   assert.equal(instantKey("2026-01-01"), "2026-01-01T00:00:00.000Z");
   assert.equal(instantKey("2026-01-01T00:00:00-06:00"), "2026-01-01T06:00:00.000Z");
+  assert.equal(instantKey("2026-01-01T00:00:00.123Z"), "2026-01-01T00:00:00.123Z");
   assert.equal(instantKey("not-a-date"), "not-a-date", "unparseable: the raw bytes, as COALESCE falls back");
-  assert.equal(compareInstants("2026-01-01T00:00:00.0004Z", "2026-01-01T00:00:00.0005Z"), -1, "0.000 < 0.001 after rounding, as SQLite orders them");
-  assert.equal(compareInstants("2026-01-01T00:00:00.0004Z", "2026-01-01T00:00:00.0001Z"), 0, "both 0.000");
   assert.equal(compareInstants("2026-01-01T00:00:00", "2026-01-01T00:00:00.000Z"), 0, "zone-less equals the same UTC instant");
+});
+
+test("#131 millisecond contract: a sub-millisecond timestamp is refused at append and as a history cursor, never rounded", () => {
+  // Codex re-check 2026-10-10: SQLite's %f rounds in floating point, so an exact half-millisecond can round down where
+  // JavaScript rounds up (500 of 10,000 four-digit fractions). The contract removes the input instead of imitating it.
+  assert.equal(TIMESTAMP_MAX_FRACTION_DIGITS, 3);
+  assert.equal(timestampFractionDigits("2026-01-01T00:00:00Z"), 0);
+  assert.equal(timestampFractionDigits("2026-01-01T00:00:00.1Z"), 1);
+  assert.equal(timestampFractionDigits("2026-01-01T00:00:00.123Z"), 3);
+  assert.equal(timestampFractionDigits("2026-01-01T00:00:00.1234Z"), 4);
+  assert.equal(timestampFractionDigits("2026-01-01T00:00:00.0045-06:00"), 4, "offset form");
+  assert.equal(timestampFractionDigits("2026-01-01T00:00:00.0045+0600"), 4, "compact offset");
+  assert.equal(timestampFractionDigits("2026-01-01T00:00:00.00450"), 5, "zone-less");
+  // append: the schema
+  const base = { project: "p", actor: { type: "agent", id: "a" }, action: "edited", artifacts: [{ id: "x" }] };
+  assert.equal(EventInput.safeParse({ ...base, timestamp: "2026-01-01T00:00:00.123Z" }).success, true);
+  assert.equal(EventInput.safeParse({ ...base, timestamp: "2026-01-01T00:00:00Z" }).success, true);
+  assert.equal(EventInput.safeParse({ ...base, timestamp: "2026-09-26T00:46:49-06:00" }).success, true, "the push-webhook shape stays valid");
+  const tooFine = EventInput.safeParse({ ...base, timestamp: "2026-01-01T00:00:00.0045Z" });
+  assert.equal(tooFine.success, false);
+  assert.match(JSON.stringify(tooFine.success ? "" : tooFine.error.issues), /millisecond precision/);
+  assert.equal(EventInput.safeParse({ ...base, timestamp: "2026-01-01T00:00:00.0045-06:00" }).success, false);
+  // query: the cursor, in every store (the memory store here; SQLite and D1 in their own suites)
+  assert.doesNotThrow(() => assertHistoryCursors({ since: "2026-01-01T00:00:00.123Z", until: "2026-01-01T00:00:00Z" }));
+  assert.doesNotThrow(() => assertHistoryCursors({}));
+  assert.throws(() => assertHistoryCursors({ since: "2026-01-01T00:00:00.0046Z" }), (e: unknown) => e instanceof InvalidHistoryCursorError && e.cursor === "since" && e.status === 400 && /4 fractional second digits.*at most 3/.test(e.message));
+  assert.throws(() => assertHistoryCursors({ until: "2026-01-01T00:00:00.0046Z" }), (e: unknown) => e instanceof InvalidHistoryCursorError && e.cursor === "until");
+  const mk = (seq: number, timestamp: string): Event => ({ id: `evt_${seq}`, seq, project: "p", actor: { type: "agent", id: "a" }, action: "edited", artifacts: [{ id: "x" }], timestamp, received_at: timestamp, prev_hash: "", hash: `h${seq}`, hash_v: 2 } as Event);
+  assert.throws(() => pageHistoryNewest([mk(1, "2026-01-01T00:00:00.004Z")], { project: "p", since: "2026-01-01T00:00:00.0046Z" }), InvalidHistoryCursorError, "the memory store refuses the cursor Codex's scan used, instead of answering differently from SQLite");
+  assert.deepEqual(pageHistoryNewest([mk(1, "2026-01-01T00:00:00.004Z"), mk(2, "2026-01-01T00:00:00.005Z")], { project: "p", since: "2026-01-01T00:00:00.005Z" }).events.map((e) => e.seq), [2], "millisecond cursors compare exactly");
 });

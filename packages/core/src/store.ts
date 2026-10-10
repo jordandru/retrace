@@ -2,7 +2,7 @@
  * Storage interface — implemented by SQLite (MCP server) and D1 (Worker).
  * SQL schema shared by both lives in SCHEMA_SQL.
  */
-import { Action, Event, EventInput } from "./schema.js";
+import { Action, Event, EventInput, TIMESTAMP_MAX_FRACTION_DIGITS, timestampFractionDigits } from "./schema.js";
 import { sealEvent, verifyChain, VerifyResult } from "./chain.js";
 import { markUntrustedText } from "./explain.js";
 import { artifactKey, artifactLookup, sameArtifact } from "./capture.js";
@@ -37,20 +37,34 @@ export function compareInstants(a: string, b: string): number {
 }
 /** The key `compareInstants` orders by: what SQLite's `strftime('%Y-%m-%dT%H:%M:%fZ', x)` renders for a parseable value
  *  (`TIMESTAMP_INSTANT_SQL`), or the raw bytes for one it cannot parse, so that the memory store and the SQL stores put
- *  every row in the same order (Codex, fresh round, 2026-10-10). Two rules make the JavaScript side match SQLite where
+ *  every row in the same order (Codex, fresh round, 2026-10-10). One rule makes the JavaScript side match SQLite where
  *  `Date.parse` alone would not: a value with no zone designator (`2026-01-01T00:00:00`, `2026-01-01 00:00:00`,
- *  `2026-01-01`) is UTC, as SQLite reads it, not local time; and a fraction longer than three digits is rounded half-up
- *  to the millisecond, as `%f` rounds it, not truncated. Known edge, stated: SQLite computes `%f` in floating point and
- *  can round an exact half-microsecond (`.1235`) down where this rounds up; no Retrace producer writes sub-millisecond
- *  timestamps, and a cursor with one is a caller's choice. */
+ *  `2026-01-01`) is UTC, as SQLite reads it, not local time. Sub-millisecond fractions are not handled here at all: the
+ *  schema refuses them at append and `assertHistoryCursors` refuses them as cursors (`TIMESTAMP_MAX_FRACTION_DIGITS`),
+ *  so neither side ever has to round one (Codex, re-check, 2026-10-10: `%f` rounds in floating point and an exact
+ *  half-millisecond can go either way). A longer fraction that reaches this function anyway is truncated by `Date.parse`;
+ *  it is not a contract. */
 export function instantKey(s: string): string {
   const naive = /^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)?$/.test(s);
   const iso = naive ? (s.length === 10 ? `${s}T00:00:00Z` : `${s.replace(" ", "T")}Z`) : s;
   const t = Date.parse(iso);
-  if (!Number.isFinite(t)) return s;
-  const frac = /\.(\d+)(?=Z|[+-]\d{2}:?\d{2}$|$)/.exec(iso)?.[1];
-  const up = frac !== undefined && frac.length > 3 && frac.charCodeAt(3) >= 53 /* "5" */ ? 1 : 0; // Date.parse truncated; %f rounds
-  return new Date(t + up).toISOString();
+  return Number.isFinite(t) ? new Date(t).toISOString() : s;
+}
+/** A `since`/`until` cursor with more than `TIMESTAMP_MAX_FRACTION_DIGITS` fractional second digits (issue #131). The
+ *  Worker answers 400, the MCP tool reports it, and every store refuses it before reading a row. */
+export class InvalidHistoryCursorError extends Error {
+  readonly status = 400;
+  constructor(public readonly cursor: "since" | "until", public readonly value: string) {
+    super(`${cursor} carries ${timestampFractionDigits(value)} fractional second digits; Retrace timestamps carry at most ${TIMESTAMP_MAX_FRACTION_DIGITS} (millisecond precision)`);
+    this.name = "InvalidHistoryCursorError";
+  }
+}
+/** Fail closed on a sub-millisecond cursor; the three stores call this first, the Worker route maps the throw to 400. */
+export function assertHistoryCursors(q: Pick<HistoryQuery, "since" | "until">): void {
+  for (const cursor of ["since", "until"] as const) {
+    const value = q[cursor];
+    if (value !== undefined && timestampFractionDigits(value) > TIMESTAMP_MAX_FRACTION_DIGITS) throw new InvalidHistoryCursorError(cursor, value);
+  }
 }
 /** SQLite expression that renders a timestamp column or parameter as a UTC `YYYY-MM-DDTHH:MM:SS.SSSZ` instant, so that
  *  `since`/`until` compare instants across offsets; a value SQLite cannot parse falls back to its own bytes, matching
@@ -82,6 +96,7 @@ export function historyPageFromNewestFirst(newestFirst: Event[], limit: number):
 
 /** In-memory history: newest `limit` matches, ascending. Used by tests and as the spec SQL stores must match. */
 export function pageHistoryNewest(events: Event[], q: HistoryQuery): HistoryPage {
+  assertHistoryCursors(q);
   let rows = events.filter((e) => e.project === q.project);
   if (q.artifact_id) rows = rows.filter((e) => e.artifacts.some((a) => a.id === q.artifact_id));
   if (q.actor_id) rows = rows.filter((e) => e.actor.id === q.actor_id);

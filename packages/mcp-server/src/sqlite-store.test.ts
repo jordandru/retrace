@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   appendEvent, sealEvent, verifyProject, EventInput, HeadMovedError, createHandler, POLICY_PROFILE,
-  eventsReferencingArtifactsSql, eventsReferencingArtifactsStatements, MemoryEventStore, recordWebhookClassifyOutcome,
+  eventsReferencingArtifactsSql, eventsReferencingArtifactsStatements, MemoryEventStore, recordWebhookClassifyOutcome, InvalidHistoryCursorError,
 } from "@retrace-dev/core";
 import { SqliteStore } from "./sqlite-store.js";
 
@@ -698,4 +698,9 @@ test("#131 SqliteStore.history since/until compare instants across offsets, in S
   assert.deepEqual(await seqs({ since: "2026-09-26T06:47:00Z" }), [later.event.seq]);
   assert.deepEqual(await seqs({ until: "2026-09-26T06:46:49Z" }), [hook.event.seq, webhook.event.seq]);
   assert.deepEqual(await seqs({ since: "2026-09-26T00:46:49-06:00", until: "2026-09-26T06:46:49.000Z" }), [hook.event.seq, webhook.event.seq], "cursors with offsets work too");
+  // #131 millisecond contract: a sub-millisecond cursor is refused before any SQL runs, so SQLite's %f never rounds one
+  await assert.rejects(store.history({ project: "w", since: "2026-09-26T06:46:49.0005Z" }), InvalidHistoryCursorError);
+  await assert.rejects(store.history({ project: "w", until: "2026-09-26T06:46:49.0005Z" }), InvalidHistoryCursorError);
+  await assert.rejects(appendEvent(store, ev({ project: "w", timestamp: "2026-09-26T06:46:49.0005Z" })), /millisecond precision/, "and the schema refuses such a timestamp at append");
+  assert.deepEqual(await seqs({ since: "2026-09-26T06:46:49.001Z" }), [later.event.seq], "a millisecond cursor compares exactly");
 });

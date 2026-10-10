@@ -44,11 +44,12 @@ import {
   buildLineage, lineageForModel, renderLineageDot, renderLineageMermaid, renderLineageText,
   buildProjectStatus, projectStatusForModel, renderProjectStatus,
   AMENDMENT_ACTION_DETAIL, causalRootState, collectProvenanceAmendments,
+  InvalidHistoryCursorError,
 } from "@retrace-dev/core";
 import { ensureSigningKey } from "./keys.js";
 import { loadProducerPrivateKey, sealForAppend } from "./producer-key.js";
 import { SqliteStore } from "./sqlite-store.js";
-import { RemoteStore } from "./remote-store.js";
+import { RemoteStore, RemoteApiError } from "./remote-store.js";
 import { isMainModule } from "./is-main.js";
 import { AuditActor, registerAuditMcpTools, type AuditMcpHandlers } from "./audit-mcp.js";
 
@@ -419,7 +420,15 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
     };
 
   auditHandlers.history = async (args) => {
-      const page = await store.history({ ...args, project: args.project ?? DEFAULT_PROJECT });
+      let page;
+      try {
+        page = await store.history({ ...args, project: args.project ?? DEFAULT_PROJECT });
+      } catch (e) {
+        // Issue #131: a sub-millisecond since/until is refused by every store (locally as InvalidHistoryCursorError, by
+        // the Worker as 400); the caller gets the reason, not a server fault.
+        if (e instanceof InvalidHistoryCursorError || (e instanceof RemoteApiError && e.status === 400)) return { content: [{ type: "text", text: e.message }], isError: true };
+        throw e;
+      }
       const note = page.truncated
         ? `\n\ntruncated — ${page.events.length} newest matching events; pass before_seq ${page.next_before_seq} for the previous page`
         : "";

@@ -1,4 +1,4 @@
-import { TIMESTAMP_INSTANT_SQL, CaptureIndexHit, CaptureIndexResult, runCaptureIndexStatements, InsertExtras, OwnerLoginConsumption, readOwnerLoginConsumption, ArtifactIndexQuery, ArtifactIndexResult, ChainHead, Event, EventStore, HeadMovedError, HistoryQuery, HistoryPage, PendingDelivery, Share, artifactIndexRows, clampHistoryLimit, runArtifactIndexStatements, ArtifactIndexHit, historyPageFromNewestFirst, likeContains, policyDocumentFromRow, policySnapshotFromIndex, assertRouteWriteConsistent, RouteConflictError, parseEventBodyRows } from "@retrace-dev/core";
+import { TIMESTAMP_INSTANT_SQL, assertHistoryCursors, CaptureIndexHit, CaptureIndexResult, runCaptureIndexStatements, InsertExtras, OwnerLoginConsumption, readOwnerLoginConsumption, ArtifactIndexQuery, ArtifactIndexResult, ChainHead, Event, EventStore, HeadMovedError, HistoryQuery, HistoryPage, PendingDelivery, Share, artifactIndexRows, clampHistoryLimit, runArtifactIndexStatements, ArtifactIndexHit, historyPageFromNewestFirst, likeContains, policyDocumentFromRow, policySnapshotFromIndex, assertRouteWriteConsistent, RouteConflictError, parseEventBodyRows } from "@retrace-dev/core";
 import type { StoreReadMetricsSink } from "@retrace-dev/core";
 import type { BreakerRow, ClassificationContextRow, PolicyRouteRow, PolicySnapshot, PolicySnapshotBudget, PolicyWrite } from "@retrace-dev/core";
 
@@ -137,6 +137,7 @@ export class D1Store implements EventStore {
   }
 
   async history(q: HistoryQuery): Promise<HistoryPage> {
+    assertHistoryCursors(q);
     const where: string[] = ["e.project = ?"];
     const params: (string | number)[] = [q.project];
     let join = "";

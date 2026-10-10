@@ -1,7 +1,7 @@
 /** Local SQLite store using Node's built-in node:sqlite (Node >= 22.13). No native deps. */
 import { DatabaseSync } from "node:sqlite";
 import {
-  TIMESTAMP_INSTANT_SQL,
+  TIMESTAMP_INSTANT_SQL, assertHistoryCursors,
   InsertExtras, OwnerLoginConsumption, readOwnerLoginConsumption, ArtifactIndexQuery, ArtifactIndexResult, BACKFILL_ARTIFACT_INDEX_SQL, ChainHead, Event, EventStore, HeadMovedError,
   HistoryQuery, HistoryPage, PendingDelivery, SCHEMA_PENDING_EVENT_COLUMNS_SQL, SCHEMA_PENDING_LEASE_COLUMNS_SQL, SCHEMA_PENDING_ROUTE_COLUMNS_SQL, SCHEMA_SQL, Share, artifactIndexRows, clampHistoryLimit,
   CaptureIndexHit, CaptureIndexResult, runCaptureIndexStatements, ArtifactIndexHit, runArtifactIndexStatements, historyPageFromNewestFirst, likeContains, parseEventBodyRows,
@@ -160,6 +160,7 @@ export class SqliteStore implements EventStore {
   }
 
   async history(q: HistoryQuery): Promise<HistoryPage> {
+    assertHistoryCursors(q);
     const where: string[] = ["e.project = ?"];
     const params: (string | number)[] = [q.project];
     let join = "";

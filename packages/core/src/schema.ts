@@ -8,6 +8,24 @@
  */
 import { z } from "zod";
 
+/** WHEN carries at most millisecond precision (issue #131). Every store orders `since`/`until` by the instant a
+ *  timestamp names; the memory store parses it and SQLite renders it with `strftime('%f')`, which computes in floating
+ *  point and can round an exact half-millisecond the other way. Rather than imitate that arithmetic, the contract
+ *  excludes the input: a timestamp or cursor with more than three fractional second digits is refused at append and at
+ *  query, so both sides see only values they render identically. The live ledger held 0 such rows in 16913 at
+ *  2026-10-10 (coordinator scan). */
+export const TIMESTAMP_MAX_FRACTION_DIGITS = 3;
+/** Fractional second digits of an ISO 8601 timestamp (`.123Z` → 3, `.1234-06:00` → 4, no fraction → 0). */
+export function timestampFractionDigits(s: string): number {
+  const m = /\.(\d+)(?=(?:Z|[+-]\d{2}:?\d{2})?$)/.exec(s);
+  return m ? m[1]!.length : 0;
+}
+/** An ISO 8601 timestamp with an offset or `Z`, at most millisecond precision. */
+export const Timestamp = z.string().datetime({ offset: true }).refine(
+  (s) => timestampFractionDigits(s) <= TIMESTAMP_MAX_FRACTION_DIGITS,
+  { message: `timestamp carries at most ${TIMESTAMP_MAX_FRACTION_DIGITS} fractional second digits (millisecond precision)` },
+);
+
 export const ActorType = z.enum(["human", "agent", "system"]);
 export type ActorType = z.infer<typeof ActorType>;
 
@@ -241,7 +259,7 @@ export const EventInput = z.object({
   action_detail: z.string().optional(),
   artifacts: z.array(ArtifactRef).min(1),
   change: Change.optional(),
-  timestamp: z.string().datetime({ offset: true }).optional(),
+  timestamp: Timestamp.optional(),
   duration_ms: z.number().int().nonnegative().optional(),
   location: Location.optional(),
   /** WHY — free text reason */
@@ -266,10 +284,10 @@ export type EventInput = z.infer<typeof EventInput>;
 export const Event = EventInput.extend({
   id: z.string().min(1),
   seq: z.number().int().nonnegative(),
-  timestamp: z.string().datetime({ offset: true }),
+  timestamp: Timestamp,
   prev_hash: z.string(),
   hash: z.string(),
-  received_at: z.string().datetime({ offset: true }),
+  received_at: Timestamp,
   /** Hash rule the seal used. 2 = the digest covers `received_at` and this field; absent = legacy seal (pre-2026-08-30),
    *  whose digest may or may not cover `received_at`. Covered by the hash, so it cannot be stripped to downgrade a verifier. */
   hash_v: z.literal(2).optional(),
