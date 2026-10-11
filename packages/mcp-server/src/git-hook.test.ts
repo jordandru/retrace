@@ -10,6 +10,7 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { SqliteStore } from "./sqlite-store.js";
 import { hookScript, hookCommand, isNpxCachePath, probeLine, runningVersion, HOOK_STDERR_REDIRECT, HOOK_UNHANDLED_GUARD, HOOK_NPX_BOUNDED, parseTrailers, resolveHookToken, resolveHookProducerKeyFile, retryableHookFailure, decidedHookRejection, ttySurface, guardRemoteWrite, validCausedById, validActorId, commitToEvent } from "./git-hook.js";
+import { mapGithubWebhook } from "@retrace-dev/core";
 import { appendEvent, generateSigningKey, PRODUCER_SIG_FORMAT_V2, publicFromPrivate, verifyProducerSig, verifyProject, createHandler, MemoryEventStore, EventInput, classifyCommitClaim, InvalidArtifactIdError, ClassificationUnavailableError } from "@retrace-dev/core";
 import { RemoteApiError, RemoteCapabilityError } from "./remote-store.js";
 import { writeProducerPrivateKey } from "./producer-key.js";
@@ -171,6 +172,44 @@ const CREDS = [
   { token: "tok-pinned-agent-00000000", name: "claude-code MCP (pinned)", actor: { type: "agent", id: "claude-code" } },
   { token: "tok-git-hook-assert-00000", name: "git hook (assert)", actor: { type: "system", id: "retrace-git" }, trust: "assert" },
 ];
+
+test("hook and push webhook assign the same caused_by to one message", async () => {
+  const full = "evt_" + "ab".repeat(16);
+  const message = `work\n\nRetrace-Caused-By: ${full}\nRetrace-Caused-By: ${full}\u2028garbage\n`;
+  const dir = mkdtempSync(join(tmpdir(), "retrace-git-same-cause-"));
+  sh(dir, "git", ["init", "-q", "-b", "main"]);
+  sh(dir, "git", ["config", "core.hooksPath", "/dev/null"]);
+  writeFileSync(join(dir, "a.ts"), "export const a = 1;\n");
+  sh(dir, "git", ["add", "."]);
+  const msg = join(dir, "msg.txt");
+  writeFileSync(msg, message);
+  sh(dir, "git", ["commit", "-qF", msg]);
+  const sha = sh(dir, "git", ["rev-parse", "HEAD"]).trim();
+  const stored = sh(dir, "git", ["log", "-1", "--format=%B"]);
+  const saved = process.env.RETRACE_CAUSED_BY;
+  delete process.env.RETRACE_CAUSED_BY;
+  let hook;
+  try {
+    hook = commitToEvent(dir, sha, { project: "p", repoName: "acme/app" });
+  } finally {
+    if (saved === undefined) delete process.env.RETRACE_CAUSED_BY;
+    else process.env.RETRACE_CAUSED_BY = saved;
+  }
+  const [pushed] = await mapGithubWebhook("push", {
+    repository: { full_name: "acme/app" },
+    commits: [{
+      id: sha,
+      message: stored,
+      timestamp: "2026-10-11T00:00:00Z",
+      author: { email: "j@x", name: "J" },
+      added: ["a.ts"], modified: [], removed: [],
+    }],
+  }, { includePush: true });
+  assert.equal(hook.caused_by, undefined);
+  assert.equal(hook.method?.params?.caused_by_rejected, `${full}\u2028garbage`);
+  assert.equal(pushed.caused_by, hook.caused_by);
+  assert.equal(pushed.method?.params?.caused_by_rejected, hook.method?.params?.caused_by_rejected);
+});
 
 test("hook token: .retrace.json \"credential\" resolves from the credentials file; no field = owner-token fallthrough unchanged", () => {
   const dir = mkdtempSync(join(tmpdir(), "retrace-cred-"));

@@ -44,7 +44,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync, appendFileSync, chmodSync, unlinkSync, mkdirSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { basename, join, resolve } from "node:path";
-import { EventInput, appendEvent, describeEvent, Event, PRODUCER_SIG_FORMAT_V2, resolveCommitActor, classifyCommitClaim, attachClaimDecision, ClassificationUnavailableError, parseTrailerPolicy, isGitCommitSeal, isLegacyClientCommitSeal, routedCanonicalRForHook } from "@retrace-dev/core";
+import { EventInput, appendEvent, describeEvent, Event, PRODUCER_SIG_FORMAT_V2, resolveCommitActor, classifyCommitClaim, attachClaimDecision, ClassificationUnavailableError, parseTrailerPolicy, isGitCommitSeal, isLegacyClientCommitSeal, routedCanonicalRForHook, causedByFrom } from "@retrace-dev/core";
 import { makeStore, detectIde, harnessSession } from "./index.js";
 import { RemoteApiError, RemoteCapabilityError, RemoteStore } from "./remote-store.js";
 import { loadProducerPrivateKeyFromFile, sealForAppend } from "./producer-key.js";
@@ -220,11 +220,16 @@ export function commitToEvent(repo: string, sha: string, cfg: Cfg, live = false)
   const actor = resolved.actor;
   if (actor.type === "agent" && "on_behalf_of" in actor && actor.on_behalf_of === undefined) actor.on_behalf_of = ae; // hook behaviour: always the author email
 
-  let causedBy: string | undefined = resolved.causedBy ?? validCausedById(process.env.RETRACE_CAUSED_BY);
-  if (!causedBy) {
-    const f = join(git(repo, ["rev-parse", "--git-dir"]), "retrace-caused-by");
-    const fp = resolve(repo, f);
-    if (existsSync(fp)) causedBy = validCausedById(readFileSync(fp, "utf8"));
+  const fromMessage = causedByFrom(message);
+  let causedBy = fromMessage.id;
+  const causedByRejected = fromMessage.rejected;
+  if (!causedBy && !causedByRejected) {
+    causedBy = validCausedById(process.env.RETRACE_CAUSED_BY);
+    if (!causedBy) {
+      const f = join(git(repo, ["rev-parse", "--git-dir"]), "retrace-caused-by");
+      const fp = resolve(repo, f);
+      if (existsSync(fp)) causedBy = validCausedById(readFileSync(fp, "utf8"));
+    }
   }
   const isMerge = parentList.length > 1;
 
@@ -248,7 +253,7 @@ export function commitToEvent(repo: string, sha: string, cfg: Cfg, live = false)
     },
     intent: resolved.intent, // prose "Key: value" lines survive (backlog #12)
     caused_by: causedBy,
-        method: { tool: "git", automated: actor.type !== "human", params: { branch, parents: parentList, files: files.length, insertions: ins, deletions: del, sha: fullSha, raw_message: message, author: { name: an, email: ae }, model_claim: resolved.modelClaim, principal_rule: "agent-address/1" } },
+        method: { tool: "git", automated: actor.type !== "human", params: { branch, parents: parentList, files: files.length, insertions: ins, deletions: del, sha: fullSha, raw_message: message, author: { name: an, email: ae }, model_claim: resolved.modelClaim, principal_rule: "agent-address/1", ...(causedByRejected ? { caused_by_rejected: causedByRejected } : {}) } },
     idempotency_key: `git:${fullSha}`,
     tags: ["git", ...(isMerge ? ["merge"] : [])],
   };

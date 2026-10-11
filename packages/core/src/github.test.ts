@@ -131,6 +131,20 @@ test("caused_by trailer lines are anchored, last line wins, and ids are lowercas
   assert.equal(pushed.caused_by, full);
 });
 
+test("caused_by rejects line separators that are not U+000A", async () => {
+  const full = "evt_" + "a".repeat(32);
+  const open = (body: string) => mapGithubWebhook("pull_request", {
+    action: "opened", repository: repo, sender: jordan, pull_request: { ...pr, body },
+  }).then((events) => events[0]);
+  for (const suffix of ["\u2028garbage", "\u2029garbage", "\u0085garbage", "\u00A0", "\u200Bgarbage"]) {
+    const event = await open(`work\n\nRetrace-Caused-By: ${full}${suffix}`);
+    assert.equal(event.caused_by, undefined, JSON.stringify(suffix));
+    assert.equal(event.method?.params?.caused_by_rejected, `${full}${suffix}`);
+  }
+  const spaced = await open(`work\n\nRetrace-Caused-By: \t${full}\t `);
+  assert.equal(spaced.caused_by, full);
+});
+
 test("T8 push agent-address/1 resolves a user sender as the authenticated principal", async () => {
   const payload = {
     repository: repo,

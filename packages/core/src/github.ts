@@ -51,7 +51,7 @@ export function githubActor(user: any, fallback = "github"): Actor {
   };
 }
 
-const CAUSED_BY_LINE = /^Retrace-Caused-By:[ \t]*(.*)$/gim;
+const CAUSED_BY_KEY = "Retrace-Caused-By:";
 const CAUSED_BY_FULL = /^evt_[a-f0-9]{32}$/i;
 const REJECTED_TOKEN_CAP = 64;
 /** The last line that starts with the key wins. A value longer than 64 characters keeps that prefix and its full length. */
@@ -59,17 +59,30 @@ function boundRejected(token: string): string {
   if (token.length <= REJECTED_TOKEN_CAP) return token;
   return `${token.slice(0, REJECTED_TOKEN_CAP)}…(${token.length})`;
 }
+function trimAsciiSpace(value: string): string {
+  let start = 0;
+  let end = value.length;
+  while (start < end && (value.charCodeAt(start) === 0x20 || value.charCodeAt(start) === 0x09)) start++;
+  while (end > start && (value.charCodeAt(end - 1) === 0x20 || value.charCodeAt(end - 1) === 0x09)) end--;
+  return value.slice(start, end);
+}
 /**
- * One trailer line, anchored at line start, value staying on that line.
- * The last such line wins. A 32-hex id is stored lowercase. A line with no
- * `evt_` token sets neither field.
+ * Split on U+000A only. A trailing U+000D is stripped. The value is the rest of
+ * that line, with only ASCII spaces and tabs trimmed. U+2028, U+2029, U+0085,
+ * NBSP, and zero-width characters stay in the value. The last matching line wins.
+ * A 32-hex id is stored lowercase. The git hook uses this same function.
  */
-function causedByFrom(text?: string | null): { id?: string; rejected?: string } {
+export function causedByFrom(text?: string | null): { id?: string; rejected?: string } {
   if (!text) return {};
-  const lines = [...text.replace(/\r\n?/g, "\n").matchAll(CAUSED_BY_LINE)];
-  if (!lines.length) return {};
-  const token = lines[lines.length - 1][1].trim();
-  if (!token || !/^evt_/i.test(token)) return {};
+  let token: string | undefined;
+  let saw = false;
+  for (const raw of text.split("\n")) {
+    const line = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
+    if (!line.startsWith(CAUSED_BY_KEY)) continue;
+    saw = true;
+    token = trimAsciiSpace(line.slice(CAUSED_BY_KEY.length));
+  }
+  if (!saw || !token || !/^evt_/i.test(token)) return {};
   if (CAUSED_BY_FULL.test(token)) return { id: token.toLowerCase() };
   return { rejected: boundRejected(token) };
 }
