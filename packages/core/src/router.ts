@@ -599,11 +599,12 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
         }
         const ownerLoginDelivery = ["pull_request", "pull_request_review", "issue_comment"].includes(ghEvent);
         const retainedDelivery = delivery ?? `github:${repo}:${crypto.randomUUID()}`;
-        const isShadowPush = mode === "shadow" && ghEvent === "push" && !!opts.githubIncludePush;
+        const isPushDelivery = ghEvent === "push" && !!opts.githubIncludePush;
+        const isShadowPush = mode === "shadow" && isPushDelivery;
         const deliveryStarted = now();
         const deliveryDeadline = deliveryStarted + WEBHOOK_DELIVERY_DEADLINE_MS;
         let probe = false;
-        if ((isShadowPush || ownerLoginDelivery) && store.insertPendingDelivery) {
+        if ((isPushDelivery || ownerLoginDelivery) && store.insertPendingDelivery) {
           try {
             await store.insertPendingDelivery({
               delivery_id: retainedDelivery,
@@ -722,10 +723,13 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
             }
             continue;
           }
+          const livePushCommit = isPushDelivery && mode !== "shadow" && isGitCommitSeal(parsed.data);
+          if (livePushCommit && now() >= deliveryDeadline)
+            return json({ ok: true, pending: remainingShas(), reason: "deadline" }, 202);
           const stamped = stampSealedBy(parsed.data, SEALED_BY_GITHUB_WEBHOOK);
           try {
             const r = await appendOwnerLoginEvent(store, stamped, currentPolicy, repo,
-              (isShadowPush || ownerLoginDelivery) ? deliveryDeadline : undefined, now);
+              (isPushDelivery || ownerLoginDelivery) ? deliveryDeadline : undefined, now);
             results.push({ id: r.event.id, seq: r.event.seq, deduped: r.deduped });
           } catch (e: any) {
             if (e instanceof AppendDeadlineExceededError || e?.name === "AppendDeadlineExceededError")
@@ -735,7 +739,7 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
             throw e;
           }
         }
-        if ((isShadowPush || ownerLoginDelivery) && store.deletePendingDelivery) {
+        if ((isPushDelivery || ownerLoginDelivery) && store.deletePendingDelivery) {
           const deleted = await withinDeliveryDeadline(store.deletePendingDelivery(retainedDelivery), deliveryDeadline, now);
           if (deleted === DELIVERY_DEADLINE_EXPIRED)
             return json({ ok: true, pending: [], reason: "deadline" }, 202);
@@ -1289,6 +1293,16 @@ export async function drainPendingGithubDeliveries(store: EventStore, opts: {
         } else {
           outcomes[sha] = { status: "pending", attempt_count: attemptCount, reason: classified.reason };
         }
+        continue;
+      }
+      if (classified.kind === "skip" && classified.reason === "policy_off") {
+        const stamped = {
+          ...parsed.data,
+          method: { ...parsed.data.method, params: { ...parsed.data.method?.params,
+            [SEALED_BY_PARAM]: SEALED_BY_GITHUB_WEBHOOK, [PRODUCER_SIG_VERDICT_PARAM]: "none" } },
+        };
+        await appendEvent(store, stamped);
+        outcomes[sha] = { status: "sealed", attempt_count: outcomes[sha]?.attempt_count ?? 0 };
         continue;
       }
       if (classified.kind === "decision" || classified.kind === "legacy") {
