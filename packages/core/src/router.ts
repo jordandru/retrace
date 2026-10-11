@@ -80,13 +80,13 @@ function logExpiredDeliveryRejection<T>(outcome: DeliveryWorkOutcome<T>): void {
     console.error(`retrace-api: delivery work rejected after deadline: ${(outcome.reason as any)?.stack ?? outcome.reason}`);
 }
 
-async function withinDeliveryDeadline<T>(work: Promise<T>, deadline: number): Promise<T | typeof DELIVERY_DEADLINE_EXPIRED> {
+async function withinDeliveryDeadline<T>(work: Promise<T>, deadline: number, now: () => number = () => Date.now()): Promise<T | typeof DELIVERY_DEADLINE_EXPIRED> {
   // Observe both branches before checking the clock: callers pass already-started promises, including with no budget.
   const settled: Promise<DeliveryWorkOutcome<T>> = work.then(
     (value) => ({ status: "fulfilled", value }),
     (reason: unknown) => ({ status: "rejected", reason }),
   );
-  const remaining = deadline - Date.now();
+  const remaining = deadline - now();
   if (remaining <= 0) {
     void settled.then(logExpiredDeliveryRejection);
     return DELIVERY_DEADLINE_EXPIRED;
@@ -232,6 +232,8 @@ export interface RouterOptions {
   exportCacheLastRefresh?: (project: string) => Promise<ExportCacheLastRefresh | null>;
   /** RETRACE_TRAILER_POLICY: off (default) | shadow | enforce. Step 1 uses this only for /1 commit-seal ingress. */
   trailerPolicy?: TrailerPolicy;
+  /** Clock for delivery deadlines and owner-login classification. Default reads Date.now on each call. */
+  now?: () => number;
 }
 
 const CORS = { "access-control-allow-origin": "*", "access-control-allow-headers": "authorization,content-type,if-match", "access-control-allow-methods": "GET,POST,PUT,DELETE,OPTIONS" };
@@ -261,6 +263,7 @@ const SHARE_BODY_MAX = 32;
 export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOptions) {
   const opts: RouterOptions = typeof tokenOrOpts === "string" ? { token: tokenOrOpts } : tokenOrOpts ?? {};
   const { token } = opts;
+  const now = opts.now ?? (() => Date.now());
   const credentials = opts.credentials ?? [];
   const authConfigured = !!token || credentials.length > 0;
   type Principal = { kind: "owner" } | { kind: "credential"; credential: Credential } | null;
@@ -597,7 +600,7 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
         const ownerLoginDelivery = ["pull_request", "pull_request_review", "issue_comment"].includes(ghEvent);
         const retainedDelivery = delivery ?? `github:${repo}:${crypto.randomUUID()}`;
         const isShadowPush = mode === "shadow" && ghEvent === "push" && !!opts.githubIncludePush;
-        const deliveryStarted = Date.now();
+        const deliveryStarted = now();
         const deliveryDeadline = deliveryStarted + WEBHOOK_DELIVERY_DEADLINE_MS;
         let probe = false;
         if ((isShadowPush || ownerLoginDelivery) && store.insertPendingDelivery) {
@@ -614,8 +617,9 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
         if (isShadowPush) {
           const probeOwner = `${delivery ?? `probe:${repo}`}:${crypto.randomUUID()}`;
           const admit = await withinDeliveryDeadline(
-            webhookBreakerAdmission(store, project, Date.now(), probeOwner),
+            webhookBreakerAdmission(store, project, now(), probeOwner),
             deliveryDeadline,
+            now,
           );
           if (admit === DELIVERY_DEADLINE_EXPIRED)
             return json({ ok: true, pending: (payload.commits ?? []).map((c: any) => c.id), reason: "deadline" }, 202);
@@ -631,11 +635,12 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
           if (!parsed.success) { results.push({ error: parsed.error.issues }); continue; }
           const remainingShas = () => inputs.slice(inputIndex).map((candidate) => String(candidate.method?.params?.sha ?? "")).filter(Boolean);
           if (mode === "shadow" && isGitCommitSeal(parsed.data)) {
-            if (Date.now() >= deliveryDeadline) {
+            if (now() >= deliveryDeadline) {
               if (isShadowPush) {
                 await withinDeliveryDeadline(
-                  recordWebhookClassifyOutcome(store, project, "deadline", Date.now(), probe),
+                  recordWebhookClassifyOutcome(store, project, "deadline", now(), probe),
                   deliveryDeadline,
+                  now,
                 );
               }
               return json({ ok: true, pending: remainingShas(), reason: "deadline" }, 202);
@@ -644,26 +649,30 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
               const prior = await withinDeliveryDeadline(
                 store.byIdempotencyKey(project, parsed.data.idempotency_key),
                 deliveryDeadline,
+                now,
               );
               if (prior === DELIVERY_DEADLINE_EXPIRED)
                 return json({ ok: true, pending: remainingShas(), reason: "deadline" }, 202);
               if (prior) { results.push({ id: prior.id, seq: prior.seq, deduped: true }); continue; }
             }
-            const operationDeadline = Math.min(Date.now() + CLASSIFY_DEADLINE_MS, deliveryDeadline);
+            const operationDeadline = Math.min(now() + CLASSIFY_DEADLINE_MS, deliveryDeadline);
             const classified = await withinDeliveryDeadline(
               classifyCommitClaim({
                 store, input: parsed.data, producer: "github-push",
                 sealedBy: SEALED_BY_GITHUB_WEBHOOK, trailerPolicy: mode, canonicalR: repo,
                 authenticatedPrincipal: parsed.data.actor.on_behalf_of,
                 deadline: operationDeadline,
+                now,
               }),
               operationDeadline,
+              now,
             );
             if (classified === DELIVERY_DEADLINE_EXPIRED) {
               if (isShadowPush) {
                 await withinDeliveryDeadline(
-                  recordWebhookClassifyOutcome(store, project, "deadline", Date.now(), probe),
+                  recordWebhookClassifyOutcome(store, project, "deadline", now(), probe),
                   deliveryDeadline,
+                  now,
                 );
               }
               return json({ ok: true, pending: remainingShas(), reason: "deadline" }, 202);
@@ -672,8 +681,9 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
               if (isShadowPush) {
                 const reason = classified.reason === "deadline" || classified.reason === "store_error" || classified.reason === "budget" ? classified.reason : "store_error";
                 const recorded = await withinDeliveryDeadline(
-                  recordWebhookClassifyOutcome(store, project, reason, Date.now(), probe),
+                  recordWebhookClassifyOutcome(store, project, reason, now(), probe),
                   deliveryDeadline,
+                  now,
                 );
                 pendingShas.push(...remainingShas());
                 return json({
@@ -685,8 +695,9 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
             }
             if (isShadowPush && (classified.kind === "decision" || classified.kind === "legacy")) {
               const recorded = await withinDeliveryDeadline(
-                recordWebhookClassifyOutcome(store, project, "ok", Date.now(), probe),
+                recordWebhookClassifyOutcome(store, project, "ok", now(), probe),
                 deliveryDeadline,
+                now,
               );
               if (recorded === DELIVERY_DEADLINE_EXPIRED)
                 return json({ ok: true, pending: remainingShas(), reason: "deadline" }, 202);
@@ -697,7 +708,7 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
             const stamped = stampSealedBy(toSeal, SEALED_BY_GITHUB_WEBHOOK);
             for (let attempt = 0; ; attempt++) {
               try {
-                const r = await appendEvent(store, stamped, isShadowPush ? { deadline: deliveryDeadline } : {});
+                const r = await appendEvent(store, stamped, isShadowPush ? { deadline: deliveryDeadline, now } : {});
                 results.push({ id: r.event.id, seq: r.event.seq, deduped: r.deduped });
                 break;
               }
@@ -714,7 +725,7 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
           const stamped = stampSealedBy(parsed.data, SEALED_BY_GITHUB_WEBHOOK);
           try {
             const r = await appendOwnerLoginEvent(store, stamped, currentPolicy, repo,
-              (isShadowPush || ownerLoginDelivery) ? deliveryDeadline : undefined);
+              (isShadowPush || ownerLoginDelivery) ? deliveryDeadline : undefined, now);
             results.push({ id: r.event.id, seq: r.event.seq, deduped: r.deduped });
           } catch (e: any) {
             if (e instanceof AppendDeadlineExceededError || e?.name === "AppendDeadlineExceededError")
@@ -725,7 +736,7 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
           }
         }
         if ((isShadowPush || ownerLoginDelivery) && store.deletePendingDelivery) {
-          const deleted = await withinDeliveryDeadline(store.deletePendingDelivery(retainedDelivery), deliveryDeadline);
+          const deleted = await withinDeliveryDeadline(store.deletePendingDelivery(retainedDelivery), deliveryDeadline, now);
           if (deleted === DELIVERY_DEADLINE_EXPIRED)
             return json({ ok: true, pending: [], reason: "deadline" }, 202);
         }
