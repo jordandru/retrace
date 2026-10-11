@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { paneTextProblem, paneTextSha256, splitSentSuffix, withSentSuffix, verifySentEvent, PANE_TEXT_MAX_BYTES } from "./dispatch.js";
+import { paneTextProblem, paneTextSha256, splitSentSuffix, withSentSuffix, verifySentEvent, briefNamedIn, PANE_TEXT_MAX_BYTES } from "./dispatch.js";
 import type { Event } from "./schema.js";
 
 const ID = "evt_" + "a".repeat(32);
@@ -16,6 +16,7 @@ test("paneTextProblem: the accepted shape and each refusal", () => {
   assert.equal(paneTextProblem("CODEX hello CODEX", "claude-code"), "envelope_missing");
   assert.equal(paneTextProblem("CLAUDE-CODE hello", "claude-code"), "envelope_missing");
   assert.equal(paneTextProblem("CLAUDE-CODE JD do it JD CLAUDE-CODE", "claude-code"), "owner_envelope_forbidden");
+  assert.equal(paneTextProblem("CLAUDE-CODE the JD token is the owner's CLAUDE-CODE", "claude-code"), undefined, "a lone JD token is not an envelope (L2)");
   assert.equal(paneTextProblem("CLAUDE-CODE x [sent-event evt_1] CLAUDE-CODE", "claude-code"), "suffix_in_text");
   // a JD inside a word is not the owner's token
   assert.equal(paneTextProblem("CLAUDE-CODE see JDOC.md CLAUDE-CODE", "claude-code"), undefined);
@@ -26,10 +27,13 @@ test("suffix round-trip: exactly one space, the full id, nothing after", () => {
   const line = withSentSuffix(text, ID);
   assert.equal(Buffer.byteLength(line) - Buffer.byteLength(text), 50);
   assert.deepEqual(splitSentSuffix(line), { text, sentEventId: ID });
-  assert.deepEqual(splitSentSuffix(line + "\n"), { text, sentEventId: ID });
+  assert.equal(splitSentSuffix(line + "\n"), undefined, "bytes after the suffix, a newline included, are not a suffix (L1)");
   assert.equal(splitSentSuffix(text), undefined);
   assert.equal(splitSentSuffix(`${text} [sent-event evt_abc]`), undefined, "a short id is not a suffix");
   assert.equal(splitSentSuffix(`${text}  [sent-event ${ID}]`)?.text, text + " ", "a second space stays in the hashed text");
+  assert.equal(briefNamedIn(text), "~/.retrace/x/BRIEF.md");
+  assert.equal(briefNamedIn("CLAUDE-CODE stand by CLAUDE-CODE"), undefined);
+  assert.equal(briefNamedIn("CODEX review per brief /tmp/BRIEF.md sha256 1234 CODEX"), "/tmp/BRIEF.md");
 });
 
 function raw(over: Partial<Event> & { params?: Record<string, unknown> }): Event {
@@ -44,7 +48,8 @@ function raw(over: Partial<Event> & { params?: Record<string, unknown> }): Event
 
 test("verifySentEvent: the six checks pass on a well-formed sent event", async () => {
   const h = await paneTextSha256(text);
-  const v = await verifySentEvent(raw({ params: { text_sha256: h } }), { text, sentEventId: ID });
+  const b = "1".repeat(64);
+  const v = await verifySentEvent(raw({ params: { text_sha256: h, brief_sha256: b } }), { text, sentEventId: ID, briefSha256: b, briefPresent: true });
   assert.equal(v.signature, "verified", JSON.stringify(v.checks));
   assert.equal(v.sender, "claude-code");
   assert.equal(v.failure, undefined);
@@ -54,6 +59,8 @@ test("verifySentEvent: each failure is named and the signature word matches rule
   const h = await paneTextSha256(text);
   const cases: Array<[string, Event | null, Partial<Parameters<typeof verifySentEvent>[1]>, string, string]> = [
     ["missing event", null, {}, "unverifiable", "exists"],
+    ["text names a brief, event records none (H3)", raw({ params: { text_sha256: h } }), {}, "mismatch", "brief_sha256"],
+    ["pinned seal of another seat (M3)", raw({ params: { text_sha256: h, brief_sha256: "1".repeat(64), sealed_by: "pinned:Grok MCP (pinned) (signing)" } }), { briefSha256: "1".repeat(64), briefPresent: true }, "mismatch", "sealed_by"],
     ["not sent", raw({ action: "received", params: { text_sha256: h } }), {}, "mismatch", "action"],
     ["other actor", raw({ actor: { type: "agent", id: "codex" }, params: { text_sha256: h } }), {}, "mismatch", "actor"],
     ["owner sealed", raw({ params: { text_sha256: h, sealed_by: "owner" } }), {}, "mismatch", "sealed_by"],
@@ -70,6 +77,8 @@ test("verifySentEvent: each failure is named and the signature word matches rule
   }
   const v = await verifySentEvent(raw({ params: { text_sha256: h, brief_sha256: "1".repeat(64) } }), { text, sentEventId: ID, briefSha256: "1".repeat(64), briefPresent: true });
   assert.equal(v.signature, "verified");
+  const codex = await verifySentEvent(raw({ actor: { type: "agent", id: "codex" }, params: { text_sha256: await paneTextSha256("CODEX stand by CODEX"), sealed_by: "pinned:codex (signing)" } }), { text: "CODEX stand by CODEX", sentEventId: ID });
+  assert.equal(codex.signature, "verified", JSON.stringify(codex.checks));
 });
 
 test("verifySentEvent: a received text without the SEAT envelope fails the envelope check first", async () => {

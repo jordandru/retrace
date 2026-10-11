@@ -141,7 +141,7 @@ Toggle **Graph** in the UI (or `?view=graph`). Nodes are artifacts, laid out lef
 | `retrace_log` | log any action (created/edited/deleted/executed/approved/sent/…) with `caused_by` |
 | `retrace_amend` | append a rooted correction for missing artifact roles or a historical causal attestation; sealed events are never rewritten |
 | `retrace_send` | send a one-line `SEAT … SEAT` message into a registered agent pane: checks the envelope and byte rules, refuses the owner's envelope and unregistered or human panes, waits for an empty composer, seals the `sent` event (text and brief hashes, target, who presses Enter), sends with ` [sent-event <id>]`, records the outcome (agent-rules 15, agent-ops 18) |
-| `retrace_verify_send` | receiver side of agent-rules 15: reads the cited `sent` event raw and runs the six checks; seals the `received` record naming `verified` / `missing` / `mismatch` / `unverifiable`; act only on `verified` |
+| `retrace_verify_send` | receiver side of agent-rules 15: reads the cited `sent` event raw and runs the six checks (the pinned credential must be the envelope's seat; a text that names a brief must hash against it); always seals the `received` record naming `verified` / `missing` / `mismatch` / `unverifiable`; act only on `verified` |
 | `retrace_history` | newest-window timeline (`truncated` / `before_seq` to walk older pages); filter by artifact / actor / action / time / text |
 | `retrace_why` | walk `caused_by` links back to the originating human intent |
 | `retrace_verify` | recompute the hash chain and report integrity |

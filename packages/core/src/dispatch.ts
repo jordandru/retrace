@@ -18,9 +18,11 @@ export const PANE_MESSAGE_MAX_BYTES = 240;
 /** ` [sent-event evt_<32 hex>]` is 50 bytes, so the text before it is at most 190. */
 export const PANE_TEXT_MAX_BYTES = 190;
 /** The owner's envelope (docs/owner-protocol.md §1) is never used by an agent (§5, the hard guard). A message that
- *  carries `JD` as a standalone token anywhere is refused before it is hashed, so the ledger never records an agent
- *  sending one. */
-const OWNER_ENVELOPE_TOKEN = /(^|\s)JD(\s|$)/;
+ *  carries an enveloped span `JD … JD` is refused before it is hashed, so the ledger never records an agent sending
+ *  one. A lone `JD` token (a message that talks about the envelope) is not an envelope (Codex, PR 222 r1, L2). */
+const OWNER_ENVELOPE_SPAN = /(^|\s)JD\s[\s\S]*?\sJD(\s|$)/;
+/** A pane text that names a brief: a path token (`~/…` or `/…`) or the word brief followed by a path-like token. */
+const BRIEF_NAMED = /(?:^|\s)(?:brief\s+)?((?:~|\/)[^\s`"'<>]+)/;
 
 export function seatEnvelope(actorId: string): string {
   return actorId.toUpperCase();
@@ -36,9 +38,16 @@ export function paneTextProblem(text: string, seatId: string): string | undefine
   if (bytes > PANE_TEXT_MAX_BYTES) return `too_long:${bytes}>${PANE_TEXT_MAX_BYTES}`;
   const seat = seatEnvelope(seatId);
   if (!text.startsWith(`${seat} `) || !text.endsWith(` ${seat}`) || text.length < seat.length * 2 + 3) return "envelope_missing";
-  if (OWNER_ENVELOPE_TOKEN.test(text)) return "owner_envelope_forbidden";
+  if (OWNER_ENVELOPE_SPAN.test(text)) return "owner_envelope_forbidden";
   if (/\[sent-event /.test(text)) return "suffix_in_text";
   return undefined;
+}
+
+/** The brief path a pane text names, if any. A text that names a brief must be verified against that brief's hash
+ *  (Codex, PR 222 r1, H3): otherwise the instruction body is replaceable after the pointer is signed. */
+export function briefNamedIn(text: string): string | undefined {
+  const m = BRIEF_NAMED.exec(text);
+  return m ? m[1] : undefined;
 }
 
 /** sha256 of the exact UTF-8 bytes of the pre-suffix line. */
@@ -52,8 +61,8 @@ export function withSentSuffix(text: string, sentEventId: string): string {
 
 /** Split a received line into the hashed text and the cited event id; undefined when the suffix is absent or malformed. */
 export function splitSentSuffix(received: string): { text: string; sentEventId: string } | undefined {
-  const line = received.replace(/\r?\n$/, "");
-  const m = SENT_EVENT_SUFFIX_RE.exec(line);
+  // The suffix is the final bytes of the line: nothing after it, not even a newline (Codex, PR 222 r1, L1).
+  const m = SENT_EVENT_SUFFIX_RE.exec(received);
   if (!m) return undefined;
   return { text: m[1]!, sentEventId: m[2]! };
 }
@@ -100,9 +109,17 @@ export async function verifySentEvent(
     ? { ok: true, detail: `agent/${raw.actor.id}` }
     : { ok: false, detail: `event actor ${raw.actor.type}/${raw.actor.id} is not the envelope's seat ${seat ?? "(none)"}` };
   const sealedBy = typeof p.sealed_by === "string" ? p.sealed_by : "";
-  checks.sealed_by = sealedBy.startsWith("pinned:")
-    ? { ok: true, detail: sealedBy }
-    : { ok: false, detail: `sealed_by is ${sealedBy || "(absent)"}, not pinned:` };
+  // `pinned:<credential name>`, and that credential is the envelope's seat: the name carries the seat id as a word
+  // ("claude-code MCP (pinned) (signing)", "codex (signing)", "Grok MCP (pinned) (signing)"). A pinned seal of another
+  // seat is not this seat's (Codex, PR 222 r1, M3).
+  const credentialName = sealedBy.startsWith("pinned:") ? sealedBy.slice("pinned:".length).trim() : undefined;
+  const namesSeat = credentialName !== undefined && seat !== undefined
+    && new RegExp(`(^|[^a-z0-9-])${seat.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}([^a-z0-9-]|$)`, "i").test(credentialName);
+  checks.sealed_by = credentialName === undefined
+    ? { ok: false, detail: `sealed_by is ${sealedBy || "(absent)"}, not pinned:` }
+    : namesSeat
+      ? { ok: true, detail: sealedBy }
+      : { ok: false, detail: `sealed_by ${sealedBy} is a pinned credential, but not the envelope's seat ${seat ?? "(none)"}` };
   const verdict = typeof p.producer_sig_verdict === "string" ? p.producer_sig_verdict : "";
   checks.producer_sig_verdict = verdict === "verified"
     ? { ok: true, detail: "verified" }
@@ -113,10 +130,13 @@ export async function verifySentEvent(
     ? { ok: true, detail: expectedText }
     : { ok: false, detail: `event text_sha256 ${recordedText || "(absent)"} ≠ received text ${expectedText}` };
   const recordedBrief = typeof p.brief_sha256 === "string" ? p.brief_sha256 : undefined;
+  const named = briefNamedIn(expect.text);
   if (recordedBrief === undefined) {
-    checks.brief_sha256 = expect.briefPresent
-      ? { ok: false, detail: "a brief was supplied but the event records no brief_sha256" }
-      : { ok: true, detail: "no brief named" };
+    checks.brief_sha256 = named !== undefined
+      ? { ok: false, detail: `the text names a brief (${named}) but the event records no brief_sha256` }
+      : expect.briefPresent
+        ? { ok: false, detail: "a brief was supplied but the event records no brief_sha256" }
+        : { ok: true, detail: "no brief named" };
   } else if (expect.briefSha256 === undefined) {
     checks.brief_sha256 = { ok: false, detail: `event records brief_sha256 ${recordedBrief} but no brief was read` };
   } else {

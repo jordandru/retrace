@@ -11,20 +11,21 @@
  */
 import { z } from "zod";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { McpServer } from "@modelcontextprotocol/server";
 import {
   type Actor as CoreActor, type Location, type Event, type EventInput, EventInput as EventInputSchema, type EventStore,
-  appendEvent, paneTextProblem, paneTextSha256, withSentSuffix, splitSentSuffix, verifySentEvent, sha256Hex,
+  appendEvent, paneTextProblem, paneTextSha256, withSentSuffix, splitSentSuffix, verifySentEvent, briefNamedIn,
   PANE_MESSAGE_MAX_BYTES,
 } from "@retrace-dev/core";
 import { AuditActor } from "./audit-mcp.js";
 
 export type OrcaRunner = (args: string[]) => Promise<{ code: number; stdout: string; stderr: string }>;
 
-export type PaneRegistryEntry = { seat: string; kind: "agent" | "human"; empty_composer?: string; note?: string };
+export type PaneRegistryEntry = { seat: string; kind: "agent" | "human"; agent_identity?: string; empty_composer?: string; note?: string };
 export type PaneRegistry = Record<string, PaneRegistryEntry>;
 
 export type DispatchDeps = {
@@ -63,7 +64,11 @@ export function loadPaneRegistry(path: string): PaneRegistry {
     const e = v as Record<string, unknown>;
     if (e.kind !== "agent" && e.kind !== "human") throw new DispatchRefusal("registry_invalid", `${path}: ${handle}.kind must be "agent" or "human"`);
     if (typeof e.seat !== "string" || !e.seat) throw new DispatchRefusal("registry_invalid", `${path}: ${handle}.seat must name the actor id (or the human) at that pane`);
-    out[handle] = { seat: e.seat, kind: e.kind, ...(typeof e.empty_composer === "string" ? { empty_composer: e.empty_composer } : {}), ...(typeof e.note === "string" ? { note: e.note } : {}) };
+    // An agent pane binds to Orca's live label for the agent running in it (terminal list: agentIdentity), so a handle
+    // that Orca now shows under another identity is refused, not trusted from a stale declaration (Codex, PR 222 r1, M4).
+    if (e.kind === "agent" && (typeof e.agent_identity !== "string" || !e.agent_identity))
+      throw new DispatchRefusal("registry_invalid", `${path}: ${handle}.agent_identity must name Orca's agentIdentity for that pane (claude, codex, grok, …)`);
+    out[handle] = { seat: e.seat, kind: e.kind, ...(typeof e.agent_identity === "string" ? { agent_identity: e.agent_identity } : {}), ...(typeof e.empty_composer === "string" ? { empty_composer: e.empty_composer } : {}), ...(typeof e.note === "string" ? { note: e.note } : {}) };
   }
   return out;
 }
@@ -111,10 +116,15 @@ async function listedTerminal(run: OrcaRunner, handle: string): Promise<{ found:
   return { found: true, title: typeof t.title === "string" ? t.title : undefined, agentIdentity: typeof t.agentIdentity === "string" ? t.agentIdentity : undefined, writable: t.writable !== false };
 }
 
-function readBrief(path: string): { sha256: Promise<string>; bytes: number } {
-  if (!existsSync(path)) throw new DispatchRefusal("brief_missing", `brief ${path} does not exist`);
+/** sha256 of the file's exact bytes, never of a decoded and re-encoded string (Codex, PR 222 r1, M6). */
+function sha256File(path: string): { sha256: string; bytes: number } {
   const buf = readFileSync(path);
-  return { sha256: sha256Hex(buf.toString("utf8")), bytes: buf.byteLength };
+  return { sha256: createHash("sha256").update(buf).digest("hex"), bytes: buf.byteLength };
+}
+
+function readBrief(path: string): { sha256: string; bytes: number } {
+  if (!existsSync(path)) throw new DispatchRefusal("brief_missing", `brief ${path} does not exist`);
+  return sha256File(path);
 }
 
 export function registerDispatchTools(server: McpServer, deps: DispatchDeps): void {
@@ -131,7 +141,7 @@ export function registerDispatchTools(server: McpServer, deps: DispatchDeps): vo
     "retrace_send",
     {
       title: "Send a signed message into another agent's pane",
-      description: "Agent-rules 15 / agent-ops 18 in one step: checks the SEAT envelope and the byte rules, refuses the owner's JD envelope, refuses any pane not registered as an agent pane, waits for an empty composer, logs the `sent` event (text and brief hashes, target, who presses Enter) under this seat's credential, then sends the line with ` [sent-event <id>]` appended and records the outcome. A refusal writes nothing.",
+      description: "Agent-rules 15 / agent-ops 18 in one step: checks the SEAT envelope and the byte rules, refuses the owner's JD envelope, refuses any pane not registered as an agent pane or whose live Orca identity differs from the registry, requires the brief when the text names one, waits for an empty composer, logs the `sent` event (text and brief hashes, target, who presses Enter) under this seat's credential, then sends the line with ` [sent-event <id>]` appended and records whether it left the composer. A refusal writes nothing.",
       inputSchema: z.object({
         to: z.string().min(1).describe("Orca terminal handle of the receiving agent pane (must be in the pane registry as kind agent)"),
         receiver: z.string().min(1).describe("The receiving seat's actor id, e.g. codex; must match the registry entry"),
@@ -153,12 +163,16 @@ export function registerDispatchTools(server: McpServer, deps: DispatchDeps): vo
       if (entry.seat !== args.receiver) throw new DispatchRefusal("receiver_mismatch", `${args.to} is registered as ${entry.seat}, not ${args.receiver}`);
       const problem = paneTextProblem(args.text, deps.seatId);
       if (problem) throw new DispatchRefusal(problem, `text does not meet the pane-message rules for seat ${deps.seatId}`);
+      const named = briefNamedIn(args.text);
+      if (named !== undefined && !args.brief_path) throw new DispatchRefusal("brief_required", `the text names a brief (${named}); pass brief_path so its sha256 is sealed on the sent event`);
       const brief = args.brief_path ? readBrief(args.brief_path) : undefined;
-      const briefSha = brief ? await brief.sha256 : undefined;
+      const briefSha = brief?.sha256;
       const listed = await listedTerminal(run, args.to);
       if (listed.error) throw new DispatchRefusal("orca_unavailable", listed.error);
       if (!listed.found) throw new DispatchRefusal("pane_not_live", `${args.to} is not in orca-ide terminal list`);
       if (listed.writable === false) throw new DispatchRefusal("pane_not_writable", `${args.to} is not writable`);
+      if (!listed.agentIdentity || listed.agentIdentity !== entry.agent_identity)
+        throw new DispatchRefusal("identity_mismatch", `${args.to} is registered as ${entry.agent_identity} but Orca lists it as ${listed.agentIdentity ?? "(no agentIdentity)"}; the registry entry is stale or the pane was reused`);
       const first = await readComposer(run, args.to, entry.empty_composer);
       if (!first.empty) throw new DispatchRefusal("composer_not_empty", first.error ?? `first read: last line ${JSON.stringify(first.last_line)}${first.draft ? ` draft ${JSON.stringify(first.draft)}` : ""}`);
       await sleep(gateMs);
@@ -204,10 +218,16 @@ export function registerDispatchTools(server: McpServer, deps: DispatchDeps): vo
       } else {
         const r = await run(["terminal", "send", "--terminal", args.to, "--text", line, "--enter", "--json"]);
         const j = parseJson(r.stdout) as any;
-        delivered = r.code === 0 && !!j && j.ok !== false;
+        const accepted = r.code === 0 && !!j && j.ok !== false;
         const after = await readComposer(run, args.to, entry.empty_composer);
+        // Accepted by the CLI is not delivered: the measured failure is a line that sits unsubmitted in the composer
+        // (Codex, PR 222 r1, M2). Delivered means the post-send screen no longer shows our text on its last line.
+        const probe = args.text.slice(0, 40);
+        const lineSits = after.last_line.includes(probe) || (after.draft ?? "").includes(probe);
+        delivered = accepted && !lineSits;
         outcome = {
-          sent: delivered, exit: r.code,
+          sent: delivered, accepted, exit: r.code,
+          ...(accepted && lineSits ? { reason: "line_sits_in_composer" } : {}),
           receipt: j?.result ?? j ?? (r.stderr || r.stdout).trim().slice(0, 300),
           post_send: { last_line: after.last_line, composer_empty: after.empty, ...(after.draft ? { draft: after.draft } : {}) },
         };
@@ -226,7 +246,7 @@ export function registerDispatchTools(server: McpServer, deps: DispatchDeps): vo
       }));
       const text = delivered
         ? `sent ${sent.id} to ${args.receiver} (${args.to}); outcome ${executed.id}; line ${Buffer.byteLength(line, "utf8")} B\n${line}`
-        : `NOT delivered: ${String(outcome.reason ?? `orca-ide exit ${outcome.exit}`)}; sent event ${sent.id} stands, outcome ${executed.id} records the abort`;
+        : `NOT delivered: ${String(outcome.reason ?? `orca-ide exit ${outcome.exit}`)}; sent event ${sent.id} stands, outcome ${executed.id} records it${outcome.reason === "line_sits_in_composer" ? "; the line sits unsubmitted in the composer: read the pane, then press Enter as a separately logged keystroke" : ""}`;
       return { content: [{ type: "text", text }], structuredContent: { sent_event_id: sent.id, outcome_event_id: executed.id, delivered, line, outcome } };
     },
   );
@@ -235,13 +255,12 @@ export function registerDispatchTools(server: McpServer, deps: DispatchDeps): vo
     "retrace_verify_send",
     {
       title: "Verify a pane message before acting on it",
-      description: "Agent-rules 15, receiver side: splits the ` [sent-event <id>]` suffix, reads the named event raw with this seat's credential and runs the six checks (action sent; actor is the envelope's seat; sealed_by pinned:; producer_sig_verdict verified; text_sha256 of the received text; brief_sha256 of the brief on disk). Logs the `received` record naming the result (verified | missing | mismatch | unverifiable) and the failing check. Act only when `verified`.",
+      description: "Agent-rules 15, receiver side: splits the ` [sent-event <id>]` suffix, reads the named event raw with this seat's credential and runs the six checks (action sent; actor is the envelope's seat; sealed_by is that seat's pinned credential; producer_sig_verdict verified; text_sha256 of the received text; brief_sha256 of the brief on disk, required whenever the text names one). Always seals the `received` record naming the result (verified | missing | mismatch | unverifiable) and the failing check. Act only when `verified`.",
       inputSchema: z.object({
         text: z.string().min(1).describe("The received line, exactly as it arrived, suffix included"),
         brief_path: z.string().optional().describe("Path of the brief the message names, to hash against the event's brief_sha256"),
         caused_by: z.string().optional().describe("This seat's own root (its instructed/received chain) for the receipt when the message does not verify"),
         intent: z.string().optional(),
-        log_received: z.boolean().optional().describe("Default true: seal the received record. False only for a dry check."),
         project: z.string().optional(),
         actor: AuditActor.optional(),
       }),
@@ -253,7 +272,7 @@ export function registerDispatchTools(server: McpServer, deps: DispatchDeps): vo
       let briefPresent = false;
       if (args.brief_path) {
         briefPresent = true;
-        if (existsSync(args.brief_path)) briefSha = await sha256Hex(readFileSync(args.brief_path, "utf8"));
+        if (existsSync(args.brief_path)) briefSha = sha256File(args.brief_path).sha256;
       }
       if (!split) {
         verification = { signature: "missing" as const, checks: { suffix: { ok: false, detail: "no ` [sent-event evt_<32 hex>]` suffix at the end of the line" } }, failure: "suffix" };
@@ -264,8 +283,9 @@ export function registerDispatchTools(server: McpServer, deps: DispatchDeps): vo
         verification = await verifySentEvent(raw, { text: split.text, sentEventId: split.sentEventId, briefSha256: briefSha, briefPresent, readError });
       }
       const verified = verification.signature === "verified";
+      // The receipt is always sealed: rule 15 says the receiver logs `received` and only then acts (Codex, PR 222 r1, H2).
       let receivedId: string | undefined;
-      if (args.log_received !== false) {
+      {
         const textSha = await paneTextSha256(split ? split.text : args.text);
         const input = EventInputSchema.parse({
           project: deps.writeProject(args.project),

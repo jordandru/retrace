@@ -1,14 +1,19 @@
 /**
- * Review verdict shape (agent-rules 11). A verdict of record is an agent event `approved` / `rejected` tagged `review`.
- * Measured 2026-10-11 (docs/design/dispatch-protocol.md §2): 17 of 55 verdicts on six PRs carried no findings counts
- * in their params (the counts lived in prose), and one `rejected` carried only Low findings and said of itself "this
- * rejection does not block". The merger and the doctor then have to read prose to know whether a round is blocked.
- * This validator makes the counts and the blocking answer part of the sealed record. It applies only to verdicts
- * (not routing events, not the receiver's receipts); historical events are reported by the doctor, never rewritten.
+ * Review verdict shape (agent-rules 11; team-roles rule 8). A verdict of record is an agent event `approved` /
+ * `rejected` tagged `review`. Measured 2026-10-11 (docs/design/dispatch-protocol.md §2): 17 of 55 verdicts on six PRs
+ * carried no findings counts in their params (the counts lived in prose), and one `rejected` carried only Low findings
+ * and said of itself "this rejection does not block". The merger and the doctor then have to read prose to know whether
+ * a round is blocked. This validator makes the counts and the blocking answer part of the sealed record, and the
+ * blocking answer is DERIVED from severity, never declared: team-roles rule 8 says every High and Medium blocks and a
+ * Low-only verdict does not, so `blocking` must equal `high + medium > 0`, an approval may carry no High or Medium, and
+ * a `rejected` verdict with only Low findings is sealed as a non-blocking rejection (Codex, PR 222 round 1, H1: the
+ * first draft let `blocking_reason` / `accepted_reason` invert that gate). It applies only to verdicts (not routing
+ * events, not receipts); historical events are reported by the doctor, never rewritten.
  */
 export const REVIEW_TAG = "review";
 const EVENT_ID_RE = /^evt_[0-9a-f]{32}$/;
-const SHA_RE = /^[0-9a-f]{7,64}$/;
+/** The repository's full SHA-1: a verdict binds to an immutable head, never to a prefix (Codex M1). */
+const FULL_SHA_RE = /^[0-9a-f]{40}$/;
 
 export type ReviewVerdictLike = {
   action: string;
@@ -37,11 +42,16 @@ function counts(v: unknown): ReviewFindings | undefined {
   return { high, medium, low };
 }
 
+/** The blocking answer team-roles rule 8 gives for these counts. */
+export function blockingFor(f: ReviewFindings): boolean {
+  return f.high + f.medium > 0;
+}
+
 /**
  * Why a verdict cannot be sealed as it stands, or undefined when it can. Required on `method.params`:
- * `findings: {high, medium, low}` (integers), `routing_event_id` (full id), `reviewed_head` (hex sha),
- * `blocking` (boolean). A `rejected` verdict is blocking; it needs a High or Medium finding, or a
- * `blocking_reason`. An `approved` verdict is not blocking; with a High or Medium it needs an `accepted_reason`.
+ * `findings: {high, medium, low}` (integers), `routing_event_id` (full id), `reviewed_head` (full 40-hex sha),
+ * `blocking` (boolean equal to `high + medium > 0`). An `approved` verdict carries no High or Medium. A `rejected`
+ * verdict with only Low findings is allowed and is not blocking.
  */
 export function reviewVerdictProblem(e: ReviewVerdictLike): string | undefined {
   if (!isReviewVerdict(e)) return undefined;
@@ -50,18 +60,14 @@ export function reviewVerdictProblem(e: ReviewVerdictLike): string | undefined {
   if (!f) return "review verdict needs method.params.findings = {high, medium, low} as non-negative integers";
   if (typeof p.routing_event_id !== "string" || !EVENT_ID_RE.test(p.routing_event_id))
     return "review verdict needs method.params.routing_event_id (the full evt_ id of the coordinator's routing event)";
-  if (typeof p.reviewed_head !== "string" || !SHA_RE.test(p.reviewed_head))
-    return "review verdict needs method.params.reviewed_head (the commit sha the verdict binds to)";
-  if (typeof p.blocking !== "boolean") return "review verdict needs method.params.blocking (true for rejected, false for approved)";
-  const severe = f.high + f.medium > 0;
-  if (e.action === "rejected") {
-    if (p.blocking !== true) return "a rejected verdict is blocking: set method.params.blocking = true, or seal it as approved with its Low findings";
-    if (!severe && !(typeof p.blocking_reason === "string" && p.blocking_reason.trim()))
-      return "a rejected verdict with no High or Medium finding needs method.params.blocking_reason (or is approved with Low findings)";
-  } else {
-    if (p.blocking !== false) return "an approved verdict is not blocking: set method.params.blocking = false";
-    if (severe && !(typeof p.accepted_reason === "string" && p.accepted_reason.trim()))
-      return "an approved verdict that reports a High or Medium finding needs method.params.accepted_reason";
-  }
+  if (typeof p.reviewed_head !== "string" || !FULL_SHA_RE.test(p.reviewed_head))
+    return "review verdict needs method.params.reviewed_head as the full 40-hex commit sha the verdict binds to";
+  if (typeof p.blocking !== "boolean") return "review verdict needs method.params.blocking (a boolean equal to high + medium > 0)";
+  const expected = blockingFor(f);
+  if (p.blocking !== expected)
+    return `method.params.blocking must be ${expected} for findings high=${f.high} medium=${f.medium} low=${f.low}: every High and Medium blocks and a Low-only verdict does not (team-roles rule 8)`;
+  if (e.action === "approved" && expected) return "an approved verdict carries no High or Medium finding; seal it as rejected, or reclassify the finding";
+  if (p.blocking_reason !== undefined || p.accepted_reason !== undefined)
+    return "blocking_reason / accepted_reason are not accepted: the blocking answer is derived from the severities, never declared";
   return undefined;
 }

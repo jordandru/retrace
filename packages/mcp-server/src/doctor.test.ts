@@ -600,6 +600,7 @@ test("doctor: review-routing history is bounded and still fires when adoption is
     recentEventLimit: REVIEW_EFFORT_RECENT_LIMIT,
     reachesAdoption: false,
     routingHistoryComplete: true,
+    verdictShapeScanComplete: true,
   });
   assert.equal(queries.some((q) => q.text?.includes("routing")), true);
   assert.equal(queries.every((q) => typeof q.limit === "number" && q.limit <= REVIEW_EFFORT_RECENT_LIMIT), true);
@@ -642,11 +643,12 @@ test("doctor: exhausted routing search reports incomplete history without droppi
     },
   }, project);
 
-  assert.equal(calls, 65, "64 bounded routing pages plus one recent-event window");
+  assert.equal(calls, 66, "64 bounded routing pages, one verdict-shape adoption page, one recent-event window");
   assert.deepEqual(loaded.scope, {
     recentEventLimit: REVIEW_EFFORT_RECENT_LIMIT,
     reachesAdoption: false,
     routingHistoryComplete: false,
+    verdictShapeScanComplete: true,
   });
   assert.equal(loaded.events.some((event) => event.id === "evt_adopt"), false);
   const findings = reviewEffortFindings(
@@ -681,7 +683,7 @@ test("doctor: capped real routing rows never claim the oldest observed row is ad
     },
   }, project);
 
-  assert.equal(calls, 65);
+  assert.equal(calls, 66);
   assert.equal(loaded.scope.routingHistoryComplete, false);
   assert.equal(loaded.events.some((event) => event.id === "evt_true_adoption"), false);
   const findings = reviewEffortFindings(
@@ -1383,7 +1385,7 @@ test("doctor: review verdict shape is counted from its own adoption (the first v
     tags: ["review"], method: { tool: "review", params: { routing_event_id: routingId, reasoning_effort: "high", ...params } },
   });
   const models = { "gpt-6": { supports_effort: true, levels: ["high"], aliases: ["gpt-6-astra"] } };
-  const shaped = { findings: { high: 0, medium: 0, low: 0 }, reviewed_head: "0437948cbc81", blocking: false };
+  const shaped = { findings: { high: 0, medium: 0, low: 0 }, reviewed_head: "0437948cbc81c09fabdb015049eab2f12dddeb0b", blocking: false };
   // before adoption: two prose verdicts, no shape finding
   const before = reviewEffortFindings([routing, verdict("evt_v1", 2, {}), verdict("evt_v2", 3, {})], models);
   assert.equal(before.some((f) => f.label === "review verdict shape"), false);
@@ -1394,4 +1396,28 @@ test("doctor: review verdict shape is counted from its own adoption (the first v
   assert.match(shape!.detail, /^1 of 4 /);
   assert.match(shape!.detail, /adoption at seq 4/);
   assert.match(shape!.detail, /oldest evt_v4/);
+  // adoption outside the inspected window is supplied by the loader's scope, so the finding still fires (Codex M5)
+  const windowed = reviewEffortFindings([routing, verdict("evt_v4", 5, {}), verdict("evt_v5", 6, shaped)], models, { recentEventLimit: 200, reachesAdoption: true, routingHistoryComplete: true, verdictShapeAdoptionSeq: 4, verdictShapeScanComplete: true });
+  const w = windowed.find((f) => f.label === "review verdict shape");
+  assert.ok(w, windowed.map((f) => f.label).join(","));
+  assert.match(w!.detail, /^1 of 2 /);
+  assert.match(w!.detail, /adoption at seq 4/);
+});
+
+test("doctor: loadReviewEffortEvents finds verdict-shape adoption by a targeted scan even when it is outside the recent window", async () => {
+  const project = "retrace";
+  const ledger: Event[] = [];
+  const routingId = "evt_" + "1".repeat(32);
+  ledger.push(commitEvt({ project, id: routingId, seq: 1, action: "other", actor: { type: "agent", id: "claude-code" }, method: { tool: "routing", params: { target: { agent: "codex", model: "gpt-6-astra", effort: "high" } } } }));
+  ledger.push(commitEvt({ project, id: "evt_shaped_old", seq: 2, action: "approved", actor: { type: "agent", id: "codex", model: "gpt-6-astra", model_source: "harness-runtime" }, tags: ["review"], method: { tool: "review", params: { routing_event_id: routingId, reasoning_effort: "high", findings: { high: 0, medium: 0, low: 0 }, reviewed_head: "6ac80c98c75b01118ca9aaabcf44b1957e1dc1ca", blocking: false } } }));
+  for (let seq = 3; seq <= 260; seq++) ledger.push(commitEvt({ project, id: `evt_fill_${seq}`, seq, action: "edited", actor: { type: "agent", id: "claude-code" }, method: { tool: "Edit", params: {} } }));
+  ledger.push(commitEvt({ project, id: "evt_prose_new", seq: 261, action: "approved", actor: { type: "agent", id: "codex", model: "gpt-6-astra", model_source: "harness-runtime" }, tags: ["review"], method: { tool: "review", params: { routing_event_id: routingId, reasoning_effort: "high" } } }));
+  const loaded = await loadReviewEffortEvents({ async history(q: HistoryQuery) { return pageHistoryNewest(ledger, q); } }, project);
+  assert.equal(loaded.scope.verdictShapeAdoptionSeq, 2);
+  assert.equal(loaded.scope.verdictShapeScanComplete, true);
+  assert.ok(loaded.events.some((e) => e.id === "evt_shaped_old"), "the adoption event rides along with the window");
+  const findings = reviewEffortFindings(loaded.events, { "gpt-6": { supports_effort: true, levels: ["high"], aliases: ["gpt-6-astra"] } }, loaded.scope);
+  const shape = findings.find((f) => f.label === "review verdict shape");
+  assert.ok(shape, findings.map((f) => f.label).join(","));
+  assert.match(shape!.detail, /oldest evt_prose_new/);
 });
