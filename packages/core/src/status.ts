@@ -61,8 +61,16 @@ export type ProjectStatus = {
     instructions: number;
     instructions_without_followup: number;
     commits: number;
+    /** commit seals that are neither rooted, attested, nor joined to a rooted seal of the same commit */
     unlinked_commits: number;
     amended_unlinked_commits: number;
+    /**
+     * Commit seals with no rooted chain of their own whose full 40-hex `change.after_hash` is also sealed by another
+     * producer (hook, push, PR-merge webhook) whose seal IS rooted or attested. The commit is one object; its direction is
+     * on the record under the sibling seal. Counted as covered and excluded from `unlinked_commits`; the join is by full
+     * sha only, never by a 12-char artifact id.
+     */
+    same_commit_rooted: number;
     amended_artifact_refs: number;
     ineffective_amendments: number;
     unverified_links: number;
@@ -74,7 +82,7 @@ export type ProjectStatus = {
     legacy_client: number;
     owner_login_events: OwnerLoginStats;
   };
-  causality: { eligible_events: number; rooted_in_human_instruction: number; attested_events: number; broken_links: number; unlinked: number; coverage_pct: number };
+  causality: { eligible_events: number; rooted_in_human_instruction: number; attested_events: number; same_commit_rooted: number; broken_links: number; unlinked: number; coverage_pct: number };
   actors: StatusActor[];
   integrations: StatusIntegration[];
   /** Credential issuance for this project (from RETRACE_CREDENTIALS). Absent when the handler has no credential list. */
@@ -126,6 +134,11 @@ export async function buildProjectStatus(
   const amendments = collectProvenanceAmendments(events, isRooted);
   const rejectedAmendments = collectRejectedAmendments(events, isRooted);
   const attested = new Set(eligible.filter((e) => causalRootState(e, byId) !== "rooted" && amendments.get(e.id)?.some((a) => a.attest_causal_root)).map((e) => e.id));
+  const commitSeals = events.filter((e) => e.action === "committed" || e.action === "merged");
+  const fullSha = (e: Event) => { const h = e.change?.after_hash; return typeof h === "string" && /^[0-9a-f]{40}$/i.test(h) ? h.toLowerCase() : undefined; };
+  const coveredShas = new Set(commitSeals.filter((e) => causalRootState(e, byId) === "rooted" || attested.has(e.id)).map(fullSha).filter((x): x is string => !!x));
+  const sameCommitRooted = new Set(commitSeals.filter((e) => causalRootState(e, byId) !== "rooted" && !attested.has(e.id) && coveredShas.has(fullSha(e) ?? "")).map((e) => e.id));
+  const covered = (e: Event) => attested.has(e.id) || sameCommitRooted.has(e.id);
   const amendedRoles = new Set<string>();
   for (const [targetId, list] of amendments) for (const amendment of list) for (const index of amendment.artifact_roles.keys()) amendedRoles.add(`${targetId}:${index}`);
   const artifactRefs = events.flatMap((e) => e.artifacts.map((a, index) => ({ event: e, artifact: a, index })));
@@ -162,8 +175,9 @@ export async function buildProjectStatus(
       instructions: instructions.length,
       instructions_without_followup: instructions.filter((e) => !caused.has(e.id)).length,
       commits: commits.length,
-      unlinked_commits: commits.filter((e) => causalRootState(e, byId) !== "rooted" && !attested.has(e.id)).length,
+      unlinked_commits: commits.filter((e) => causalRootState(e, byId) !== "rooted" && !covered(e)).length,
       amended_unlinked_commits: commits.filter((e) => attested.has(e.id)).length,
+      same_commit_rooted: sameCommitRooted.size,
       ineffective_amendments: rejectedAmendments.length + attribution.rejected.length,
       attribution_attempts: events.filter(isAttributionAmendment).length,
       attribution: attributionUnavailable ? `unavailable: ${attributionUnavailable}` : "available",
@@ -178,9 +192,10 @@ export async function buildProjectStatus(
       eligible_events: eligible.length,
       rooted_in_human_instruction: rooted,
       attested_events: attested.size,
-      broken_links: eligible.filter((e) => causalRootState(e, byId) === "broken" && !attested.has(e.id)).length,
-      unlinked: eligible.filter((e) => causalRootState(e, byId) === "unlinked" && !attested.has(e.id)).length,
-      coverage_pct: eligible.length ? Math.round((rooted + attested.size) * 1000 / eligible.length) / 10 : 100,
+      same_commit_rooted: sameCommitRooted.size,
+      broken_links: eligible.filter((e) => causalRootState(e, byId) === "broken" && !covered(e)).length,
+      unlinked: eligible.filter((e) => causalRootState(e, byId) === "unlinked" && !covered(e)).length,
+      coverage_pct: eligible.length ? Math.round((rooted + attested.size + sameCommitRooted.size) * 1000 / eligible.length) / 10 : 100,
     },
     actors: [...actors.values()].map((a) => ({ ...a, models: a.models.sort() })).sort((a, b) => a.type.localeCompare(b.type) || a.id.localeCompare(b.id)),
     integrations: [...integrations.values()].sort((a, b) => a.system.localeCompare(b.system)),
@@ -295,7 +310,7 @@ export function renderProjectStatus(s: ProjectStatus): string {
     `${s.events.total} events · ${s.causality.coverage_pct}% causal coverage · ${s.capture.unlinked_commits}/${s.capture.commits} unlinked commits · ${s.capture.unverified_links} unverified links · ${s.capture.legacy_client} legacy-client seals\n` +
     `${s.capture.agent_events_without_model}/${s.capture.agent_events} agent events missing model (${byCause.source_none} declared none · ${byCause.no_source_recorded} no source recorded) · ${s.capture.instructions_without_followup}/${s.capture.instructions} instructions without follow-up · ${s.capture.artifact_refs_without_role}/${s.capture.artifact_refs} artifact refs missing role\n` +
     (sourceParts.length ? `model sources: ${sourceParts.join(" · ")}\n` : "") +
-    `append-only amendments: ${s.capture.amended_unlinked_commits} commits attested · ${s.capture.amended_artifact_refs} artifact roles supplied · ${s.capture.ineffective_amendments} rejected links\n` +
+    `append-only amendments: ${s.capture.amended_unlinked_commits} commits attested · ${s.capture.amended_artifact_refs} artifact roles supplied · ${s.capture.ineffective_amendments} rejected links · ${s.capture.same_commit_rooted ?? 0} commit seals rooted through another seal of the same commit\n` +
     (s.capture.owner_login_events ? `GitHub owner-login events: ${s.capture.owner_login_events.sealed_as_human} sealed human · read-time: ${s.capture.owner_login_events.read_time_labels.declared_by_seat} declared-by-seat · ${s.capture.owner_login_events.read_time_labels.conflicting} conflicting · ${s.capture.owner_login_events.read_time_labels.unresolved} unresolved (computed at read, not sealed) · ${s.capture.owner_login_events.legacy_unknown_login} legacy unknown login · identity-mapped ${s.capture.owner_login_events.by_status.identity_mapped} (current policy identities, separate scope)\n` : "") +
     `sealed by: ${s.capture.sealed_by.pinned} pinned · ${s.capture.sealed_by.assert} assert · ${s.capture.sealed_by.webhook} webhook · ${s.capture.sealed_by.owner} owner-asserted · ${s.capture.sealed_by.unauthenticated} unauthenticated · ${s.capture.sealed_by.unstamped} unstamped; ${s.capture.agent_events_not_pinned}/${s.capture.agent_events} agent events not pinned\n` +
     (s.capture.attribution_unavailable ? `attribution evaluation unavailable: ${s.capture.attribution_unavailable} (${s.capture.attribution_attempts ?? 0} attempts)\n` : `attribution amendments: ${s.capture.attribution_amendments ?? 0} effective · ${s.capture.superseded_attribution_amendments ?? 0} superseded · ${s.capture.partially_amended_events ?? 0} partially amended events\n`) +

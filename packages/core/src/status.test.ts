@@ -24,7 +24,7 @@ test("project status: integrity, causal coverage, capture gaps, actors and integ
   await appendEvent(store, { project: "p", actor: { type: "human", id: "jordan@example.com" }, action: "committed", artifacts: [{ id: "commit:p@orphan" }], location: { system: "git" } });
   const s = await buildProjectStatus(store, "p", new Date("2026-01-01T00:00:00Z"));
   assert.equal(s.integrity.ok, true);
-  assert.deepEqual(s.causality, { eligible_events: 3, rooted_in_human_instruction: 2, attested_events: 0, broken_links: 0, unlinked: 1, coverage_pct: 66.7 });
+  assert.deepEqual(s.causality, { eligible_events: 3, rooted_in_human_instruction: 2, attested_events: 0, same_commit_rooted: 0, broken_links: 0, unlinked: 1, coverage_pct: 66.7 });
   assert.equal(s.capture.unlinked_commits, 1);
   assert.equal(s.capture.agent_events_without_model, 1);
   assert.deepEqual(s.capture.agent_events_without_model_by_cause, { source_none: 0, no_source_recorded: 1 });
@@ -37,6 +37,28 @@ test("project status: integrity, causal coverage, capture gaps, actors and integ
   assert.equal(s.capture.legacy_client, 0);
   assert.deepEqual(s.actors.map((a) => [a.type, a.id, a.events]), [["agent", "gemini", 2], ["human", "jordan@example.com", 2]]);
   assert.deepEqual(s.integrations.map((i) => [i.system, i.events]), [["gemini-cli", 2], ["git", 2]]);
+});
+
+test("a commit seal with no chain is covered when another seal of the same full sha is rooted; sha12 and other shas do not join", async () => {
+  const store = new MemStore();
+  const sha = "15f0ca1a9707" + "a".repeat(28);
+  const root = (await appendEvent(store, { project: "p", actor: { type: "human", id: "jordan@example.com" }, action: "instructed", artifacts: [{ id: "task:pr12", role: "generated" }] })).event;
+  // git hook seal of the merge: rooted, carries the full sha
+  await appendEvent(store, { project: "p", actor: { type: "agent", id: "claude-code" }, action: "merged", artifacts: [{ id: `commit:p@${sha.slice(0, 12)}`, role: "generated" }], caused_by: root.id, change: { after_hash: sha } });
+  // PR-merge webhook seal of the same commit: no caused_by (the PR body carried no token)
+  const webhook = (await appendEvent(store, { project: "p", actor: { type: "human", id: "github:jordandru" }, action: "merged", artifacts: [{ id: `commit:p@${sha.slice(0, 12)}`, role: "generated" }], change: { after_hash: sha } })).event;
+  // same 12-char artifact id but no full sha on the seal: must not join
+  await appendEvent(store, { project: "p", actor: { type: "human", id: "github:jordandru" }, action: "committed", artifacts: [{ id: `commit:p@${sha.slice(0, 12)}`, role: "generated" }] });
+  // a different commit with no chain: stays unlinked
+  await appendEvent(store, { project: "p", actor: { type: "system", id: "checkpoint[bot]" }, action: "committed", artifacts: [{ id: "commit:p@e0e2dddca251", role: "generated" }], change: { after_hash: "e0e2dddca251" + "b".repeat(28) } });
+  const s = await buildProjectStatus(store, "p");
+  assert.equal(s.capture.commits, 4);
+  assert.equal(s.capture.same_commit_rooted, 1);
+  assert.equal(s.capture.unlinked_commits, 2, "the sha12-only seal and the checkpoint stay unlinked");
+  assert.equal(s.capture.amended_unlinked_commits, 0, "the join is not an attestation");
+  assert.deepEqual(s.causality, { eligible_events: 4, rooted_in_human_instruction: 1, attested_events: 0, same_commit_rooted: 1, broken_links: 0, unlinked: 2, coverage_pct: 50 });
+  assert.equal(causalRootState(webhook, new Map(store.events.map((e) => [e.id, e]))), "unlinked", "the seal's own chain is unchanged; only the status join covers it");
+  assert.match(renderProjectStatus(s), /1 commit seals rooted through another seal of the same commit/);
 });
 
 test("rooted append-only amendments resolve debt without changing sealed targets", async () => {
