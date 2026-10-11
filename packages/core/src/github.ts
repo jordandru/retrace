@@ -51,14 +51,27 @@ export function githubActor(user: any, fallback = "github"): Actor {
   };
 }
 
+const CAUSED_BY_LINE = /^Retrace-Caused-By:[ \t]*(.*)$/gim;
 const CAUSED_BY_FULL = /^evt_[a-f0-9]{32}$/i;
-/** A full id is `evt_` plus 32 hex. A shorter or longer `evt_` token is not a parent; the token is returned so the mapped event can show the omission. A line with no `evt_` token is ignored. */
+const REJECTED_TOKEN_CAP = 64;
+/** The last line that starts with the key wins. A value longer than 64 characters keeps that prefix and its full length. */
+function boundRejected(token: string): string {
+  if (token.length <= REJECTED_TOKEN_CAP) return token;
+  return `${token.slice(0, REJECTED_TOKEN_CAP)}…(${token.length})`;
+}
+/**
+ * One trailer line, anchored at line start, value staying on that line.
+ * The last such line wins. A 32-hex id is stored lowercase. A line with no
+ * `evt_` token sets neither field.
+ */
 function causedByFrom(text?: string | null): { id?: string; rejected?: string } {
-  const token = text?.match(/Retrace-Caused-By:\s*(\S+)/i)?.[1];
-  if (!token) return {};
-  if (CAUSED_BY_FULL.test(token)) return { id: token };
-  if (!/^evt_/i.test(token)) return {};
-  return { rejected: token };
+  if (!text) return {};
+  const lines = [...text.replace(/\r\n?/g, "\n").matchAll(CAUSED_BY_LINE)];
+  if (!lines.length) return {};
+  const token = lines[lines.length - 1][1].trim();
+  if (!token || !/^evt_/i.test(token)) return {};
+  if (CAUSED_BY_FULL.test(token)) return { id: token.toLowerCase() };
+  return { rejected: boundRejected(token) };
 }
 const trim = (s: string | null | undefined, n = 300) => { const t = s?.replace(/^\s*Retrace-[\w-]+:.*$/gim, "").trim(); return t ? (t.length > n ? t.slice(0, n - 1) + "…" : t) : undefined; };
 
@@ -167,16 +180,15 @@ export async function mapGithubWebhook(event: string, payload: any, opts: Github
       const parents: string[] = parentsComplete
         ? c.parents.filter((p: unknown): p is string => typeof p === "string")
         : [];
-      const rawCausedBy = r.trailers["retrace-caused-by"]?.[0]?.trim();
-      const causedByRejected = rawCausedBy && !r.causedBy && /^evt_/i.test(rawCausedBy) ? rawCausedBy : undefined;
+      const pushCause = causedByFrom(String(c.message ?? ""));
       return {
         project, actor, action: "committed" as const,
         artifacts: [{ id: `commit:${repoFull}@${String(c.id).slice(0, 12)}`, kind: "commit", label: `${repoFull}@${String(c.id).slice(0, 7)}`, role: "generated" as const }, ...files.map((f) => ({ id: `repo:${repoFull}#${f}`, kind: "file", label: f, role: "generated" as const }))],
-        timestamp: c.timestamp, location: where(c.url), intent: r.intent, caused_by: r.causedBy,
+        timestamp: c.timestamp, location: where(c.url), intent: r.intent, caused_by: pushCause.id,
         change: { after_hash: c.id, summary: `${files.length} file${files.length === 1 ? "" : "s"} (pushed to ${String(payload.ref ?? "").replace(/^refs\/heads\//, "")})` },
         method: { tool: "git", automated: actor.type !== "human", params: {
           sha: c.id, producer: "github-push", ref: payload.ref, pusher: payload.pusher?.name,
-          ...(causedByRejected ? { caused_by_rejected: causedByRejected } : {}),
+          ...(pushCause.rejected ? { caused_by_rejected: pushCause.rejected } : {}),
           raw_message: String(c.message ?? ""), author: { name: c.author?.name, email: c.author?.email ?? (c.author?.username ? `github:${c.author.username}` : undefined) },
           parents, parents_complete: parentsComplete, model_claim: r.modelClaim, principal_rule: "agent-address/1",
         } },

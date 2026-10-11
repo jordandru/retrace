@@ -90,6 +90,47 @@ test("caused_by accepts a 32-hex id and records a short evt_ token", async () =>
   assert.equal(pushed.method?.params?.caused_by_rejected, "evt_abc123");
 });
 
+test("caused_by trailer lines are anchored, last line wins, and ids are lowercase", async () => {
+  const full = "evt_" + "a".repeat(32);
+  const upper = "EVT_" + "A".repeat(32);
+  const open = (body: string) => mapGithubWebhook("pull_request", {
+    action: "opened", repository: repo, sender: jordan, pull_request: { ...pr, body },
+  }).then((events) => events[0]);
+  const upperCase = await open(`work\n\nRetrace-Caused-By:   ${upper}  `);
+  assert.equal(upperCase.caused_by, full);
+  assert.equal(upperCase.method?.params?.caused_by_rejected, undefined);
+  const tooLong = await open(`work\n\nRetrace-Caused-By: evt_${"b".repeat(33)}`);
+  assert.equal(tooLong.caused_by, undefined);
+  assert.equal(tooLong.method?.params?.caused_by_rejected, "evt_" + "b".repeat(33));
+  const suffixed = await open(`work\n\nRetrace-Caused-By: ${full} extra`);
+  assert.equal(suffixed.caused_by, undefined);
+  assert.equal(suffixed.method?.params?.caused_by_rejected, `${full} extra`);
+  const inline = await open(`see Retrace-Caused-By: ${full} in prose`);
+  assert.equal(inline.caused_by, undefined);
+  assert.equal(inline.method?.params?.caused_by_rejected, undefined);
+  const split = await open(`work\n\nRetrace-Caused-By: evt_abc\n${full.slice(7)}`);
+  assert.equal(split.caused_by, undefined);
+  assert.equal(split.method?.params?.caused_by_rejected, "evt_abc");
+  const lastWins = await open(`work\n\nRetrace-Caused-By: not-an-event\nRetrace-Caused-By: evt_abc123\nRetrace-Caused-By: ${full}`);
+  assert.equal(lastWins.caused_by, full);
+  assert.equal(lastWins.method?.params?.caused_by_rejected, undefined);
+  const lastJunk = await open(`work\n\nRetrace-Caused-By: ${full}\nRetrace-Caused-By: evt_abc123`);
+  assert.equal(lastJunk.caused_by, undefined);
+  assert.equal(lastJunk.method?.params?.caused_by_rejected, "evt_abc123");
+  const huge = "evt_" + "c".repeat(200);
+  const bounded = await open(`work\n\nRetrace-Caused-By: ${huge}`);
+  assert.equal(bounded.caused_by, undefined);
+  assert.equal(bounded.method?.params?.caused_by_rejected, `${huge.slice(0, 64)}…(${huge.length})`);
+  const [pushed] = await mapGithubWebhook("push", { repository: repo, commits: [{
+    id: "3123456789abcdef",
+    message: `Fix\n\nRetrace-Actor: codex\nRetrace-Caused-By: ${upper}\n`,
+    timestamp: "2026-08-16T14:00:00Z",
+    author: { email: "j@x", name: "J" },
+    added: [], modified: [], removed: [],
+  }] }, { includePush: true });
+  assert.equal(pushed.caused_by, full);
+});
+
 test("T8 push agent-address/1 resolves a user sender as the authenticated principal", async () => {
   const payload = {
     repository: repo,
