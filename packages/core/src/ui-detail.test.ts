@@ -348,7 +348,7 @@ test("the header badges open a status pane whose numbers are the ledger's own /s
   assert.match(d, /<span class="num bad">75<\/span>% — 3 rooted of 4 eligible events/);
   assert.match(d, /append-only amendments<\/td><td>0 commits · 0 roles/);
   assert.match(d, /unverified caused_by links<\/td><td><span class="num ok">0<\/span>/);
-  assert.match(d, /commits without a causal root<\/td><td><span class="num bad">2<\/span> \/ 4/);
+  assert.match(d, /commit seals without a causal root<\/td><td><span class="num bad">2<\/span> \/ 4/);
   assert.match(d, /agent events without a model<\/td><td><span class="num ok">0<\/span> \/ 1/);
   assert.match(d, /data-actor="claude-code"[^>]*>claude-code<\/span>/);
   assert.match(d, /data-actor="mystery"[^>]*>mystery<\/span>.*<span class="num bad">none recorded<\/span>/);
