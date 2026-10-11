@@ -520,17 +520,17 @@ test("F8: an unsettled classification store operation is response-bounded", asyn
   let clock = 10_000;
   const { store, h } = handler(new MemoryEventStore(), { now: () => clock });
   await putPolicy(h);
-  const originalLookup = store.byIdempotencyKey.bind(store);
-  store.byIdempotencyKey = async (...args) => {
-    const found = await originalLookup(...args);
-    if (String(args[1]).startsWith("gh:push:")) clock += WEBHOOK_DELIVERY_DEADLINE_MS;
-    return found;
+  let stalledReads = 0;
+  store.eventsReferencingArtifacts = async () => {
+    stalledReads += 1;
+    clock += WEBHOOK_DELIVERY_DEADLINE_MS;
+    return new Promise(() => {});
   };
-  store.eventsReferencingArtifacts = async () => new Promise(() => {});
   const response = await postPush(h, pushPayload(), "d-unsettled");
   assert.equal(response.status, 202, await response.clone().text());
   assert.equal((await response.json() as { reason?: string }).reason, "deadline");
   assert.equal(store.events.filter((event) => event.action === "committed").length, 0);
+  assert.ok(stalledReads >= 1, "the stalled artifact read must be reached");
 });
 
 test("F8: admission, dedup, and outcome persistence share the delivery deadline", async () => {
@@ -935,7 +935,8 @@ test("F19: expired outcome rejection is observed under default Node rejection ha
     const response = await postPush(h, pushPayload(), "d-expired-outcome");
     assert.equal(response.status, 202, await response.clone().text());
     assert.equal((await response.json() as { reason?: string }).reason, "deadline");
-    await Promise.resolve();
+    // Scheduling yield, not a timing margin.
+    await new Promise<void>((resolve) => setImmediate(resolve));
     assert.equal(breakerCalls, 2);
     assert.ok(logged.some((line) => line.includes("outcome read failed")), "late rejection must be logged and swallowed");
   } finally {
