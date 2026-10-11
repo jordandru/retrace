@@ -681,7 +681,7 @@ test("F8: an in-flight insert times out with pending retained and drain-accounte
   assert.equal(await store.getPendingDelivery("d-insert-gap"), null);
 });
 
-test("F9/F10: drain budgets are per-sha and terminal/policy-off work stays durable", async () => {
+test("F9/F10: drain budgets are per-sha, terminal rows stay, and a policy-off push is sealed", async () => {
   const { store, h } = handler();
   await putPolicy(h);
   const shas = ["1".repeat(40), "2".repeat(40), "3".repeat(40)];
@@ -716,12 +716,12 @@ test("F9/F10: drain budgets are per-sha and terminal/policy-off work stays durab
     received_at: "2026-09-10T12:00:00.000Z", repo: "acme/app", routing_state: "received",
   });
   const off = await drainPendingGithubDeliveries(offStore, { trailerPolicy: "off" });
-  assert.equal(off.failed, 1);
-  const offRow = await offStore.getPendingDelivery("d-off");
-  assert.ok(offRow);
-  const offOutcome = JSON.parse(offRow!.outcomes!) as Record<string, { status: string; reason: string }>;
-  assert.equal(offOutcome[SHA]!.status, "pending");
-  assert.equal(offOutcome[SHA]!.reason, "policy_off");
+  assert.deepEqual(off, { drained: 1, failed: 0 });
+  assert.equal(await offStore.getPendingDelivery("d-off"), null);
+  assert.deepEqual(
+    offStore.events.filter((event) => event.idempotency_key?.startsWith("gh:push:")).map((event) => event.idempotency_key),
+    [`gh:push:acme/app:${SHA}`],
+  );
 });
 
 test("drain refuses malformed artifact ids in retained owner-login deliveries under their idempotency outcome key", async () => {
@@ -977,4 +977,66 @@ test("F16 HTTP: duplicate delivery ids cannot execute the same half-open probe",
   ]);
   assert.deepEqual(responses.map((response) => response.status).sort(), [201, 202]);
   assert.equal(classifiers, 1);
+});
+
+test("live push answers 202 at the delivery deadline, the drain seals the rest, and a redelivery does not double-seal", async () => {
+  const shas = [
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "cccccccccccccccccccccccccccccccccccccccc",
+  ];
+  let clock = 30_000;
+  let jumped = false;
+  const store = new MemoryEventStore();
+  const { h } = handler(store, { trailerPolicy: "off", now: () => clock });
+  await putPolicy(h);
+  const originalHead = store.head.bind(store);
+  store.head = async (...args) => {
+    const found = await originalHead(...args);
+    const sealed = store.events.filter((event) => event.idempotency_key?.startsWith("gh:push:")).length;
+    if (!jumped && sealed >= 1) {
+      jumped = true;
+      clock += WEBHOOK_DELIVERY_DEADLINE_MS;
+    }
+    return found;
+  };
+  const payload = pushPayload({
+    commits: shas.map((id) => ({
+      id,
+      message: "work\n\nRetrace-Actor: codex\n",
+      timestamp: "2026-09-10T12:00:00.000Z",
+      author: { name: "Jordan", email: "jordan@example.com" },
+      added: ["a.ts"],
+      modified: [],
+      removed: [],
+    })),
+  });
+  const pushKeys = () => store.events
+    .filter((event) => event.idempotency_key?.startsWith("gh:push:"))
+    .map((event) => event.idempotency_key)
+    .sort();
+  const first = await postPush(h, payload, "d-live-deadline");
+  assert.equal(first.status, 202, await first.clone().text());
+  const body = await first.json() as { ok?: boolean; pending?: string[]; reason?: string };
+  assert.equal(body.ok, true);
+  assert.equal(body.reason, "deadline");
+  assert.deepEqual(body.pending, shas.slice(1));
+  assert.deepEqual(pushKeys(), [`gh:push:acme/app:${shas[0]}`]);
+
+  const again = await postPush(h, payload, "d-live-deadline");
+  assert.equal(again.status, 202, await again.clone().text());
+  assert.equal((await again.json() as { reused?: boolean }).reused, true);
+  assert.deepEqual(pushKeys(), [`gh:push:acme/app:${shas[0]}`]);
+
+  const drain = await drainPendingGithubDeliveries(store, { trailerPolicy: "off" });
+  assert.deepEqual(drain, { drained: 1, failed: 0 });
+  assert.deepEqual(pushKeys(), shas.map((id) => `gh:push:acme/app:${id}`).sort());
+  assert.equal(store.pending.length, 0);
+
+  const after = await postPush(h, payload, "d-live-deadline");
+  assert.equal(after.status, 201, await after.clone().text());
+  const logged = await after.json() as { logged?: Array<{ deduped?: boolean }> };
+  assert.equal(logged.logged?.length, shas.length);
+  assert.ok(logged.logged?.every((row) => row.deduped === true));
+  assert.deepEqual(pushKeys(), shas.map((id) => `gh:push:acme/app:${id}`).sort());
 });
