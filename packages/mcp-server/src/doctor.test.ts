@@ -1370,3 +1370,28 @@ test("T11 owner-login gate uses first /2 adoption, passes declarations/unresolve
   assert.match((await ownerLoginFinding(await store.all(f.project), store.policies, false)).detail, new RegExp(bad.event.id));
   for (const status of ["declared_by_seat", "identity_mapped"]) assert.equal(sealedLooksAgent({ actor: { type: "system" }, method: { params: { sealed_by: "webhook:github", owner_login_decision: { policy: "owner-login/1", decision: { status } } } } }), true);
 });
+
+test("doctor: review verdict shape is counted from its own adoption (the first verdict with a boolean blocking), never before", () => {
+  const project = "retrace";
+  const routingId = "evt_" + "1".repeat(32);
+  const routing = commitEvt({
+    project, id: routingId, seq: 1, action: "other", actor: { type: "agent", id: "claude-code" },
+    method: { tool: "routing", params: { target: { agent: "codex", model: "gpt-6-astra", effort: "high" } } },
+  });
+  const verdict = (id: string, seq: number, params: Record<string, unknown>) => commitEvt({
+    project, id, seq, action: "approved", actor: { type: "agent", id: "codex", model: "gpt-6-astra", model_source: "harness-runtime" },
+    tags: ["review"], method: { tool: "review", params: { routing_event_id: routingId, reasoning_effort: "high", ...params } },
+  });
+  const models = { "gpt-6": { supports_effort: true, levels: ["high"], aliases: ["gpt-6-astra"] } };
+  const shaped = { findings: { high: 0, medium: 0, low: 0 }, reviewed_head: "0437948cbc81", blocking: false };
+  // before adoption: two prose verdicts, no shape finding
+  const before = reviewEffortFindings([routing, verdict("evt_v1", 2, {}), verdict("evt_v2", 3, {})], models);
+  assert.equal(before.some((f) => f.label === "review verdict shape"), false);
+  // adoption at seq 4; the later prose verdict is counted, the earlier ones are not
+  const after = reviewEffortFindings([routing, verdict("evt_v1", 2, {}), verdict("evt_v3", 4, shaped), verdict("evt_v4", 5, {}), verdict("evt_v5", 6, shaped)], models);
+  const shape = after.find((f) => f.label === "review verdict shape");
+  assert.ok(shape, after.map((f) => f.label).join(","));
+  assert.match(shape!.detail, /^1 of 4 /);
+  assert.match(shape!.detail, /adoption at seq 4/);
+  assert.match(shape!.detail, /oldest evt_v4/);
+});

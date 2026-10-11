@@ -4,7 +4,8 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, lstatSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
-import { ownerLoginRecord, PolicyDocument, policyDigestOf, evaluateActivation, looksLikePolicyActivation, isAttributionAmendment, Actor, Credential, Event, EventStore, HistoryQuery, ProjectStatus, ReconcileReport, asHistoryPage, causalRootState, localConfigDrift, renderProjectStatus, schemaSurface } from "@retrace-dev/core";
+import { ownerLoginRecord, PolicyDocument, policyDigestOf, evaluateActivation, looksLikePolicyActivation, isAttributionAmendment, Actor, Credential, Event, EventStore, HistoryQuery, ProjectStatus, ReconcileReport, asHistoryPage, causalRootState, localConfigDrift, renderProjectStatus, schemaSurface, reviewVerdictProblem,
+} from "@retrace-dev/core";
 import { Cfg, commitToEvent, resolveHookToken } from "./git-hook.js";
 import { ReconcileCfg, commitFacts, reconcileOptionsFrom, reconcileWithGit, repoNamesFor } from "./reconcile.js";
 import { RemoteStore, retraceHeaders } from "./remote-store.js";
@@ -355,6 +356,13 @@ export function reviewEffortFindings(events: Event[], models: RoutingModelRegist
   const missingModelsLegacy: Event[] = [];
   const missingModelsRegisteredNoSource: Event[] = [];
   const missingEfforts: Event[] = [];
+  const malformedVerdicts: Event[] = [];
+  // The verdict shape (docs/design/dispatch-protocol.md §2) is counted from its own adoption: the first verdict that
+  // carries a boolean `blocking`. Before that, no verdict is held to a shape nobody had yet, which is how the routing
+  // findings treat routing adoption above.
+  const verdictShapeAdoptionSeq = events
+    .filter((event) => isReviewEvent(event) && typeof paramsOf(event).blocking === "boolean")
+    .reduce<number | undefined>((first, event) => first === undefined ? event.seq : Math.min(first, event.seq), undefined);
   let reviewCount = 0;
   for (const review of events.filter((event) => event.seq > adoptionSeq && isReviewEvent(event))) {
     reviewCount++;
@@ -385,6 +393,7 @@ export function reviewEffortFindings(events: Event[], models: RoutingModelRegist
     if (capability?.supports_effort && !effort) {
       missingEfforts.push(review);
     }
+    if (verdictShapeAdoptionSeq !== undefined && review.seq > verdictShapeAdoptionSeq && reviewVerdictProblem(review)) malformedVerdicts.push(review);
     if (!routingId) {
       unrouted.push(review);
       continue;
@@ -448,6 +457,7 @@ export function reviewEffortFindings(events: Event[], models: RoutingModelRegist
     summary(missingModelsLegacy, "review model", "do not report an actor.model listed in the routing model registry (unknown models have no inferred fallback) (no source recorded)"),
     summary(missingModels, "review model", "do not report an actor.model listed in the routing model registry (unknown models have no inferred fallback)"),
     summary(missingEfforts, "review reasoning effort", "use an effort-capable model but do not self-report method.params.reasoning_effort"),
+    summary(malformedVerdicts, "review verdict shape", `carry no findings counts, routing id, reviewed head and blocking answer in method.params; counted from the shape's adoption at seq ${verdictShapeAdoptionSeq} (docs/design/dispatch-protocol.md §2)`),
     ...findings,
   ].filter((finding): finding is Finding => finding !== undefined);
 }
