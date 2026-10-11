@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  CLAIM_DECISION_PARAM, MemoryEventStore, POLICY_PROFILE, SEALED_BY_PARAM, appendEvent,
+  CLAIM_DECISION_PARAM, MemoryEventStore, POLICY_PROFILE, SEALED_BY_PARAM, WEBHOOK_DELIVERY_DEADLINE_MS, appendEvent,
   applyBreakerFailure, createHandler, drainPendingGithubDeliveries, generateSigningKey,
   signProducer, PRODUCER_SIG_FORMAT_V2, type EventInput,
 } from "./index.js";
@@ -517,19 +517,20 @@ test("F8: one 2s delivery budget returns 202 with current and remaining shas", a
 });
 
 test("F8: an unsettled classification store operation is response-bounded", async () => {
-  const { store, h } = handler();
+  let clock = 10_000;
+  const { store, h } = handler(new MemoryEventStore(), { now: () => clock });
   await putPolicy(h);
-  store.eventsReferencingArtifacts = async () => new Promise(() => {});
-  const started = Date.now();
+  let stalledReads = 0;
+  store.eventsReferencingArtifacts = async () => {
+    stalledReads += 1;
+    clock += WEBHOOK_DELIVERY_DEADLINE_MS;
+    return new Promise(() => {});
+  };
   const response = await postPush(h, pushPayload(), "d-unsettled");
-  const elapsed = Date.now() - started;
   assert.equal(response.status, 202, await response.clone().text());
   assert.equal((await response.json() as { reason?: string }).reason, "deadline");
   assert.equal(store.events.filter((event) => event.action === "committed").length, 0);
-  // Issue #117: the behaviour is the 202 with reason "deadline" and zero committed events, asserted above; the lower
-  // bound proves the handler waited for the deadline. The former upper bound (< 1500 ms) was a wall-clock window the
-  // full suite's concurrency pushed past twice in a row on 2026-09-24, so it measured the host, not the code.
-  assert.ok(elapsed >= 450, `response took ${elapsed} ms`);
+  assert.ok(stalledReads >= 1, "the stalled artifact read must be reached");
 });
 
 test("F8: admission, dedup, and outcome persistence share the delivery deadline", async () => {
@@ -912,17 +913,17 @@ test("F13: three real classifier timer expirations open the breaker", async () =
 });
 
 test("F19: expired outcome rejection is observed under default Node rejection handling", async () => {
-  const { store, h } = handler();
+  let clock = 20_000;
+  const { store, h } = handler(new MemoryEventStore(), { now: () => clock });
   await putPolicy(h);
   const originalLookup = store.byIdempotencyKey.bind(store);
   const originalGetBreaker = store.getBreaker.bind(store);
   let breakerCalls = 0;
   store.byIdempotencyKey = async (...args) => {
-    if (String(args[1]).startsWith("gh:push:"))
-      await new Promise((resolve) => setTimeout(resolve, 1_650));
-    return originalLookup(...args);
+    const found = await originalLookup(...args);
+    if (String(args[1]).startsWith("gh:push:")) clock += WEBHOOK_DELIVERY_DEADLINE_MS;
+    return found;
   };
-  store.eventsReferencingArtifacts = async () => new Promise(() => {});
   store.getBreaker = async (...args) => {
     if (++breakerCalls > 1) throw new Error("outcome read failed");
     return originalGetBreaker(...args);
@@ -934,7 +935,8 @@ test("F19: expired outcome rejection is observed under default Node rejection ha
     const response = await postPush(h, pushPayload(), "d-expired-outcome");
     assert.equal(response.status, 202, await response.clone().text());
     assert.equal((await response.json() as { reason?: string }).reason, "deadline");
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    // Scheduling yield, not a timing margin.
+    await new Promise<void>((resolve) => setImmediate(resolve));
     assert.equal(breakerCalls, 2);
     assert.ok(logged.some((line) => line.includes("outcome read failed")), "late rejection must be logged and swallowed");
   } finally {
