@@ -70,6 +70,7 @@ export type ProjectStatus = {
      * on the record under the sibling seal. Counted as covered and excluded from `unlinked_commits`; the join is by full
      * sha only, never by a 12-char artifact id.
      */
+    /** commit seals whose own chain is unlinked, covered for status by a rooted or attested seal of the same repository+full sha from a different producer; not rooted, not attested, not in coverage_pct */
     same_commit_rooted: number;
     amended_artifact_refs: number;
     ineffective_amendments: number;
@@ -135,9 +136,37 @@ export async function buildProjectStatus(
   const rejectedAmendments = collectRejectedAmendments(events, isRooted);
   const attested = new Set(eligible.filter((e) => causalRootState(e, byId) !== "rooted" && amendments.get(e.id)?.some((a) => a.attest_causal_root)).map((e) => e.id));
   const commitSeals = events.filter((e) => e.action === "committed" || e.action === "merged");
+  // Same-commit sibling join (status only; it attests nothing and changes no seal's own chain). A seal joins a rooted or
+  // attested sibling only when all four bind: (1) its own chain is `unlinked`, never `broken`: a dangling or malformed
+  // parent is a record defect and stays in broken_links; (2) both carry a well-formed 40-hex change.after_hash and they are
+  // equal; (3) both carry a `commit:<owner/repo>@<hex>` artifact naming the same repository whose hex is a prefix of that
+  // sha; (4) the producers differ (sealedByKind of the sealed_by stamp), so a hook seal is never covered by another hook
+  // seal of the same sha from a second checkout, nor a webhook seal by another webhook seal.
   const fullSha = (e: Event) => { const h = e.change?.after_hash; return typeof h === "string" && /^[0-9a-f]{40}$/i.test(h) ? h.toLowerCase() : undefined; };
-  const coveredShas = new Set(commitSeals.filter((e) => causalRootState(e, byId) === "rooted" || attested.has(e.id)).map(fullSha).filter((x): x is string => !!x));
-  const sameCommitRooted = new Set(commitSeals.filter((e) => causalRootState(e, byId) !== "rooted" && !attested.has(e.id) && coveredShas.has(fullSha(e) ?? "")).map((e) => e.id));
+  const commitKey = (e: Event): string | undefined => {
+    const sha = fullSha(e);
+    if (!sha) return undefined;
+    for (const a of e.artifacts) {
+      const m = /^commit:([^@\s]+)@([0-9a-f]{7,40})$/i.exec(a.id);
+      if (m && sha.startsWith(m[2].toLowerCase())) return `${m[1]}@${sha}`;
+    }
+    return undefined;
+  };
+  const producerKind = (e: Event) => sealedByKind(e.method?.params?.[SEALED_BY_PARAM]);
+  const coveredSeals = new Map<string, Set<string>>();
+  for (const e of commitSeals) {
+    if (!(causalRootState(e, byId) === "rooted" || attested.has(e.id))) continue;
+    const key = commitKey(e);
+    if (!key) continue;
+    if (!coveredSeals.has(key)) coveredSeals.set(key, new Set());
+    coveredSeals.get(key)!.add(producerKind(e));
+  }
+  const sameCommitRooted = new Set(commitSeals.filter((e) => {
+    if (causalRootState(e, byId) !== "unlinked" || attested.has(e.id)) return false;
+    const key = commitKey(e);
+    const kinds = key ? coveredSeals.get(key) : undefined;
+    return !!kinds && [...kinds].some((k) => k !== producerKind(e));
+  }).map((e) => e.id));
   const covered = (e: Event) => attested.has(e.id) || sameCommitRooted.has(e.id);
   const amendedRoles = new Set<string>();
   for (const [targetId, list] of amendments) for (const amendment of list) for (const index of amendment.artifact_roles.keys()) amendedRoles.add(`${targetId}:${index}`);
@@ -195,7 +224,7 @@ export async function buildProjectStatus(
       same_commit_rooted: sameCommitRooted.size,
       broken_links: eligible.filter((e) => causalRootState(e, byId) === "broken" && !covered(e)).length,
       unlinked: eligible.filter((e) => causalRootState(e, byId) === "unlinked" && !covered(e)).length,
-      coverage_pct: eligible.length ? Math.round((rooted + attested.size + sameCommitRooted.size) * 1000 / eligible.length) / 10 : 100,
+      coverage_pct: eligible.length ? Math.round((rooted + attested.size) * 1000 / eligible.length) / 10 : 100,
     },
     actors: [...actors.values()].map((a) => ({ ...a, models: a.models.sort() })).sort((a, b) => a.type.localeCompare(b.type) || a.id.localeCompare(b.id)),
     integrations: [...integrations.values()].sort((a, b) => a.system.localeCompare(b.system)),
@@ -310,7 +339,7 @@ export function renderProjectStatus(s: ProjectStatus): string {
     `${s.events.total} events · ${s.causality.coverage_pct}% causal coverage · ${s.capture.unlinked_commits}/${s.capture.commits} unlinked commits · ${s.capture.unverified_links} unverified links · ${s.capture.legacy_client} legacy-client seals\n` +
     `${s.capture.agent_events_without_model}/${s.capture.agent_events} agent events missing model (${byCause.source_none} declared none · ${byCause.no_source_recorded} no source recorded) · ${s.capture.instructions_without_followup}/${s.capture.instructions} instructions without follow-up · ${s.capture.artifact_refs_without_role}/${s.capture.artifact_refs} artifact refs missing role\n` +
     (sourceParts.length ? `model sources: ${sourceParts.join(" · ")}\n` : "") +
-    `append-only amendments: ${s.capture.amended_unlinked_commits} commits attested · ${s.capture.amended_artifact_refs} artifact roles supplied · ${s.capture.ineffective_amendments} rejected links · ${s.capture.same_commit_rooted ?? 0} commit seals rooted through another seal of the same commit\n` +
+    `append-only amendments: ${s.capture.amended_unlinked_commits} commits attested · ${s.capture.amended_artifact_refs} artifact roles supplied · ${s.capture.ineffective_amendments} rejected links · ${s.capture.same_commit_rooted ?? 0} commit seals covered by a sibling seal of the same commit (not rooted; excluded from coverage)\n` +
     (s.capture.owner_login_events ? `GitHub owner-login events: ${s.capture.owner_login_events.sealed_as_human} sealed human · read-time: ${s.capture.owner_login_events.read_time_labels.declared_by_seat} declared-by-seat · ${s.capture.owner_login_events.read_time_labels.conflicting} conflicting · ${s.capture.owner_login_events.read_time_labels.unresolved} unresolved (computed at read, not sealed) · ${s.capture.owner_login_events.legacy_unknown_login} legacy unknown login · identity-mapped ${s.capture.owner_login_events.by_status.identity_mapped} (current policy identities, separate scope)\n` : "") +
     `sealed by: ${s.capture.sealed_by.pinned} pinned · ${s.capture.sealed_by.assert} assert · ${s.capture.sealed_by.webhook} webhook · ${s.capture.sealed_by.owner} owner-asserted · ${s.capture.sealed_by.unauthenticated} unauthenticated · ${s.capture.sealed_by.unstamped} unstamped; ${s.capture.agent_events_not_pinned}/${s.capture.agent_events} agent events not pinned\n` +
     (s.capture.attribution_unavailable ? `attribution evaluation unavailable: ${s.capture.attribution_unavailable} (${s.capture.attribution_attempts ?? 0} attempts)\n` : `attribution amendments: ${s.capture.attribution_amendments ?? 0} effective · ${s.capture.superseded_attribution_amendments ?? 0} superseded · ${s.capture.partially_amended_events ?? 0} partially amended events\n`) +
