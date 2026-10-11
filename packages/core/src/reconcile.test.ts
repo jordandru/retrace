@@ -544,3 +544,15 @@ test("T13 owner-login account merge keeps webhook missing_commit downgrade witho
   const report = reconcile([commit("b", ["x.ts"])], [merge], { repoName: REPO });
   assert.deepEqual([report.commits[0].findings[0].kind, report.commits[0].findings[0].level], ["missing_commit", "warn"]);
 });
+
+test("#195 the report states whether attribution amendments were evaluated", () => {
+  const seal = sealed(10, "a", codex, ["x.ts"]);
+  const none = reconcile([commit("a", ["x.ts"])], [seal], { repoName: REPO });
+  assert.deepEqual(none.attribution, { status: "not_needed" });
+  const amendment = ev(11, jordan, "other", ["event:" + seal.id], { action_detail: "amended", tags: ["amendment", "attribution"], method: { tool: "retrace_amend", params: { sealed_by: "owner", target_event_id: seal.id, attribution: {} } } });
+  const unavailable = reconcile([commit("a", ["x.ts"])], [seal, amendment], { repoName: REPO });
+  assert.deepEqual(unavailable.attribution, { status: "unavailable", reason: "untrusted_snapshot" });
+  const named = reconcile([commit("a", ["x.ts"])], [seal, amendment], { repoName: REPO, attributionUnavailable: "context_missing: full commit identity commit:b96676bc" });
+  assert.deepEqual(named.attribution, { status: "unavailable", reason: "context_missing: full commit identity commit:b96676bc" });
+  assert.match(JSON.stringify(named), /"attribution":\{"status":"unavailable","reason":"context_missing/);
+});

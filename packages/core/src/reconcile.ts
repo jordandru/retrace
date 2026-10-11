@@ -17,6 +17,7 @@
 import { Event } from "./schema.js";
 import { captureSeals, effectiveBoundary, firstStampedSeq as captureFirstStampedSeq, previousCaptureTouch, restrictedSealEligibility, sameActor, actorKey, validateCapturePolicy, webhookSealsFromEvents, type CaptureTouch, type RestrictedStamp } from "./capture.js";
 import { collectAttributionAmendments, type AttributionOptions } from "./attribution.js";
+import { isAttributionAmendment } from "./attribution-context.js";
 
 export type CommitFileStatus = "A" | "M" | "D" | "R" | "C" | "T" | "U" | "X";
 export interface CommitFile { path: string; status: CommitFileStatus; /** rename/copy source */ from?: string }
@@ -86,12 +87,32 @@ export interface ReconcileReport {
    * preserving the report bytes of ledgers that predate the feature. */
   restricted_hook_stamps?: { event_id: string; seq: number; eligible: boolean; reason?: string; paths?: string[]; dropped?: string[] }[];
   summary: Record<ReconcileFindingKind | "commits" | "sealed" | "acknowledged", number> & {amended?:number};
+  /** Whether attribution amendments were evaluated on this run (issue #195). A reader of `--json` must not take a
+   *  `misattributed` finding as live, or an amendment as applied, while this is `unavailable`. */
+  attribution: ReconcileAttributionState;
   /** no unacknowledged fail-level finding */
   ok: boolean;
 }
 
+export interface ReconcileAttributionState {
+  /** `evaluated`: every attribution amendment in the export was classified against a verified capture context and the
+   *  effective ones were applied to the findings; `unavailable`: the export carries amendments but the context could not
+   *  be built, so no amendment was applied and every `misattributed` finding is reported as if uncorrected; `not_needed`:
+   *  the export carries no attribution amendment, so there was nothing to evaluate. */
+  status: "evaluated" | "unavailable" | "not_needed";
+  /** For `unavailable`: the failure, verbatim (`context_missing: …`, `untrusted_snapshot`, …). */
+  reason?: string;
+  /** For `evaluated`: how the amendments were classified. */
+  amendments?: { effective: number; superseded: number; rejected: number };
+  policy_digest?: string;
+  git_facts_digest?: string;
+  head_hash?: string;
+}
+
 export interface ReconcileOptions {
   attribution?: AttributionOptions;
+  /** Why the caller could not build `attribution` (the thrown message), reported verbatim as `attribution.reason`. */
+  attributionUnavailable?: string;
   /** the name the git hook uses in artifact ids (`commit:<repoName>@…`, `repo:<repoName>#…`) */
   repoName: string;
   /** other names producers use for the same repo — `retrace` for `jordandru/retrace`; the basename is always accepted */
@@ -307,6 +328,15 @@ export function reconcile(commits: CommitFacts[], events: Event[], opts: Reconci
     commitTouches.push({key:seal.key,seq:seal.seq,paths,restricted});
   }
   const attribution = collectAttributionAmendments(evs, opts.attribution);
+  const attributionState: ReconcileAttributionState = !evs.some(isAttributionAmendment)
+    ? { status: "not_needed" }
+    : attribution.unavailable !== undefined || !attribution.context
+      ? { status: "unavailable", reason: opts.attributionUnavailable ?? attribution.unavailable ?? "context_missing" }
+      : {
+        status: "evaluated",
+        amendments: { effective: [...attribution.effective.values()].reduce((n, list) => n + list.length, 0), superseded: attribution.superseded.length, rejected: attribution.rejected.length },
+        policy_digest: attribution.context.policy_digest, git_facts_digest: attribution.context.git_facts_digest, head_hash: attribution.context.head_hash,
+      };
 
 
   const verdicts: CommitVerdict[] = [];
@@ -462,7 +492,7 @@ export function reconcile(commits: CommitFacts[], events: Event[], opts: Reconci
     .map(([sha12,touch]) => ({ sha12,seq:touch.hook ?? touch.legacy ?? touch.webhook! }))
     .sort((a,b)=>a.seq-b.seq);
   const ok = !verdicts.some((v) => v.findings.some((f) => f.level === "fail"));
-  return { format: "retrace-reconcile/1", repo_name: opts.repoName, range: { commits: commits.length, first_seq: firstSeq, last_seq: lastSeq, head_seq: headSeq }, commits: verdicts, orphans, pending: [...pendingMap.values()], seals, ...(restrictedDiagnostics.length ? {restricted_hook_stamps:restrictedDiagnostics}:{}) , summary, ok };
+  return { format: "retrace-reconcile/1", repo_name: opts.repoName, range: { commits: commits.length, first_seq: firstSeq, last_seq: lastSeq, head_seq: headSeq }, commits: verdicts, orphans, pending: [...pendingMap.values()], seals, ...(restrictedDiagnostics.length ? {restricted_hook_stamps:restrictedDiagnostics}:{}) , summary, attribution: attributionState, ok };
 }
 
 /** One-line-per-finding text rendering shared by the CLI and the workflow PR body. */

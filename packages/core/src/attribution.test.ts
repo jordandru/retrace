@@ -332,7 +332,7 @@ test("Git eligible universe, same-SHA cutoff and reconcile per-file certificate"
   let r=await prepare(x,facts);assert.equal(active(r)[0].whole_event,true);assert.deepEqual(active(r)[0].artifacts,["repo:org/r#a","repo:org/r#b"]);
   const commits=[{sha:oid,parents:[],files:[{path:"a",status:"A" as const},{path:"b",status:"A" as const}]}];
   const report=reconcile(commits,r.events,{repoName:"org/r",hookSealedBy:["assert:hook"],attribution:r.options});
-  assert.equal(report.ok,true);const certificate=report.commits[0].findings.find(f=>f.kind==="misattributed")?.amended;
+  assert.equal(report.ok,true);assert.equal(report.attribution.status,"evaluated");assert.deepEqual(report.attribution.amendments,{effective:1,superseded:0,rejected:0});assert.equal(report.attribution.head_hash,r.options.context!.head_hash);const certificate=report.commits[0].findings.find(f=>f.kind==="misattributed")?.amended;
   assert.ok(certificate && "files" in certificate);assert.equal(certificate.files.length,2);
   x[4]=amendment("A","T",O,B,["repo:org/r#a"]);r=await prepare(x,facts);
   const partial=reconcile(commits,r.events,{repoName:"org/r",hookSealedBy:["assert:hook"],attribution:r.options});assert.equal(partial.ok,false);
@@ -489,4 +489,35 @@ test("shared causal root walker: strict attribution parents reject forward/forei
   assert.equal(state([r,{...e,caused_by:undefined}]),"unlinked");
   assert.equal(state([r,{...e,caused_by:"missing"}]),"broken");
   assert.equal(state([r,{...e,caused_by:e.id}]),"broken");
+});
+
+test("#195 a non-seal merge record with a bare commit ref is a diagnostic, not a context failure",async()=>{
+  const oid="e".repeat(40),bare=`commit:${oid}`;
+  // the live shape: a `merged` record logged through MCP under a pinned credential, no method.tool, no git: key
+  const mcpMerge={...ev("M",O,ids("pr:org/r#60",bare),"merged"),idempotency_key:"0e2a4c5b-mcp",method:{params:{sealed_by:"pinned:O",producer_sig_verdict:"verified"}}};
+  const r=await prepare([root(),mcpMerge,ev("G",C),ev("E",B),ev("T"),amendment("A")]);
+  assert.deepEqual(r.options.context!.diagnostics.filter(d=>d.status==="ignored"),[{event_id:"M",seq:1,artifact_id:bare,status:"ignored",reason:"non_seal_commit_record"}]);
+  assert.equal(r.result.unavailable,undefined,"the context builds and the amendment is evaluated");
+  assert.equal(active(r).length,1);
+  // the same bare ref on any seal-shaped record stays fail-closed
+  const hookShaped={...mcpMerge,id:"H",method:{tool:"git",params:{sealed_by:"assert:hook"}}};
+  await assert.rejects(prepare([root(),hookShaped,ev("G",C),ev("E",B),ev("T"),amendment("A")]),/context_missing: full commit identity commit:e{40}/);
+  const pushShaped={...mcpMerge,id:"P",tags:["github","push"],method:{params:{sealed_by:"webhook:github"}}};
+  await assert.rejects(prepare([root(),pushShaped,ev("G",C),ev("E",B),ev("T"),amendment("A")]),/context_missing: full commit identity/);
+  const gitKey={...mcpMerge,id:"K",idempotency_key:`git:${oid}`};
+  await assert.rejects(prepare([root(),gitKey,ev("G",C),ev("E",B),ev("T"),amendment("A")]),/context_missing: full commit identity/);
+  // PR 198 round 1, Codex C-M1: the predicate covers what the capture rules accept
+  const upperKey={...mcpMerge,id:"U",idempotency_key:`GIT:${oid.toUpperCase()}`};
+  await assert.rejects(prepare([root(),upperKey,ev("G",C),ev("E",B),ev("T"),amendment("A")]),/context_missing: full commit identity/,"restricted capture reads git: keys case-insensitively");
+  const nonGitCapture={...ev("N",O,[{id:"doc:a",role:"generated" as const},{id:bare,role:"generated" as const}],"merged"),idempotency_key:"n-mcp",method:{params:{sealed_by:"assert:capture"}}};
+  await assert.rejects(prepare([root(),nonGitCapture,ev("G",C),ev("E",B),ev("T"),amendment("A")]),/context_missing: full commit identity/,"a policy-trusted non-Git capture stamp keeps the record fail-closed");
+  const hookStamped={...mcpMerge,id:"S",method:{params:{sealed_by:"assert:hook"}}};
+  await assert.rejects(prepare([root(),hookStamped,ev("G",C),ev("E",B),ev("T"),amendment("A")]),/context_missing: full commit identity/,"a repository's hook stamp keeps the record fail-closed without method.tool");
+  const unstamped={...mcpMerge,id:"X",method:{params:{}}};
+  await assert.rejects(prepare([root(),unstamped,ev("G",C),ev("E",B),ev("T"),amendment("A")]),/context_missing: full commit identity/,"an unstamped record is not exempt");
+  const pushTagged={...mcpMerge,id:"W",tags:["push"]};
+  await assert.rejects(prepare([root(),pushTagged,ev("G",C),ev("E",B),ev("T"),amendment("A")]),/context_missing: full commit identity/,"the push tag alone keeps the record fail-closed");
+  // and the seq-10390 shape, an untrusted pinned stamp with no Git fields, is still the one case that is exempt
+  const r2=await prepare([root(),mcpMerge,ev("G",C),ev("E",B),ev("T"),amendment("A")]);
+  assert.equal(r2.options.context!.diagnostics.filter(d=>d.status==="ignored").length,1);
 });

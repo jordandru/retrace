@@ -124,12 +124,14 @@ export async function reconcileRepo(repo: string, opts: { since?: string; limit?
   const reconcileOpts = reconcileOptionsFrom(cfg, opts);
   const { events, note } = await fetchEvents(project, opts.pubkey, repo);
   let attribution;
+  let attributionUnavailable: string | undefined;
   let attributionNote="";
   if(events.some(isAttributionAmendment)) {
     try { const {attributionOptionsForRepo}=await import("./attribution.js"); attribution=await attributionOptionsForRepo(repo,events,project); }
-    catch(error) { attributionNote=`; attribution evaluation unavailable: ${error instanceof Error?error.message:error}`; }
+    catch(error) { attributionUnavailable=error instanceof Error?error.message:String(error); attributionNote=`; attribution evaluation unavailable: ${attributionUnavailable}`; }
   }
-  const report = reconcileWithGit(repo, commits, events, { ...repoNamesFor(repo, cfg), repoPath: repo, ...reconcileOpts, attribution });
+  // The JSON report carries the same state as the text note (issue #195): `report.attribution`.
+  const report = reconcileWithGit(repo, commits, events, { ...repoNamesFor(repo, cfg), repoPath: repo, ...reconcileOpts, attribution, attributionUnavailable });
   return { report, note:note+attributionNote };
 }
 

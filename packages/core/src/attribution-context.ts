@@ -43,9 +43,14 @@ export interface AttributionCaptureContext {
   project: string; head_seq: number; head_hash: string;
   policy_digest: string; git_facts_digest: string;
   domains: Map<string, AttributionDomain>;
-  /** Non-seal commit references that cannot supply a capture identity. Raw events remain unchanged. */
+  /** Non-seal commit references that cannot supply a capture identity. Raw events remain unchanged.
+   *  `non_seal_commit_record` (issue #195; PR 198 round 1, Codex C-M1): a `committed`/`merged` event carrying a commit
+   *  ref that does not resolve, on a record no capture rule looks at: no `method.tool: "git"`, no `git:` idempotency key
+   *  in any casing, no `push` tag, and a `sealed_by` stamp that is present but trusted by no repository (hook, restricted,
+   *  owner), no non-Git scheme (`capture_stamps`) and is not the GitHub webhook, for the record's sequence. Every other
+   *  shape stays fail-closed (`context_missing`). The live trigger is seq 10390: an MCP-logged merge under a pinned stamp. */
   diagnostics: (
-    | { event_id: string; seq: number; artifact_id: string; status: "ignored"; reason: "malformed_commit_ref" | "unavailable_commit_ref" }
+    | { event_id: string; seq: number; artifact_id: string; status: "ignored"; reason: "malformed_commit_ref" | "unavailable_commit_ref" | "non_seal_commit_record" }
     | { event_id: string; seq: number; status: "restricted"; eligible: boolean; reason?: string; paths?: string[]; dropped?: string[] }
   )[];
   canonicalArtifact: (id: string, seq: number) => string | undefined;
@@ -95,6 +100,28 @@ export async function prepareAttributionContext(snapshot: AttributionSnapshot, p
     if (mappings.length > 1) throw new Error("context_conflict: overlapping non-Git policy");
     return mappings.length === 1 ? id : undefined;
   };
+  // A commit or merge record is seal-shaped when any capture rule could accept it, and then its identity stays
+  // fail-closed. The rules (`capture.ts` `captureSealEligible`, `restrictedSealEligibility`; the non-Git touches
+  // below) look at: `method.tool: "git"`; a `git:` idempotency key, case-insensitive; the `push` tag; and the server
+  // stamp `sealed_by`, when it is one this policy trusts for the record's sequence (a repository's hook or restricted
+  // stamps, `owner` where owner seals are allowed, a non-Git scheme's capture stamps, the GitHub webhook). An unstamped
+  // record is kept fail-closed too. Only a record that carries none of these, such as a merge logged through MCP under
+  // an untrusted pinned stamp, can never define a capture boundary, so an unresolvable commit ref on it is recorded as
+  // a diagnostic instead of failing the whole context (issue #195: one such record, seq 10390 in project retrace, made
+  // attribution evaluation unavailable on every run; the predicate's width is PR 198 round 1, Codex C-M1).
+  const trustedStamps = (seq: number) => new Set<string>([
+    ...policy.repositories.filter(p => inInterval(p,seq)).flatMap(p => [...p.hook_sealed_by, ...(p.restricted_hook_stamps ?? []).map(r => r.stamp), ...(p.owner_seals ? ["owner"] : [])]),
+    ...policy.non_git.filter(p => inInterval(p,seq)).flatMap(p => p.capture_stamps),
+    "webhook:github",
+  ]);
+  const sealShaped = (e: Event) => {
+    const stamp = e.method?.params?.sealed_by;
+    return e.method?.tool === "git"
+      || (typeof e.idempotency_key === "string" && /^git:/i.test(e.idempotency_key))
+      || e.tags?.includes("push") === true
+      || typeof stamp !== "string"
+      || trustedStamps(e.seq).has(stamp);
+  };
   // Historical coverage is mandatory for every reference using a declared repository alias.
   for (const e of snapshot.events) for (const a of e.artifacts) {
     if (a.id.startsWith("commit:")) {
@@ -103,7 +130,8 @@ export async function prepareAttributionContext(snapshot: AttributionSnapshot, p
         // Push reports and other non-seal references cannot define a capture boundary.
         continue;
       }
-      resolve(a.id); // Required seal identities must remain fail-closed, including malformed refs.
+      if (resolvedRef(a.id) || sealShaped(e)) resolve(a.id); // Seal-shaped identities remain fail-closed, including malformed refs.
+      else diagnostics.push({event_id:e.id,seq:e.seq,artifact_id:a.id,status:"ignored",reason:"non_seal_commit_record"});
     }
     const repo=/^(?:repo:([^#]+)#|commit:([^@]+)@)/.exec(a.id)?.slice(1).find(Boolean);
     if (!repo) continue;
