@@ -958,7 +958,8 @@ export type CausedByProblem = "missing" | "wrong_project" | "not_older";
 
 /** Classify a claimed parent. `not_older` is timestamp (Drive Activity can predate the current instruct), compared as
  *  instants (issue #227): a push-webhook record keeps its committer's offset (`09:47:47-06:00`), which a string compare
- *  put after a `Z` parent sealed a minute earlier. A timestamp outside the grammar fails closed to `not_older`. */
+ *  put after a `Z` parent sealed a minute earlier. Only an absent record timestamp is unchecked. A timestamp outside the
+ *  grammar on either side fails closed to `not_older`, and the empty string is outside the grammar. */
 export function causedByProblem(
   parent: Event | null | undefined,
   input: Pick<EventInput, "caused_by" | "project" | "timestamp">,
@@ -966,7 +967,7 @@ export function causedByProblem(
   if (!input.caused_by) return undefined;
   if (!parent) return "missing";
   if (parent.project !== input.project) return "wrong_project";
-  if (input.timestamp) {
+  if (input.timestamp !== undefined) {
     const order = instantOrder(parent.timestamp, input.timestamp);
     if (order === undefined || order > 0) return "not_older";
   }
