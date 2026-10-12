@@ -22,6 +22,17 @@ class MemStore implements EventStore {
   async createShare(_s: Share) {} async getShare() { return null; }
 }
 
+test("#227 last_seen is the later instant across offsets, stored as written", async () => {
+  const store = new MemStore();
+  const at = (id: string, timestamp: string) => appendEvent(store, { project: "p", actor: { type: "agent", id: "grok" }, action: "edited", artifacts: [{ id, role: "both" }], timestamp, location: { system: "git" } });
+  await at("repo:p#a", "2026-10-12T15:47:47.000Z");
+  await at("repo:p#b", "2026-10-12T09:50:00-06:00"); // 15:50:00Z, the latest instant
+  await at("repo:p#c", "2026-10-12T15:48:00.000Z"); // later as a string, earlier as an instant
+  const s = await buildProjectStatus(store, "p", new Date("2026-10-13T00:00:00Z"));
+  assert.equal(s.actors.find((a) => a.id === "grok")!.last_seen, "2026-10-12T09:50:00-06:00");
+  assert.equal(s.integrations.find((i) => i.system === "git")!.last_seen, "2026-10-12T09:50:00-06:00");
+});
+
 test("project status: integrity, causal coverage, capture gaps, actors and integrations share one model", async () => {
   const store = new MemStore();
   const root = (await appendEvent(store, { project: "p", actor: { type: "human", id: "jordan@example.com" }, action: "instructed", artifacts: [{ id: "task:1", role: "generated" }], location: { system: "gemini-cli" } })).event;

@@ -2,7 +2,7 @@ import { ownerLoginStats, OwnerLoginStats } from "./owner-login-status.js";
 import { collectAttributionAmendments, effectiveActor, isAttributionAmendment, type AttributionOptions } from "./attribution.js";
 import { Event, ModelSource } from "./schema.js";
 import { VerifyResult } from "./chain.js";
-import { EventStore, verifyProject } from "./store.js";
+import { EventStore, instantOrder, verifyProject } from "./store.js";
 import { collectProvenanceAmendments, collectRejectedAmendments } from "./amendment.js";
 import { isLegacyClientCommitSeal } from "./producer-sig.js";
 import { CAUSED_BY_UNVERIFIED_TAG, SEALED_BY_PARAM, sealedByKind } from "./store.js";
@@ -169,14 +169,16 @@ export async function buildProjectStatus(
     const a=view.actor;
     const ak = `${a.type}:${a.id}`;
     const actor = actors.get(ak) ?? { type: a.type, id: a.id, events: 0, last_seen: e.timestamp, models: [] };
-    actor.events++; if (e.timestamp > actor.last_seen) actor.last_seen = e.timestamp;
+    // The later instant, not the later string (issue #227); the stored last_seen stays as written. A timestamp outside the
+    // grammar never replaces it: the schema refuses those at append (none in the ledger, measured 2026-10-12).
+    actor.events++; if ((instantOrder(e.timestamp, actor.last_seen) ?? 0) > 0) actor.last_seen = e.timestamp;
     if (a.model && !actor.models.includes(a.model)) actor.models.push(a.model);
     if(view.amended) { actor.amended_from ??= []; if(!actor.amended_from.some(a=>a.type===e.actor.type&&a.id===e.actor.id))actor.amended_from.push({type:e.actor.type,id:e.actor.id}); }
     actors.set(ak, actor);
     const system = e.location?.system;
     if (system) {
       const integration = integrations.get(system) ?? { system, events: 0, last_seen: e.timestamp };
-      integration.events++; if (e.timestamp > integration.last_seen) integration.last_seen = e.timestamp;
+      integration.events++; if ((instantOrder(e.timestamp, integration.last_seen) ?? 0) > 0) integration.last_seen = e.timestamp;
       integrations.set(system, integration);
     }
   }
