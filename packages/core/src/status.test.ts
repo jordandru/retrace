@@ -83,7 +83,7 @@ test("sibling corroboration: an unlinked webhook seal is corroborated by a roote
   const html = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../ui/retrace.html"), "utf8");
   const covered = html.match(/<div class="k">Covered<\/div>.*\n/)![0];
   assert.doesNotMatch(covered, /sibling/);
-  assert.match(html, /<div class="k">Sibling-corroborated<\/div><div class="v">\$\{num\(z\.sibling_corroborated \?\? 0\)\}[^\n]*roots nothing/);
+  assert.match(html, /<div class="k">Sibling-corroborated<\/div><div class="v">\$\{s\.policy\?\.mode === "none" \? `disabled [^\n]*\$\{num\(z\.sibling_corroborated \?\? 0\)\}[^\n]*roots nothing/);
   assert.doesNotMatch(html, /same_commit_rooted|more covered/);
 });
 
@@ -104,6 +104,43 @@ test("sibling corroboration: only the policy's authenticated producers corrobora
   assert.equal((await pair(HOOK, { stamp: "pinned:codex (signing)" })).s.capture.sibling_corroborated, 0);
   // no policy: no trusted stamps, no repositories, nothing corroborates
   assert.equal((await pair(HOOK, {}, null)).s.capture.sibling_corroborated, 0);
+});
+
+test("sibling corroboration: one policy read; the reported policy digest/version is the document the join used (r3 M1)", async () => {
+  class RotatingStore extends MemStore {
+    docs: PolicyDocument[] = []; reads = 0;
+    override async getPolicy() { return this.docs[Math.min(this.reads++, this.docs.length - 1)] ?? null; }
+  }
+  const v1 = policyDoc();
+  const v2: PolicyDocument = { ...policyDoc(), body: { ...policyDoc().body, trusted_hook_stamps: ["assert:git hook (rotated)"] }, envelope: { ...policyDoc().envelope, version: 2 }, digest: "1".repeat(64) };
+  const store = new RotatingStore(); store.docs = [v1, v2];
+  const root = (await appendEvent(store, { project: "p", actor: { type: "human", id: "jordan@example.com" }, action: "instructed", artifacts: [{ id: "task:pr12", role: "generated" }] })).event;
+  await seal(store, { stamp: HOOK, caused_by: root.id, action: "merged" });
+  await seal(store, { stamp: "webhook:github" });
+  const s = await buildProjectStatus(store, "p");
+  assert.equal(store.reads, 1, "the policy is read once per status");
+  assert.equal(s.capture.sibling_corroborated, 1, "computed under v1, whose stamp is trusted");
+  assert.deepEqual(s.policy, { mode: "document", digest: v1.digest, version: 1 }, "and the response reports v1, not the rotated v2");
+  // a second status sees v2 everywhere: the old stamp is no longer trusted and the metadata says v2
+  const s2 = await buildProjectStatus(store, "p");
+  assert.equal(s2.capture.sibling_corroborated, 0);
+  assert.deepEqual(s2.policy, { mode: "document", digest: v2.digest, version: 2 });
+});
+
+test("sibling corroboration: the absent-policy fail-closed state is visible in the CLI line and the UI row (r3 L1)", async () => {
+  const { s } = await pair(HOOK, {}, null);
+  assert.equal(s.policy?.mode, "none");
+  assert.equal(s.capture.sibling_corroborated, 0);
+  const text = renderProjectStatus(s);
+  assert.match(text, /sibling corroboration: disabled, no policy \(read-time, roots nothing/);
+  assert.doesNotMatch(text, /0 unlinked commit seals whose commit/);
+  const withPolicy = renderProjectStatus((await pair(HOOK)).s);
+  assert.match(withPolicy, /sibling corroboration \(read-time, roots nothing\): 1 unlinked commit seals/);
+  const html = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../ui/retrace.html"), "utf8");
+  const row = html.match(/<div class="k">Sibling-corroborated<\/div>.*\n/)![0];
+  assert.match(row, /s\.policy\?\.mode === "none" \? `disabled /, "the UI row reads s.policy");
+  assert.match(row, /no project policy/);
+  assert.match(row, /num\(z\.sibling_corroborated \?\? 0\)/);
 });
 
 test("sibling corroboration: canonical repository identity (M2) and malformed inputs (L1)", async () => {

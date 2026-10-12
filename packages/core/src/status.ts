@@ -132,6 +132,7 @@ export async function buildProjectStatus(
       integrations.set(system, integration);
     }
   }
+  // read ONCE: corroboration, owner-login labels and the reported policy digest/version all use this document
   const policy = store.getPolicy ? await store.getPolicy(project, { current: true }) : null;
   const isRooted = (e: Event) => causalRootState(e, byId) === "rooted";
   const amendments = collectProvenanceAmendments(events, isRooted);
@@ -239,16 +240,18 @@ export async function buildProjectStatus(
     actors: [...actors.values()].map((a) => ({ ...a, models: a.models.sort() })).sort((a, b) => a.type.localeCompare(b.type) || a.id.localeCompare(b.id)),
     integrations: [...integrations.values()].sort((a, b) => a.system.localeCompare(b.system)),
     ...(credentials !== undefined ? { issuance: projectIssuanceStatus(credentials, project) } : {}),
-    ...(await projectPolicyStatus(store, project, extras?.githubRepoProjects)),
+    ...(await projectPolicyStatus(store, project, policy, extras?.githubRepoProjects)),
   };
 }
 
+/** `doc` is the ONE policy document this status was computed under (sibling corroboration, owner-login labels): the
+ *  reported digest/version must be that document, never a second read that a rotation could have moved. */
 async function projectPolicyStatus(
   store: EventStore,
   project: string,
+  doc: Awaited<ReturnType<NonNullable<EventStore["getPolicy"]>>>,
   githubRepoProjects?: Record<string, string>,
 ): Promise<Pick<ProjectStatus, "policy" | "routing">> {
-  const doc = store.getPolicy ? await store.getPolicy(project, { current: true }) : null;
   const envRepos = Object.entries(githubRepoProjects ?? {})
     .filter(([, p]) => p === project)
     .map(([repo]) => canonicalGithubRepo(repo));
@@ -350,7 +353,9 @@ export function renderProjectStatus(s: ProjectStatus): string {
     `${s.capture.agent_events_without_model}/${s.capture.agent_events} agent events missing model (${byCause.source_none} declared none · ${byCause.no_source_recorded} no source recorded) · ${s.capture.instructions_without_followup}/${s.capture.instructions} instructions without follow-up · ${s.capture.artifact_refs_without_role}/${s.capture.artifact_refs} artifact refs missing role\n` +
     (sourceParts.length ? `model sources: ${sourceParts.join(" · ")}\n` : "") +
     `append-only amendments: ${s.capture.amended_unlinked_commits} commits attested · ${s.capture.amended_artifact_refs} artifact roles supplied · ${s.capture.ineffective_amendments} rejected links\n` +
-    `sibling corroboration (read-time, roots nothing): ${s.capture.sibling_corroborated ?? 0} unlinked commit seals whose commit the other authenticated producer sealed with a rooted chain; still counted in unlinked\n` +
+    (s.policy?.mode === "none"
+      ? `sibling corroboration: disabled, no policy (read-time, roots nothing; a project policy names the trusted hook stamp)\n`
+      : `sibling corroboration (read-time, roots nothing): ${s.capture.sibling_corroborated ?? 0} unlinked commit seals whose commit the other authenticated producer sealed with a rooted chain; still counted in unlinked\n`) +
     (s.capture.owner_login_events ? `GitHub owner-login events: ${s.capture.owner_login_events.sealed_as_human} sealed human · read-time: ${s.capture.owner_login_events.read_time_labels.declared_by_seat} declared-by-seat · ${s.capture.owner_login_events.read_time_labels.conflicting} conflicting · ${s.capture.owner_login_events.read_time_labels.unresolved} unresolved (computed at read, not sealed) · ${s.capture.owner_login_events.legacy_unknown_login} legacy unknown login · identity-mapped ${s.capture.owner_login_events.by_status.identity_mapped} (current policy identities, separate scope)\n` : "") +
     `sealed by: ${s.capture.sealed_by.pinned} pinned · ${s.capture.sealed_by.assert} assert · ${s.capture.sealed_by.webhook} webhook · ${s.capture.sealed_by.owner} owner-asserted · ${s.capture.sealed_by.unauthenticated} unauthenticated · ${s.capture.sealed_by.unstamped} unstamped; ${s.capture.agent_events_not_pinned}/${s.capture.agent_events} agent events not pinned\n` +
     (s.capture.attribution_unavailable ? `attribution evaluation unavailable: ${s.capture.attribution_unavailable} (${s.capture.attribution_attempts ?? 0} attempts)\n` : `attribution amendments: ${s.capture.attribution_amendments ?? 0} effective · ${s.capture.superseded_attribution_amendments ?? 0} superseded · ${s.capture.partially_amended_events ?? 0} partially amended events\n`) +
