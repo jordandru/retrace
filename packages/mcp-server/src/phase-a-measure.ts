@@ -522,7 +522,7 @@ export async function measureHandshakeSchemas(): Promise<HandshakeMeasure> {
     tools,
     worker_audit_subset_bytes,
     worker_audit_tool_count: tools.filter((t) => audit.has(t.name)).length,
-    note: "census: UTF-8 bytes of this checkout's MCP tools/list payload (name + description + inputSchema) after handshake. Fixed per harness version. Local CLI MCP is 11 tools; the Worker remote MCP is the 9-tool audit subset (no retrace_amend, no retrace_share).",
+    note: "census: UTF-8 bytes of this checkout's MCP tools/list payload (name + description + inputSchema) after handshake. Fixed per harness version. Local CLI MCP is 13 tools; the Worker remote MCP is the 9-tool audit subset (no retrace_amend, no retrace_share, no retrace_send, no retrace_verify_send).",
   };
 }
 

@@ -44,7 +44,7 @@ import {
   buildLineage, lineageForModel, renderLineageDot, renderLineageMermaid, renderLineageText,
   buildProjectStatus, projectStatusForModel, renderProjectStatus,
   AMENDMENT_ACTION_DETAIL, causalRootState, collectProvenanceAmendments,
-  InvalidHistoryCursorError,
+  InvalidHistoryCursorError, reviewVerdictProblem,
 } from "@retrace-dev/core";
 import { ensureSigningKey } from "./keys.js";
 import { loadProducerPrivateKey, sealForAppend } from "./producer-key.js";
@@ -52,6 +52,7 @@ import { SqliteStore } from "./sqlite-store.js";
 import { RemoteStore, RemoteApiError } from "./remote-store.js";
 import { isMainModule } from "./is-main.js";
 import { AuditActor, registerAuditMcpTools, type AuditMcpHandlers } from "./audit-mcp.js";
+import { registerDispatchTools, type DispatchDeps } from "./dispatch-mcp.js";
 
 const env = process.env;
 const DEFAULT_PROJECT = env.RETRACE_PROJECT ?? "default";
@@ -178,7 +179,7 @@ export function packageVersion(moduleUrl: string = import.meta.url): string {
   return pkg.version;
 }
 
-export function buildServer(store = makeStore(), opts: { pinnedProject?: string; lock?: boolean; commitLock?: boolean; actorLock?: boolean } = {}) {
+export function buildServer(store = makeStore(), opts: { pinnedProject?: string; lock?: boolean; commitLock?: boolean; actorLock?: boolean; dispatch?: Pick<DispatchDeps, "run" | "registryPath" | "gateMs" | "sleep" | "ownTerminal" | "homeDir"> } = {}) {
   const server = new McpServer({ name: "retrace", version: packageVersion() });
   const remote = store instanceof RemoteStore ? store : null;
   const pinned = opts.pinnedProject ?? env.RETRACE_PROJECT;
@@ -332,6 +333,10 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
         artifacts: applyDefaultRoles(args.action, args.artifacts),
         location: enrichLocation(args.location, locationDefaults()),
       });
+      // A review verdict seals its findings counts, routing id, head and blocking answer, or it is not sealed
+      // (docs/design/dispatch-protocol.md §3; agent-rules 11). Other events are untouched.
+      const verdictProblem = reviewVerdictProblem(input);
+      if (verdictProblem) throw new Error(`review verdict refused: ${verdictProblem}`);
       if (input.caused_by) {
         const parent = await store.get(input.caused_by);
         const problem = causedByProblem(parent, input);
@@ -530,6 +535,13 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
       return { content: [{ type: "text", text: ps.map(markUntrustedText).join("\n") || "(none)" }], structuredContent: { project_displays: ps.map(markUntrustedText) } };
     };
 
+  registerDispatchTools(server, {
+    store, remote, resolveActor, prepareWrite, writeProject, locationDefaults, seatId: defaultActor.id,
+    // The pane this server runs in, as Orca tells the pane's processes (ORCA_TERMINAL_HANDLE) or as the operator
+    // configures it (RETRACE_TERMINAL): the receiver binding of retrace_verify_send (Codex, PR 222 r2, H2).
+    ...(env.RETRACE_TERMINAL ?? env.ORCA_TERMINAL_HANDLE ? { ownTerminal: env.RETRACE_TERMINAL ?? env.ORCA_TERMINAL_HANDLE } : {}),
+    ...(opts.dispatch ?? {}),
+  });
   registerAuditMcpTools(server, auditHandlers, { defaultProject: DEFAULT_PROJECT });
 
   return server;

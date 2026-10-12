@@ -341,11 +341,11 @@ test("the first commit has no previous commit so it does not get a ledger-start 
   assert.equal(r.logs_per_commit.first_commit_dropped, true);
 });
 
-test("handshake schema census lists 11 local tools and the 9-tool Worker subset", async () => {
+test("handshake schema census lists 13 local tools and the 9-tool Worker subset", async () => {
   await withCleanEnv(async () => {
     const h = await measureHandshakeSchemas();
     assert.equal(h.kind, "census");
-    assert.equal(h.tool_count, 11);
+    assert.equal(h.tool_count, 13);
     assert.equal(h.worker_audit_tool_count, 9);
     assert.ok(h.total_bytes > h.worker_audit_subset_bytes);
     assert.ok(h.worker_audit_subset_bytes > 0);
@@ -353,5 +353,7 @@ test("handshake schema census lists 11 local tools and the 9-tool Worker subset"
     assert.ok(names.includes("retrace_log"));
     assert.ok(names.includes("retrace_amend"));
     assert.ok(names.includes("retrace_share"));
+    assert.ok(names.includes("retrace_send"));
+    assert.ok(names.includes("retrace_verify_send"));
   });
 });

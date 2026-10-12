@@ -4,7 +4,8 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, lstatSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
-import { ownerLoginRecord, PolicyDocument, policyDigestOf, evaluateActivation, looksLikePolicyActivation, isAttributionAmendment, Actor, Credential, Event, EventStore, HistoryQuery, ProjectStatus, ReconcileReport, asHistoryPage, causalRootState, localConfigDrift, renderProjectStatus, schemaSurface } from "@retrace-dev/core";
+import { ownerLoginRecord, PolicyDocument, policyDigestOf, evaluateActivation, looksLikePolicyActivation, isAttributionAmendment, Actor, Credential, Event, EventStore, HistoryQuery, ProjectStatus, ReconcileReport, asHistoryPage, causalRootState, localConfigDrift, renderProjectStatus, schemaSurface, reviewVerdictProblem,
+} from "@retrace-dev/core";
 import { Cfg, commitToEvent, resolveHookToken } from "./git-hook.js";
 import { ReconcileCfg, commitFacts, reconcileOptionsFrom, reconcileWithGit, repoNamesFor } from "./reconcile.js";
 import { RemoteStore, retraceHeaders } from "./remote-store.js";
@@ -335,6 +336,10 @@ export type ReviewEffortScope = {
   recentEventLimit: number;
   reachesAdoption: boolean;
   routingHistoryComplete: boolean;
+  /** Seq of the first review verdict carrying a boolean `blocking`, found by the bounded targeted scan; undefined when
+   *  none exists or the scan was incomplete. Supplied so adoption outside the recent window is not forgotten (Codex, PR 222 r1, M5). */
+  verdictShapeAdoptionSeq?: number;
+  verdictShapeScanComplete?: boolean;
 };
 
 /** Advisory R2/R3 checks: routing is intent; the review event remains the truth about what ran. */
@@ -355,6 +360,16 @@ export function reviewEffortFindings(events: Event[], models: RoutingModelRegist
   const missingModelsLegacy: Event[] = [];
   const missingModelsRegisteredNoSource: Event[] = [];
   const missingEfforts: Event[] = [];
+  const malformedVerdicts: Event[] = [];
+  // The verdict shape (docs/design/dispatch-protocol.md §2) is counted from its own adoption: the first verdict that
+  // carries a boolean `blocking`. Before that, no verdict is held to a shape nobody had yet, which is how the routing
+  // findings treat routing adoption above.
+  const observedShapeSeq = events
+    .filter((event) => isReviewEvent(event) && typeof paramsOf(event).blocking === "boolean")
+    .reduce<number | undefined>((first, event) => first === undefined ? event.seq : Math.min(first, event.seq), undefined);
+  const verdictShapeAdoptionSeq = scope?.verdictShapeAdoptionSeq !== undefined && (observedShapeSeq === undefined || scope.verdictShapeAdoptionSeq < observedShapeSeq)
+    ? scope.verdictShapeAdoptionSeq
+    : observedShapeSeq;
   let reviewCount = 0;
   for (const review of events.filter((event) => event.seq > adoptionSeq && isReviewEvent(event))) {
     reviewCount++;
@@ -385,6 +400,7 @@ export function reviewEffortFindings(events: Event[], models: RoutingModelRegist
     if (capability?.supports_effort && !effort) {
       missingEfforts.push(review);
     }
+    if (verdictShapeAdoptionSeq !== undefined && review.seq > verdictShapeAdoptionSeq && reviewVerdictProblem(review)) malformedVerdicts.push(review);
     if (!routingId) {
       unrouted.push(review);
       continue;
@@ -448,6 +464,7 @@ export function reviewEffortFindings(events: Event[], models: RoutingModelRegist
     summary(missingModelsLegacy, "review model", "do not report an actor.model listed in the routing model registry (unknown models have no inferred fallback) (no source recorded)"),
     summary(missingModels, "review model", "do not report an actor.model listed in the routing model registry (unknown models have no inferred fallback)"),
     summary(missingEfforts, "review reasoning effort", "use an effort-capable model but do not self-report method.params.reasoning_effort"),
+    summary(malformedVerdicts, "review verdict shape", `carry no findings counts, routing id, reviewed head and blocking answer in method.params; counted from the shape's adoption at seq ${verdictShapeAdoptionSeq} (docs/design/dispatch-protocol.md §2)`),
     ...findings,
   ].filter((finding): finding is Finding => finding !== undefined);
 }
@@ -592,6 +609,8 @@ export const REVIEW_EFFORT_RECENT_LIMIT = 200;
 /** Page size for the targeted routing-event walk (adoption lives at the oldest page). */
 export const REVIEW_EFFORT_ROUTING_PAGE = 50;
 export const REVIEW_EFFORT_ROUTING_TEXT = '"tool":"routing"';
+/** Targeted text for the verdict-shape adoption scan: a sealed boolean `blocking` param (docs/design/dispatch-protocol.md §2). */
+export const REVIEW_EFFORT_SHAPE_TEXT = '"blocking":';
 
 /**
  * Non-gate review checks cannot afford RemoteStore.all (O(ledger)). Fetch a bounded recent
@@ -603,9 +622,11 @@ export async function loadReviewEffortEvents(
   project: string,
 ): Promise<{ events: Event[]; scope: ReviewEffortScope }> {
   const routing = await collectRoutingEvents(store, project);
+  const shape = await collectShapeAdoption(store, project);
   const recent = await store.history({ project, limit: REVIEW_EFFORT_RECENT_LIMIT });
   const byId = new Map<string, Event>();
   for (const event of routing.events) byId.set(event.id, event);
+  if (shape.first) byId.set(shape.first.id, shape.first);
   for (const event of recent.events) byId.set(event.id, event);
   const adoptionSeq = routing.events.reduce<number | undefined>(
     (first, event) => first === undefined ? event.seq : Math.min(first, event.seq),
@@ -622,8 +643,26 @@ export async function loadReviewEffortEvents(
       reachesAdoption: routing.complete && (adoptionSeq === undefined || !recent.truncated
         || (oldestRecentSeq !== undefined && oldestRecentSeq <= adoptionSeq)),
       routingHistoryComplete: routing.complete,
+      ...(shape.first ? { verdictShapeAdoptionSeq: shape.first.seq } : {}),
+      verdictShapeScanComplete: shape.complete,
     },
   };
+}
+
+/** The oldest review verdict with a boolean `blocking` param, by the same bounded targeted walk the routing scan uses. */
+async function collectShapeAdoption(store: Pick<EventStore, "history">, project: string): Promise<{ first?: Event; complete: boolean }> {
+  let first: Event | undefined;
+  let before_seq: number | undefined;
+  for (let page = 0; page < 64; page++) {
+    const result = await store.history({ project, text: REVIEW_EFFORT_SHAPE_TEXT, limit: REVIEW_EFFORT_ROUTING_PAGE, before_seq });
+    for (const event of result.events) {
+      if (!isReviewEvent(event) || typeof paramsOf(event).blocking !== "boolean") continue;
+      if (!first || event.seq < first.seq) first = event;
+    }
+    if (!result.truncated || result.next_before_seq === undefined) return { first, complete: true };
+    before_seq = result.next_before_seq;
+  }
+  return { first, complete: false };
 }
 
 async function collectRoutingEvents(store: Pick<EventStore, "history">, project: string): Promise<{ events: Event[]; complete: boolean }> {
