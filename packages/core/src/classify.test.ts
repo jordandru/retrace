@@ -215,6 +215,13 @@ test("caused-by source follows the message, and a different claimed id is a conf
     assert.notEqual(unstamped.record.caused_by.root?.id, parent.id);
   }
 
+  const emptyMessage = await classify(store, commitInput({ raw: "", caused_by: parent.id }));
+  assert.equal(emptyMessage.kind, "decision");
+  if (emptyMessage.kind === "decision") {
+    assert.deepEqual(emptyMessage.record.caused_by, { source: "none" });
+    assert.notEqual(emptyMessage.record.caused_by.root?.id, parent.id);
+  }
+
   const legacy = commitInput({ caused_by: parent.id });
   const legacyParams = { ...(legacy.method?.params ?? {}) };
   delete legacyParams.raw_message;
