@@ -83,7 +83,7 @@ test("sibling corroboration: an unlinked webhook seal is corroborated by a roote
   const html = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../ui/retrace.html"), "utf8");
   const covered = html.match(/<div class="k">Covered<\/div>.*\n/)![0];
   assert.doesNotMatch(covered, /sibling/);
-  assert.match(html, /<div class="k">Sibling-corroborated<\/div><div class="v">\$\{s\.policy\?\.mode === "none" \? `disabled [^\n]*\$\{num\(z\.sibling_corroborated \?\? 0\)\}[^\n]*roots nothing/);
+  assert.match(html, /<div class="k">Sibling-corroborated<\/div><div class="v">\$\{s\.policy\?\.mode === "none" \|\| s\.policy\?\.mode === "env_fallback" \? `disabled [^\n]*\$\{num\(z\.sibling_corroborated \?\? 0\)\}[^\n]*roots nothing/);
   assert.doesNotMatch(html, /same_commit_rooted|more covered/);
 });
 
@@ -138,9 +138,28 @@ test("sibling corroboration: the absent-policy fail-closed state is visible in t
   assert.match(withPolicy, /sibling corroboration \(read-time, roots nothing\): 1 unlinked commit seals/);
   const html = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../ui/retrace.html"), "utf8");
   const row = html.match(/<div class="k">Sibling-corroborated<\/div>.*\n/)![0];
-  assert.match(row, /s\.policy\?\.mode === "none" \? `disabled /, "the UI row reads s.policy");
+  assert.match(row, /s\.policy\?\.mode === "none" \|\| s\.policy\?\.mode === "env_fallback" \? `disabled /, "the UI row reads s.policy");
   assert.match(row, /no project policy/);
   assert.match(row, /num\(z\.sibling_corroborated \?\? 0\)/);
+});
+
+test("sibling corroboration: env_fallback renders disabled, not an ordinary zero (issue 228)", async () => {
+  const store = new MemStore();
+  const s = await buildProjectStatus(store, "p", new Date("2026-01-01T00:00:00Z"), undefined, undefined, { githubRepoProjects: { "acme/app": "p" } });
+  assert.equal(s.policy?.mode, "env_fallback");
+  assert.equal(s.routing?.[0]?.source, "env_fallback");
+  assert.equal(s.capture.sibling_corroborated, 0);
+  const text = renderProjectStatus(s);
+  assert.match(text, /sibling corroboration: disabled, environment fallback routes only \(read-time, roots nothing; no trusted stamps, no policy document\)/);
+  assert.doesNotMatch(text, /0 unlinked commit seals whose commit/);
+  const none = renderProjectStatus((await pair(HOOK, {}, null)).s);
+  assert.match(none, /sibling corroboration: disabled, no policy \(read-time, roots nothing/);
+  const documentMode = renderProjectStatus((await pair(HOOK)).s);
+  assert.match(documentMode, /sibling corroboration \(read-time, roots nothing\): 1 unlinked commit seals/);
+  const html = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../ui/retrace.html"), "utf8");
+  const row = html.match(/<div class="k">Sibling-corroborated<\/div>.*\n/)![0];
+  assert.match(row, /environment fallback routes only/);
+  assert.match(row, /no trusted stamps and no policy document/);
 });
 
 test("sibling corroboration: canonical repository identity (M2) and malformed inputs (L1)", async () => {
