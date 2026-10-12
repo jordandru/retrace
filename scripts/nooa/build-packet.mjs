@@ -16,7 +16,9 @@
  * pinned claude-code credential with a verified producer signature, and its `pr`, `head_sha`, `class`, `round`,
  * `reasoning_effort`, `seat`, `reviewer_actor` and `model` must each equal what this build asks for. Otherwise nothing is
  * written. The witness model is the constant NOOA_MODEL, not a flag (M2); the launcher carries the class and the review
- * surface the wrapper seals (M3).
+ * surface the wrapper seals (M3). The launcher itself is a plain shell file: the host wrapper takes its values as given and
+ * re-verifies none of them (PR 225 round 2, H1); what the coordinator's push-and-launch outcome event records (packet hash,
+ * launcher hash, pid) is the record of what was launched.
  *
  *   node scripts/nooa/build-packet.mjs --pr 220 --head <40 hex> --routing evt_… --round r4 --rubric high --class a \
  *     --rules-file rules.md [--base <sha>] [--prev-head <sha>] [--context-file notes.md] [--instruction evt_…] \
@@ -125,9 +127,10 @@ export function routingProblem(raw, o) {
   return undefined;
 }
 
-/** Top-level fields of a raw event that Appendix A carries (intent clipped; artifacts and change with strings clipped). */
+/** Top-level fields of a raw event that Appendix A carries when present, empty values included (intent clipped as
+ * `intent_head`; artifacts and change with their strings clipped; `method` through `method_tool` and `params`). */
 export const EVENT_FIELDS_CARRIED = ["id", "seq", "timestamp", "actor", "action", "action_detail", "caused_by", "tags", "intent", "artifacts", "change", "method"];
-/** `method.params` keys Appendix A carries; every other key present in the event is listed by name under `omitted.params`. */
+/** `method.params` keys Appendix A carries when present; every other key present in the event is listed by name under `omitted.params`. */
 export const PARAM_KEYS_CARRIED = [
   "sealed_by", "producer_sig_verdict", "pr", "round", "class", "surface_class", "seat", "seat_order", "reviewer_actor", "model",
   "reasoning_effort", "head_sha", "base_sha", "author", "author_instruction_event", "routing_event_id", "reviewed_head", "findings",
@@ -136,35 +139,48 @@ export const PARAM_KEYS_CARRIED = [
   "target_event_id", "attest_causal_root", "input_signature", "github_action", "relayed_by", "owner_login_decision", "owner_pin_event",
   "rules_digest", "models_digest", "merge_ready", "next",
 ];
+/** Where a carried raw key lands in the rendered entry (identity unless listed). */
+const TOP_KEY_OUT = { intent: "intent_head" };
+const PARAM_KEY_OUT = { sealed_by: "sealed_by", producer_sig_verdict: "producer_sig_verdict" };
+
+const clipStrings = (v, n) => (v && typeof v === "object" && !Array.isArray(v) ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, typeof x === "string" ? clip(x, n) : x])) : v);
 
 /**
  * Selected fields of a raw event for Appendix A (Codex, PR 225 r1, M4: a projection, labelled as one). Signature material
- * is never carried. Every top-level field, `method` key and `method.params` key that IS in the raw event and is NOT carried
- * here is listed by name under `omitted`, so a reader cannot take absence in the packet for absence in the ledger. Strings
- * over their clip length end with `…[N chars]`.
+ * is never carried. Every key PRESENT in the raw event — empty strings and empty arrays included — is either carried or
+ * named under `omitted`; the `omitted` lists are computed from the properties this function actually emitted, not from a
+ * static declaration (Codex, PR 225 r2, M2), so a reader cannot take absence in the packet for absence in the ledger.
+ * Strings over their clip length end with `…[N chars]`.
  */
 export function renderEvent(raw) {
   if (!raw || typeof raw !== "object") return raw;
-  const p = raw.method?.params ?? {};
-  const out = {
-    id: raw.id, seq: raw.seq, timestamp: raw.timestamp,
-    ...(raw.actor ? { actor: raw.actor } : {}),
-    action: raw.action, ...(raw.action_detail ? { action_detail: raw.action_detail } : {}),
-    ...(raw.caused_by ? { caused_by: raw.caused_by } : {}),
-    sealed_by: p.sealed_by ?? "(absent)", producer_sig_verdict: p.producer_sig_verdict ?? "(absent)",
-    ...(raw.tags?.length ? { tags: raw.tags } : {}),
-    intent_head: clip(raw.intent ?? "", 240),
-    ...(raw.artifacts?.length ? { artifacts: raw.artifacts.map((a) => (a && typeof a === "object" ? Object.fromEntries(Object.entries(a).map(([k, v]) => [k, typeof v === "string" ? clip(v, 160) : v])) : a)) } : {}),
-    ...(raw.change && typeof raw.change === "object" ? { change: Object.fromEntries(Object.entries(raw.change).map(([k, v]) => [k, typeof v === "string" ? clip(v, 300) : v])) } : {}),
-    ...(raw.method?.tool ? { method_tool: raw.method.tool } : {}),
-  };
-  const params = {};
-  for (const k of PARAM_KEYS_CARRIED) if (k !== "sealed_by" && k !== "producer_sig_verdict" && p[k] !== undefined) params[k] = typeof p[k] === "string" ? clip(p[k], 300) : p[k];
-  if (Object.keys(params).length) out.params = params;
+  const out = {};
+  for (const k of Object.keys(raw)) {
+    if (k === "method" || !EVENT_FIELDS_CARRIED.includes(k)) continue;
+    const v = raw[k];
+    if (k === "intent") out.intent_head = clip(v, 240);
+    else if (k === "artifacts") out.artifacts = Array.isArray(v) ? v.map((a) => clipStrings(a, 160)) : v;
+    else if (k === "change") out.change = clipStrings(v, 300);
+    else out[k] = v;
+  }
+  const method = raw.method && typeof raw.method === "object" ? raw.method : undefined;
+  const p = method?.params && typeof method.params === "object" ? method.params : undefined;
+  out.sealed_by = p && "sealed_by" in p ? p.sealed_by : "(absent)";
+  out.producer_sig_verdict = p && "producer_sig_verdict" in p ? p.producer_sig_verdict : "(absent)";
+  if (method && "tool" in method) out.method_tool = method.tool;
+  if (p) {
+    const params = {};
+    for (const k of Object.keys(p)) if (!(k in PARAM_KEY_OUT) && PARAM_KEYS_CARRIED.includes(k)) params[k] = typeof p[k] === "string" ? clip(p[k], 300) : p[k];
+    if (Object.keys(params).length) out.params = params;
+  }
+  // Omission, computed from what was emitted: a raw key is carried only if its rendered property exists in `out`.
+  const topCarried = (k) => (k === "method" ? Boolean(method) : (TOP_KEY_OUT[k] ?? k) in out);
+  const methodCarried = (k) => (k === "tool" ? "method_tool" in out : k === "params" ? Boolean(p) : false);
+  const paramCarried = (k) => (k in PARAM_KEY_OUT ? PARAM_KEY_OUT[k] in out : Boolean(out.params) && k in out.params);
   out.omitted = {
-    fields: Object.keys(raw).filter((k) => !EVENT_FIELDS_CARRIED.includes(k)).sort(),
-    method: Object.keys(raw.method ?? {}).filter((k) => k !== "tool" && k !== "params").sort(),
-    params: Object.keys(p).filter((k) => !PARAM_KEYS_CARRIED.includes(k)).sort(),
+    fields: Object.keys(raw).filter((k) => !topCarried(k)).sort(),
+    method: method ? Object.keys(method).filter((k) => !methodCarried(k)).sort() : [],
+    params: p ? Object.keys(p).filter((k) => !paramCarried(k)).sort() : [],
   };
   return out;
 }
@@ -260,18 +276,20 @@ What you could not verify from this packet alone; the slices you read; that this
 
 FINDINGS: high=<n> medium=<n> low=<n>
 BLOCKING: <yes|no>
-VERDICT: approved — <one line>   |   VERDICT: needs changes: <the blocking findings>
+VERDICT: approved — <one line>   |   VERDICT: needs changes: <the findings>
 \`\`\`
 
-The **last three lines of the whole review** are bare text, in that order, with nothing after them: no heading, no bold, no
-code fence, no closing remark. They are derived from your findings, never declared: the counts are the findings you listed;
-\`BLOCKING: yes\` exactly when high + medium > 0, otherwise \`BLOCKING: no\`; \`needs changes\` needs at least one Medium or
-High; \`approved\` cannot carry a Medium or High. With only Lows write \`VERDICT: approved\` and keep the Lows as findings (a
-\`needs changes\` with only Lows is sealed as a non-blocking rejection; neither blocks a merge). There is no REASON line and no
-override. Write the word VERDICT at the start of exactly one line in the whole review: the seal reads the one block at the
-very end, refuses a second FINDINGS, BLOCKING or VERDICT line anywhere, refuses text after the block, and refuses lines that
-disagree with each other. Then nothing is sealed, the run is reported as failed, and the text you wrote is kept. These are
-the rules the repository's verdict validator applies to every sealed verdict (team-roles rule 8).`;
+The **last three lines of the whole review** are bare text starting at column zero, in that order, with nothing after them:
+not indented, no heading, no bold, no list marker, no blockquote, no code fence, no closing remark. They are derived from
+your findings, never declared: the counts are the findings you listed; \`BLOCKING: yes\` exactly when high + medium > 0,
+otherwise \`BLOCKING: no\`. The VERDICT line is \`approved\` or \`needs changes\`, alone or followed by one of the delimiters
+— – : - and one line. \`approved\` cannot carry a Medium or High. \`needs changes\` is sealed as the action \`rejected\`; with
+only Lows it is allowed and reads \`BLOCKING: no\` (a non-blocking rejection; only a Medium or High blocks a merge). There is
+no REASON line and no override. Write FINDINGS, BLOCKING and VERDICT at the start of exactly one line each in the whole
+review and never quote them in a fence, a blockquote, a list or a heading: the seal reads the one block at the very end,
+refuses a keyword line in any of those forms anywhere, refuses a second keyword line, refuses text after the block, and
+refuses lines that disagree with each other. Then nothing is sealed, the run is reported as failed, and the text you wrote is
+kept. These are the rules the repository's verdict validator applies to every sealed verdict (team-roles rule 8).`;
 
 const code = (lang, body) => `\`\`\`${lang}\n${body.replace(/\n$/, "")}\n\`\`\``;
 
@@ -313,7 +331,7 @@ function assemble(s) {
 export function renderLauncher(o) {
   const q = (v) => `'${String(v).replace(/'/g, `'\\''`)}'`;
   return `#!/usr/bin/env bash
-# NOOA witness review (${o.round}) of PR ${o.pr} at ${o.head} — generated by scripts/nooa/build-packet.mjs from routing event ${o.routing}, which the builder read raw and authenticated. Runs as user nooa. Prints nothing secret.
+# NOOA witness review (${o.round}) of PR ${o.pr} at ${o.head} — generated by scripts/nooa/build-packet.mjs from routing event ${o.routing} (read raw by the builder, which refused to build unless that event authorized this build). This file is plain shell: the wrapper takes its values as given and re-verifies none of them; the push-and-launch outcome event records this file's hash. Runs as user nooa. Prints nothing secret.
 set -u
 cd /home/nooa/nooa-retrace
 set -a; . ./.env; set +a

@@ -107,6 +107,38 @@ test("renderEvent: a labelled projection — carries actor, artifacts, change an
   assert.ok(!PARAM_KEYS_CARRIED.includes("review_scope"), "long prose params are omitted by name, not silently");
 });
 
+/** Every key present in `raw` is either rendered or named under `omitted` (the Appendix A guarantee). */
+function assertAccounted(raw, r) {
+  for (const k of Object.keys(raw)) {
+    const carried = k === "method" ? true : k === "intent" ? "intent_head" in r : k in r;
+    assert.ok(carried !== r.omitted.fields.includes(k), `top-level ${k}: carried ${carried}, omitted ${r.omitted.fields.includes(k)}`);
+  }
+  for (const k of Object.keys(raw.method ?? {})) {
+    const carried = k === "tool" ? "method_tool" in r : k === "params";
+    assert.ok(carried !== r.omitted.method.includes(k), `method.${k}`);
+  }
+  for (const k of Object.keys(raw.method?.params ?? {})) {
+    const carried = k === "sealed_by" || k === "producer_sig_verdict" ? true : Boolean(r.params) && k in r.params;
+    assert.ok(carried !== r.omitted.params.includes(k), `params.${k}`);
+  }
+}
+
+test("renderEvent: empty present values are carried, not dropped, and omission is computed from what was emitted (M2)", () => {
+  const raw = { id: CITED, seq: 7, timestamp: "t", action: "other", action_detail: "", tags: [], intent: "", caused_by: "", artifacts: [], change: {},
+    method: { tool: "", automated: false, params: { sealed_by: "", producer_sig_verdict: "", pr: 0, round: "", findings: {}, blocking: false, review_scope: "" } }, producer_sig: {}, hash: "" };
+  const r = renderEvent(raw);
+  assert.equal(r.action_detail, ""); assert.deepEqual(r.tags, []); assert.equal(r.method_tool, ""); assert.equal(r.intent_head, ""); assert.equal(r.caused_by, "");
+  assert.deepEqual(r.artifacts, []); assert.deepEqual(r.change, {}); assert.equal(r.sealed_by, ""); assert.equal(r.producer_sig_verdict, "");
+  assert.deepEqual(r.params, { pr: 0, round: "", findings: {}, blocking: false }, "falsy but present params are carried");
+  assert.deepEqual(r.omitted, { fields: ["hash", "producer_sig"], method: ["automated"], params: ["review_scope"] }, "only what was not emitted is named");
+  assertAccounted(raw, r);
+  assertAccounted(routingEvent(), renderEvent(routingEvent()));
+  const noParams = renderEvent({ id: "x", method: { tool: "routing" } });
+  assert.equal(noParams.method_tool, "routing"); assert.equal(noParams.sealed_by, "(absent)"); assert.deepEqual(noParams.omitted, { fields: [], method: [], params: [] });
+  const noMethod = renderEvent({ id: "x", method: null, extra: null });
+  assert.deepEqual(noMethod.omitted, { fields: ["extra", "method"], method: [], params: [] }, "a method that is not an object is named as omitted");
+});
+
 test("extractRuleItems and citedRuleNumbers over a rules document", () => {
   const md = "# Agent rules\n\nintro\n\n1. **One.** first\n   more\n\n2. **Two.** second\n\n15. **Fifteen.** last item\n   tail\n\nRoles, review order, and budgets: elsewhere.\n";
   const items = extractRuleItems(md, [1, 15, 99]);
@@ -186,8 +218,10 @@ test("build: assembles every section, reads every cited event once (diff and int
   const r = await build(o, io);
   assert.ok(r.fits, `bytes ${r.bytes}`);
   assert.equal(r.packetName, "nooa-pr222-packet-r1.md"); assert.equal(r.launcherName, "launch-pr222-r1.sh");
-  for (const h of ["# Review packet — Retrace PR 222", "## Your role", "## Rules to judge against", "## This round, as the coordinator describes it", "## PR body (verbatim", "## Commit messages (verbatim", "## Diff vs base", "## Interdiff vs previous head", "## Output contract", "# Appendix A — selected fields", "# Appendix B", "# Appendix C", "# Appendix D", "# Appendix E", "FINDINGS: high=<n>", "BLOCKING: <yes|no>", "There is no REASON line", "read raw by the builder and authenticated"]) assert.ok(r.packet.includes(h), h);
+  for (const h of ["# Review packet — Retrace PR 222", "## Your role", "## Rules to judge against", "## This round, as the coordinator describes it", "## PR body (verbatim", "## Commit messages (verbatim", "## Diff vs base", "## Interdiff vs previous head", "## Output contract", "# Appendix A — selected fields", "# Appendix B", "# Appendix C", "# Appendix D", "# Appendix E", "FINDINGS: high=<n>", "BLOCKING: <yes|no>", "no REASON line and no override", "read raw by the builder and authenticated", "starting at column zero", "is sealed as the action `rejected`; with\nonly Lows it is allowed"]) assert.ok(r.packet.includes(h), h);
   assert.ok(!r.packet.includes("REASON: <why"), "H1: the contract no longer offers an override");
+  assert.ok(!r.packet.includes("needs at least one Medium"), "M1 (r2): one statement, the validator's: a Low-only `needs changes` is allowed");
+  assert.ok(r.launcher.includes("the wrapper takes its values as given and re-verifies none of them"), "H1 (r2): the launcher says what it is");
   assert.ok(r.packet.includes("Author per the head's hook seal: agent/claude-code (claude-mythos-5-1)"));
   assert.ok(r.packet.includes("15. **Fifteen.** rule fifteen text"), "cited rule text in Appendix C");
   assert.ok(r.packet.includes("run 1 — conclusion success") && r.packet.includes("run 2 — in_progress at build time"));
@@ -236,14 +270,17 @@ test("build: a tight budget drops the appendices in order and says so in the pac
   assert.ok(r.packet.includes("gh run view <id> --log"));
 });
 
-test("wrapper v2.1 self-test runs (python3 present) or is skipped", (t) => {
+test("wrapper v2.2 self-test runs (python3 present) or is skipped", (t) => {
   const py = spawnSync("python3", ["--version"], { encoding: "utf8" });
   if (py.status !== 0) { t.skip("python3 not available"); return; }
   const out = execFileSync("python3", ["-I", join(here, "nooa-review-generic.py"), "--selftest"], { encoding: "utf8" });
-  assert.match(out, /selftest: 20 cases OK/);
+  assert.match(out, /selftest: 35 cases OK/);
+  const src = execFileSync("cat", [join(here, "nooa-review-generic.py")], { encoding: "utf8" });
+  assert.ok(!src.includes("routing_binding") && src.includes('"launcher_trust": LAUNCHER_TRUST'), "H1 (r2): the seal names the launcher values as trusted input");
+  assert.ok(!/needs changes" needs\s+at least one/.test(src), "M1 (r2): the prompt no longer directs Low-only results to approval");
 });
 
-test("wrapper v2.1 refuses to start on a model that is not the pinned witness model or on a malformed launcher value (M2, H3)", (t) => {
+test("wrapper v2.2 refuses to start on a model that is not the pinned witness model or on a malformed launcher value (M2, H3)", (t) => {
   const py = spawnSync("python3", ["--version"], { encoding: "utf8" });
   if (py.status !== 0) { t.skip("python3 not available"); return; }
   const env = { PATH: process.env.PATH, HOME: "/nonexistent-home", NOOA_PR: "222", NOOA_PR_TITLE: "t", NOOA_JUDGEMENT: "j", NOOA_TAGS: "pr-222", NOOA_ROUTING_EVENT: ROUTING, NOOA_REVIEWED_HEAD: HEAD, NOOA_FILES: "docs/x.md", NOOA_ROUND: "r1", NOOA_RUBRIC: "high", NOOA_SCOPE: "s", NOOA_CLASS: "a", NOOA_SURFACE: "class (a)", NOOA_MODEL: NOOA_MODEL };
