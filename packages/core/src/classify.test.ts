@@ -109,6 +109,32 @@ const agentClaim = (id = "codex"): ClaimRecord => ({
   type: "agent", id, source: "retrace-actor", model_claim: "absent", raw_trailers: { "retrace-actor": id },
 });
 
+test("a rejecting caused-by trailer is not a classification root", async () => {
+  const full = "evt_" + "d".repeat(32);
+  const followed = `work\n\nRetrace-Actor: codex\nRetrace-Caused-By: ${ROOT}\nRetrace-Caused-By: ${full}\u00A0`;
+  const nbsp = `work\n\nRetrace-Actor: codex\nRetrace-Caused-By: ${ROOT}\u00A0`;
+  for (const raw of [followed, nbsp]) {
+    const store = new MemoryEventStore();
+    await putPolicy(store);
+    const result = await classify(store, commitInput({
+      raw,
+      method: {
+        tool: "git",
+        automated: true,
+        params: {
+          sha: SHA,
+          parents: ["d".repeat(40)],
+          raw_message: raw,
+          author: { name: "Jordan", email: "jordan@example.com" },
+          files: 1,
+        },
+      },
+    }));
+    assert.equal(result.kind, "decision", raw);
+    if (result.kind === "decision") assert.equal(result.record.caused_by.root, undefined);
+  }
+});
+
 test("model_claim is recorded from trailers; decideFromTable and wouldWrite ignore it", () => {
   const claims: ClaimRecord[] = [
     { ...agentClaim(), model: "gpt-5", model_claim: "complete" },

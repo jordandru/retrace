@@ -17,6 +17,7 @@ import {
   CommitActorResolution, resolveCommitActor, validCausedById,
   type ModelClaimCompleteness,
 } from "./commit-actor.js";
+import { causedByFrom } from "./github.js";
 import {
   actorKey, captureSealEligible, captureSeals, effectiveBoundary, firstStampedSeq, generatesArtifact, previousCaptureTouch, sameArtifact,
   type CapturePolicy, type CaptureSeal,
@@ -921,9 +922,15 @@ export function countLooseHints(events: Event[], files: { path: string }[]): num
 }
 
 async function resolveCausedBy(store: EventStore, input: EventInput, trailers: Record<string, string[]>): Promise<CausedByRecord> {
-  const source = causedBySourceOf(input, trailers);
-  const id = validCausedById(input.caused_by) ?? validCausedById(trailers["retrace-caused-by"]?.[0]);
-  if (!id) return { source: source === "none" ? "none" : source };
+  const params = (input.method?.params ?? {}) as Record<string, unknown>;
+  if (typeof params.caused_by_rejected === "string" && params.caused_by_rejected.length > 0) return { source: "none" };
+  const raw = typeof params.raw_message === "string" ? params.raw_message : "";
+  const fromMessage = raw ? causedByFrom(raw) : {};
+  if (fromMessage.rejected) return { source: "none" };
+  const ingested = validCausedById(input.caused_by);
+  const id = ingested ?? (fromMessage.id ? validCausedById(fromMessage.id) : undefined);
+  if (!id) return { source: "none" };
+  const source = ingested ? causedBySourceOf(input, trailers) : "trailer";
   const parent = await store.get(id);
   const problem = causedByProblem(parent, { caused_by: id, project: input.project, timestamp: input.timestamp });
   if (problem) return { id, source, problem };

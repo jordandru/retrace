@@ -143,6 +143,10 @@ test("caused_by rejects line separators that are not U+000A", async () => {
   }
   const spaced = await open(`work\n\nRetrace-Caused-By: \t${full}\t `);
   assert.equal(spaced.caused_by, full);
+  for (const key of ["retrace-caused-by:", "RETRACE-CAUSED-BY:"]) {
+    const event = await open(`work\n\n${key} ${full}`);
+    assert.equal(event.caused_by, full, key);
+  }
 });
 
 test("T8 push agent-address/1 resolves a user sender as the authenticated principal", async () => {

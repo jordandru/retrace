@@ -211,6 +211,64 @@ test("hook and push webhook assign the same caused_by to one message", async () 
   assert.equal(pushed.method?.params?.caused_by_rejected, hook.method?.params?.caused_by_rejected);
 });
 
+test("hook and webhook reject each bare unicode suffix and a lowercase key does not use the env", async () => {
+  const full = "evt_" + "ab".repeat(16);
+  const other = "evt_" + "cd".repeat(16);
+  const dir = mkdtempSync(join(tmpdir(), "retrace-git-suffix-"));
+  sh(dir, "git", ["init", "-q", "-b", "main"]);
+  sh(dir, "git", ["config", "core.hooksPath", "/dev/null"]);
+  const saved = process.env.RETRACE_CAUSED_BY;
+  process.env.RETRACE_CAUSED_BY = other;
+  try {
+    const suffixes = ["\u2028", "\u2029", "\u0085", "\u00A0", "\u200B"];
+    for (const [i, suffix] of suffixes.entries()) {
+      writeFileSync(join(dir, "a.ts"), `export const a = ${i};\n`);
+      const message = `work ${i}\n\nRetrace-Caused-By: ${full}${suffix}`;
+      const msg = join(dir, "msg.txt");
+      writeFileSync(msg, message);
+      sh(dir, "git", ["add", "."]);
+      sh(dir, "git", ["commit", "-qF", msg]);
+      const sha = sh(dir, "git", ["rev-parse", "HEAD"]).trim();
+      const hook = commitToEvent(dir, sha, { project: "p", repoName: "acme/app" });
+      const raw = String(hook.method?.params?.raw_message ?? "");
+      const [pushed] = await mapGithubWebhook("push", {
+        repository: { full_name: "acme/app" },
+        commits: [{
+          id: sha, message: raw, timestamp: "2026-10-12T00:00:00Z",
+          author: { email: "j@x", name: "J" }, added: ["a.ts"], modified: [], removed: [],
+        }],
+      }, { includePush: true });
+      assert.equal(hook.caused_by, undefined, JSON.stringify(suffix));
+      assert.equal(hook.caused_by, pushed.caused_by);
+      assert.equal(hook.method?.params?.caused_by_rejected, `${full}${suffix}`);
+      assert.equal(pushed.method?.params?.caused_by_rejected, hook.method?.params?.caused_by_rejected);
+    }
+    for (const key of ["retrace-caused-by:", "RETRACE-CAUSED-BY:"]) {
+      writeFileSync(join(dir, "a.ts"), `export const a = ${key};\n`);
+      const message = `case\n\n${key} ${full}`;
+      writeFileSync(join(dir, "msg.txt"), message);
+      sh(dir, "git", ["add", "."]);
+      sh(dir, "git", ["commit", "-qF", join(dir, "msg.txt")]);
+      const sha = sh(dir, "git", ["rev-parse", "HEAD"]).trim();
+      const hook = commitToEvent(dir, sha, { project: "p", repoName: "acme/app" });
+      const raw = String(hook.method?.params?.raw_message ?? "");
+      const [pushed] = await mapGithubWebhook("push", {
+        repository: { full_name: "acme/app" },
+        commits: [{
+          id: sha, message: raw, timestamp: "2026-10-12T00:00:00Z",
+          author: { email: "j@x", name: "J" }, added: ["a.ts"], modified: [], removed: [],
+        }],
+      }, { includePush: true });
+      assert.equal(hook.caused_by, full, key);
+      assert.notEqual(hook.caused_by, other);
+      assert.equal(pushed.caused_by, hook.caused_by);
+    }
+  } finally {
+    if (saved === undefined) delete process.env.RETRACE_CAUSED_BY;
+    else process.env.RETRACE_CAUSED_BY = saved;
+  }
+});
+
 test("hook token: .retrace.json \"credential\" resolves from the credentials file; no field = owner-token fallthrough unchanged", () => {
   const dir = mkdtempSync(join(tmpdir(), "retrace-cred-"));
   const credFile = join(dir, "creds.json");

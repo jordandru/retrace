@@ -51,7 +51,7 @@ export function githubActor(user: any, fallback = "github"): Actor {
   };
 }
 
-const CAUSED_BY_KEY = "Retrace-Caused-By:";
+const CAUSED_BY_KEY = "retrace-caused-by:";
 const CAUSED_BY_FULL = /^evt_[a-f0-9]{32}$/i;
 const REJECTED_TOKEN_CAP = 64;
 /** The last line that starts with the key wins. A value longer than 64 characters keeps that prefix and its full length. */
@@ -78,7 +78,7 @@ export function causedByFrom(text?: string | null): { id?: string; rejected?: st
   let saw = false;
   for (const raw of text.split("\n")) {
     const line = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
-    if (!line.startsWith(CAUSED_BY_KEY)) continue;
+    if (line.length < CAUSED_BY_KEY.length || line.slice(0, CAUSED_BY_KEY.length).toLowerCase() !== CAUSED_BY_KEY) continue;
     saw = true;
     token = trimAsciiSpace(line.slice(CAUSED_BY_KEY.length));
   }

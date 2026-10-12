@@ -152,8 +152,16 @@ export function decidedHookRejection(error: unknown): boolean {
   return error instanceof RemoteApiError && error.status >= 400 && error.status < 500 && error.status !== 426;
 }
 
+function gitBytes(repo: string, args: string[]): string {
+  return execFileSync("git", ["-C", repo, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+}
 function git(repo: string, args: string[]): string {
-  return execFileSync("git", ["-C", repo, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  return gitBytes(repo, args).trim();
+}
+/** `%B` is the stored message. Git appends one trailing newline to the format output; do not Unicode-trim it. */
+function gitCommitMessage(repo: string, sha: string): string {
+  const raw = gitBytes(repo, ["log", "-1", "--format=%B", sha]);
+  return raw.endsWith("\n") ? raw.slice(0, -1) : raw;
 }
 
 function parseArgs(argv: string[]) {
@@ -200,9 +208,10 @@ export { parseTrailers, validCausedById, validActorId, CAUSED_BY_RE, ACTOR_ID_RE
 import { validCausedById } from "@retrace-dev/core";
 
 export function commitToEvent(repo: string, sha: string, cfg: Cfg, live = false): EventInput {
-  const fmt = ["%H", "%P", "%an", "%ae", "%aI", "%s", "%b", "%B"].join("%x1f");
+  const fmt = ["%H", "%P", "%an", "%ae", "%aI", "%s", "%b"].join("%x1f");
   const raw = git(repo, ["show", "-s", `--format=${fmt}`, sha]);
-  const [fullSha, parents, an, ae, aI, subject, body, message] = raw.split("\x1f");
+  const [fullSha, parents, an, ae, aI, subject, body] = raw.split("\x1f");
+  const message = gitCommitMessage(repo, fullSha || sha);
   const parentList = parents ? parents.split(" ") : [];
   const resolved = resolveCommitActor({ message, authorName: an, authorEmail: ae, parents: parentList, principalRule: "agent-address/1" });
   const numstat = git(repo, ["show", "--numstat", "--format=", sha]).split("\n").filter(Boolean);
