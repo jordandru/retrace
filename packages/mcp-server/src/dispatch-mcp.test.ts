@@ -16,8 +16,9 @@ const OWN = "term_00000000-2222-3333-4444-555555555555";
 const INC = "977b50fe-87d7-435e-8e21-1b57da749867";
 const ENV_KEYS = ["RETRACE_ACTOR", "RETRACE_ACTOR_MODEL", "RETRACE_ACTOR_MODEL_SOURCE", "RETRACE_ON_BEHALF_OF", "RETRACE_ACTOR_LOCK", "RETRACE_PROJECT", "RETRACE_PRODUCER_KEY", "RETRACE_PRODUCER_KEY_FILE", "RETRACE_PANES_FILE", "RETRACE_URL", "RETRACE_TOKEN", "RETRACE_DB", "RETRACE_TERMINAL", "ORCA_TERMINAL_HANDLE"];
 
-type Screen = { lines?: string[]; draft?: string; source?: string; fail?: boolean };
-type Fake = { calls: string[][]; screenLines: string[]; draft?: string; sendOk: boolean; listed: boolean; identity?: string; incarnation?: string; afterSend?: Screen[]; pending?: Screen[]; sentLine?: string };
+/** `source`: Orca's field for this read; null leaves it out. A screen without one takes the fake's, else `screen`. */
+type Screen = { lines?: string[]; draft?: string; source?: string | null; fail?: boolean };
+type Fake = { calls: string[][]; screenLines: string[]; draft?: string; source?: string | null; sendOk: boolean; listed: boolean; identity?: string; incarnation?: string; afterSend?: Screen[]; pending?: Screen[]; sentLine?: string };
 function fakeOrca(f: Fake): OrcaRunner {
   return async (args) => {
     f.calls.push(args);
@@ -27,7 +28,8 @@ function fakeOrca(f: Fake): OrcaRunner {
       if (s?.fail) return { code: 1, stdout: "", stderr: "read failed" };
       const lines = (s?.lines ?? f.screenLines).map((l) => l.replace("__LINE__", f.sentLine ?? "__LINE__"));
       const draft = s ? s.draft : f.draft;
-      return { code: 0, stdout: JSON.stringify({ ok: true, result: { terminal: { tail: lines, source: s?.source ?? "screen", truncated: true, ...(draft ? { draft } : {}) } } }), stderr: "" };
+      const source = s && s.source !== undefined ? s.source : f.source !== undefined ? f.source : "screen";
+      return { code: 0, stdout: JSON.stringify({ ok: true, result: { terminal: { tail: lines, ...(source === null ? {} : { source }), truncated: true, ...(draft ? { draft } : {}) } } }), stderr: "" };
     }
     if (args[0] === "terminal" && args[1] === "send") { f.sentLine = args[5]; if (f.afterSend) f.pending = [...f.afterSend]; return f.sendOk ? { code: 0, stdout: JSON.stringify({ ok: true, result: { accepted: true, submission: "observed" } }), stderr: "" } : { code: 1, stdout: "", stderr: "transport failed" }; }
     return { code: 2, stdout: "", stderr: `unknown ${args.join(" ")}` };
@@ -364,6 +366,11 @@ test("deliveryFromScreen: false only when the composer itself holds the line; tr
     assert.deepEqual(deliveryFromScreen(read(frame(["older", `${prompt}${PLAIN} [sent-event evt_${"0".repeat(32)}]`, "• done"])), PLAIN, id, layout), { delivered: "unknown", reason: "stale_prefix_only" }, at("another id"));
     assert.deepEqual(deliveryFromScreen(read(frame(["older", `${prompt}${PLAIN}`, "• done"])), PLAIN, id, layout), { delivered: "unknown", reason: "stale_prefix_only" }, at("no id"));
     assert.deepEqual(deliveryFromScreen(read(frame(["older"])), PLAIN, id, layout), { delivered: "unknown", reason: "line_not_on_screen" }, at("the line nowhere: lag or loss"));
+    // r6 M2 (Codex's case): a stale prefix of this line, then an unrelated overlong row carrying this send's id past the
+    // line's length. The run stops at the bound, so that id is not this line's: unknown, never true.
+    assert.deepEqual(deliveryFromScreen(read(frame(["older", `${prompt}${PLAIN.slice(0, 30)}`, `• ${"x".repeat(LINE.length)} ${id}`])), PLAIN, id, layout), { delivered: "unknown", reason: "stale_prefix_only" }, at("a stale prefix, then this id past the bound in an unrelated row"));
+    // The first row is cut at the bound too: one wide row holds an earlier send of the same words, then this id past the line's length.
+    assert.deepEqual(deliveryFromScreen(read(frame(["older", `${prompt}${PLAIN} [sent-event evt_${"0".repeat(32)}] ${"y".repeat(8)} ${id}`])), PLAIN, id, layout), { delivered: "unknown", reason: "stale_prefix_only" }, at("one wide row: an earlier send, then this id past the bound"));
     // Positive composer evidence: the composer row itself holds the line, whole, cut off, or wrapped.
     assert.deepEqual(deliveryFromScreen(read(frame(["older"], [`${prompt}${LINE}`])), PLAIN, id, layout), { delivered: false, reason: "line_sits_in_composer" }, at("sits"));
     assert.deepEqual(deliveryFromScreen(read(frame(["older"], [`${prompt}${PLAIN.slice(0, 30)}`])), PLAIN, id, layout), { delivered: false, reason: "line_sits_in_composer" }, at("sits, cut off by the width"));
@@ -505,6 +512,45 @@ test("retrace_send: the gate and the outcome read Claude Code's and Grok's compo
       assert.equal(bare.isError, true, layout); assert.match(errText(bare), new RegExp(`composer_not_empty.*no ${layout} composer on screen`), `${layout}: a bare prompt outside the layout is not the composer`);
     } finally { await close(); }
   }
+});
+
+test("retrace_send: only a live screen read counts as an idle composer; screen-unavailable, no source or any other source sends nothing (M1 r6)", async () => {
+  const f: Fake = { calls: [], screenLines: codexFrame([]), sendOk: true, listed: true, afterSend: [{ lines: codexFrame(["› __LINE__", "• Working (0s • esc to interrupt)"]) }] };
+  const { store, client, rootId, close } = await setup(f, registry);
+  const send = () => client.callTool({ name: "retrace_send", arguments: { to: HANDLE, receiver: "codex", text: PLAIN, caused_by: rootId } });
+  const sends = () => f.calls.filter((c) => c[1] === "send").length;
+  try {
+    const before = (await store.all("retrace")).length;
+    // Codex's case: an old idle frame served as screen-unavailable; then no source at all; then values that are not `screen`.
+    for (const source of ["screen-unavailable", null, "stream", "Screen"]) {
+      f.source = source;
+      const shown = source ?? "none";
+      const r = await send();
+      assert.equal(r.isError, true, `source ${shown}: ${errText(r)}`);
+      assert.match(errText(r), /composer_not_empty/, `source ${shown}`);
+      assert.ok(errText(r).includes(`first read: not a live screen (source ${shown}); composer "› Ask Codex to do anything"`), `source ${shown}: ${errText(r)}`);
+    }
+    assert.equal((await store.all("retrace")).length, before, "no fallback read wrote an event");
+    assert.equal(sends(), 0, "no fallback read sent");
+    // The second gate read counts only a live screen too.
+    f.source = undefined;
+    f.pending = [{ lines: codexFrame([]) }, { lines: codexFrame([]), source: "screen-unavailable" }];
+    const second = await send();
+    assert.equal(second.isError, true); assert.match(errText(second), /composer_not_empty.*second read: not a live screen \(source screen-unavailable\)/);
+    assert.equal((await store.all("retrace")).length, before, "a refusal at the second read wrote nothing");
+    // So does the last look before Enter: the sent event exists by then; nothing goes out and the outcome names the source.
+    f.pending = [{ lines: codexFrame([]) }, { lines: codexFrame([]) }, { lines: codexFrame([]), source: null }];
+    const last = await send();
+    const sl = last.structuredContent as any;
+    assert.equal(sl.delivered, false, JSON.stringify(sl)); assert.equal(sl.outcome.reason, "composer_not_empty"); assert.equal(sl.outcome.source, "none");
+    assert.equal(sends(), 0, "the last look was not a live screen: nothing sent");
+    // A live screen read still passes: the line is sent and proved.
+    f.pending = undefined;
+    const ok = await send();
+    assert.notEqual(ok.isError, true, errText(ok));
+    assert.equal(sends(), 1);
+    assert.equal((ok.structuredContent as any).delivered, true, JSON.stringify((ok.structuredContent as any).outcome));
+  } finally { await close(); }
 });
 
 test("retrace_send: an agent pane without agent_identity or incarnation_id in the registry is a refusal", async () => {

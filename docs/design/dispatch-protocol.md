@@ -1,7 +1,7 @@
 # The dispatch and verdict protocol as product — `retrace_send`, `retrace_verify_send`, the verdict shape (design note v1)
 
-**Status:** v1.5, 2026-10-12. v1 to v1.3 by claude-code (the "system optimization" pane; `claude-mythos-5-1`, model source
-harness-runtime, effort high); v1.4 and v1.5 by claude-code (the coverage-audit pane; `claude-opus-5-5`, harness-runtime) on
+**Status:** v1.6, 2026-10-12. v1 to v1.3 by claude-code (the "system optimization" pane; `claude-mythos-5-1`, model source
+harness-runtime, effort high); v1.4 to v1.6 by claude-code (the coverage-audit pane; `claude-opus-5-5`, harness-runtime) on
 a handover from that pane for throughput. v1.1 was the fix round for Codex's round-1 verdict `evt_6db893faeafc4f12a8b6c6af5c25001c`
 (3 High, 6 Medium, 2 Low at `6ac80c98`), on the coordinator's verified pointer `evt_7a0fff88…`; its changes are listed in
 §4a. v1.2 is the fix round for Codex's round-2 verdict `evt_841c4bb7af364d90917c1a7a96fbe8c5` (2 High, 5 Medium at
@@ -9,10 +9,12 @@ a handover from that pane for throughput. v1.1 was the fix round for Codex's rou
 for Codex's round-3 verdict `evt_ea979a1085054bc7858f13cac334357a` (1 High, 2 Medium, 1 Low at `c6ea2d87`), on the
 coordinator's verified pointer `evt_939211c9…`; its changes are listed in §4c. v1.4 is the fix round for Codex's round-4
 verdict `evt_15db62c90e874719a3f88068d7d527fd` (1 Medium, 1 Low at `51dada16`), on the coordinator's verified pointer
-`evt_410d8231…`; its changes are listed in §4d. **v1.5 is the fix round for Codex's round-5 verdict
+`evt_410d8231…`; its changes are listed in §4d. v1.5 is the fix round for Codex's round-5 verdict
 `evt_d09dbbc057ce4880ad2d63800d8f32e6` (2 Medium, 2 Low at `289e081d`), on the coordinator's verified pointer
-`evt_3d1d7ad2…`; its changes are listed in §4e.** Every sentence of this note was checked
-against the code at v1.2 (Codex r2 M5) and the changed sentences again at v1.3, v1.4 and v1.5. Class **(a)** under agent-rules 12: it governs how seats dispatch to each other and what a
+`evt_3d1d7ad2…`; its changes are listed in §4e. **v1.6 is the fix round for Codex's round-6 verdict
+`evt_01fc2398b9394c2f9b840ecec67d474b` (2 Medium at `05f89bee`), on the coordinator's verified pointer `evt_a8301442…`;
+its changes are listed in §4f.** Every sentence of this note was checked
+against the code at v1.2 (Codex r2 M5) and the changed sentences again at v1.3, v1.4, v1.5 and v1.6. Class **(a)** under agent-rules 12: it governs how seats dispatch to each other and what a
 review verdict must carry, and it ships the code that does both (class c for the MCP server, with one validator shared
 with the doctor). Written and built on Jordan's signed go `evt_c83cad7552a149a5940b27a0bcc84b0b` ("Let's go on your top 3
 items starting with 1", received `evt_85ad930c…`), item 1 of `~/.retrace/ops-2026-10-11/system-optimization/OPTIMIZATION-PLAN.md`
@@ -103,7 +105,10 @@ with `--enter` and seals `enter_pressed_by: "retrace_send (tool)"` (Codex r2 M4)
    a handle that now hosts another incarnation of the same agent, or a pane a human has taken over since it was
    registered, is refused until the operator re-registers it after reading the pane (Codex r2 M3).
 5. **Gate.** Two `terminal read --screen --json` reads, 3 s apart; both must show the harness's **composer** empty and no
-   `draft`, else `composer_not_empty`, naming the composer row seen or saying that none was found. The composer is found
+   `draft`, else `composer_not_empty`, naming the composer row seen or saying that none was found. Only a live screen read
+   counts: Orca's `source` must be `screen`. A read whose source is `screen-unavailable`, `stream`, any other value or none
+   is not empty whatever its frame shows, because accumulated output can hold an old idle frame (Codex r6 M1); the refusal
+   names the source. The composer is found
    by the harness's own layout (`composerOf`, chosen by the registry's `agent_identity`, which step 4 matched to Orca's
    live label), never as the last rendered row: on every harness here the last row is a status row (Codex r5 M2; v1.4's
    gate read the last row and so refused every send, §4e). Layouts, measured on this host's panes 2026-10-12: **Claude
@@ -120,8 +125,8 @@ with `--enter` and seals `enter_pressed_by: "retrace_send (tool)"` (Codex r2 M4)
    `target_terminal`, `receiver_seat`, `enter_pressed_by` (the constant), `target_agent_identity` and
    `target_incarnation_id` (Orca's label and incarnation for the pane), `pane_binding: "handle+identity+incarnation"`,
    `gate`; `caused_by` as given.
-7. **Last look, then send.** One more screen read; if the composer filled during the write, nothing is sent and the
-   outcome says so. Otherwise `terminal send --terminal <h> --text "<text> [sent-event <id>]" --enter --json`.
+7. **Last look, then send.** One more screen read, counted as step 5 counts it; if the composer filled during the write,
+   or the read is not a live screen, nothing is sent and the outcome says so (with the source when it is not `screen`). Otherwise `terminal send --terminal <h> --text "<text> [sent-event <id>]" --enter --json`.
 8. **Outcome.** `executed` event, `caused_by` the sent event, with Orca's receipt and what the post-send screen proved.
    `delivered` has three values, and each rests on the composer as step 5 finds it, never on which row happens to be
    last (Codex r1 M2, r2 M2, r3 M2, r5 M2). **`false`** (`line_sits_in_composer`) only on positive evidence that the line
@@ -132,7 +137,9 @@ with `--enter` and seals `enter_pressed_by: "retrace_send (tool)"` (Codex r2 M4)
    composer is found and does not hold the line, and a transcript row above it shows the start of the text **with this
    send's `[sent-event <id>]` on that row or in its continuation run**: the rows after it, leading indentation dropped,
    joined without a separator (a wrap may split the id), until the run holds as many characters as the line or reaches
-   the composer. That bound is the line's own length in content characters, so it holds at every width with no row cap
+   the composer, and never more: the first row is cut at the line's length and each continuation row at what remains,
+   so an id further along an unrelated row is never read as this line's (Codex r6 M2). That bound is the line's own
+   length in content characters, so it holds at every width with no row cap
    (Codex r5 L1: v1.4 capped the run at 12 rows, ceil(240 / 20), which assumed 20 content columns; a two-column prompt
    makes a 240-byte line 13 rows at 20 columns). At width W, with a P-column prompt and I-column indentation, an
    L-character line spans 1 + ⌈(L − (W − P)) / (W − I)⌉ rows when the harness breaks rows at the column limit. The first
@@ -208,7 +215,7 @@ its verdicts show up in the doctor's count until its review agent adopts the sha
 | `sent` logged **before** the send, with text and brief sha256, target, who presses Enter | three steps, two hashes | one write; the suffix is appended only after the id exists; the tool presses Enter and the record says so |
 | the brief a pointer names is the brief that was hashed | the sender's care | `brief_name_mismatch` and `brief_name_unparseable` on send (path-like tokens found without the binder; one bare `brief <path>`, no other path, URL or slash token); `brief_path` check on verify resolving the name to the event's one path, the receiver's path equal to it or refused |
 | never send into a human's pane | the sender knows | the registry bound to Orca's live `agentIdentity` and `incarnationId`; unknown, mismatched or relaunched → refused |
-| read the pane before sending; a human may be typing | two reads 3 s apart by hand | two reads of the harness's composer, found by its layout, then a third after the write |
+| read the pane before sending; a human may be typing | two reads 3 s apart by hand | two live screen reads (`source: screen`) of the harness's composer, found by its layout, then a third after the write |
 | the line left the composer | the sender reads the pane again | `delivered: true` only when the screen shows the line with this send's id in the transcript above the composer; `false` only when the composer itself holds it; `"unknown"` with the reason otherwise (a same-words row without the id, or no composer on screen, included) |
 | receiver reads the event raw, six checks, then `received` | `curl` with the token from env, six comparisons | `retrace_verify_send`; one `received` record with every check's result, written on every path; the pinned credential must name the seat; the dispatch must be addressed to this seat at this terminal; the named brief must be the sealed brief and must hash |
 | the verdict of record self-reports effort and cites the routing event | partially (17 of 55 without counts) | counts, full head, routing id, blocking derived from severity: refused without them |
@@ -321,6 +328,16 @@ enumerating forms.
 | L1 the stated 20-column bound was false (13 rows at 20 columns; 26 is the true minimum) | the run is bounded by the line's own length in characters, with no row cap; the minimum is the prompt's width plus 24 columns (26 for a two-column prompt); tested at 26, 40, 59 and 80 columns (true, plain and indented, on Claude Code's and Codex's layouts) and at 25 and 20 (`"unknown"`) |
 | L2 the status line said v1.3 | the status line says v1.5 and lists every round, v1.4 and v1.5 among them |
 | found in this round: the gate read the last rendered row, which is a status row on all three live harnesses, so `retrace_send` refused every send to every live pane | the gate reads the composer through the same `composerOf`. Replayed on three live panes, each with an empty composer (Claude Code, Codex, Grok), on 2026-10-12: v1.4 `empty` false on all three, v1.5 true. The default empty form now accepts Codex's placeholder after `›` (v1.4 accepted it only after `»`). A screen without the layout's composer is not empty |
+
+## 4f. Fix round 6 (Codex `evt_01fc2398…`, applied in v1.6)
+
+| finding | change |
+|---|---|
+| M1 `readComposer` derived `empty` without Orca's `source`, so a `screen-unavailable` read carrying an old empty-composer frame passed every gate read and a send could go out with no live screen | `empty` is true only when `source` is `screen` (§2 steps 5 and 7); `screen-unavailable`, `stream`, any other value or none is not empty, and the refusal, or the last look's outcome, names the source. Tool-level tests, each with an empty-looking frame: `screen-unavailable`, no source, `stream` and `Screen` at the first gate read, `screen-unavailable` at the second and no source at the last look before Enter all send nothing; a `screen` read still sends and proves delivery |
+| M2 `continuationRun` appended a whole row past the line's length, and the id search read the overrun: a stale prefix of the line, then an unrelated overlong row carrying this send's id past the bound, gave `delivered: true` | each append is cut to what remains of the bound, and the first row is cut at the bound, so the search never reads past the line's own length (§2 step 8). Regressions on all three layouts: Codex's case, and one wide row holding an earlier send of the same words and then this send's id past the line's length; both `"unknown"`, `stale_prefix_only` |
+
+Both regressions fail on the round-5 code (`delivered: true` in Codex's M2 case; the `screen-unavailable` read sent) and
+pass on this round's. Nothing else changed in behaviour.
 
 ## 5. Rollout
 

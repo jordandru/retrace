@@ -162,8 +162,9 @@ export function composerOf(rows: string[], layout: string | undefined): Composer
 }
 
 export type ScreenRead = {
-  /** The harness's composer is on screen (`composerOf`), is one row matching its empty form, and there is no draft. False
-   *  when nothing rendered or no composer was found. */
+  /** The read is a live rendered screen (`source` is `screen`), the harness's composer is on it (`composerOf`), is one
+   *  row matching its empty form, and there is no draft. False for any other source or none (Codex, PR 222 r6 M1: a
+   *  `screen-unavailable` read can carry an old idle frame), when nothing rendered, or when no composer was found. */
   empty: boolean;
   last_line: string;
   /** Every rendered non-blank row, in order. */
@@ -185,17 +186,22 @@ export async function readComposer(run: OrcaRunner, handle: string, layout: stri
   const rows = tail.map((l) => l.replace(/\s+$/u, "")).filter((l) => l.trim().length > 0);
   const last = rows.length ? rows[rows.length - 1]! : "";
   const draft = typeof term.draft === "string" && term.draft.length ? term.draft : undefined;
+  const source = typeof term.source === "string" ? term.source : undefined;
   // The gate reads the composer itself (Codex, PR 222 r5 M2): the last rendered row is a status row on every harness here.
   const composer = composerOf(rows, layout);
-  const empty = composer !== undefined && composer.lines.length === 1 && new RegExp(emptyPattern, "u").test(composer.lines[0]!) && !draft;
-  return { empty, last_line: last, rows, ...(composer ? { composer_line: composer.lines[0]! } : {}), ...(draft ? { draft } : {}), ...(typeof term.source === "string" ? { source: term.source } : {}) };
+  // Only the rendered frame shows what the pane shows now (Codex, PR 222 r6 M1): `screen-unavailable` or `stream` is
+  // accumulated output that can hold an old idle frame, and a read with no source proves nothing.
+  const empty = source === "screen" && composer !== undefined && composer.lines.length === 1 && new RegExp(emptyPattern, "u").test(composer.lines[0]!) && !draft;
+  return { empty, last_line: last, rows, ...(composer ? { composer_line: composer.lines[0]! } : {}), ...(draft ? { draft } : {}), ...(source !== undefined ? { source } : {}) };
 }
 
-/** What a gate read saw, for a refusal: the composer row, or that none was found and the last row. */
+/** What a gate read saw, for a refusal: a source that is not the live screen, then the composer row, or that none was
+ *  found and the last row. */
 function composerDetail(read: ScreenRead, layout: string | undefined): string {
   if (read.error) return read.error;
+  const live = read.source === "screen" ? "" : `not a live screen (source ${read.source ?? "none"}); `;
   const seen = read.composer_line !== undefined ? `composer ${JSON.stringify(read.composer_line)}` : `no ${layout ?? "known"} composer on screen (last line ${JSON.stringify(read.last_line)})`;
-  return `${seen}${read.draft ? ` draft ${JSON.stringify(read.draft)}` : ""}`;
+  return `${live}${seen}${read.draft ? ` draft ${JSON.stringify(read.draft)}` : ""}`;
 }
 
 /** How much of the text a row must show to count as showing it: its first 40 characters anywhere in the row, or a prefix
@@ -216,15 +222,17 @@ function prefixOffset(row: string, text: string): number {
 /**
  * The wrapped run that starts at `body[i]`: that row from where our text starts, then each continuation row with its
  * leading indentation dropped (harnesses indent wrapped rows), joined without a separator (a wrap may split the id), until
- * the run holds as many characters as the whole line or the body ends at the composer. The bound is the line's own length
- * in content characters, so it holds at every width and needs no row count (Codex, PR 222 r5 L1: v1.4's 12-row cap
- * assumed 20 content columns, and a two-column prompt makes a 240-byte line 13 rows at width 20). At width W, with a
- * P-column prompt and I-column indentation, an L-character line spans 1 + ⌈(L − (W − P)) / (W − I)⌉ rows when the harness
- * breaks rows at the column limit.
+ * the run holds as many characters as the whole line or the body ends at the composer, and never more: the first row is
+ * cut at the line's length and each continuation row is cut to what remains, so the id search never reads past the line
+ * (Codex, PR 222 r6 M2: a whole last row appended past the bound let an id in an unrelated overlong row count as this
+ * send's). The bound is the line's own length in content characters, so it holds at every width and needs no row count
+ * (Codex, PR 222 r5 L1: v1.4's 12-row cap assumed 20 content columns, and a two-column prompt makes a 240-byte line 13
+ * rows at width 20). At width W, with a P-column prompt and I-column indentation, an L-character line spans
+ * 1 + ⌈(L − (W − P)) / (W − I)⌉ rows when the harness breaks rows at the column limit.
  */
 function continuationRun(body: string[], i: number, text: string, lineLength: number): string {
-  let run = body[i]!.slice(Math.max(0, prefixOffset(body[i]!, text)));
-  for (let j = i + 1; j < body.length && run.length < lineLength; j++) run += body[j]!.trimStart();
+  let run = body[i]!.slice(Math.max(0, prefixOffset(body[i]!, text))).slice(0, lineLength);
+  for (let j = i + 1; j < body.length && run.length < lineLength; j++) run += body[j]!.trimStart().slice(0, lineLength - run.length);
   return run;
 }
 
@@ -241,7 +249,8 @@ export type Delivery = { delivered: true | false | "unknown"; reason?: string };
  *  - `false`, `line_sits_in_composer`, only on positive evidence that the line is still in the composer: Orca's `draft`
  *    or the composer's own rows show the start of this send's text or its id;
  *  - `true` only when the composer is found and does not hold the line, and a transcript row above it shows the start of
- *    the text **with this send's id** on that row or in its continuation run (`continuationRun`). A row with the text and
+ *    the text **with this send's id** on that row or in its continuation run, which never reads past the line's own
+ *    length (`continuationRun`). A row with the text and
  *    no id, or another id, is some earlier send of the same words: `"unknown"`, `stale_prefix_only`;
  *  - `"unknown"`, with the reason, for everything else: a read error, a frame that is not the rendered screen or is empty,
  *    no composer on screen (`composer_not_on_screen`: an echo that ends the screen, a dialog in the composer's place, a
@@ -303,7 +312,7 @@ export function registerDispatchTools(server: McpServer, deps: DispatchDeps): vo
     "retrace_send",
     {
       title: "Send a signed message into another agent's pane",
-      description: "Agent-rules 15 / agent-ops 18 in one step: checks the SEAT envelope and the byte rules, refuses the owner's JD envelope, refuses any pane not registered as an agent pane or whose live Orca identity or incarnation differs from the registry, requires the brief when the text names one as `brief <path>` and refuses any other path-like token (a path, URL or slash token outside `brief <path>`) and a brief_path that is not the brief the text names, waits for the harness's composer (found by its layout: claude, codex, grok) to be empty, logs the `sent` event (text and brief hashes, target seat and terminal) under this seat's credential, then sends the line with ` [sent-event <id>]` appended, pressing Enter itself, and records what the post-send screen proved: delivered true (the line and its sent-event id are in the transcript above the composer), false (the composer itself holds the line) or unknown (the screen could not settle it). A refusal writes nothing.",
+      description: "Agent-rules 15 / agent-ops 18 in one step: checks the SEAT envelope and the byte rules, refuses the owner's JD envelope, refuses any pane not registered as an agent pane or whose live Orca identity or incarnation differs from the registry, requires the brief when the text names one as `brief <path>` and refuses any other path-like token (a path, URL or slash token outside `brief <path>`) and a brief_path that is not the brief the text names, waits for the harness's composer (found by its layout: claude, codex, grok) to be empty on a live screen read (Orca's source `screen`), logs the `sent` event (text and brief hashes, target seat and terminal) under this seat's credential, then sends the line with ` [sent-event <id>]` appended, pressing Enter itself, and records what the post-send screen proved: delivered true (the line and its sent-event id are in the transcript above the composer), false (the composer itself holds the line) or unknown (the screen could not settle it). A refusal writes nothing.",
       inputSchema: z.object({
         to: z.string().min(1).describe("Orca terminal handle of the receiving agent pane (must be in the pane registry as kind agent)"),
         receiver: z.string().min(1).describe("The receiving seat's actor id, e.g. codex; must match the registry entry"),
@@ -387,7 +396,7 @@ export function registerDispatchTools(server: McpServer, deps: DispatchDeps): vo
       let delivery: Delivery;
       if (!final.empty) {
         delivery = { delivered: false, reason: "composer_not_empty" };
-        outcome = { sent: false, reason: "composer_not_empty", last_line: final.last_line, ...(final.composer_line !== undefined ? { composer_line: final.composer_line } : {}), ...(final.draft ? { draft: final.draft } : {}) };
+        outcome = { sent: false, reason: "composer_not_empty", last_line: final.last_line, ...(final.source !== "screen" ? { source: final.source ?? "none" } : {}), ...(final.composer_line !== undefined ? { composer_line: final.composer_line } : {}), ...(final.draft ? { draft: final.draft } : {}) };
       } else {
         const r = await run(["terminal", "send", "--terminal", args.to, "--text", line, "--enter", "--json"]);
         const j = parseJson(r.stdout) as any;
