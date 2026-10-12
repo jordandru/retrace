@@ -179,7 +179,7 @@ export function packageVersion(moduleUrl: string = import.meta.url): string {
   return pkg.version;
 }
 
-export function buildServer(store = makeStore(), opts: { pinnedProject?: string; lock?: boolean; commitLock?: boolean; actorLock?: boolean; dispatch?: Pick<DispatchDeps, "run" | "registryPath" | "gateMs" | "sleep"> } = {}) {
+export function buildServer(store = makeStore(), opts: { pinnedProject?: string; lock?: boolean; commitLock?: boolean; actorLock?: boolean; dispatch?: Pick<DispatchDeps, "run" | "registryPath" | "gateMs" | "sleep" | "ownTerminal" | "homeDir"> } = {}) {
   const server = new McpServer({ name: "retrace", version: packageVersion() });
   const remote = store instanceof RemoteStore ? store : null;
   const pinned = opts.pinnedProject ?? env.RETRACE_PROJECT;
@@ -537,6 +537,9 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
 
   registerDispatchTools(server, {
     store, remote, resolveActor, prepareWrite, writeProject, locationDefaults, seatId: defaultActor.id,
+    // The pane this server runs in, as Orca tells the pane's processes (ORCA_TERMINAL_HANDLE) or as the operator
+    // configures it (RETRACE_TERMINAL): the receiver binding of retrace_verify_send (Codex, PR 222 r2, H2).
+    ...(env.RETRACE_TERMINAL ?? env.ORCA_TERMINAL_HANDLE ? { ownTerminal: env.RETRACE_TERMINAL ?? env.ORCA_TERMINAL_HANDLE } : {}),
     ...(opts.dispatch ?? {}),
   });
   registerAuditMcpTools(server, auditHandlers, { defaultProject: DEFAULT_PROJECT });
