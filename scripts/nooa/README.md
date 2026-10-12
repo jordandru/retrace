@@ -53,7 +53,7 @@ never on a command line. Writes nothing to the ledger. Pushing and launching sta
 the coordinator's own `sent` event, logged before the push, carries the local hashes it computed, and any launch outcome it logs
 afterwards is its act, not the script's.
 
-## `nooa-review-generic.py` (v2.6)
+## `nooa-review-generic.py` (v2.7)
 
 The canonical copy of the host wrapper. It reads **one anchored block at the very end** of the review — the last three
 non-blank lines, bare, at column zero, in order: `FINDINGS: high=<n> medium=<n> low=<n>`, `BLOCKING: yes|no`, `VERDICT: …` —
@@ -70,11 +70,13 @@ replaces the comment emulation of v2.3 and v2.4, which disagreed with GitHub's r
 Fence state is tracked line by line, so a block after an unclosed fence is inside it and refused, as is a keyword line inside a
 closed one; a keyword line that is indented, blockquoted, a list item, a heading, bold or inline code, anywhere in the review,
 is refused, as is a second keyword line or text after the block. Refusal seals nothing, keeps the text, and reports the error.
-`python3 scripts/nooa/nooa-review-generic.py --selftest` runs its 60 cases without the host.
+`python3 scripts/nooa/nooa-review-generic.py --selftest` runs its 61 cases without the host.
 
 **Limit, stated.** Other raw HTML is not inspected. A raw HTML element can still collapse or hide what follows it in rendered
 Markdown (an unclosed `<details>`, for example), and the wrapper does not claim that a sealed block is visible in every Markdown
-renderer. What it seals is bound to the exact bytes of the stored review, whose plain text shows the block. The sealed verdict
+renderer. What it seals is bound to the exact bytes of the stored review, whose plain text shows the block: the wrapper's
+header, then the reviewer's text with leading and trailing whitespace removed (Python `str.strip`), then one newline; the
+verdict block is parsed from the text as received. The sealed verdict
 says so itself: `method.params.record_surface` states that the stored file, whose sha256 is `change.after_hash`, is the record,
 that rendered Markdown is not, and that raw HTML other than the refused markers is not inspected; the sealed intent ends with
 that sha256 ("record: stored review text sha256 …; rendered Markdown is not the record"). Refusing every `<`

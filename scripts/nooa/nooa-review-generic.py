@@ -63,6 +63,11 @@ says that the record is the exact stored review file whose sha256 is change.afte
 record, and that raw HTML other than the refused comment-family markers is not inspected, so an unclosed element can collapse or
 hide what follows it, the verdict block included; the sealed intent ends with the stored file's sha256. `verdict_payload()`
 builds the sealed params and intent as a pure function, and the self-test checks both (H1).
+
+v2.7 (PR 225 fix round 7, Codex evt_302f0b23): wording only. `record_surface` and `change.summary` say what is stored: this
+wrapper's header, then the reviewer's text with leading and trailing whitespace removed (Python str.strip), then one newline; the
+verdict block is parsed from the text as received. `stored_review_bytes()` is the unchanged storage expression, moved into a
+function so the self-test checks the statement against the code (L1).
 Self-test: `python3 nooa-review-generic.py --selftest` (no host modules needed).
 The canonical copy lives in the repository at scripts/nooa/nooa-review-generic.py; push-and-launch.sh
 copies the one in its own directory, so copy the repository file over it after a merge.
@@ -183,9 +188,16 @@ def parse_verdict_block(review_markdown: str) -> dict:
 
 # What the sealed verdict says about its own record (Codex, PR 225 r6, H1): the stored bytes are the record, not a rendering.
 RECORD_SURFACE = ("the record is the exact bytes of the stored review file, this wrapper's header followed by the reviewer's text "
-                  "unedited, whose sha256 is change.after_hash; rendered Markdown is not the record; raw HTML other than the refused "
-                  "comment-family markers is not inspected, and an unclosed element, a details element for example, can collapse or "
-                  "hide what follows it in rendered Markdown, the verdict block included")
+                  "with leading and trailing whitespace removed (Python str.strip) and one newline added, whose sha256 is "
+                  "change.after_hash; the verdict block is parsed from the text as received; rendered Markdown is not the record; raw "
+                  "HTML other than the refused comment-family markers is not inspected, and an unclosed element, a details element for "
+                  "example, can collapse or hide what follows it in rendered Markdown, the verdict block included")
+
+
+def stored_review_bytes(header: str, review_markdown: str) -> bytes:
+    """The exact bytes the wrapper stores and hashes: its header, then the reviewer's text with leading and trailing whitespace
+    removed (Python str.strip), then one newline. RECORD_SURFACE describes exactly this (PR 225 r7, L1)."""
+    return (header + review_markdown.strip() + "\n").encode("utf-8")
 
 
 def verdict_payload(shape: dict, digest: str, *, pr: str, title: str, round_: str, cls: str, surface: str, reviewed_head: str,
@@ -355,9 +367,14 @@ def _selftest() -> None:
     rs = payload["params"].get("record_surface", "")
     assert rs == RECORD_SURFACE and "change.after_hash" in rs and "rendered Markdown is not the record" in rs, rs
     assert "details element" in rs and "comment-family markers" in rs and "<" not in rs and ">" not in rs, rs
+    assert "leading and trailing whitespace removed" in rs and "unedited" not in rs, rs
     cases += 1
     assert payload["intent"].endswith(f"; record: stored review text sha256 {digest[:12]}; rendered Markdown is not the record"), payload["intent"]
     assert payload["params"]["launcher_trust"] == "lt" and payload["params"]["findings"] == sample["params"]["findings"], payload
+    cases += 1
+    # r7 L1: what is stored is what record_surface says: the header, the text stripped at both ends, one newline; inside untouched.
+    stored = stored_review_bytes("H\n", " \r\n a\r\nb \u00a0\n\n")
+    assert stored == "H\na\r\nb\n".encode("utf-8"), stored
     cases += 1
     print(f"nooa-review-generic selftest: {cases} cases OK")
 
@@ -432,7 +449,7 @@ class PRReviewer(ra.RetraceDesignReviewer):
                   f"run: {ra.RUN_ID}\nreviewer: nooa (model {ra.MODEL})\n"
                   f"packet sha256: {ra.DESIGN_SHA}\nrouting event: {ROUTING_EVENT}\n"
                   f"reviewed head: {REVIEWED_HEAD}\nclass: {CLASS}\ncaused_by: {caused_by}\n\n---\n\n")
-        body = (header + review_markdown.strip() + "\n").encode("utf-8")
+        body = stored_review_bytes(header, review_markdown)
         with path.open("xb") as fh:
             fh.write(body)
         digest = sha256(body).hexdigest()
@@ -455,7 +472,7 @@ class PRReviewer(ra.RetraceDesignReviewer):
                  "label": f"review packet sha256 {ra.DESIGN_SHA[:12]}", "role": "used"},
                 {"id": f"file:{path}", "kind": "review", "label": path.name, "role": "generated"},
             ],
-            change={"after_hash": digest, "summary": "Exact stored review file: this wrapper's header, then the reviewer's text unedited; this sha256 is the record"},
+            change={"after_hash": digest, "summary": "Exact stored review file: this wrapper's header, then the reviewer's text with leading and trailing whitespace removed (Python str.strip) and one newline; this sha256 is the record"},
             method={"tool": "review", "automated": True, "params": payload["params"]},
             tags=["review", f"pr-{PR}", *TAGS, "gate"],
             intent=payload["intent"],
