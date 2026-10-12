@@ -1,13 +1,17 @@
-# Sentry cron monitoring for the Worker's scheduled jobs (design note v1)
+# Sentry cron monitoring for the Worker's scheduled jobs (design note v1.1)
 
-**Status:** v1, 2026-10-12, by claude-code (the "system optimization" pane, `claude-opus-5-5`, model source harness-runtime), on Jordan's
+**Status:** v1.1, 2026-10-12, by claude-code (the "system optimization" pane, `claude-opus-5-5`, model source harness-runtime), on Jordan's
 instruction `evt_8e43e1842df64d5580fd67d0135349ed` ("… and write the Sentry cron-monitoring design note."), dispatched by the coordinator's
 pointer `evt_a9e30fbef4644ae383aa0a0da0f482d8` (receipt `evt_4120fdf6dbfc41558ddac7d375204040`; its Sentry findings
 `evt_77470f7e966a41af8aa81ee78b805cb1`). Class **(a)** under agent-rules 12 (`docs/agent-rules.md:145-160`): it governs a later code change.
 **It proposes no code in this PR**, opens no Sentry account, holds no DSN, installs no package and sends nothing to Sentry.
+**Rounds:** v1.1 answers Codex round 1 (`evt_391bd3f18cda454ebbe286ed26b59518`, rejected `dd2b739e`: M1, the Alert that delivers a
+notification; L1, the header list) and NOOA round 1's Lows 1, 2, 3, 5, 6 and 7 (`evt_4abe894ec2214654b909b84fe5b4d681`), on the
+coordinator's verified pointer `evt_7c27aec0e4e7493690ac0b6e404b7b3f` (decision `evt_50df84d2a0194595b71565a7abfaf14d`). §12 lists the
+changes.
 
 Every claim is sourced: `file:line` at `3201e918`, a GitHub issue of this repository, or a documentation page read on 2026-10-12 (§10 lists
-them with their short names, S1-S6, C1-C6, H1-H2). Nothing here was run against Sentry, Cloudflare's API or Healthchecks.io.
+them with their short names, S1-S7, A1, C1-C6, H1-H2). Nothing here was run against Sentry, Cloudflare's API or Healthchecks.io.
 
 ## 1. The problem: three jobs whose failures reach only the console
 
@@ -35,23 +39,24 @@ nothing sends an alert when nobody is looking.
 
 ## 2. The design: HTTP check-ins from the scheduled handler, no SDK
 
-Sentry Crons takes check-ins over plain HTTPS at `https://o<orgId>.ingest.sentry.io/api/<project-id>/cron/<monitor_slug>/<public-key>/`,
+Sentry Crons takes check-ins over HTTPS at `https://o<orgId>.ingest.sentry.io/api/<project-id>/cron/<monitor_slug>/<public-key>/`,
 with `?status=in_progress`, `ok` or `error`, and a `check_in_id` that pairs a run's start with its end (S1). No SDK is needed: a monitored
 run sends two `fetch` requests.
 
 **Monitors: one to start, `retrace-api-hourly`, for the `:07` invocation.** It reports `ok` only when, in that invocation, all of these
 hold: the drain did not throw; `runCheckpointCron` resolved and no result's `witness` begins with `failed:`; `refreshExportCache` resolved
-with no `failed` result; and the refresh's status writes succeeded (today they are only logged, `export-cache-refresh.ts:44-48`; the code PR
-makes them visible to the check-in). Everything else reports `error`. That includes the hourly pass returning early for want of a signing
-key, or on an opt-in list that is empty or does not parse (§1): no checkpoint was made. If the handler throws before the jobs (§1), the
-terminal check-in still reports `error`; if even that is lost, the open `in_progress` becomes a timeout at `max_runtime` (S2), which also
-alerts. The empty list is a configured state (`wrangler.toml:27-29`), but a monitor exists only while checkpoints are expected. Why one
-monitor and not one per job:
+with no `failed` result; and the refresh's status writes succeeded (today they are only logged, `export-cache-refresh.ts:44-48`; the later
+code PR would make them visible to the check-in). Everything else reports `error`. That includes the hourly pass returning early for want of
+a signing key, or on an opt-in list that is empty or does not parse (§1): no checkpoint was made. If the handler throws before the jobs
+(§1), the terminal check-in still reports `error`; if even that is lost, the open `in_progress` becomes a timeout at `max_runtime` (S2),
+which also alerts. The empty list is a configured state (`wrangler.toml:27-29`), but a monitor exists only while checkpoints are expected.
+Why one monitor and not one per job:
 - the free plan includes one (§5);
 - the checkpoint and the refresh run in one invocation and one `waitUntil` chain, so one pair of check-ins covers both;
 - the same invocation also runs the drain.
 
-The twelve `*/5` drain runs are not monitored in this plan. A second monitor, `retrace-api-drain`, would cover them (Decision 2).
+The twelve `*/5` drain runs are not monitored in this plan. A second monitor, `retrace-api-drain`, would cover them (see Decision 2 for the
+tier choice).
 
 The drain's `failed` count is not mapped to `error`. It counts deliveries left pending for the next run as well as terminal ones: a deadline
 (`router.ts:1298`) or a classification that reached no decision (`router.ts:1317`, `router.ts:1340`) keeps a delivery pending, and the next
@@ -89,23 +94,26 @@ With a second monitor, `retrace-api-drain` would take crontab `*/5 * * * *`, `ch
 check-ins only from the `*/5` invocations; the `:07` run's drain stays inside `retrace-api-hourly`. Two check-ins every five minutes are far
 inside Sentry's limit of "6 per minute for each monitor environment" (S1).
 
-## 3. Exactly what leaves the Worker
+## 3. What leaves the Worker
 
 Per check-in, one HTTPS `GET` to Sentry's ingest host:
 - **host** `o<orgId>.ingest.sentry.io`, which names the Sentry organisation;
 - **path**: the Sentry project id, the monitor slug and the public key. The slug names the Worker (`retrace-api`, `wrangler.toml:1`), not a
   ledger project;
 - **query**: `status`, and `check_in_id` when the pair is used: a random UUID, derived from nothing in the ledger. **Not sent:**
-  - `environment` (S1: "If you don't specify an environment with your check-ins the default is `production`.");
+  - `environment`. S1 (read 2026-10-12): "If you don't specify an environment with your check-ins the default is `production`.";
   - a duration (S2: "Sentry uses the time between the in_progress and terminal (ok/error) check-ins to compute duration."; S1 documents no
     duration parameter);
   - `monitor_config`, if Decision 4 keeps the configuration in Sentry;
-- **headers**: what the runtime sends with a bare `fetch`, plus Cloudflare's `CF-Worker` header, which "is set to the name of the zone which
-  owns the Worker making the subrequest" (C4). C4 does not say what value a `workers.dev` Worker sends; the first check-in shows it;
+- **headers**: the Worker sets none of its own. Cloudflare adds `CF-Worker`, which "is set to the name of the zone which owns the Worker
+  making the subrequest" (C4), so it identifies the Worker's zone; C4 does not say what value a `workers.dev` Worker sends. **Any other
+  header the runtime or Cloudflare adds is not known.** The pages read do not list them, and the Sentry pages read describe no view of a
+  check-in's request headers, so a first deploy could not confirm them in Sentry either (§11);
 - **timing**: when each request arrives.
 
-Nothing else leaves: no event, id, hash, count or project name from the ledger, no request data, no error text, no job result. Results stay
-in Workers Logs (`index.ts:102`, `index.ts:123`, `index.ts:134`) and in D1 (`checkpoint-cron.ts:208`, `export-cache-refresh.ts:23-43`).
+Apart from that transport metadata, nothing leaves: no event, id, hash, count or project name from the ledger, no request data, no error
+text, no job result. Results stay in Workers Logs (`index.ts:102`, `index.ts:123`, `index.ts:134`) and in D1 (`checkpoint-cron.ts:208`,
+`export-cache-refresh.ts:23-43`).
 
 **The key.** One Worker secret, `RETRACE_SENTRY_CRONS_DSN`, holds the DSN of a Sentry project used for nothing else. The check-in URL is
 built from it. Jordan sets it with `wrangler secret put`, outside every agent pane (agent-rules 13). When it is unset, no check-in is sent:
@@ -124,18 +132,44 @@ It is not limited to check-ins: the key belongs to the project, not to the monit
 Per-key rate limits exist only on Business and Enterprise and limit error events (S6), so they are no part of this. Sentry calls a DSN safe to
 publish, but the Worker still keeps it as a secret, because the harm is a forged `ok`, not a read.
 
-## 4. Fail-closed, and observability is not evidence
+## 4. What notifies, fail-closed, and observability is not evidence
 
-- **What alerts.** S3: missed means "The job didn't execute in the predicted timeframe or frequency." Timeout means "A timeout failure event
-  when a job sent an initial check-in but failed to send a final check-in." Failed means "The job has reported its execution as
-  unsuccessful." "Issues are created when a cron monitor job execution is missed or failed", and "Monitor owners also receive notifications
-  when a monitor becomes broken". With `failure_issue_threshold` 1 the first such run alerts.
-- **Fail-closed both ways.** The Worker never depends on Sentry: nothing waits for a check-in, a check-in is abandoned after 2 s, and it never
-  rejects (§2). Sentry's silence is never read as health: a run Sentry never hears about becomes a missed check-in, and that alerts.
+**What makes an issue, and what delivers a notification.** A check-in that reports `error`, a missed check-in and a timed-out one each make
+Sentry "create an error event with a tag to your monitor" (S1). After `failure_issue_threshold` consecutive failed check-ins the failures
+become an issue (S2: "Number of consecutive failed check-ins before an issue is created."; S3: "Issues are created when a cron monitor job
+execution is missed or failed."), assigned to the monitor's owner if it has one (S3). **An issue notifies nobody by itself. A notification
+is delivered by an Alert.** S1's steps "To receive notifications about these events" are to create an Alert, "Choose the Projects or
+Monitors that should drive the rule", and set its triggers and filters; an Alert's action is what notifies someone (A1). For alerts that
+never arrive, Sentry's troubleshooting page says "You may not have set up alerts for your monitor." (S7). The one notification without an
+Alert is an email when a monitor environment "has been consistently broken for 14 days or more" (S7), which is no use for an hourly job. v1
+of this note cited owners being notified "when a monitor becomes broken" (S3) as if that were the alert; it is not.
+
+**The Alert.** Jordan creates it in Sentry (§8). The values are proposals (Decisions 3, 9 and 10):
+- **Source:** "Alert on specific monitors", connected to `retrace-api-hourly` (and to `retrace-api-drain` if it is bought), so that the
+  Alert evaluates only "issues those Monitors create" (A1). With a project source instead, S1's example filter, `monitor.slug` equals the
+  slug, does the same.
+- **Environment:** none is sent, so every check-in is `production` (S1), and the Alert needs no environment filter. S3 describes scoping an
+  Alert by environment for monitors that have several.
+- **Triggers:** "A new issue is created" and "A resolved issue regresses" (A1; triggers use ANY logic). The pages read do not say whether a
+  failure after a recovery opens a new issue or regresses the resolved one, so both are taken.
+- **Filters:** none. With no filters an Alert fires on every issue matching its trigger (A1), and the source already limits it to this
+  monitor's issues.
+- **Action:** "Notify on preferred channel" to a Member, Jordan. The free plan is "Limited to one user" (S5), and this action needs no
+  integration (A1). Slack, PagerDuty or a custom webhook need an installed integration (A1).
+- **Throttling:** the default, "Get notified on every trigger" (A1). Both triggers fire once per issue, not once per failed run, so one
+  failure episode sends one notification. A reminder while a failure lasts would need the trigger "An event or issue activity is captured"
+  with throttling of 3, 12 or 24 hours (A1; Decision 10).
+- **With `failure_issue_threshold`:** no issue exists until that many consecutive check-ins have failed (S2), so the Alert cannot fire
+  before then. At 1, the first failed, missed or timed-out hourly run notifies; at 2, the second in a row (Decision 3). `recovery_threshold`
+  1 resolves the issue on the next `ok` (S2), and the next failure notifies again through one of the two triggers.
+
+- **Fail-closed both ways.** The Worker never depends on Sentry: nothing waits for a check-in, a check-in is abandoned after 2 s, and it
+  never rejects (§2). Sentry's silence is never read as health: a run Sentry never hears about becomes a missed check-in, which the Alert
+  turns into a notification.
 - **What it cannot see:**
   - a run whose jobs report success while doing the wrong thing;
   - a forged `ok` (§3);
-  - anything that happens while Sentry itself is not receiving check-ins (§11).
+  - anything that happens while Sentry itself is not receiving check-ins, or while the Alert is turned off (§11).
 - **Pausing.** S3: "When you pause, your monitor will stop recording check-ins and will no longer notify you of any failed or missed
   check-ins." It "won't pause the execution of your job".
 - **Observability, not evidence.** A check-in is Sentry's note that a request arrived carrying a status. It is not signed with a producer key,
@@ -188,8 +222,9 @@ this and for any later error capture (§7). Decision 1.
 
 **(c) Retrace's own data.**
 - `/status` already carries `export_cache` (`packages/core/src/status.ts:143`), and `doctor` already warns on it (§1).
-- There is no checkpoint field. The `checkpoints` table is written by the cron and read only by `latest()`
-  (`apps/worker/src/checkpoint-log.ts:8-17`).
+- There is no checkpoint field. The `checkpoints` table is written by the cron and read only by `latest()`, which the cron itself calls
+  (`apps/worker/src/checkpoint-log.ts:8-17`, called at `checkpoint-cron.ts:190`). Nothing outside the cron can see checkpoint state today,
+  so this option needs a new reader as well as a new field.
 
 A checkpoint field could be added, but age alone is not failure. A run writes a checkpoint only when the head moved or the last checkpoint
 is not yet witnessed (`checkpoint-cron.ts:191-195`), so the field must carry the head beside it: the head moved, and there has been no
@@ -213,13 +248,19 @@ a complement (Decision 7).
 **Rollout**
 1. This note merges. Class (a) takes the design gate (`docs/team-roles.md:92-96`); routing is the coordinator's.
 2. Issue #232's fix lands first. It is the same file and the same logging rule.
-3. Jordan creates the Sentry organisation, a project used only for these monitors, and the monitor (§2's values; Decision 4). The DSN stays
-   off every agent pane.
-4. The code pull request follows, class (c) in surface S: the Worker's `index.ts` and a secret are both on surface S's list
+3. In Sentry, Jordan creates the organisation, a project used only for these monitors, the monitor (§2's values; Decision 4) and the Alert
+   (§4; Decisions 9 and 10). The DSN stays off every agent pane. He clicks **Send Test Notification** on the Alert's If/Then block, which
+   sends "a test event through that block's actions" (A1), and confirms that it arrives.
+4. **One synthetic failure, end to end, before the Worker sends anything.** A1 warns that event-based triggers may behave differently in a
+   test, so the test notification alone does not prove the chain. From his own terminal, not an agent pane, Jordan sends one check-in with
+   `?status=error` to the monitor; S1 documents this single-check-in "Heartbeat" form. At `failure_issue_threshold` 1 that makes an issue
+   (S2, S3); the Alert must fire and the notification must arrive. A check-in with `?status=ok` then resolves the issue
+   (`recovery_threshold` 1, S2). If no notification arrives, the rollout stops here.
+5. The code pull request follows, class (c) in surface S: the Worker's `index.ts` and a secret are both on surface S's list
    (`docs/design/effort-model-routing.md:54`).
-   - **Scope.** A small module (for example `apps/worker/src/cron-checkin.ts`) holds the URL builder, the status mapping of §2, and the
-     2-second never-reject wrapper; `index.ts` wires it in.
-   - **Tests:**
+   - **What it would do.** A small module (for example `apps/worker/src/cron-checkin.ts`) would hold the URL builder, the status mapping of §2
+     and the 2-second never-reject wrapper, and `index.ts` would wire it in.
+   - **Tests it would carry:**
      - an endpoint that never answers neither delays nor fails a job;
      - a failing check-in never rejects a `waitUntil`;
      - each failure shape of §1 maps to `error`;
@@ -227,12 +268,15 @@ a complement (Decision 7).
      - with the secret unset, no `fetch` is made.
    - **Review:** the code order (`docs/team-roles.md:92`), first pass at high effort for surface S (`effort-model-routing.md:54`); routing
      is the coordinator's.
-5. Jordan sets the secret and deploys. The first `:07` run shows one paired check-in, and the `CF-Worker` value it carried is recorded (§3).
+6. Jordan sets the secret and deploys. The first `:07` run shows one paired check-in on the monitor.
 
 **Rollback.** Each step is independent of the others.
 - **Stop sending:** `wrangler secret delete RETRACE_SENTRY_CRONS_DSN`. C6: "`wrangler secret delete` creates a new version of the Worker and
   deploys it immediately". With no secret, the code sends nothing.
-- **Stop alerts but keep receiving:** pause the monitor in Sentry (S3, §4).
+- **Stop notifications, keep recording:** turn the Alert off from its details page, where an Alert can be edited or turned off, or delete it
+  (A1).
+- **Stop recording and notifications:** pause the monitor (S3, §4).
+- **Stop any charge:** delete or deactivate the monitor; a muted monitor is still charged (S7).
 - **Remove the code:** revert the pull request and deploy. The jobs behave the same with or without it.
 
 ## 9. Decisions for Jordan
@@ -253,23 +297,30 @@ a complement (Decision 7).
    witnessed checkpoint for more than 2 hours. That would be a separate class (c) pull request.
 8. Measure what Cloudflare does with a scheduled event whose `waitUntil` rejects (retries or not) before any change that would let Cron Events
    show failures (§6 a).
+9. The Alert's action: "Notify on preferred channel" to Jordan as a Member (recommended; no integration, A1), or an integration such as
+   Slack, PagerDuty or a webhook, installed first (A1).
+10. The Alert's triggers: "A new issue is created" and "A resolved issue regresses" with throttling at its default (recommended; one
+    notification per failure episode), optionally with "An issue is resolved" for a recovery notice; or also "An event or issue activity is
+    captured" with throttling of 3, 12 or 24 hours, for reminders while a failure lasts (A1).
 
-## 10. Sources (all read 2026-10-12)
+## 10. Sources
 
-- S1 Sentry, Crons over HTTP: https://docs.sentry.io/product/crons/getting-started/http/
-- S2 Sentry, check-in protocol (SDK developer docs): https://develop.sentry.dev/sdk/telemetry/check-ins/
-- S3 Sentry, Crons job monitoring: https://docs.sentry.io/product/monitors-and-alerts/monitors/crons/job-monitoring.md
-- S4 Sentry, DSN explainer: https://docs.sentry.io/concepts/key-terms/dsn-explainer/
-- S5 Sentry, pricing: https://sentry.io/pricing/
-- S6 Sentry, managing the event stream (rate limits per key): https://docs.sentry.io/pricing/quotas/manage-event-stream-guide/
-- C1 Cloudflare, Cron Triggers: https://developers.cloudflare.com/workers/configuration/cron-triggers/
-- C2 Cloudflare, scheduled handler: https://developers.cloudflare.com/workers/runtime-apis/handlers/scheduled/
-- C3 Cloudflare, Workers limits: https://developers.cloudflare.com/workers/platform/limits/
-- C4 Cloudflare, HTTP request headers (`CF-Worker`): https://developers.cloudflare.com/fundamentals/reference/http-headers/
-- C5 Cloudflare, available notifications: https://developers.cloudflare.com/notifications/notification-available/
-- C6 Cloudflare, Worker secrets: https://developers.cloudflare.com/workers/configuration/secrets/
-- H1 Healthchecks.io, pricing: https://healthchecks.io/pricing/
-- H2 Healthchecks.io, HTTP API: https://healthchecks.io/docs/http_api/
+- S1 Sentry, Crons over HTTP, including its alerts section, read 2026-10-12: https://docs.sentry.io/product/crons/getting-started/http/
+- S2 Sentry, check-in protocol (SDK developer docs), read 2026-10-12: https://develop.sentry.dev/sdk/telemetry/check-ins/
+- S3 Sentry, Crons job monitoring, read 2026-10-12: https://docs.sentry.io/product/monitors-and-alerts/monitors/crons/job-monitoring.md
+- S4 Sentry, DSN explainer, read 2026-10-12: https://docs.sentry.io/concepts/key-terms/dsn-explainer/
+- S5 Sentry, pricing, read 2026-10-12: https://sentry.io/pricing/
+- S6 Sentry, per-key rate limits, read 2026-10-12: https://docs.sentry.io/pricing/quotas/manage-event-stream-guide/
+- S7 Sentry, Crons troubleshooting, read 2026-10-12: https://docs.sentry.io/product/monitors-and-alerts/monitors/crons/troubleshooting.md
+- A1 Sentry, creating an Alert, read 2026-10-12: https://docs.sentry.io/product/monitors-and-alerts/alerts/create-alerts/
+- C1 Cloudflare, Cron Triggers, read 2026-10-12: https://developers.cloudflare.com/workers/configuration/cron-triggers/
+- C2 Cloudflare, scheduled handler, read 2026-10-12: https://developers.cloudflare.com/workers/runtime-apis/handlers/scheduled/
+- C3 Cloudflare, Workers limits, read 2026-10-12: https://developers.cloudflare.com/workers/platform/limits/
+- C4 Cloudflare, HTTP request headers (`CF-Worker`), read 2026-10-12: https://developers.cloudflare.com/fundamentals/reference/http-headers/
+- C5 Cloudflare, available notifications, read 2026-10-12: https://developers.cloudflare.com/notifications/notification-available/
+- C6 Cloudflare, Worker secrets, read 2026-10-12: https://developers.cloudflare.com/workers/configuration/secrets/
+- H1 Healthchecks.io, pricing, read 2026-10-12: https://healthchecks.io/pricing/
+- H2 Healthchecks.io, HTTP API, read 2026-10-12: https://healthchecks.io/docs/http_api/
 
 ## 11. Measured, sourced, and not known
 
@@ -278,6 +329,22 @@ a complement (Decision 7).
 - **Sourced** from the pages in §10: every statement about Sentry, Cloudflare and Healthchecks.io.
 - **Not known**, to be measured on the first deploy or left open:
   - how Sentry records a terminal check-in whose `check_in_id` it never saw (§2 avoids sending one);
-  - the `CF-Worker` value for this `workers.dev` Worker;
+  - the `CF-Worker` value for this `workers.dev` Worker, and any other header the runtime or Cloudflare adds (§3). The Sentry pages read
+    show no request headers; measuring them would take one test request from the Worker to an endpoint Jordan controls;
+  - whether a failure after a recovery opens a new issue or regresses the resolved one (the Alert takes both triggers, §4);
+  - whether Sentry reports a missed check-in for a monitor that has not yet received one (S7 does not say);
   - whether Cloudflare retries a scheduled event whose `waitUntil` rejects;
   - Sentry's own availability, and how long it takes to raise a missed check-in beyond the configured margin.
+
+## 12. Changes in v1.1
+
+- **Codex M1.** §4 now separates what makes an issue (a failed, missed or timed-out check-in, counted against `failure_issue_threshold`)
+  from what delivers a notification (an Alert). It designs the Alert: source, environment, triggers, filters, action, throttling, and the
+  threshold's effect. It corrects v1's reading of "becomes broken". §8 adds the Alert and its test notification to rollout step 3, one
+  synthetic failure validated end to end as step 4, and the Alert to rollback. Decisions 9 and 10 are new, and so are sources S7 and A1.
+- **Codex L1.** §3 is "What leaves the Worker", no longer "Exactly what leaves". It names the one documented header (`CF-Worker`, which
+  identifies the zone) and says that any other added header is not known. v1's claim that the first check-in would show the `CF-Worker`
+  value is withdrawn (§8 step 6, §11).
+- **NOOA Lows.** 1: "plain HTTPS" is now "HTTPS" (§2). 2: the `environment` default is quoted from S1 with its read date (§3). 3: the
+  `checkpoints` reader line says why it matters (§6 c). 5: every source in §10 carries its read date, the DSN page S4 included. 6: the code
+  pull request is described as what it would do (§2, §8). 7: the drain monitor points to Decision 2 "for the tier choice" (§2).
