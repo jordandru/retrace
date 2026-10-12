@@ -53,7 +53,7 @@ never on a command line. Writes nothing to the ledger. Pushing and launching sta
 the coordinator's own `sent` event, logged before the push, carries the local hashes it computed, and any launch outcome it logs
 afterwards is its act, not the script's.
 
-## `nooa-review-generic.py` (v2.3)
+## `nooa-review-generic.py` (v2.4)
 
 The canonical copy of the host wrapper. It reads **one anchored block at the very end** of the review — the last three
 non-blank lines, bare, at column zero, in order: `FINDINGS: high=<n> medium=<n> low=<n>`, `BLOCKING: yes|no`, `VERDICT: …` —
@@ -64,10 +64,11 @@ are the ones `packages/core/src/review-verdict.ts` applies to every sealed verdi
 no REASON line and no override. The VERDICT line is parsed whole: `approved` or `needs changes`, alone or followed by one of
 `—`, `–`, `:`, `-` and at least one word (a bare delimiter is refused); `approved? no — needs changes` matches neither and is
 refused, not mapped. Fence state and HTML-comment state (`<!--` … `-->`) are tracked line by line, so a block after an unclosed
-fence or comment is inside it and refused, as is a keyword line inside a closed one; a keyword line that is indented,
+fence or comment is inside it and refused, as is a keyword line inside a closed one; an open fence takes precedence, so a
+literal `<!--` inside a fenced block or an inline code span is text, and an unmatched `-->` is text too; a keyword line that is indented,
 blockquoted, a list item, a heading, bold or inline code, anywhere in the review, is refused, as is a second keyword line or
 text after the block. Refusal seals nothing, keeps the text, and reports the error. `python3 scripts/nooa/nooa-review-generic.py
---selftest` runs its 42 cases without the host.
+--selftest` runs its 48 cases without the host.
 
 Before the run it checks the shape of every launcher value (PR number, full event id, full 40-hex head, round, rubric, class in
 a/b/c/S, surface) and refuses unless `NOOA_MODEL` **equals** the pinned witness model; a prefix is not a pin. Those values are

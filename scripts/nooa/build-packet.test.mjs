@@ -294,11 +294,11 @@ test("build: a tight budget drops the appendices in order and says so in the pac
   assert.ok(r.packet.includes("gh run view <id> --log"));
 });
 
-test("wrapper v2.3 self-test runs (python3 present) or is skipped", (t) => {
+test("wrapper v2.4 self-test runs (python3 present) or is skipped", (t) => {
   const py = spawnSync("python3", ["--version"], { encoding: "utf8" });
   if (py.status !== 0) { t.skip("python3 not available"); return; }
   const out = execFileSync("python3", ["-I", join(here, "nooa-review-generic.py"), "--selftest"], { encoding: "utf8" });
-  assert.match(out, /selftest: 42 cases OK/);
+  assert.match(out, /selftest: 48 cases OK/);
   const src = execFileSync("cat", [join(here, "nooa-review-generic.py")], { encoding: "utf8" });
   assert.ok(!src.includes("routing_binding") && src.includes('"launcher_trust": LAUNCHER_TRUST'), "H1 (r2): the seal names the launcher values as given");
   assert.ok(!/outcome event records/.test(src) && /coordinator's act outside this code/.test(src), "H1 (r3): no claim that the launch script records anything");
@@ -307,7 +307,7 @@ test("wrapper v2.3 self-test runs (python3 present) or is skipped", (t) => {
   assert.ok(!/needs changes" needs\s+at least one/.test(src), "M1 (r2): the prompt no longer directs Low-only results to approval");
 });
 
-test("wrapper v2.3 refuses to start on a model that is not the pinned witness model or on a malformed launcher value (M2, H3)", (t) => {
+test("wrapper v2.4 refuses to start on a model that is not the pinned witness model or on a malformed launcher value (M2, H3)", (t) => {
   const py = spawnSync("python3", ["--version"], { encoding: "utf8" });
   if (py.status !== 0) { t.skip("python3 not available"); return; }
   const env = { PATH: process.env.PATH, HOME: "/nonexistent-home", NOOA_PR: "222", NOOA_PR_TITLE: "t", NOOA_JUDGEMENT: "j", NOOA_TAGS: "pr-222", NOOA_ROUTING_EVENT: ROUTING, NOOA_REVIEWED_HEAD: HEAD, NOOA_FILES: "docs/x.md", NOOA_ROUND: "r1", NOOA_RUBRIC: "high", NOOA_SCOPE: "s", NOOA_CLASS: "a", NOOA_SURFACE: "class (a)", NOOA_MODEL: NOOA_MODEL };

@@ -45,7 +45,12 @@ launcher as given and only their shape and the model pin were checked; whether a
 it binds, is the coordinator's act outside this code (push-and-launch.sh prints hashes and a pid and writes nothing) (H1). An
 HTML comment (`<!--` … `-->`) is tracked like a fence, so a keyword line inside one, or a terminal block after an unclosed
 comment, is refused: a human reader would not see it (H2). A VERDICT delimiter must be followed by text; `approved —` alone is
-refused (L1). Self-test: `python3 nooa-review-generic.py --selftest` (no host modules needed).
+refused (L1).
+
+v2.4 (PR 225 fix round 4, Codex evt_4b8d48a0): fence state takes precedence over HTML-comment parsing, and inline code spans are
+masked before an opener is looked for, so a literal `<!--` inside a fenced block or in backticks is text, not a comment; an
+unmatched `-->` and CRLF line endings stay accepted (L1). Self-test: `python3 nooa-review-generic.py --selftest` (no host modules
+needed).
 The canonical copy lives in the repository at scripts/nooa/nooa-review-generic.py; push-and-launch.sh
 copies the one in its own directory, so copy the repository file over it after a merge.
 """
@@ -76,17 +81,31 @@ _KEYWORD_RE = re.compile(r"(?i)^(FINDINGS|BLOCKING|VERDICT|REASON)\**[ \t]*:")
 _FENCE_RE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})")
 # An HTML comment hides text from a human reader of rendered Markdown while the bytes stay in the file (Codex, PR 225 r3, H2).
 _COMMENT_OPEN, _COMMENT_CLOSE = "<!--", "-->"
+# Inline code spans are masked (same length, spaces) before an HTML-comment opener is looked for (r4 L1).
+_INLINE_CODE_RE = re.compile(r"`+[^`]*`+")
 
 
 def keyword_lines(text: str) -> list:
     """Every line of the review that starts, after optional Markdown dress, with one of the four keywords and a colon, as
     (line number, KEYWORD, dress, hidden) where hidden is None, "fence" or "comment". Fence state is tracked line by line (a
     fence closes only on a line of the same character at least as long, with nothing after it) and HTML-comment state the
-    same way (`<!--` opens, `-->` closes), so a block after an unclosed fence or comment is inside it (r2 H3, r3 H2)."""
+    same way (`<!--` opens, `-->` closes), so a block after an unclosed fence or comment is inside it (r2 H3, r3 H2). An
+    open fence takes precedence: its lines are text, a literal `<!--` inside it opens nothing, and a keyword line inside it
+    is hidden by the fence; an opener inside an inline code span is text too (r4 L1)."""
     found = []
     fence = None
     comment = False
     for i, line in enumerate(text.split("\n")):
+        if fence is not None:
+            # Inside a fence: only the closing fence matters; everything else is text, comment openers included.
+            fm = _FENCE_RE.match(line)
+            if fm and fm.group(1)[0] == fence[0] and len(fm.group(1)) >= len(fence) and not line[fm.end():].strip():
+                fence = None
+                continue
+            km = _KEYWORD_RE.match(_MD_PREFIX_RE.sub("", line, count=1))
+            if km:
+                found.append((i + 1, km.group(1).upper(), "", "fence"))
+            continue
         if comment:
             # Inside a comment: a keyword line here is hidden; the line that closes the comment is consumed whole.
             km = _KEYWORD_RE.match(line.lstrip())
@@ -95,17 +114,14 @@ def keyword_lines(text: str) -> list:
             if _COMMENT_CLOSE in line:
                 comment = False
             continue
-        opens = line.rfind(_COMMENT_OPEN)
-        if opens != -1 and _COMMENT_CLOSE not in line[opens:]:
+        masked = _INLINE_CODE_RE.sub(lambda m: " " * len(m.group(0)), line)
+        opens = masked.rfind(_COMMENT_OPEN)
+        if opens != -1 and _COMMENT_CLOSE not in masked[opens:]:
             comment = True
             line = line[:opens]  # only the visible part of this line can be a keyword line
         fm = _FENCE_RE.match(line)
         if fm:
-            mark = fm.group(1)
-            if fence is None:
-                fence = mark
-            elif mark[0] == fence[0] and len(mark) >= len(fence) and not line[fm.end():].strip():
-                fence = None
+            fence = fm.group(1)
             continue
         pm = _MD_PREFIX_RE.match(line)
         rest = line[pm.end():] if pm else line
@@ -195,6 +211,19 @@ def _selftest() -> None:
     spanning = parse_verdict_block(base + "<!-- a note\nover two lines -->\n\nFINDINGS: high=0 medium=0 low=1\nBLOCKING: no\nVERDICT: approved — fine")
     assert spanning["params"]["findings"]["low"] == 1, spanning
     cases += 1
+    # r4 L1 (Codex's probes): a literal opener inside a fenced block, or inside inline code, is text; an unmatched closer and CRLF are accepted.
+    fenced_opener = parse_verdict_block(base + "```html\n<!-- a template comment\n<div>\n```\n\nFINDINGS: high=0 medium=0 low=0\nBLOCKING: no\nVERDICT: approved — fine")
+    assert fenced_opener["action"] == "approved", fenced_opener
+    cases += 1
+    inline_opener = parse_verdict_block(base + "The file uses `<!--` as its marker.\n\nFINDINGS: high=0 medium=0 low=0\nBLOCKING: no\nVERDICT: approved — fine")
+    assert inline_opener["action"] == "approved", inline_opener
+    cases += 1
+    stray_close = parse_verdict_block(base + "a stray --> here\n\nFINDINGS: high=0 medium=0 low=0\nBLOCKING: no\nVERDICT: approved — fine")
+    assert stray_close["action"] == "approved", stray_close
+    cases += 1
+    crlf = parse_verdict_block((base + "FINDINGS: high=0 medium=0 low=0\nBLOCKING: no\nVERDICT: approved — fine\n").replace("\n", "\r\n"))
+    assert crlf["action"] == "approved", crlf
+    cases += 1
     bad = [
         # H2 (r1): an earlier VERDICT line with a terminal needs-changes block is refused, never sealed as approved.
         base + "VERDICT: approved — early\n\nmore text\n\nFINDINGS: high=1 medium=0 low=0\nBLOCKING: yes\nVERDICT: needs changes: H1",
@@ -248,6 +277,10 @@ def _selftest() -> None:
         # H2 (r3): a keyword line inside a closed comment, and a comment opened mid-line and never closed.
         base + "<!--\nVERDICT: approved — commented\n-->\n\nFINDINGS: high=1 medium=0 low=0\nBLOCKING: yes\nVERDICT: needs changes: H1",
         base + "Some prose <!-- starts here\nFINDINGS: high=0 medium=0 low=0\nBLOCKING: no\nVERDICT: approved — fine",
+        # r4 L1: a keyword line inside a fence that also holds a literal opener is still hidden by the fence, and a real
+        # comment opened after a closed fence still hides the block.
+        base + "```\n<!-- x\nVERDICT: approved — fenced\n```\n\nFINDINGS: high=1 medium=0 low=0\nBLOCKING: yes\nVERDICT: needs changes: H1",
+        base + "```\ncode\n```\n<!-- opened after the fence\n\nFINDINGS: high=0 medium=0 low=0\nBLOCKING: no\nVERDICT: approved — fine",
         # L1 (r3): a delimiter with nothing after it.
         base + "FINDINGS: high=0 medium=0 low=0\nBLOCKING: no\nVERDICT: approved — ",
         base + "FINDINGS: high=1 medium=0 low=0\nBLOCKING: yes\nVERDICT: needs changes:",
