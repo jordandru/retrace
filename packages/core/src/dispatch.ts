@@ -30,6 +30,16 @@ const OWNER_ENVELOPE_SPAN = /(^|\s)JD\s[\s\S]*?\sJD(\s|$)/;
  * The optional word `brief` may precede the first two forms as well.
  */
 const BRIEF_NAMED = /(?:^|\s)(?:brief\s+)?((?:~\/|\/)[^\s`"'<>]+)|(?:^|\s)brief\s+((?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.-]+)/;
+/** The same grammar, every match (a text names at most one brief; Codex, PR 222 r4, M1). */
+const BRIEF_NAMED_ALL = new RegExp(BRIEF_NAMED.source, "g");
+/**
+ * The word that introduces a brief: a token whose letters are `brief` in any letter case, punctuation attached
+ * (`brief`, `Brief:`, `(brief`, `brief,`). In a pane line the word is reserved for naming the brief: the token after it
+ * must be the name the grammar binds (Codex, PR 222 r4, M1). `briefs`, `briefly`, `debrief` are other words.
+ */
+const BRIEF_KEYWORD_RE = /^[^A-Za-z0-9]*brief[^A-Za-z0-9]*$/i;
+/** A path in another user's home (`~user/…`): never a supported form (only `~/…` is), so never silently ignored (r4, M1). */
+const OTHER_HOME_RE = /^[^A-Za-z0-9~]*~[A-Za-z_][A-Za-z0-9_.-]*\//;
 /** Where a relative brief name resolves: `<home>/.retrace/ops-<something>/<name>`. */
 const OPS_DIR_RE = /^\.retrace\/ops-[^/]+\//;
 
@@ -66,21 +76,54 @@ const FILE_EXT_RE = /\.[A-Za-z0-9]+$/;
 /** The token after a brief name must be another field, not a continuation of the path (an extension or a slash). */
 const PATH_LIKE_RE = /\/|\.[A-Za-z0-9]+$/;
 
+/** Why a text's brief name cannot be bound, for the refusal record and the failing check: the stable word, the
+ *  offending token as written, and a one-line reason. */
+export type BriefNameUnparseable = { reason: "brief_name_unparseable"; token: string; why: string };
+
 /**
- * Why the brief name in a text cannot be bound whole, or undefined when it can (Codex, PR 222 r3, M1). The grammar stops
- * at whitespace, so `brief /tmp/Brief A.md` would otherwise bind `/tmp/Brief` — a prefix of the visible pointer. A name
- * without a file extension, or one followed by a token that looks like the rest of a path, is `brief_name_unparseable`:
- * refused on send, a failing check on verify, never bound to a prefix. Paths with whitespace are not supported.
+ * Why the brief a text names cannot be bound whole, or undefined when it can. Nothing visibly brief-like is silently
+ * treated as "no brief" (Codex, PR 222 r3 M1, r4 M1). `brief_name_unparseable` — refused on send, a failing `brief_path`
+ * check on verify, never bound to a prefix — when:
+ *  - the word `brief` (any case, punctuation attached) is followed by anything but the name the grammar binds, whole:
+ *    `brief BRIEF.md`, `brief ~other/x.md`, `Brief: pr222/x.md` (the relative form binds only after the bare word),
+ *    `brief … x.md`, `the brief is ready`, or nothing at all;
+ *  - a token is a path in another user's home, `~user/…`, anywhere (only `~/…` is a supported form);
+ *  - the text names more than one brief;
+ *  - the bound name has no file extension, or is followed by a token that looks like the rest of a path (the grammar
+ *    stops at whitespace, so `brief /tmp/Brief A.md` would otherwise bind `/tmp/Brief`). Paths with whitespace are not
+ *    supported.
  */
-export function briefNameProblem(text: string): string | undefined {
-  const m = BRIEF_NAMED.exec(text);
-  if (!m) return undefined;
-  const named = (m[1] ?? m[2])!;
-  if (!FILE_EXT_RE.test(named)) return "brief_name_unparseable";
-  const rest = text.slice(m.index + m[0].length).trimStart();
-  const next = rest.split(/\s+/)[0] ?? "";
-  if (next && PATH_LIKE_RE.test(next)) return "brief_name_unparseable";
+export function briefNameUnparseable(text: string): BriefNameUnparseable | undefined {
+  const problem = (token: string, why: string): BriefNameUnparseable => ({ reason: "brief_name_unparseable", token, why });
+  const bound = [...text.matchAll(BRIEF_NAMED_ALL)].map((m) => {
+    const name = (m[1] ?? m[2])!;
+    const end = m.index! + m[0].length;
+    return { name, start: end - name.length, end };
+  });
+  const tokens = [...text.matchAll(/\S+/g)].map((m) => ({ token: m[0], start: m.index! }));
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i]!;
+    if (OTHER_HOME_RE.test(t.token)) return problem(t.token, "a path in another user's home; only ~/… names a brief");
+    if (!BRIEF_KEYWORD_RE.test(t.token)) continue;
+    const next = tokens[i + 1];
+    if (!next) return problem(t.token, "the word brief ends the text; the brief's name must follow it");
+    const b = bound.find((x) => x.start === next.start);
+    if (!b || b.end !== next.start + next.token.length)
+      return problem(next.token, "the word brief is reserved for naming the brief, and what follows it is not a supported brief name (~/…, /…, or <dir>/<file> right after the bare word brief)");
+  }
+  const names = [...new Set(bound.map((x) => x.name))];
+  if (names.length > 1) return problem(names[1]!, `the text names more than one brief (${names.join(", ")}); a pointer names one`);
+  for (const x of bound) {
+    if (!FILE_EXT_RE.test(x.name)) return problem(x.name, "a brief name without a file extension (a directory, or a path cut at whitespace)");
+    const next = text.slice(x.end).trimStart().split(/\s+/)[0] ?? "";
+    if (next && PATH_LIKE_RE.test(next)) return problem(`${x.name} ${next}`, "a brief name followed by a token that looks like the rest of a path; paths with whitespace are not supported");
+  }
   return undefined;
+}
+
+/** The stable word of `briefNameUnparseable`, or undefined when the brief name (if any) binds whole. */
+export function briefNameProblem(text: string): string | undefined {
+  return briefNameUnparseable(text)?.reason;
 }
 
 /** `~` and `~/x` expanded against `homeDir`; `.`/`..` segments normalised; nothing else changed. */
@@ -228,12 +271,13 @@ export async function verifySentEvent(raw: Event | null | undefined, expect: Sen
   // The brief binding (Codex, PR 222 r1 H3, r2 H1): the brief the text names, the brief the event recorded and the
   // brief the receiver read must be one file, and its bytes must hash to the recorded sha256.
   const named = briefNamedIn(expect.text);
-  const nameProblem = briefNameProblem(expect.text);
+  const unparseable = briefNameUnparseable(expect.text);
   const recordedPath = typeof p.brief_path === "string" ? p.brief_path : undefined;
   const recordedBrief = typeof p.brief_sha256 === "string" ? p.brief_sha256 : undefined;
-  if (nameProblem !== undefined) {
-    // The grammar cannot bind the name whole (whitespace in the path): nothing is bound, let alone a prefix (r3, M1).
-    checks.brief_path = { ok: false, detail: `${nameProblem}: the text names a brief the grammar cannot bind whole (${named}); paths with whitespace are not supported` };
+  if (unparseable !== undefined) {
+    // The grammar cannot bind the name whole: nothing is bound, let alone a prefix (r3, M1), and nothing brief-like is read
+    // as "no brief named" (r4, M1).
+    checks.brief_path = { ok: false, detail: `${unparseable.reason}: ${unparseable.why}: ${unparseable.token}` };
   } else if (named !== undefined) {
     // One resolution (r3, H1): the name resolves to exactly the event's brief_path; the receiver's path, when given, must
     // equal it after normalisation. Another ops-* directory carrying the same tail is brief_path_mismatch.
@@ -251,7 +295,9 @@ export async function verifySentEvent(raw: Event | null | undefined, expect: Sen
     checks.brief_sha256 = { ok: false, detail: `the brief could not be read: ${expect.briefReadError}` };
     unverifiable.add("brief_sha256");
   } else if (recordedBrief === undefined) {
-    checks.brief_sha256 = named !== undefined
+    checks.brief_sha256 = unparseable !== undefined
+      ? { ok: false, detail: `the text's brief name cannot be bound (${unparseable.token}), and the event records no brief_sha256` }
+      : named !== undefined
       ? { ok: false, detail: `the text names a brief (${named}) but the event records no brief_sha256` }
       : expect.briefPresent
         ? { ok: false, detail: "a brief was supplied but the event records no brief_sha256" }

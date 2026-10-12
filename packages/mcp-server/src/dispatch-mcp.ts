@@ -21,7 +21,7 @@ import { join } from "node:path";
 import type { McpServer } from "@modelcontextprotocol/server";
 import {
   type Actor as CoreActor, type Location, type Event, type EventInput, EventInput as EventInputSchema, type EventStore,
-  appendEvent, paneTextProblem, paneTextSha256, withSentSuffix, splitSentSuffix, verifySentEvent, briefNamedIn, briefNameProblem, briefPathNames,
+  appendEvent, paneTextProblem, paneTextSha256, withSentSuffix, splitSentSuffix, verifySentEvent, briefNamedIn, briefNameProblem, briefNameUnparseable, briefPathNames,
   resolveBriefName, expandHome, PANE_MESSAGE_MAX_BYTES, type SentVerification,
 } from "@retrace-dev/core";
 import { AuditActor } from "./audit-mcp.js";
@@ -148,28 +148,63 @@ function rowShowsPrefix(row: string, text: string): boolean {
 function rowShows(row: string, text: string, sentEventId: string): boolean {
   return rowShowsPrefix(row, text) || row.includes(`[sent-event ${sentEventId}]`);
 }
+/** Where our text starts in a row that shows its prefix (the same two tests as `rowShowsPrefix`), or -1. */
+function prefixOffset(row: string, text: string): number {
+  const i = row.indexOf(text.slice(0, 40));
+  if (i >= 0) return i;
+  for (let n = Math.min(text.length, 120); n >= 24; n--) if (row.endsWith(text.slice(0, n))) return row.length - n;
+  return -1;
+}
+
+/** The longest run the delivery scan follows: a 240-byte line wraps over at most ceil(240 / 20) = 12 rows in a pane 20
+ *  columns wide. The first row must still show 24 characters of the text (`rowShowsPrefix`); a pane too narrow for that,
+ *  or one where the id falls past 12 rows, leaves delivery `"unknown"`, never `true` (Codex, PR 222 r4, L1). */
+export const DELIVERY_SCAN_MAX_ROWS = Math.ceil(PANE_MESSAGE_MAX_BYTES / 20);
+
+/**
+ * The wrapped run that starts at `body[i]`: that row from where our text starts, then each continuation row with its
+ * leading indentation dropped (harnesses indent wrapped rows), joined without a separator (a wrap may split the id), until
+ * the run holds as many characters as the whole line, the body ends (the next row is the composer), or
+ * DELIVERY_SCAN_MAX_ROWS rows (Codex, PR 222 r4, L1: at 59 columns a 240-byte line puts the id on its fourth row).
+ */
+function continuationRun(body: string[], i: number, text: string, lineLength: number): string {
+  let run = body[i]!.slice(Math.max(0, prefixOffset(body[i]!, text)));
+  for (let j = i + 1; j < body.length && j - i < DELIVERY_SCAN_MAX_ROWS && run.length < lineLength; j++) run += body[j]!.trimStart();
+  return run;
+}
+
+/** A line that sits in the composer ends on the last row; wrapped, the last row is a tail of it, possibly only `]` or the
+ *  last characters of the id. That row can show neither the text prefix nor the whole suffix, so `rowShows` misses it; the
+ *  wider scan would then find the id above it and call a sitting line delivered (r4, L1). */
+function lastRowIsTailOf(lastRow: string, line: string): boolean {
+  const tail = lastRow.trimStart();
+  return tail.length > 0 && line.endsWith(tail);
+}
 
 export type Delivery = { delivered: true | false | "unknown"; reason?: string };
 
 /**
  * What the post-send screen proves (Codex, PR 222 r1 M2, r2 M2, r3 M2). `true` only on positive evidence: the frame was
  * read, is the rendered screen, is non-empty, our line is NOT on the last row or in the draft, and it IS echoed on an
- * earlier row (the harness accepted it into its transcript) **with the current sent-event id on that row or on the one
- * or two rows after it (a wrapped line)**. A row that matches only the text prefix is a transcript of some send with the
- * same words — an earlier dispatch of the same line — and proves nothing about this one: `"unknown"`, `stale_prefix_only`.
- * A line on the last row or in the draft is `false` (`line_sits_in_composer`). Anything else the screen cannot settle — a
+ * earlier row (the harness accepted it into its transcript) **with the current sent-event id on that row or in its
+ * continuation run (a wrapped line, up to DELIVERY_SCAN_MAX_ROWS rows; r4 L1)**. A row that matches only the text prefix is
+ * a transcript of some send with the same words — an earlier dispatch of the same line — and proves nothing about this one:
+ * `"unknown"`, `stale_prefix_only`. A line on the last row or in the draft, or a last row that is a tail of this line (a
+ * wrapped line still in the composer), is `false` (`line_sits_in_composer`). Anything else the screen cannot settle — a
  * read error, an unrendered or empty frame, a frame that shows the line nowhere yet — is `"unknown"` with the reason.
  */
 export function deliveryFromScreen(after: ScreenRead, text: string, sentEventId: string): Delivery {
   if (after.error) return { delivered: "unknown", reason: `post_send_read_failed: ${after.error}` };
   if (after.source !== undefined && after.source !== "screen") return { delivered: "unknown", reason: `post_send_screen_unavailable: source ${after.source}` };
   if (!after.rows.length) return { delivered: "unknown", reason: "post_send_screen_empty" };
-  if ((after.draft !== undefined && rowShows(after.draft, text, sentEventId)) || rowShows(after.last_line, text, sentEventId)) return { delivered: false, reason: "line_sits_in_composer" };
+  const line = withSentSuffix(text, sentEventId);
+  if ((after.draft !== undefined && rowShows(after.draft, text, sentEventId)) || rowShows(after.last_line, text, sentEventId) || lastRowIsTailOf(after.last_line, line))
+    return { delivered: false, reason: "line_sits_in_composer" };
   const body = after.rows.slice(0, -1);
   const prefixRows = body.map((row, i) => (rowShowsPrefix(row, text) ? i : -1)).filter((i) => i >= 0);
   if (!prefixRows.length) return { delivered: "unknown", reason: "line_not_on_screen" };
-  // The id may sit on the same row, or on a continuation row after a wrap (possibly split across the wrap: join without a separator).
-  const withId = prefixRows.some((i) => body.slice(i, i + 3).join("").includes(sentEventId));
+  // The id may sit on the same row or anywhere in the continuation run after a wrap (possibly split across a wrap).
+  const withId = prefixRows.some((i) => continuationRun(body, i, text, line.length).includes(sentEventId));
   if (!withId) return { delivered: "unknown", reason: "stale_prefix_only" };
   return { delivered: true };
 }
@@ -233,8 +268,8 @@ export function registerDispatchTools(server: McpServer, deps: DispatchDeps): vo
       if (problem) throw new DispatchRefusal(problem, `text does not meet the pane-message rules for seat ${deps.seatId}`);
       // The brief binding (Codex, PR 222 r1 H3, r2 H1): the text's brief name and brief_path must denote one file.
       const named = briefNamedIn(args.text);
-      const nameProblem = briefNameProblem(args.text);
-      if (nameProblem) throw new DispatchRefusal(nameProblem, `the text names a brief the grammar cannot bind whole (${named}); paths with whitespace are not supported, and a prefix is never sealed`);
+      const unparseable = briefNameUnparseable(args.text);
+      if (unparseable) throw new DispatchRefusal(unparseable.reason, `${unparseable.why}: ${unparseable.token}; nothing is sealed for a brief the grammar cannot bind whole (Codex, PR 222 r3 M1, r4 M1)`);
       if (named !== undefined && !args.brief_path) throw new DispatchRefusal("brief_required", `the text names a brief (${named}); pass brief_path so its sha256 is sealed on the sent event`);
       if (named !== undefined && args.brief_path && !briefPathNames(args.brief_path, named, homeDir))
         throw new DispatchRefusal("brief_name_mismatch", `the text names brief ${named} but brief_path is ${args.brief_path}; the sealed brief must be the one the receiver will resolve from the text`);

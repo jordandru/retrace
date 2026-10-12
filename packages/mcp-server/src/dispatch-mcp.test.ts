@@ -91,6 +91,10 @@ test("retrace_send: refusals write nothing", async () => {
       // M1 (r3): a brief name with whitespace is refused, never bound to a prefix.
       [{ to: HANDLE, receiver: "codex", text: "CLAUDE-CODE per brief /tmp/Brief A.md sha256 1234 CLAUDE-CODE", brief_path: "/tmp/Brief", caused_by: rootId }, /brief_name_unparseable/],
       [{ to: HANDLE, receiver: "codex", text: `CLAUDE-CODE PR 222: brief pr222/BRIEF.md CLAUDE-CODE`, brief_path: other, caused_by: rootId }, /brief_name_mismatch/],
+      // M1 (r4): Codex's probes sent with no brief at 51dada16; a visibly brief-like name that does not bind is refused.
+      [{ to: HANDLE, receiver: "codex", text: "CLAUDE-CODE PR 222: brief ~other/pr222/BRIEF.md CLAUDE-CODE", caused_by: rootId }, /brief_name_unparseable.*~other\/pr222\/BRIEF\.md/],
+      [{ to: HANDLE, receiver: "codex", text: "CLAUDE-CODE PR 222: brief BRIEF.md CLAUDE-CODE", caused_by: rootId }, /brief_name_unparseable.*BRIEF\.md/],
+      [{ to: HANDLE, receiver: "codex", text: "CLAUDE-CODE PR 222: brief BRIEF.md CLAUDE-CODE", brief_path: other, caused_by: rootId }, /brief_name_unparseable/],
       // M1-adjacent on the sender: a brief that cannot be read is a refusal, not a crash.
       [{ to: HANDLE, receiver: "codex", text: TEXT, brief_path: "~/.retrace/x/BRIEF.md", caused_by: rootId }, /brief_unreadable/],
       [{ to: HANDLE, receiver: "codex", text: "CLAUDE-CODE per brief /nonexistent/brief.md CLAUDE-CODE", brief_path: "/nonexistent/brief.md", caused_by: rootId }, /brief_missing/],
@@ -237,6 +241,28 @@ test("retrace_send: logs the sent event, sends the suffixed line, proves deliver
   } finally { await close(); }
 });
 
+test("retrace_verify_send: a ~user/ path or a bare filename after brief fails brief_path; the receipt is sealed, act false (M1 r4)", async () => {
+  const f: Fake = { calls: [], screenLines: ["❯ "], sendOk: true, listed: true };
+  const { store, client, rootId, close } = await setup(f, registry);
+  try {
+    for (const T of ["CLAUDE-CODE PR 222: brief ~other/pr222/BRIEF.md CLAUDE-CODE", "CLAUDE-CODE PR 222: brief BRIEF.md CLAUDE-CODE"]) {
+      // Signed, addressed to this seat at this terminal, text hash right, no brief on the event: at 51dada16 this verified.
+      const ev = await stamp(store, T, { text_sha256: await paneTextSha256(T) });
+      const v = await client.callTool({ name: "retrace_verify_send", arguments: { text: `${T} [sent-event ${ev.event.id}]`, caused_by: rootId } });
+      const sc = v.structuredContent as any;
+      assert.equal(v.isError, true, T);
+      assert.equal(sc.verification.signature, "mismatch", T);
+      assert.equal(sc.verification.failure, "brief_path", T);
+      assert.match(sc.verification.checks.brief_path.detail, /^brief_name_unparseable/, T);
+      assert.equal(sc.act, false, T);
+      const rec = await store.get(sc.received_event_id);
+      assert.equal(rec!.action, "received", "the receipt is sealed");
+      assert.equal((rec!.method!.params as any).failure, "brief_path");
+      assert.equal(rec!.caused_by, rootId, "an unverified receipt links to the receiver's own root, not the sender's chain");
+    }
+  } finally { await close(); }
+});
+
 test("retrace_verify_send: every failure after the split still writes the received record (M1)", async () => {
   const f: Fake = { calls: [], screenLines: ["❯ "], sendOk: true, listed: true };
   const { store, client, dir, close } = await setup(f, registry);
@@ -298,6 +324,44 @@ test("deliveryFromScreen: true only on positive evidence; sitting lines false; e
   assert.deepEqual(deliveryFromScreen(read({ rows: ["x", `[sent-event ${id}]`], last_line: `[sent-event ${id}]`, empty: false }), PLAIN, id), { delivered: false, reason: "line_sits_in_composer" }, "a wrapped stuck line shows its suffix on the last row");
   assert.deepEqual(deliveryFromScreen(read({ draft: PLAIN.slice(0, 50) }), PLAIN, id), { delivered: false, reason: "line_sits_in_composer" });
   assert.deepEqual(deliveryFromScreen(read({}), PLAIN, id), { delivered: "unknown", reason: "line_not_on_screen" }, "a frame that shows the line nowhere is lag or loss, not delivery");
+});
+
+/** The rows a terminal `width` columns wide shows for `prompt + line`, continuation rows led by `indent`, trailing
+ *  whitespace dropped as `readComposer` drops it. */
+function wrapRows(prompt: string, line: string, width: number, indent = ""): string[] {
+  const rows: string[] = [];
+  for (let rest = line, head = prompt; rest.length; head = indent) {
+    const room = width - head.length;
+    rows.push(`${head}${rest.slice(0, room)}`.replace(/\s+$/u, ""));
+    rest = rest.slice(room);
+  }
+  return rows;
+}
+
+test("deliveryFromScreen: a 240-byte line wrapped at 40 and 59 columns is delivered when this send's id is anywhere in its run; a wrapped line still in the composer never is (L1 r4)", () => {
+  const id = "evt_3f9c2a7b1d8e4f60a5b7c9d1e3f5a7b9";
+  const MAX = `CLAUDE-CODE ${"review the PR at its exact head and seal the verdict ".repeat(4).slice(0, 166).trimEnd().padEnd(166, "x")} CLAUDE-CODE`;
+  const line = `${MAX} [sent-event ${id}]`;
+  assert.equal(Buffer.byteLength(MAX, "utf8"), 190); assert.equal(Buffer.byteLength(line, "utf8"), 240);
+  const read = (over: Partial<ScreenRead>): ScreenRead => ({ empty: true, last_line: "❯ ", rows: ["x", "❯ "], source: "screen", ...over });
+  const stale = (w: number, indent: string) => wrapRows("> ", `${MAX} [sent-event evt_${"0".repeat(32)}]`, w, indent);
+  for (const width of [40, 59]) for (const indent of ["", "  "]) {
+    const at = `${width} columns${indent ? ", indented continuation rows" : ""}`;
+    const echo = wrapRows("> ", line, width, indent);
+    assert.ok(!echo.slice(0, 3).join("").includes(id), `${at}: the id lies beyond the prefix row and two continuation rows (Codex's probe)`);
+    assert.deepEqual(deliveryFromScreen(read({ rows: ["older output", ...echo, "❯ "] }), MAX, id), { delivered: true }, `${at}: echoed`);
+    const sitting = wrapRows("» ", line, width, indent);
+    assert.deepEqual(deliveryFromScreen(read({ rows: ["older output", ...sitting], last_line: sitting.at(-1)!, empty: false }), MAX, id), { delivered: false, reason: "line_sits_in_composer" }, `${at}: still in the composer`);
+    assert.deepEqual(deliveryFromScreen(read({ rows: ["older output", ...stale(width, indent), "❯ "] }), MAX, id), { delivered: "unknown", reason: "stale_prefix_only" }, `${at}: an earlier send of the same words`);
+    assert.deepEqual(deliveryFromScreen(read({ rows: [...stale(width, indent), ...sitting], last_line: sitting.at(-1)!, empty: false }), MAX, id), { delivered: false, reason: "line_sits_in_composer" }, `${at}: an earlier send above, this one still in the composer`);
+  }
+  // A sitting line whose last row is only its closing bracket: the r3 window found the id above it and said delivered.
+  const bracket = ["older output", `» ${line.slice(0, 120)}`, line.slice(120, 239), "]"];
+  assert.deepEqual(deliveryFromScreen(read({ rows: bracket, last_line: "]", empty: false }), MAX, id), { delivered: false, reason: "line_sits_in_composer" });
+  // Narrower than the scan supports (12 rows): unknown, never true.
+  assert.equal(deliveryFromScreen(read({ rows: ["older output", ...wrapRows("> ", line, 16), "❯ "] }), MAX, id).delivered, "unknown");
+  // 80 columns: with a two-character prompt the id's last character is on the fourth row, one past r3's window.
+  assert.deepEqual(deliveryFromScreen(read({ rows: ["older output", ...wrapRows("> ", line, 80), "❯ "] }), MAX, id), { delivered: true });
 });
 
 test("retrace_send: a failed orca send is not delivered; a stuck line is not delivered; an unreadable or lagging screen is unknown (M2)", async () => {
