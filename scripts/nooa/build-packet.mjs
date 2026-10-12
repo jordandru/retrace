@@ -293,8 +293,13 @@ only Lows it is allowed and reads \`BLOCKING: no\` (a non-blocking rejection; on
 no REASON line and no override. Write FINDINGS, BLOCKING and VERDICT at the start of exactly one line each in the whole
 review and never quote them in a fence, a blockquote, a list or a heading: the seal reads the one block at the very end,
 refuses a keyword line in any of those forms anywhere, refuses a second keyword line, refuses text after the block, and
-refuses lines that disagree with each other. Then nothing is sealed, the run is reported as failed, and the text you wrote is
-kept. These are the rules the repository's verdict validator applies to every sealed verdict (team-roles rule 8).`;
+refuses lines that disagree with each other.
+Write no HTML comment and no comment marker anywhere in the review, code and quotations included: no less-than sign
+followed by an exclamation mark or a question mark, no less-than sign and slash followed by anything but a letter, and no
+two hyphens followed by a greater-than sign; describe such text in words. The seal refuses a review that contains one, whole,
+before reading anything else. Then nothing is sealed, the run is reported as failed, and the text you wrote is kept. The
+derivation rules are the ones the repository's verdict validator applies to every sealed verdict (team-roles rule 8); the form
+rules are the wrapper's.`;
 
 const code = (lang, body) => `\`\`\`${lang}\n${body.replace(/\n$/, "")}\n\`\`\``;
 

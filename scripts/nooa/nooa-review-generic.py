@@ -43,14 +43,20 @@ refused; a keyword line in blockquote, list, heading, bold, inline-code or inden
 v2.3 (PR 225 fix round 3, Codex evt_501bdc45): `launcher_trust` says only what this code does — the values were taken from the
 launcher as given and only their shape and the model pin were checked; whether a launch record exists in the ledger, and what
 it binds, is the coordinator's act outside this code (push-and-launch.sh prints hashes and a pid and writes nothing) (H1). An
-HTML comment (`<!--` … `-->`) is tracked like a fence, so a keyword line inside one, or a terminal block after an unclosed
-comment, is refused: a human reader would not see it (H2). A VERDICT delimiter must be followed by text; `approved —` alone is
+HTML comment was tracked like a fence (H2; replaced in v2.5). A VERDICT delimiter must be followed by text; `approved —` alone is
 refused (L1).
 
-v2.4 (PR 225 fix round 4, Codex evt_4b8d48a0): fence state takes precedence over HTML-comment parsing, and inline code spans are
-masked before an opener is looked for, so a literal `<!--` inside a fenced block or in backticks is text, not a comment; an
-unmatched `-->` and CRLF line endings stay accepted (L1). Self-test: `python3 nooa-review-generic.py --selftest` (no host modules
-needed).
+v2.4 (PR 225 fix round 4, Codex evt_4b8d48a0): fence state took precedence over HTML-comment parsing and inline code spans were
+masked before an opener was looked for (L1; replaced in v2.5).
+
+v2.5 (PR 225 fix round 5, Codex evt_cb65eb28): the wrapper no longer parses HTML comments; the comment tracking of v2.3 and v2.4
+and the inline-code mask are deleted. Rounds 3 to 5 each found a new way for that emulation to disagree with GitHub's renderer
+(an unclosed opener; a close and a reopen on one line, H1; a comment-like fence info string, L1; a code span with longer
+delimiters, L2). Instead, a review that contains any sequence an HTML parser turns into a comment (`<!` for comments,
+declarations and CDATA, `<?` for processing instructions, `</` not followed by a letter, and the closer `-->`) anywhere, in code
+or not, is refused whole before any other parsing: "HTML comment markers are not allowed in a review". The prompt and the
+packet's contract tell the reviewer to write none. Other raw HTML is not inspected; scripts/nooa/README.md states that limit and
+why. CRLF line endings stay accepted. Self-test: `python3 nooa-review-generic.py --selftest` (no host modules needed).
 The canonical copy lives in the repository at scripts/nooa/nooa-review-generic.py; push-and-launch.sh
 copies the one in its own directory, so copy the repository file over it after a merge.
 """
@@ -79,47 +85,31 @@ _VERDICT_RE = re.compile(r"(?i)^(approved|needs changes)(?:[ \t]*[—–:\-][ \t
 _MD_PREFIX_RE = re.compile(r"^(?:[ \t]+|>[ \t]*|[-*+][ \t]+|\d{1,3}[.)][ \t]+|#{1,6}[ \t]*|\*\*|__|`+)+")
 _KEYWORD_RE = re.compile(r"(?i)^(FINDINGS|BLOCKING|VERDICT|REASON)\**[ \t]*:")
 _FENCE_RE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})")
-# An HTML comment hides text from a human reader of rendered Markdown while the bytes stay in the file (Codex, PR 225 r3, H2).
-_COMMENT_OPEN, _COMMENT_CLOSE = "<!--", "-->"
-# Inline code spans are masked (same length, spaces) before an HTML-comment opener is looked for (r4 L1).
-_INLINE_CODE_RE = re.compile(r"`+[^`]*`+")
+# Every sequence an HTML parser turns into a comment, which a reader of rendered Markdown does not see: `<!` (comment,
+# declaration, CDATA), `<?` (processing instruction), `</` not followed by a letter, and the closer `-->`. A review that contains
+# one is refused whole, in code or not, before any other parsing (PR 225 r5: H1, L1, L2). No comment emulation remains.
+_HTML_COMMENT_MARKER_RE = re.compile(r"<!|<\?|</(?![A-Za-z])|-->")
 
 
 def keyword_lines(text: str) -> list:
     """Every line of the review that starts, after optional Markdown dress, with one of the four keywords and a colon, as
-    (line number, KEYWORD, dress, hidden) where hidden is None, "fence" or "comment". Fence state is tracked line by line (a
-    fence closes only on a line of the same character at least as long, with nothing after it) and HTML-comment state the
-    same way (`<!--` opens, `-->` closes), so a block after an unclosed fence or comment is inside it (r2 H3, r3 H2). An
-    open fence takes precedence: its lines are text, a literal `<!--` inside it opens nothing, and a keyword line inside it
-    is hidden by the fence; an opener inside an inline code span is text too (r4 L1)."""
+    (line number, KEYWORD, dress, fenced). Fence state is tracked line by line: a fence opens on a line of three or more
+    backticks or tildes (up to three leading spaces, any info string) and closes only on a line of the same character at
+    least as long with nothing after it, so a block after an unclosed fence is inside it (r2 H3). HTML comments are not
+    parsed: a review that contains a comment marker is refused before this runs (r5)."""
     found = []
     fence = None
-    comment = False
     for i, line in enumerate(text.split("\n")):
+        fm = _FENCE_RE.match(line)
         if fence is not None:
-            # Inside a fence: only the closing fence matters; everything else is text, comment openers included.
-            fm = _FENCE_RE.match(line)
+            # Inside a fence only the closing fence matters; a keyword line here is hidden by the fence.
             if fm and fm.group(1)[0] == fence[0] and len(fm.group(1)) >= len(fence) and not line[fm.end():].strip():
                 fence = None
                 continue
             km = _KEYWORD_RE.match(_MD_PREFIX_RE.sub("", line, count=1))
             if km:
-                found.append((i + 1, km.group(1).upper(), "", "fence"))
+                found.append((i + 1, km.group(1).upper(), "", True))
             continue
-        if comment:
-            # Inside a comment: a keyword line here is hidden; the line that closes the comment is consumed whole.
-            km = _KEYWORD_RE.match(line.lstrip())
-            if km:
-                found.append((i + 1, km.group(1).upper(), "", "comment"))
-            if _COMMENT_CLOSE in line:
-                comment = False
-            continue
-        masked = _INLINE_CODE_RE.sub(lambda m: " " * len(m.group(0)), line)
-        opens = masked.rfind(_COMMENT_OPEN)
-        if opens != -1 and _COMMENT_CLOSE not in masked[opens:]:
-            comment = True
-            line = line[:opens]  # only the visible part of this line can be a keyword line
-        fm = _FENCE_RE.match(line)
         if fm:
             fence = fm.group(1)
             continue
@@ -127,23 +117,27 @@ def keyword_lines(text: str) -> list:
         rest = line[pm.end():] if pm else line
         km = _KEYWORD_RE.match(rest)
         if km:
-            found.append((i + 1, km.group(1).upper(), pm.group(0) if pm else "", "fence" if fence is not None else None))
+            found.append((i + 1, km.group(1).upper(), pm.group(0) if pm else "", False))
     return found
 
 
 def parse_verdict_block(review_markdown: str) -> dict:
-    """The sealed shape of a verdict, from the review's own final block. Raises ValueError on anything missing, duplicated,
-    dressed, fenced, trailing or inconsistent, so a malformed review seals nothing (fail closed) and the error names what to
-    fix. Same derivation and refusals as packages/core/src/review-verdict.ts: blocking = high + medium > 0."""
+    """The sealed shape of a verdict, from the review's own final block. Raises ValueError on a review that contains an HTML
+    comment marker, and on anything missing, duplicated, dressed, fenced, trailing or inconsistent, so a malformed review
+    seals nothing (fail closed) and the error names what to fix. Same derivation and refusals as
+    packages/core/src/review-verdict.ts: blocking = high + medium > 0."""
     text = review_markdown.replace("\r\n", "\n")
+    marker = _HTML_COMMENT_MARKER_RE.search(text)
+    if marker:
+        lineno = text.count("\n", 0, marker.start()) + 1
+        raise ValueError(f"line {lineno}: HTML comment markers are not allowed in a review (found {marker.group(0)!r}); the review is "
+                         "refused whole, in code or not: <!, <?, </ not followed by a letter, and --> are what an HTML parser turns "
+                         "into a comment that a reader of rendered Markdown does not see; describe such text in words")
     found = keyword_lines(text)
-    for lineno, kw, dress, hidden in found:
-        if hidden == "fence":
+    for lineno, kw, dress, fenced in found:
+        if fenced:
             raise ValueError(f"line {lineno}: a {kw}: line is inside a code fence (opened earlier and, if never closed, running to "
                              "the end of the review); the three sealed lines are bare text outside any fence")
-        if hidden == "comment":
-            raise ValueError(f"line {lineno}: a {kw}: line is inside an HTML comment (opened earlier and, if never closed, running to "
-                             "the end of the review); a human reader would not see it, so nothing is sealed")
         if dress:
             raise ValueError(f"line {lineno}: a {kw}: line is in a Markdown form ({dress!r}: indentation, blockquote, list, heading, "
                              "bold or code); the three sealed lines start at column zero, bare, exactly once each")
@@ -204,25 +198,16 @@ def _selftest() -> None:
     prose = parse_verdict_block(base + "The final VERDICT: line is below.\n```\nsome diff\n```\n\nFINDINGS: high=0 medium=0 low=0\nBLOCKING: no\nVERDICT: approved — fine")
     assert prose["action"] == "approved", prose
     cases += 1
-    # r3 H2: a CLOSED HTML comment before the block, on one line or across lines, hides nothing that is sealed.
-    closed = parse_verdict_block(base + "<!-- reviewer note -->\n\nFINDINGS: high=0 medium=0 low=0\nBLOCKING: no\nVERDICT: approved — fine")
-    assert closed["action"] == "approved", closed
-    cases += 1
-    spanning = parse_verdict_block(base + "<!-- a note\nover two lines -->\n\nFINDINGS: high=0 medium=0 low=1\nBLOCKING: no\nVERDICT: approved — fine")
-    assert spanning["params"]["findings"]["low"] == 1, spanning
-    cases += 1
-    # r4 L1 (Codex's probes): a literal opener inside a fenced block, or inside inline code, is text; an unmatched closer and CRLF are accepted.
-    fenced_opener = parse_verdict_block(base + "```html\n<!-- a template comment\n<div>\n```\n\nFINDINGS: high=0 medium=0 low=0\nBLOCKING: no\nVERDICT: approved — fine")
-    assert fenced_opener["action"] == "approved", fenced_opener
-    cases += 1
-    inline_opener = parse_verdict_block(base + "The file uses `<!--` as its marker.\n\nFINDINGS: high=0 medium=0 low=0\nBLOCKING: no\nVERDICT: approved — fine")
-    assert inline_opener["action"] == "approved", inline_opener
-    cases += 1
-    stray_close = parse_verdict_block(base + "a stray --> here\n\nFINDINGS: high=0 medium=0 low=0\nBLOCKING: no\nVERDICT: approved — fine")
-    assert stray_close["action"] == "approved", stray_close
-    cases += 1
     crlf = parse_verdict_block((base + "FINDINGS: high=0 medium=0 low=0\nBLOCKING: no\nVERDICT: approved — fine\n").replace("\n", "\r\n"))
     assert crlf["action"] == "approved", crlf
+    cases += 1
+    # r5: arrows, comparisons and the entity-escaped form are not comment markers; neither are placeholders or generics (other
+    # raw HTML is not inspected; the README states that limit).
+    arrows = parse_verdict_block(base + "Arrows a -> b and a <- b, comparisons a < b <= c, and the escaped form &lt;!-- are text.\n\nFINDINGS: high=0 medium=0 low=0\nBLOCKING: no\nVERDICT: approved — fine")
+    assert arrows["action"] == "approved", arrows
+    cases += 1
+    placeholders = parse_verdict_block(base + "Placeholders <id> and <path>, and the type `Record<string, unknown>`, are not markers.\n\nFINDINGS: high=0 medium=0 low=1\nBLOCKING: no\nVERDICT: approved — fine")
+    assert placeholders["params"]["findings"]["low"] == 1, placeholders
     cases += 1
     bad = [
         # H2 (r1): an earlier VERDICT line with a terminal needs-changes block is refused, never sealed as approved.
@@ -272,15 +257,6 @@ def _selftest() -> None:
         base + "`VERDICT: approved`\n\nFINDINGS: high=1 medium=0 low=0\nBLOCKING: yes\nVERDICT: needs changes: H1",
         # H3 (r2): a keyword line inside a closed fence earlier in the review is refused too, so quoted text never competes.
         base + "```\nVERDICT: approved — quoted contract\n```\n\nFINDINGS: high=1 medium=0 low=0\nBLOCKING: yes\nVERDICT: needs changes: H1",
-        # H2 (r3, Codex's probe): an unclosed HTML comment before the block hides it from a human reader.
-        base + "<!-- hidden from the reader\n\nFINDINGS: high=0 medium=0 low=0\nBLOCKING: no\nVERDICT: approved — fine",
-        # H2 (r3): a keyword line inside a closed comment, and a comment opened mid-line and never closed.
-        base + "<!--\nVERDICT: approved — commented\n-->\n\nFINDINGS: high=1 medium=0 low=0\nBLOCKING: yes\nVERDICT: needs changes: H1",
-        base + "Some prose <!-- starts here\nFINDINGS: high=0 medium=0 low=0\nBLOCKING: no\nVERDICT: approved — fine",
-        # r4 L1: a keyword line inside a fence that also holds a literal opener is still hidden by the fence, and a real
-        # comment opened after a closed fence still hides the block.
-        base + "```\n<!-- x\nVERDICT: approved — fenced\n```\n\nFINDINGS: high=1 medium=0 low=0\nBLOCKING: yes\nVERDICT: needs changes: H1",
-        base + "```\ncode\n```\n<!-- opened after the fence\n\nFINDINGS: high=0 medium=0 low=0\nBLOCKING: no\nVERDICT: approved — fine",
         # L1 (r3): a delimiter with nothing after it.
         base + "FINDINGS: high=0 medium=0 low=0\nBLOCKING: no\nVERDICT: approved — ",
         base + "FINDINGS: high=1 medium=0 low=0\nBLOCKING: yes\nVERDICT: needs changes:",
@@ -288,10 +264,48 @@ def _selftest() -> None:
     for text in bad:
         try:
             parse_verdict_block(text)
-        except ValueError:
+        except ValueError as e:
+            assert "HTML comment markers" not in str(e), ("refused for a marker, not for its own defect", text)
             cases += 1
             continue
         raise AssertionError("accepted a malformed verdict block:\n" + text)
+    block = "FINDINGS: high=0 medium=0 low=0\nBLOCKING: no\nVERDICT: approved — fine"
+    # r5: a review that contains an HTML comment marker anywhere is refused whole, before any other parsing, for that reason.
+    comment_bad = [
+        # H1 (r5, Codex's probe): a close and a reopen on one line hide the block in rendered Markdown.
+        base + "<!-- first\n--> <!-- second\n\n" + block,
+        # L1 (r5): comment-like fence info strings, backtick and tilde: a documented refusal now, not a parser state.
+        base + "``` <!-- literal info\ncode\n```\n\n" + block,
+        base + "~~~ <!-- literal info\ncode\n~~~\n\n" + block,
+        # L2 (r5): a longer-delimited code span holding an opener: a documented refusal; the inline-code mask is gone.
+        base + "Text ``literal ` <!-- marker`` here.\n\n" + block,
+        # The r3 and r4 cases, all refused by the one rule now: unclosed; closed on one line; spanning lines; a keyword line
+        # inside; a mid-line opener; an opener in a fence or in inline code; a stray closer; a comment after a closed fence.
+        base + "<!-- hidden from the reader\n\n" + block,
+        base + "<!-- reviewer note -->\n\n" + block,
+        base + "<!-- a note\nover two lines -->\n\n" + block,
+        base + "<!--\nVERDICT: approved — commented\n-->\n\nFINDINGS: high=1 medium=0 low=0\nBLOCKING: yes\nVERDICT: needs changes: H1",
+        base + "Some prose <!-- starts here\n" + block,
+        base + "```html\n<!-- a template comment\n<div>\n```\n\n" + block,
+        base + "The file uses `<!--` as its marker.\n\n" + block,
+        base + "a stray --> here\n\n" + block,
+        base + "```\ncode\n```\n<!-- opened after the fence\n\n" + block,
+        # The rest of the family an HTML parser turns into comments: a declaration, CDATA, a processing instruction, `</` not
+        # followed by a letter; and a marker inside the VERDICT line itself.
+        base + "<!DOCTYPE html\n\n" + block,
+        base + "<![CDATA[ x\n\n" + block,
+        base + "<?php echo 1;\n\n" + block,
+        base + "</ x\n\n" + block,
+        base + "FINDINGS: high=0 medium=0 low=0\nBLOCKING: no\nVERDICT: approved — fine <!-- x -->",
+    ]
+    for text in comment_bad:
+        try:
+            parse_verdict_block(text)
+        except ValueError as e:
+            assert "HTML comment markers are not allowed in a review" in str(e), (str(e), text)
+            cases += 1
+            continue
+        raise AssertionError("accepted a review that contains an HTML comment marker:\n" + text)
     print(f"nooa-review-generic selftest: {cases} cases OK")
 
 
@@ -435,7 +449,10 @@ PR_DOC = """Review a change to the Retrace repository as its independent witness
        "approved" cannot carry a Medium or High. "needs changes" is sealed as the action "rejected"; with only Lows it is
        allowed and reads "BLOCKING: no" (a non-blocking rejection). There is no REASON line. Write FINDINGS:, BLOCKING:
        and VERDICT: at the start of exactly one line each in the whole review, and never quote them in a fence, a
-       blockquote, a list or a heading. The seal refuses anything else and seals nothing.
+       blockquote, a list or a heading. Write no HTML comment and no comment marker anywhere in the review, code and
+       quotations included: no less-than sign followed by an exclamation mark or a question mark, no less-than sign and
+       slash followed by anything but a letter, and no two hyphens followed by a greater-than sign; describe such text in
+       words. The seal refuses anything else and seals nothing.
     3. Call self.seal_review(INSTRUCT_ID, <the complete review markdown>) ONCE. If seal_review
        raises, report the error verbatim and never invent a review event id.
     Finally reply with INSTRUCT_ID, the review path, its SHA-256, the action, and the review event id,

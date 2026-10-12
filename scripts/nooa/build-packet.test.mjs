@@ -242,7 +242,7 @@ test("build: assembles every section, reads every cited event once (diff and int
   const r = await build(o, io);
   assert.ok(r.fits, `bytes ${r.bytes}`);
   assert.equal(r.packetName, "nooa-pr222-packet-r1.md"); assert.equal(r.launcherName, "launch-pr222-r1.sh");
-  for (const h of ["# Review packet — Retrace PR 222", "## Your role", "## Rules to judge against", "## This round, as the coordinator describes it", "## PR body (verbatim", "## Commit messages (verbatim", "## Diff vs base", "## Interdiff vs previous head", "## Output contract", "# Appendix A — selected fields", "# Appendix B", "# Appendix C", "# Appendix D", "# Appendix E", "FINDINGS: high=<n>", "BLOCKING: <yes|no>", "no REASON line and no override", "read raw by the builder and authenticated", "starting at column zero", "is sealed as the action `rejected`; with\nonly Lows it is allowed"]) assert.ok(r.packet.includes(h), h);
+  for (const h of ["# Review packet — Retrace PR 222", "## Your role", "## Rules to judge against", "## This round, as the coordinator describes it", "## PR body (verbatim", "## Commit messages (verbatim", "## Diff vs base", "## Interdiff vs previous head", "## Output contract", "# Appendix A — selected fields", "# Appendix B", "# Appendix C", "# Appendix D", "# Appendix E", "FINDINGS: high=<n>", "BLOCKING: <yes|no>", "no REASON line and no override", "read raw by the builder and authenticated", "starting at column zero", "Write no HTML comment and no comment marker anywhere in the review", "is sealed as the action `rejected`; with\nonly Lows it is allowed"]) assert.ok(r.packet.includes(h), h);
   assert.ok(!r.packet.includes("REASON: <why"), "H1: the contract no longer offers an override");
   assert.ok(!r.packet.includes("needs at least one Medium"), "M1 (r2): one statement, the validator's: a Low-only `needs changes` is allowed");
   assert.ok(r.launcher.includes("the wrapper takes its values as given and re-verifies none of them"), "H1 (r2): the launcher says what it is");
@@ -294,20 +294,22 @@ test("build: a tight budget drops the appendices in order and says so in the pac
   assert.ok(r.packet.includes("gh run view <id> --log"));
 });
 
-test("wrapper v2.4 self-test runs (python3 present) or is skipped", (t) => {
+test("wrapper v2.5 self-test runs (python3 present) or is skipped", (t) => {
   const py = spawnSync("python3", ["--version"], { encoding: "utf8" });
   if (py.status !== 0) { t.skip("python3 not available"); return; }
   const out = execFileSync("python3", ["-I", join(here, "nooa-review-generic.py"), "--selftest"], { encoding: "utf8" });
-  assert.match(out, /selftest: 48 cases OK/);
+  assert.match(out, /selftest: 58 cases OK/);
   const src = execFileSync("cat", [join(here, "nooa-review-generic.py")], { encoding: "utf8" });
   assert.ok(!src.includes("routing_binding") && src.includes('"launcher_trust": LAUNCHER_TRUST'), "H1 (r2): the seal names the launcher values as given");
   assert.ok(!/outcome event records/.test(src) && /coordinator's act outside this code/.test(src), "H1 (r3): no claim that the launch script records anything");
+  assert.ok(src.includes("_HTML_COMMENT_MARKER_RE") && !src.includes("_INLINE_CODE_RE") && !src.includes("_COMMENT_OPEN"), "r5: comment markers refused; no comment emulation left");
+  assert.ok(src.includes("Write no HTML comment and no comment marker anywhere in the review"), "r5: the prompt tells the reviewer");
   const readme = execFileSync("cat", [join(here, "README.md")], { encoding: "utf8" });
   assert.ok(!/in its outcome event/.test(readme) && !/whose `sent` event/.test(readme) && /writes nothing to the ledger\*\*/.test(readme), "H1 (r3): the README says what push-and-launch.sh does");
   assert.ok(!/needs changes" needs\s+at least one/.test(src), "M1 (r2): the prompt no longer directs Low-only results to approval");
 });
 
-test("wrapper v2.4 refuses to start on a model that is not the pinned witness model or on a malformed launcher value (M2, H3)", (t) => {
+test("wrapper v2.5 refuses to start on a model that is not the pinned witness model or on a malformed launcher value (M2, H3)", (t) => {
   const py = spawnSync("python3", ["--version"], { encoding: "utf8" });
   if (py.status !== 0) { t.skip("python3 not available"); return; }
   const env = { PATH: process.env.PATH, HOME: "/nonexistent-home", NOOA_PR: "222", NOOA_PR_TITLE: "t", NOOA_JUDGEMENT: "j", NOOA_TAGS: "pr-222", NOOA_ROUTING_EVENT: ROUTING, NOOA_REVIEWED_HEAD: HEAD, NOOA_FILES: "docs/x.md", NOOA_ROUND: "r1", NOOA_RUBRIC: "high", NOOA_SCOPE: "s", NOOA_CLASS: "a", NOOA_SURFACE: "class (a)", NOOA_MODEL: NOOA_MODEL };

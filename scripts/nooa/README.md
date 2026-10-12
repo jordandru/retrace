@@ -53,7 +53,7 @@ never on a command line. Writes nothing to the ledger. Pushing and launching sta
 the coordinator's own `sent` event, logged before the push, carries the local hashes it computed, and any launch outcome it logs
 afterwards is its act, not the script's.
 
-## `nooa-review-generic.py` (v2.4)
+## `nooa-review-generic.py` (v2.5)
 
 The canonical copy of the host wrapper. It reads **one anchored block at the very end** of the review — the last three
 non-blank lines, bare, at column zero, in order: `FINDINGS: high=<n> medium=<n> low=<n>`, `BLOCKING: yes|no`, `VERDICT: …` —
@@ -63,12 +63,22 @@ are the ones `packages/core/src/review-verdict.ts` applies to every sealed verdi
 `needs changes` maps to the core action `rejected` and with only Lows is allowed, sealed as a non-blocking rejection; there is
 no REASON line and no override. The VERDICT line is parsed whole: `approved` or `needs changes`, alone or followed by one of
 `—`, `–`, `:`, `-` and at least one word (a bare delimiter is refused); `approved? no — needs changes` matches neither and is
-refused, not mapped. Fence state and HTML-comment state (`<!--` … `-->`) are tracked line by line, so a block after an unclosed
-fence or comment is inside it and refused, as is a keyword line inside a closed one; an open fence takes precedence, so a
-literal `<!--` inside a fenced block or an inline code span is text, and an unmatched `-->` is text too; a keyword line that is indented,
-blockquoted, a list item, a heading, bold or inline code, anywhere in the review, is refused, as is a second keyword line or
-text after the block. Refusal seals nothing, keeps the text, and reports the error. `python3 scripts/nooa/nooa-review-generic.py
---selftest` runs its 48 cases without the host.
+refused, not mapped. **A review that contains an HTML comment marker anywhere is refused whole before anything else is read**
+("HTML comment markers are not allowed in a review"): `<!`, `<?`, `</` not followed by a letter, or `-->`, in code or not.
+Those are the sequences an HTML parser turns into comments that a reader of rendered Markdown does not see. Refusing them
+replaces the comment emulation of v2.3 and v2.4, which disagreed with GitHub's renderer in three successive review rounds.
+Fence state is tracked line by line, so a block after an unclosed fence is inside it and refused, as is a keyword line inside a
+closed one; a keyword line that is indented, blockquoted, a list item, a heading, bold or inline code, anywhere in the review,
+is refused, as is a second keyword line or text after the block. Refusal seals nothing, keeps the text, and reports the error.
+`python3 scripts/nooa/nooa-review-generic.py --selftest` runs its 58 cases without the host.
+
+**Limit, stated.** Other raw HTML is not inspected. A raw HTML element can still collapse or hide what follows it in rendered
+Markdown (an unclosed `<details>`, for example), and the wrapper does not claim that a sealed block is visible in every Markdown
+renderer. What it seals is bound to the exact bytes of the stored review, whose plain text shows the block. Refusing every `<`
+followed by a letter or a slash would close that too, but 49 of the 162 NOOA reviews stored under `~/.retrace` contain one
+(placeholders such as `<id>` and `<path>`, generics such as `Record<string, unknown>`, an email address in angle brackets), so
+it would refuse about three reviews in ten. Of the same 162, one contains a comment marker: NOOA's review of this wrapper's
+round 4, which described the comment parser.
 
 Before the run it checks the shape of every launcher value (PR number, full event id, full 40-hex head, round, rubric, class in
 a/b/c/S, surface) and refuses unless `NOOA_MODEL` **equals** the pinned witness model; a prefix is not a pin. Those values are
