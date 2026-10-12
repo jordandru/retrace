@@ -36,15 +36,16 @@
  *   WHERE  system=git, path=repo root, environment=local (override RETRACE_ENV), device=hostname (override
  *          RETRACE_DEVICE), session=CLAUDE_CODE_SESSION_ID or GROK_SESSION_ID when an agent's shell drove the commit (absent for a
  *          human's own `git commit` — see below), ide/workspace when an IDE names itself (Orca), surface=tty|agent
- *   WHY    intent = commit subject (+ body); caused_by = trailer `Retrace-Caused-By: evt_…`, else env RETRACE_CAUSED_BY,
- *          else contents of .git/retrace-caused-by (a scratch file agents/MCP can write)
+ *   WHY    intent = commit subject (+ body); caused_by = causedByFrom on the message, else env RETRACE_CAUSED_BY,
+ *          else contents of .git/retrace-caused-by (a scratch file agents/MCP can write). The env and file
+ *          fall-throughs stamp method.params.caused_by_source as env or file. A message id stamps trailer.
  *   HOW    tool=git, params { branch, parents, files, insertions, deletions, sha, raw_message, author }, automated = agent commit
  */
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync, appendFileSync, chmodSync, unlinkSync, mkdirSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { basename, join, resolve } from "node:path";
-import { EventInput, appendEvent, describeEvent, Event, PRODUCER_SIG_FORMAT_V2, resolveCommitActor, classifyCommitClaim, attachClaimDecision, ClassificationUnavailableError, parseTrailerPolicy, isGitCommitSeal, isLegacyClientCommitSeal, routedCanonicalRForHook } from "@retrace-dev/core";
+import { EventInput, appendEvent, describeEvent, Event, PRODUCER_SIG_FORMAT_V2, resolveCommitActor, classifyCommitClaim, attachClaimDecision, ClassificationUnavailableError, parseTrailerPolicy, isGitCommitSeal, isLegacyClientCommitSeal, routedCanonicalRForHook, causedByFrom } from "@retrace-dev/core";
 import { makeStore, detectIde, harnessSession } from "./index.js";
 import { RemoteApiError, RemoteCapabilityError, RemoteStore } from "./remote-store.js";
 import { loadProducerPrivateKeyFromFile, sealForAppend } from "./producer-key.js";
@@ -152,8 +153,16 @@ export function decidedHookRejection(error: unknown): boolean {
   return error instanceof RemoteApiError && error.status >= 400 && error.status < 500 && error.status !== 426;
 }
 
+function gitBytes(repo: string, args: string[]): string {
+  return execFileSync("git", ["-C", repo, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+}
 function git(repo: string, args: string[]): string {
-  return execFileSync("git", ["-C", repo, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  return gitBytes(repo, args).trim();
+}
+/** `%B` is the stored message. Git appends one trailing newline to the format output; do not Unicode-trim it. */
+function gitCommitMessage(repo: string, sha: string): string {
+  const raw = gitBytes(repo, ["log", "-1", "--format=%B", sha]);
+  return raw.endsWith("\n") ? raw.slice(0, -1) : raw;
 }
 
 function parseArgs(argv: string[]) {
@@ -200,9 +209,10 @@ export { parseTrailers, validCausedById, validActorId, CAUSED_BY_RE, ACTOR_ID_RE
 import { validCausedById } from "@retrace-dev/core";
 
 export function commitToEvent(repo: string, sha: string, cfg: Cfg, live = false): EventInput {
-  const fmt = ["%H", "%P", "%an", "%ae", "%aI", "%s", "%b", "%B"].join("%x1f");
+  const fmt = ["%H", "%P", "%an", "%ae", "%aI", "%s", "%b"].join("%x1f");
   const raw = git(repo, ["show", "-s", `--format=${fmt}`, sha]);
-  const [fullSha, parents, an, ae, aI, subject, body, message] = raw.split("\x1f");
+  const [fullSha, parents, an, ae, aI, subject, body] = raw.split("\x1f");
+  const message = gitCommitMessage(repo, fullSha || sha);
   const parentList = parents ? parents.split(" ") : [];
   const resolved = resolveCommitActor({ message, authorName: an, authorEmail: ae, parents: parentList, principalRule: "agent-address/1" });
   const numstat = git(repo, ["show", "--numstat", "--format=", sha]).split("\n").filter(Boolean);
@@ -220,11 +230,26 @@ export function commitToEvent(repo: string, sha: string, cfg: Cfg, live = false)
   const actor = resolved.actor;
   if (actor.type === "agent" && "on_behalf_of" in actor && actor.on_behalf_of === undefined) actor.on_behalf_of = ae; // hook behaviour: always the author email
 
-  let causedBy: string | undefined = resolved.causedBy ?? validCausedById(process.env.RETRACE_CAUSED_BY);
-  if (!causedBy) {
-    const f = join(git(repo, ["rev-parse", "--git-dir"]), "retrace-caused-by");
-    const fp = resolve(repo, f);
-    if (existsSync(fp)) causedBy = validCausedById(readFileSync(fp, "utf8"));
+  const fromMessage = causedByFrom(message);
+  let causedBy = fromMessage.id;
+  let causedBySource: "trailer" | "env" | "file" | undefined = fromMessage.id ? "trailer" : undefined;
+  const causedByRejected = fromMessage.rejected;
+  if (!causedBy && !causedByRejected) {
+    const fromEnv = validCausedById(process.env.RETRACE_CAUSED_BY);
+    if (fromEnv) {
+      causedBy = fromEnv.toLowerCase();
+      causedBySource = "env";
+    } else {
+      const f = join(git(repo, ["rev-parse", "--git-dir"]), "retrace-caused-by");
+      const fp = resolve(repo, f);
+      if (existsSync(fp)) {
+        const fromFile = validCausedById(readFileSync(fp, "utf8"));
+        if (fromFile) {
+          causedBy = fromFile.toLowerCase();
+          causedBySource = "file";
+        }
+      }
+    }
   }
   const isMerge = parentList.length > 1;
 
@@ -248,7 +273,7 @@ export function commitToEvent(repo: string, sha: string, cfg: Cfg, live = false)
     },
     intent: resolved.intent, // prose "Key: value" lines survive (backlog #12)
     caused_by: causedBy,
-        method: { tool: "git", automated: actor.type !== "human", params: { branch, parents: parentList, files: files.length, insertions: ins, deletions: del, sha: fullSha, raw_message: message, author: { name: an, email: ae }, model_claim: resolved.modelClaim, principal_rule: "agent-address/1" } },
+        method: { tool: "git", automated: actor.type !== "human", params: { branch, parents: parentList, files: files.length, insertions: ins, deletions: del, sha: fullSha, raw_message: message, author: { name: an, email: ae }, model_claim: resolved.modelClaim, principal_rule: "agent-address/1", ...(causedByRejected ? { caused_by_rejected: causedByRejected } : {}), ...(causedBySource ? { caused_by_source: causedBySource } : {}) } },
     idempotency_key: `git:${fullSha}`,
     tags: ["git", ...(isMerge ? ["merge"] : [])],
   };

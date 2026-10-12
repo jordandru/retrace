@@ -10,7 +10,7 @@ test("pull_request opened / synchronize / merged / closed", async () => {
   const [o] = await mapGithubWebhook("pull_request", { action: "opened", repository: repo, sender: jordan, pull_request: pr }, { deliveryId: "d1" });
   assert.equal(o.action, "created"); assert.equal(o.project, "slcwitit/rpg"); assert.equal(o.actor.type, "human"); assert.equal(o.actor.id, "github:jordan");
   assert.equal(o.artifacts[0].id, "pr:slcwitit/rpg#57"); assert.deepEqual(o.artifacts[0].derived_from, ["commit:slcwitit/rpg@deadbeefcafe"]);
-  assert.equal(o.caused_by, "evt_abc123"); assert.equal(o.idempotency_key, "gh:d1");
+  assert.equal(o.caused_by, undefined); assert.equal(o.method?.params?.caused_by_rejected, "evt_abc123"); assert.equal(o.idempotency_key, "gh:d1");
   assert.equal(o.intent, "Adds jab counter to HUD"); // trailer stripped from WHY
   const [s] = await mapGithubWebhook("pull_request", { action: "synchronize", before: "1111111aaaa", after: "2222222bbbb", repository: repo, sender: jordan, pull_request: pr }, { project: "boxing-rpg" });
   assert.equal(s.action, "edited"); assert.equal(s.project, "boxing-rpg"); assert.match(s.change!.summary!, /1111111 → 2222222/);
@@ -28,7 +28,7 @@ test("pull_request opened / synchronize / merged / closed", async () => {
 
 test("reviews, comments, workflow_run, bots, push opt-in", async () => {
   const [a] = await mapGithubWebhook("pull_request_review", { action: "submitted", repository: repo, sender: jordan, pull_request: pr, review: { id: 9, state: "APPROVED", body: "LGTM, played 3 rounds", user: { login: "coach-mike" }, submitted_at: "2026-08-16T14:22:00Z", commit_id: "deadbeef" } });
-  assert.equal(a.action, "approved"); assert.equal(a.intent, "LGTM, played 3 rounds"); assert.equal(a.caused_by, "evt_abc123"); // inherits PR body's caused_by
+  assert.equal(a.action, "approved"); assert.equal(a.intent, "LGTM, played 3 rounds"); assert.equal(a.caused_by, undefined); assert.equal(a.method?.params?.caused_by_rejected, "evt_abc123"); // PR body's short token is rejected, not inherited as a parent
   const [r] = await mapGithubWebhook("pull_request_review", { action: "submitted", repository: repo, sender: jordan, pull_request: pr, review: { id: 10, state: "changes_requested", body: null, user: jordan, submitted_at: "2026-08-16T14:22:00Z" } });
   assert.equal(r.action, "rejected");
   const [cm] = await mapGithubWebhook("issue_comment", { action: "created", repository: repo, sender: jordan, issue: { number: 57, title: "Jab counter", pull_request: {} }, comment: { id: 5, body: "ship it", user: jordan, created_at: "2026-08-16T14:21:00Z", html_url: "x" } });
@@ -63,6 +63,90 @@ test("reviews, comments, workflow_run, bots, push opt-in", async () => {
   assert.equal(a.artifacts[0].role, "used"); assert.equal(r.artifacts[0].role, "used"); assert.equal(cm.artifacts[0].role, "used");
   assert.deepEqual(w.artifacts.map((x) => [x.kind, x.role]), [["workflow_run", "generated"], ["pr", "used"], ["commit", "used"]]);
   assert.deepEqual(p[0].artifacts.map((x) => x.role), ["generated", "generated"]);
+});
+
+test("caused_by accepts a 32-hex id and records a short evt_ token", async () => {
+  const full = "evt_" + "a".repeat(32);
+  const open = (body: string) => mapGithubWebhook("pull_request", {
+    action: "opened", repository: repo, sender: jordan, pull_request: { ...pr, body },
+  }).then((events) => events[0]);
+  const mapped = await open(`work\n\nRetrace-Caused-By: ${full}`);
+  assert.equal(mapped.caused_by, full);
+  assert.equal(mapped.method?.params?.caused_by_rejected, undefined);
+  const short = await open("work\n\nRetrace-Caused-By: evt_abc123");
+  assert.equal(short.caused_by, undefined);
+  assert.equal(short.method?.params?.caused_by_rejected, "evt_abc123");
+  const plain = await open("work\n\nRetrace-Caused-By: not-an-event");
+  assert.equal(plain.caused_by, undefined);
+  assert.equal(plain.method?.params?.caused_by_rejected, undefined);
+  const [pushed] = await mapGithubWebhook("push", { repository: repo, commits: [{
+    id: "0123456789abcdef",
+    message: "Fix\n\nRetrace-Actor: codex\nRetrace-Caused-By: evt_abc123\n",
+    timestamp: "2026-08-16T14:00:00Z",
+    author: { email: "j@x", name: "J" },
+    added: [], modified: [], removed: [],
+  }] }, { includePush: true });
+  assert.equal(pushed.caused_by, undefined);
+  assert.equal(pushed.method?.params?.caused_by_rejected, "evt_abc123");
+});
+
+test("caused_by trailer lines are anchored, last line wins, and ids are lowercase", async () => {
+  const full = "evt_" + "a".repeat(32);
+  const upper = "EVT_" + "A".repeat(32);
+  const open = (body: string) => mapGithubWebhook("pull_request", {
+    action: "opened", repository: repo, sender: jordan, pull_request: { ...pr, body },
+  }).then((events) => events[0]);
+  const upperCase = await open(`work\n\nRetrace-Caused-By:   ${upper}  `);
+  assert.equal(upperCase.caused_by, full);
+  assert.equal(upperCase.method?.params?.caused_by_rejected, undefined);
+  const tooLong = await open(`work\n\nRetrace-Caused-By: evt_${"b".repeat(33)}`);
+  assert.equal(tooLong.caused_by, undefined);
+  assert.equal(tooLong.method?.params?.caused_by_rejected, "evt_" + "b".repeat(33));
+  const suffixed = await open(`work\n\nRetrace-Caused-By: ${full} extra`);
+  assert.equal(suffixed.caused_by, undefined);
+  assert.equal(suffixed.method?.params?.caused_by_rejected, `${full} extra`);
+  const inline = await open(`see Retrace-Caused-By: ${full} in prose`);
+  assert.equal(inline.caused_by, undefined);
+  assert.equal(inline.method?.params?.caused_by_rejected, undefined);
+  const split = await open(`work\n\nRetrace-Caused-By: evt_abc\n${full.slice(7)}`);
+  assert.equal(split.caused_by, undefined);
+  assert.equal(split.method?.params?.caused_by_rejected, "evt_abc");
+  const lastWins = await open(`work\n\nRetrace-Caused-By: not-an-event\nRetrace-Caused-By: evt_abc123\nRetrace-Caused-By: ${full}`);
+  assert.equal(lastWins.caused_by, full);
+  assert.equal(lastWins.method?.params?.caused_by_rejected, undefined);
+  const lastJunk = await open(`work\n\nRetrace-Caused-By: ${full}\nRetrace-Caused-By: evt_abc123`);
+  assert.equal(lastJunk.caused_by, undefined);
+  assert.equal(lastJunk.method?.params?.caused_by_rejected, "evt_abc123");
+  const huge = "evt_" + "c".repeat(200);
+  const bounded = await open(`work\n\nRetrace-Caused-By: ${huge}`);
+  assert.equal(bounded.caused_by, undefined);
+  assert.equal(bounded.method?.params?.caused_by_rejected, `${huge.slice(0, 64)}…(${huge.length})`);
+  const [pushed] = await mapGithubWebhook("push", { repository: repo, commits: [{
+    id: "3123456789abcdef",
+    message: `Fix\n\nRetrace-Actor: codex\nRetrace-Caused-By: ${upper}\n`,
+    timestamp: "2026-08-16T14:00:00Z",
+    author: { email: "j@x", name: "J" },
+    added: [], modified: [], removed: [],
+  }] }, { includePush: true });
+  assert.equal(pushed.caused_by, full);
+});
+
+test("caused_by rejects line separators that are not U+000A", async () => {
+  const full = "evt_" + "a".repeat(32);
+  const open = (body: string) => mapGithubWebhook("pull_request", {
+    action: "opened", repository: repo, sender: jordan, pull_request: { ...pr, body },
+  }).then((events) => events[0]);
+  for (const suffix of ["\u2028garbage", "\u2029garbage", "\u0085garbage", "\u00A0", "\u200Bgarbage"]) {
+    const event = await open(`work\n\nRetrace-Caused-By: ${full}${suffix}`);
+    assert.equal(event.caused_by, undefined, JSON.stringify(suffix));
+    assert.equal(event.method?.params?.caused_by_rejected, `${full}${suffix}`);
+  }
+  const spaced = await open(`work\n\nRetrace-Caused-By: \t${full}\t `);
+  assert.equal(spaced.caused_by, full);
+  for (const key of ["retrace-caused-by:", "RETRACE-CAUSED-BY:"]) {
+    const event = await open(`work\n\n${key} ${full}`);
+    assert.equal(event.caused_by, full, key);
+  }
 });
 
 test("T8 push agent-address/1 resolves a user sender as the authenticated principal", async () => {
