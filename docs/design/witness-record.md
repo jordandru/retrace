@@ -1,11 +1,13 @@
-# The webhook as witness, not second author — one authoritative record per commit (design note v1.2)
+# The webhook as witness, not second author — one authoritative record per commit (design note v1.3)
 
-**Status:** v1.2, 2026-10-12, by claude-code (the "system optimization" pane; `claude-mythos-5-1`, model source
-harness-runtime, effort high). v1.1 was the fix round for Codex's round-1 verdict `evt_ba3081460461418b8cb2c5d6389bcc51`
-(3 High, 3 Medium, 1 Low at `9878437e`), on the coordinator's verified pointer `evt_b624313f…`; its changes and the two
-claims withdrawn are listed in §13. **v1.2 is the fix round for Codex's round-2 verdict `evt_8c06b938a8314099b37912fb372db6f4`
-(1 High, 2 Medium at `6ccfc718`), on the coordinator's verified pointer `evt_149ae739…`; its changes, one deferral and one
-relabelling, are listed in §14.** **It proposes no code in this PR**: a design note, class **(a)** under agent-rules 12,
+**Status:** v1.3, 2026-10-12, by claude-code (the "system optimization" pane; v1 to v1.2 written as `claude-mythos-5-1`,
+v1.3 as `claude-opus-5-5`, model source harness-runtime). v1.1 was the fix round for Codex's round-1 verdict
+`evt_ba3081460461418b8cb2c5d6389bcc51` (3 High, 3 Medium, 1 Low at `9878437e`), on the coordinator's verified pointer
+`evt_b624313f…`; its changes and the two claims withdrawn are listed in §13. v1.2 was the fix round for Codex's round-2
+verdict `evt_8c06b938a8314099b37912fb372db6f4` (1 High, 2 Medium at `6ccfc718`), on the coordinator's verified pointer
+`evt_149ae739…`; its changes are listed in §14. **v1.3 is the fix round for Codex's round-3 verdict
+`evt_ac00d53daea44e32b479b4bbe769807d` (1 High, 2 Medium at `7b5907c0`), on the coordinator's verified pointer
+`evt_47561202…`; its changes, and the v1.2 statements it withdraws, are listed in §15.** **It proposes no code in this PR**: a design note, class **(a)** under agent-rules 12,
 for the design gate. Written on Jordan's signed go `evt_c83cad7552a149a5940b27a0bcc84b0b` ("Let's go on your top 3 items starting
 with 1", received `evt_85ad930c…`), item 3 of `~/.retrace/ops-2026-10-11/system-optimization/OPTIMIZATION-PLAN.md` (sha256
 `499d1ee9…3527`, created `evt_71b02714…`). Items 1 and 2 are PRs 222 and 225. The measurements it rests on are
@@ -29,8 +31,8 @@ same facts, or can it be a *witness* to the first record, and what would that ch
   field-by-field comparison with the seal, and a verdict `matches` | `conflict` | `incomplete`; on `conflict` it keeps
   GitHub's observed value of every differing field verbatim, so both sides stay inspectable. **The push payload alone
   cannot prove the file list or the parents complete** (§3, Codex r2 H1): without the Commit API hydration §3 specifies,
-  those two fields are `unknown`, the verdict is `incomplete`, and `matches` cannot occur; message, author and trailer
-  actor are still compared from the payload. It is sealed by `webhook:github` like today; it is still a second producer;
+  those two fields are `unknown`, the verdict is `incomplete`, and `matches` cannot occur; message and trailer actor are
+  still compared from the payload, and the author only when the payload carries an exact email (§3, Codex r3 M2). It is sealed by `webhook:github` like today; it is still a second producer;
   it is not a second copy.
 - **A2. The PR-merge record records a derived causal candidate, outside `caused_by`, when the PR body carries no full
   token**: the hook's `merged` seal of the merge commit if it exists at delivery, else the hook seal of the PR head, in
@@ -120,23 +122,24 @@ the witness may name only when every one of these holds; otherwise the push take
     producer: "github-push", witness_of: "<hook seal id>", witness_of_seq: <seal seq>, sha, ref, pusher, delivery,
     ingress_at, ingress_seq,                          // the ledger head sequence read at ingress (M1)
     eligibility: { stamp: "<the pinned stamp matched>", producer_sig: "verified", shape: "git", project: "<project>" },
-    observed: {                                     // GitHub's side, recomputable by anyone holding the payload (and the hydrated commit)
-      message_sha256, message_bytes,                // digest of the exact message bytes GitHub delivered (encoding below)
-      files_sha256, files_count, files_complete,    // digest over the byte-sorted path list; complete only when proven (below)
-      parents, parents_complete,                    // the parent shas, in order, only from a hydrated commit; else [] and false
-      author: { name, email },
+    observed: {                                     // GitHub's side, recomputable from the payload and the hydrated commit
+      message_sha256, message_bytes,                // digest of the exact message bytes GitHub delivered (frames below)
+      file_set_sha256, file_set_count, files_complete, file_set_reason?,  // the canonical file set (below); complete only when proven
+      parents, parents_complete,                    // parent shas in git order, only from a hydrated commit; else [] and false
+      author: { name, email, complete, source },    // email exactly as delivered, or null; never a github: substitute (r3 M2)
+      author_login,                                 // the GitHub username: identity metadata, labelled, never compared
       trailer_actor,                                // the Retrace-Actor the webhook side parsed, or null
-      source: "push" | "push+commit-api",           // where files and parents came from
-      hydration: { status: "ok" | "not_attempted" | "failed" | "deadline" | "truncated", files_pages, files_total, http_status }
+      source: "push" | "push+commit-api",           // where files, parents and (when hydrated) the author came from
+      hydration: { status: "ok" | "not_attempted" | "failed" | "deadline" | "truncated", pages, files_accumulated, http_status }
     },
-    sealed: {                                       // the seal's side, the same digests over the seal's stored fields
-      message_sha256, files_sha256, files_count, parents, author: { name, email }, trailer_actor
+    sealed: {                                       // the seal's side, the same frames over the seal's commitment and fields
+      message_sha256, file_set_sha256, file_set_count, files_complete, parents, author: { name, email }, trailer_actor
     },
     comparison: {                                   // field by field; unknown = one side incomplete or absent
       message: "match" | "differ",
       files: "match" | "differ" | "unknown",
       parents: "match" | "differ" | "unknown",
-      author: "match" | "differ",
+      author: "match" | "differ" | "unknown",
       trailer_actor: "match" | "differ" | "unknown"
     },
     verdict: "matches" | "conflict" | "incomplete", // matches = every field match; conflict = any differ; else incomplete
@@ -153,42 +156,85 @@ the witness may name only when every one of these holds; otherwise the push take
 - **Not a commit record.** `status`, reconcile and the doctor count `committed`/`merged`; a witness is `other`. So the
   sha is counted once, by its seal, and the witness is evidence about the seal.
 - **What the witness keeps, and what it does not** (Codex r1 H1). It keeps GitHub's observed values as digests over exact
-  bytes (message) and over lists (paths; parent shas), with the counts and completeness flags that say whether the digest
-  covers the whole value, and it keeps the seal's digests computed the same way, so a reader recomputes either side from
-  the stored seal or from GitHub's API and checks the comparison instead of trusting it.
-- **Digest encoding, one for both sides** (Codex r2 M1). Every digest is sha256 over a domain-separated, length-prefixed
-  byte string, so that no legal path or message can collide with another by framing:
-  `message_sha256 = sha256("retrace-witness-message/1" ‖ 0x00 ‖ len32be(m) ‖ m)` where `m` is the exact UTF-8 bytes of
-  the message as delivered; `files_sha256 = sha256("retrace-witness-files/1" ‖ 0x00 ‖ count32be ‖ for each path, in
-  byte-wise ascending order of its UTF-8 encoding: len32be(p) ‖ p)`; `parents_sha256` likewise with domain
-  `retrace-witness-parents/1` over the 40-byte lowercase hex shas **in delivered order** (parents are ordered; the list is
-  not sorted). `len32be` and `count32be` are unsigned 32-bit big-endian. No normalisation is applied to paths or messages:
-  bytes are hashed as GitHub (or the hook) gives them, Unicode NFC and NFD forms of the same name are different paths and
-  digest differently, duplicates are kept, and an empty list digests the frame with `count32be = 0`. The seal's side uses
-  the same frames over the seal's stored `raw_message`, `files` and `parents`. Acceptance test 1b carries the adversarial
-  names.
-- **Completeness is proven, never assumed** (Codex r2 H1). GitHub's push event gives, per commit, `message`, `author`,
-  `committer`, `added`, `modified`, `removed` and no `parents`; GitHub documents that the three file arrays may be empty
-  for large pushes even when files changed, so an omitted list is indistinguishable from an empty one, and the mapper
-  today reads parents only from a non-standard `c.parents` (`github.ts`). So from the push payload alone: `message`,
-  `author` and `trailer_actor` are compared; `files_complete` and `parents_complete` are **false**, `comparison.files` and
-  `comparison.parents` are `unknown`, the verdict is `incomplete`, and `matches` cannot occur. The only route to a
-  complete file list and to parents is **hydration from the Commit API**, specified here and built as its own class S
-  step (D1): `GET /repos/{owner}/{repo}/commits/{sha}` with a read-only token the Worker does not hold today (a GitHub App
-  installation token or a fine-grained PAT with `contents: read` on the repository, stored as a Worker secret, class S);
-  the response's `parents[]` is complete; `files[]` is paginated at 300 entries per page (`page=`), GitHub caps the listing
-  at 3,000 files and says so by returning fewer than the commit's `stats.total` entries, so `files_complete` is true only
-  when every page was read and the count equals what the API reports as the whole; the call counts against the 5,000/h
-  authenticated rate limit and runs inside the same 2,000 ms delivery budget — a deadline, a non-2xx status, a rate-limit
-  response or a short page sets `hydration.status` to `deadline` / `failed` / `truncated` and leaves the field `unknown`.
-  The witness is still written in those cases (the seal exists; `incomplete` is the honest verdict), with
-  `observed.source` and `observed.hydration` saying what was tried. Until the hydration step is built, every witness is
-  `incomplete`, the doctor warns on every HEAD (§6), and A3 is not built: that is the cost of not claiming completeness
-  the payload cannot give, and D1 orders hydration before the witness ships as a gate signal. On `conflict` it also keeps GitHub's verbatim value of each differing field, so both sides of a disagreement are in
-  the ledger. What it does **not** keep in the quiet case is GitHub's verbatim copy of a message or file list that matched
-  the seal's: that copy is the second byte-identical `raw_message` §1 measured, and the seal has it. `unknown` on any
-  field (a file list not proven complete, `parents_complete: false`, no trailer actor parsed on one side) makes the
+  bytes (the message) and over canonical sets (the changed files; the parent shas), with the counts and completeness flags
+  that say whether a digest covers the whole value, and it keeps the seal's digests computed the same way, so a reader
+  recomputes either side, from the seal and the repository or from GitHub's API, and checks the comparison instead of
+  trusting it. On `conflict` it also keeps GitHub's verbatim value of each differing field, so both sides of a
+  disagreement are in the ledger (the seal's file list is reconstructed from the repository, below). What it does **not**
+  keep in the quiet case is GitHub's verbatim copy of a message or file list that matched the seal's: that copy is the
+  second byte-identical `raw_message` §1 measured, and the seal has it. `unknown` on any field (a file set not proven
+  complete, `parents_complete: false`, an author without an exact email, no trailer actor parsed on one side) makes the
   verdict `incomplete`, never `matches`; there is no path from `unknown` to `matches` (§9 test 1c).
+- **One canonical file set, both sides** (Codex r3 M1). The file comparison is over a set of elements `(kind, path)`:
+  `kind` is `A` (the path is absent from the first parent's tree and present in the commit's), `D` (present, then absent)
+  or `M` (present in both, with a different blob or mode), always relative to the **first parent** (the empty tree for a
+  root commit), and `path` is the raw path bytes. Neither side applies rename or copy detection, so the set depends only
+  on the two trees: a rename is `D` of the old path and `A` of the new one, a copy is `A` of the new path, whatever
+  similarity heuristic either producer would otherwise use. **Hook side:** `git diff-tree -r -z --no-renames
+  --ignore-submodules=none --no-commit-id --name-status <first-parent> <sha>` (`--root <sha>` for a root commit), which
+  emits NUL-delimited `status NUL path NUL` records with the raw path bytes and no quoting (checked on this repository);
+  without `-z` git quotes unusual paths, which is why the hook's present `git show --numstat` extraction is not the
+  comparison source. `T` (a type change) maps to `M`. **Commit API side:** `files[].status` `added` → `A filename`,
+  `removed` → `D filename`, `modified` → `M filename`, `renamed` → `D previous_filename` and `A filename`, `copied` → `A
+  filename`, and `changed`, whose meaning GitHub does not document, → `M filename`, to be confirmed by the end-to-end
+  fixture's mode-change commit before merge; `unchanged`, a `renamed` record without `previous_filename`, or any other
+  status makes the file comparison `unknown` (`file_set_reason: unmapped_status`) rather than a guess. For a merge commit
+  the Commit API lists the first-parent diff: measured on merge `af13caf1`, whose one listed file equals git's
+  first-parent diff while the second-parent diff has two, so both sides use the first parent. **Persistence:** the hook
+  seal commits to the set, `method.params.file_set: { encoding: "retrace-witness-files/2", sha256, count, complete,
+  reason? }`, and does not store the list: the set is a pure function of the commit and its first parent, both fixed by
+  the sha, so any reader reconstructs the seal's list with the command above. The witness stores GitHub's side the same
+  way and, on `conflict`, GitHub's list verbatim as `(kind, path)` elements. A path that is not valid UTF-8 cannot be
+  compared with the API's JSON strings, so the hook marks `complete: false`, `reason: non_utf8_path`, and the comparison
+  is `unknown`. The hook's existing `repo:…#path` file artifacts, built from `git show --numstat` without `-z`, stay as
+  they are and are not the comparison source; aligning them is a separate change.
+- **Digest encoding, one for both sides** (Codex r2 M1, r3 M1). Every digest is sha256 over a domain-separated,
+  length-prefixed byte string, so that no legal path or message can collide with another by framing:
+  `message_sha256 = sha256("retrace-witness-message/1" ‖ 0x00 ‖ len32be(m) ‖ m)` where `m` is the exact UTF-8 bytes of
+  the message as delivered; `file_set_sha256 = sha256("retrace-witness-files/2" ‖ 0x00 ‖ count32be ‖ for each element, in
+  byte-wise ascending order of its path: kind ‖ len32be(p) ‖ p)`, where `kind` is the one byte `A`, `D` or `M` and paths
+  are unique within a set; `parents_sha256` with domain `retrace-witness-parents/1` over the 40-byte lowercase hex shas
+  **in git order** (parents are ordered; the list is not sorted). `len32be` and `count32be` are unsigned 32-bit
+  big-endian. No normalisation is applied: bytes are hashed as the producer gives them, Unicode NFC and NFD forms of a
+  name are different paths and digest differently, and an empty set digests the frame with `count32be = 0`. The v1.2
+  `files/1` frame, over whatever path list each side happened to hold, is withdrawn.
+- **The author, with its own completeness** (Codex r3 M2). GitHub's published push schema makes
+  `commits[].author.email` a `string | null` with an optional `username`, and the push mapper today substitutes
+  `github:<username>` when the email is missing (`github.ts`), a value that is not the commit's author email. The witness
+  never compares that substitute. `observed.author` is `{ name, email, complete, source }`: from the hydrated commit when
+  hydration succeeded (`commit.author.name` and `commit.author.email`, the git author as committed; `source:
+  commit-api`), else from the push payload when its email is a non-null string (`source: push`), else `email: null`,
+  `complete: false` and `comparison.author: unknown`. The username, when present, is kept as `observed.author_login`:
+  identity metadata, labelled as such, never compared and never used as an email. The seal's side is the hook's `author:
+  { name, email }` (git `%an`, `%ae`).
+- **Completeness is proven, never assumed** (Codex r2 H1, r3 H1). GitHub's push event gives, per commit, `message`,
+  `author`, `committer`, `added`, `modified`, `removed` and no `parents`; GitHub documents that the three file arrays may
+  be empty for large pushes even when files changed, so an omitted list is indistinguishable from an empty one, and the
+  mapper today reads parents only from a non-standard `c.parents` (`github.ts`). So from the push payload alone: the
+  message and the trailer actor are compared, the author only when its email is exact; `files_complete` and
+  `parents_complete` are **false**, `comparison.files` and `comparison.parents` are `unknown`, the verdict is
+  `incomplete`, and `matches` cannot occur. The only route to a complete file set and to parents is **hydration from the
+  Commit API**, specified here and built as its own class S step (D1). Request: `GET /repos/{owner}/{repo}/commits/{sha}
+  ?per_page=100` with the default JSON media type and a read-only token the Worker does not hold today (a GitHub App
+  installation token or a fine-grained token with `contents: read` on the repository, stored as a Worker secret, class S);
+  follow the `Link` header's `rel="next"` URL until there is none, accumulating `files[]`. The facts this rests on, from
+  GitHub's "Get a commit" documentation (read 2026-10-12) and read-only calls against this repository: `per_page` is at
+  most 100; without pagination parameters a commit with more than 300 changed files is paginated with `Link` headers "up
+  to a limit of 3000 files", and with `per_page` set the pages follow it; no response field gives the number of changed
+  files; `stats.total` is additions plus deletions, lines and not files (measured: commit `8c4933eb`, 36 files,
+  `stats.total` 2,764 = 2,637 + 127); a short final page is the normal end of the list (measured: at `per_page=10`, pages
+  of 10, 10, 10 and 6, then no `next` link, 36 files accumulated); `parents[]` is complete and in git order (measured on
+  merge `af13caf1`). **The completion predicate:** the file set is complete only when the `Link` chain is exhausted and
+  fewer than 3,000 files were accumulated. At 3,000, exactly 3,000 included because a commit with more also returns 3,000,
+  the listing may have hit the cap: `files_complete: false`, `hydration.status: truncated`, `comparison.files: unknown`,
+  unless another authoritative source proves the set, and none is specified here. A deadline inside the 2,000 ms delivery
+  budget (several pages may not fit), a non-2xx status or a rate-limit response sets `hydration.status` to `deadline` or
+  `failed` and leaves the affected fields `unknown`; each page is one request against the token's hourly rate limit, and
+  a commit at the cap costs 30. The witness is still written in those cases (the seal exists; `incomplete` is the honest
+  verdict), with `observed.source` and `observed.hydration` saying what was tried. Until the hydration step is built,
+  every witness is `incomplete`, the doctor warns on every HEAD (§6), and A3 is not built; D1 orders hydration before the
+  witness ships as a gate signal. **Withdrawn from v1.2:** "300 entries per page", and every use of `stats.total` or of a
+  short page as a completeness or truncation signal.
 - **Rooted by construction** when the seal is rooted: `caused_by` is the seal. This is a direct relation, not an
   inference: the witness exists because the seal was found. A witness never creates a new unlinked chain, which is what
   58 of the 73 unlinked records on recent main are (PR-merge, §1) — the push half of that class (the 7 push records of
@@ -276,11 +322,12 @@ other.
 
 - `commit witness` finding on `--gate`: FAIL when the HEAD sha's witness says `conflict`; **PASS only when it says
   `matches`, which by §3 means every compared field is `match`**; WARN, never PASS, when it says `incomplete` (a field was
-  `unknown` on one side), naming the fields and `observed.hydration.status`, with D6 deciding whether that becomes FAIL;
-  PASS also when the only record is a fallback capture (the hook was absent or ineligible; today's "HEAD delivery"
-  finding already names that, and `fallback_reason` says why). Until hydration exists every witness is `incomplete` and
-  this finding warns on every gated HEAD; that noise is the measurement that hydration is missing, not a reason to relax
-  the rule.
+  `unknown` on one side: no hydration, a file listing at the 3,000-file cap, an unmapped file status, a non-UTF-8 path,
+  an author without an exact email), naming the fields, `observed.hydration.status` and `file_set_reason`, with D6
+  deciding whether that becomes FAIL; PASS also when the only record is a fallback capture (the hook was absent or
+  ineligible; today's "HEAD delivery" finding already names that, and `fallback_reason` says why). Until hydration exists
+  every witness is `incomplete` and this finding warns on every gated HEAD; that noise is the measurement that hydration is
+  missing, not a reason to relax the rule.
 - The existing "HEAD delivery" check (`headDelivery`) accepts a hook seal **or** a push record today; after A1 it accepts
   a hook seal with or without a witness, or a fallback capture. Nothing becomes weaker: a sha with no record of any kind
   still fails.
@@ -318,20 +365,33 @@ other.
 ## 9. Acceptance tests (each names the finding it closes)
 
 1. Push of a sha whose eligible hook seal exists at or before `ingress_seq`, **with hydration** → one `commit-witness`,
-   `caused_by` the seal, `verdict: matches` with every comparison field `match`, `observed.source: push+commit-api`,
-   `observed` and `sealed` digests equal and recomputable from the fixture, no `committed` record from the webhook;
-   `status.commits` unchanged, `commit_records` +0, `witnesses.matches` +1. The same push **without hydration** → the
-   witness with `files`/`parents` `unknown`, `verdict: incomplete`, `witnesses.incomplete` +1, never `matches`.
-1b. **Digest encoding** (M1): fixtures with paths containing a newline, a `\u0000`-adjacent name, `,` `|` `;` and `\n`
-   delimiter characters, NFC and NFD forms of `é`, a duplicate path, and an empty list → both sides compute the same
-   `files_sha256` from the frames in §3; the two Unicode forms differ; the delimiter names do not collide with any
-   split-and-join encoding; the empty list digests `count32be = 0`.
-1c. **Provider-faithful completeness** (H1): a push commit with empty `added/modified/removed` arrays for a commit that
-   changed files, and a push commit with no `parents` field (the published shape) → `files_complete: false`,
-   `parents_complete: false`, both comparisons `unknown`, `verdict: incomplete`; a hydration response that is a 403, a
-   429, a timeout at the 2,000 ms budget, or a `files` page shorter than the commit's total → `hydration.status`
-   `failed` / `failed` / `deadline` / `truncated`, the field `unknown`, the verdict `incomplete`. No fixture can produce
-   `matches` without `hydration.status: ok` and `files_complete && parents_complete`.
+   `caused_by` the seal, `verdict: matches` with every comparison field `match`, `observed.source: push+commit-api`, the
+   author complete, `observed` and `sealed` digests equal and recomputable from the fixture, no `committed` record from
+   the webhook; `status.commits` unchanged, `commit_records` +0, `witnesses.matches` +1. The same push **without
+   hydration** → the witness with `files`/`parents` `unknown`, `verdict: incomplete`, `witnesses.incomplete` +1, never
+   `matches`.
+1b. **One canonical file set, end to end** (r2 M1, r3 M1): a fixture repository built by the test, with commits whose paths
+   contain a tab, a newline, a double quote, a backslash, a non-ASCII name in NFC and the same name in NFD, and commits
+   that make a pure rename, a rename with edits, a copy, a deletion, a mode change, a type change, a root commit and a
+   merge. For every commit the hook extraction (`git diff-tree -z …`, §3) and the Commit API mapping produce the same
+   `(kind, path)` set and the same `file_set_sha256`. The API side runs on recorded Commit API responses for the same
+   commits, captured once from a scratch GitHub repository the fixture commits were pushed to and checked in with the
+   capture date (CI cannot reach GitHub). A path that is not valid UTF-8 makes the hook side `complete: false`, `reason:
+   non_utf8_path`. The frame-level checks of v1.2 (delimiter characters, the empty set) stay as unit cases.
+1c. **Provider-faithful completeness** (r2 H1, r3 H1): (a) a push commit with empty `added/modified/removed` arrays for a
+   commit that changed files, and a push commit with no `parents` field (the published shape) → `files_complete: false`,
+   `parents_complete: false`, both comparisons `unknown`, `verdict: incomplete`; (b) hydration whose last page is short
+   and has no `next` link (pages of 100, 100 and 37) → `files_complete: true` with 237 files; (c) a recorded response
+   whose `stats.total` differs from its file count (as on `8c4933eb`: 36 files, `stats.total` 2,764) → completeness
+   decided by the `Link` chain alone; (d) a commit with exactly 3,000 changed files and (e) one with 3,500 (the API returns
+   3,000 for both) → `hydration.status: truncated`, `comparison.files: unknown`, `verdict: incomplete`; (f) a 403, a 429
+   and a timeout at the 2,000 ms budget → `failed`, `failed` and `deadline`, the fields `unknown`. No fixture can produce
+   `matches` without `hydration.status: ok`, an exhausted `Link` chain with fewer than 3,000 files, parents from the API
+   and a complete author.
+1d. **The author** (r3 M2): (a) a push commit whose author email is null and whose username is present, without hydration
+   → `observed.author.email: null`, `complete: false`, `author_login` set, `comparison.author: unknown`, `verdict:
+   incomplete`, and no `github:` value anywhere in `observed.author`; (b) the same with hydration → the author from
+   `commit.author`, `source: commit-api`, compared; (c) the same with a hydration failure → `unknown`.
 2. Push of a sha with no seal → full record with `fallback_capture: true`; a later hook seal is a second full record;
    `status` shows two records, one commit.
 2b. **Eligibility** (H3): a candidate sealed by another `assert:` credential, by a `pinned:` credential, with
@@ -343,11 +403,12 @@ other.
    carries, for the sealed sha, a message whose bytes differ from the seal's `raw_message` (a mapper/source divergence
    fixture: the hook's bytes against GitHub's normalised text) → `comparison.message: differ`, `verdict: conflict`,
    `differing.message` holds GitHub's text, doctor `--gate` FAIL `commit witness`, reconcile `witness_conflict`; (b) the
-   Commit API's `files` listing hits GitHub's 3,000-file cap or a page comes back short of the commit's total (the real
-   provider signal; v1.1 said "truncated" without naming one) → `hydration.status: truncated`, `comparison.files:
-   unknown`, `verdict: incomplete`, doctor WARN not PASS; (c) no hydration → `parents_complete: false` → `incomplete`
-   likewise; (d) the trailer actor parsed on one side only → `incomplete`; (e) hydrated files that differ from the seal's
-   → `comparison.files: differ`, `verdict: conflict`, `differing.files` holds GitHub's list.
+   Commit API listing reaches the 3,000-file cap → `hydration.status: truncated`, `comparison.files: unknown`, `verdict:
+   incomplete`, doctor WARN not PASS (v1.2 also named a page short of `stats.total` as the signal; a short last page is the
+   normal end of the list and `stats.total` counts lines, so that is withdrawn); (c) no hydration → `parents_complete:
+   false` → `incomplete` likewise; (d) the trailer actor parsed on one side only → `incomplete`; (e) a hydrated file set
+   that differs from the seal's (a recorded response missing one of the commit's changed paths) → `comparison.files:
+   differ`, `verdict: conflict`, `differing.files` holds GitHub's list as `(kind, path)` elements.
 3b. **Forced ref replacement**: amend and force-push over a sealed sha → a new sha with no seal takes the fallback path;
    the old sha's seal and any witness stand; `status` shows both shas.
 4. Redelivery of the same push → dedup on `gh:push:<repo>:<sha>` whichever record exists; no second witness.
@@ -384,10 +445,11 @@ other.
 - **D1. Adopt A1–A4 as the design** and route the build as class S code in this order, **after PR 223 merges** (it already
   carries the 32-hex `causedByFrom` fix and the shared caused-by parser; v1 listed that fix as this plan's first step
   without naming the open PR — Codex r1 L1): `status` counts (quick win 3, with the third count measured first) →
-  `derived_cause` on the PR-merge record → `ingress_seq` on the pending row → **Commit API hydration (class S: a new
-  read-only GitHub credential in the Worker, the pagination and deadline rules of §3)** → witness record + eligibility +
-  reconcile + doctor → push mapper `merged` (A3, on hydrated parents), each its own PR. Overrule by striking any letter;
-  A1 without A4 leaves the headline counting records; A1 before hydration ships a witness that is always `incomplete`.
+  `derived_cause` on the PR-merge record → `ingress_seq` on the pending row → **the hook's `file_set` commitment (the
+  canonical extraction of §3, on the seal)** → **Commit API hydration (class S: a new read-only GitHub credential in the
+  Worker, the pagination, cap and deadline rules of §3)** → witness record + eligibility + reconcile + doctor → push mapper
+  `merged` (A3, on hydrated parents), each its own PR. Overrule by striking any letter; A1 without A4 leaves the headline
+  counting records; A1 before hydration ships a witness that is always `incomplete`.
 - **D2. The fallback stays a full record** (not a witness that waits). Overrule: make the drain convert fallbacks when a
   seal lands later, accepting a third record in that case.
 - **D3. Do not attest the 116 historic PR-merge records by batch.** Attest only where a rooted merge seal exists and a
@@ -403,16 +465,24 @@ other.
 
 Nothing here is built or measured in code. **Measured** (§1, from the ledger pull of 2026-10-11 20:50Z and the coverage
 audit): the record and sha counts, the producer combinations, the byte means, the 198 identical `raw_message` pairs, the
-root states, the class table, the two unlinked counts 180 and 164 (records, and shas with an unlinked record). **Estimated**
-(§3, §7): witness bytes per record and per commit. **Specified but unbuilt:** the witness record, the digest frames (§3), the Commit API hydration with its credential,
-pagination, rate-limit and deadline rules, and `derived_cause` with its `root_state`. **Deferred:** A3 (merge
-classification from the push mapper) until hydration exists, because the push payload carries no parents; the third
-unlinked count (`unlinked_commits`, §5), to be measured before merge; the latency of the indexed read and of hydration (§9
-test 8); and confirmation that the Worker resolves the trusted hook-stamp set from the stored policy at delivery the way
-`router.ts` already does for producer verification (`trusted_hook_stamps`); if a project's policy pins no stamp, A1
-degrades to today's behaviour for that project and says so in `fallback_reason`. **Not claimed:** that the push payload
-proves any file list or parent set complete — it does not, and the design says `unknown` wherever that is so. The class counts are the coverage audit's (Grok's CSV, verified by Codex's independent derivation
-to the same totals; Codex's set diff was pending at 20:48Z).
+root states, the class table, the two unlinked counts 180 and 164 (records, and shas with an unlinked record). **Measured
+2026-10-12, read-only against GitHub and this repository:** `stats.total` equals additions plus deletions on commit
+`8c4933eb`; pages at `per_page=10` end with a short page and no `next` link; the merge commit `af13caf1` lists its
+first-parent diff; `git diff-tree -z --name-status` emits NUL-delimited raw paths. **Estimated** (§3, §7): witness bytes
+per record and per commit. **Specified but unbuilt:** the witness record; the canonical file set and the hook's
+`file_set` commitment; the digest frames; Commit API hydration with its credential, pagination, cap and deadline rules;
+the author's completeness state; `derived_cause` with its `root_state`. **Deferred:** A3 (merge classification from the
+push mapper) until hydration exists, because the push payload carries no parents; the third unlinked count
+(`unlinked_commits`, §5), to be measured before merge; the latency of the indexed read and of hydration (§9 test 8);
+confirmation that the Worker resolves the trusted hook-stamp set from the stored policy at delivery the way `router.ts`
+already does for producer verification (`trusted_hook_stamps`), and if a project's policy pins no stamp, A1 degrades to
+today's behaviour for that project and says so in `fallback_reason`; the recorded Commit API responses for test 1b,
+captured once from a scratch GitHub repository; and two provider facts that capture settles before merge, what the
+`changed` status means and whether GitHub's `filename` preserves NFD bytes (if it normalises, NFD paths become a stated
+`unknown`). **Not claimed:** that the push payload proves any file list, parent set or author email complete; that a
+Commit API listing of 3,000 files is complete; that any response field counts files. The design says `unknown` wherever
+that is so. The class counts are the coverage audit's (Grok's CSV, verified by Codex's independent derivation to the same
+totals; Codex's set diff was pending at 20:48Z).
 
 ## 13. Fix round 1 (Codex `evt_ba308146…`, applied in v1.1)
 
@@ -441,3 +511,15 @@ lost" (H1). One number was relabelled to what it measures: 164 (M2).
 
 One deferral (A3), one relabelling (`root` → `seal_caused_by`), one admission the design now carries in its own record
 (`observed.hydration`): what the second producer saw, and what it could not see.
+
+## 15. Fix round 3 (Codex `evt_ac00d53d…`, applied in v1.3)
+
+| finding | change | where |
+|---|---|---|
+| H1 the Commit API facts were wrong: 300 files per page, `stats.total` used as a file count, a short page read as truncation | rewritten from GitHub's "Get a commit" documentation and read-only calls: `per_page=100`, follow `Link` until there is no `next`; the set is complete only when the chain is exhausted with fewer than 3,000 files, and 3,000 (exactly or more) is `truncated`, files `unknown`; `stats.total` is lines (2,764 for 36 files, measured) and is not used; a short last page is completion (measured); **withdrawn:** "300 entries per page" and every use of `stats.total` or of a short page as a signal | §3 completeness bullet and `hydration` fields, §6, §9 tests 1c and 3(b), §12 |
+| M1 the framed digests consumed non-comparable path bytes: `--numstat` without `-z` quotes unusual paths, renames have another shape, and the seal stored only a count | one canonical set of `(kind, path)` against the first parent with no rename or copy detection, so the set depends only on the trees; hook side `git diff-tree -r -z --no-renames …` with raw NUL-delimited paths; Commit API statuses mapped, renames split into `D` and `A`, unmapped statuses `unknown`; merges use the first parent (measured); the hook seal commits to `file_set` and the list is reconstructed from the repository; non-UTF-8 paths `unknown`; frame `files/2` with the kind byte; **withdrawn:** the `files/1` frame; test 1b is end to end on recorded API responses; D1 gains the hook step | §3 shape, canonical-set and digest bullets, §9 tests 1b and 3(e), §11 D1, §12 |
+| M2 a nullable push author email was compared exactly, with the mapper's `github:<username>` standing in for it | `observed.author` is `{name, email, complete, source}`: from the hydrated commit, else the payload's exact email, else `unknown`; the username is kept as `author_login`, labelled and never compared; the substitute is never compared | §0 A1, §3 shape and author bullet, §6, §9 test 1d |
+| editorial | v1.2 had spliced the end of the "what the witness keeps" bullet onto the completeness bullet; moved back | §3 |
+
+Withdrawn rather than reworded: the v1.2 Commit API rule (300 per page, `stats.total`, a short page as the signal) and the
+`files/1` frame. Added: one commitment on the hook seal (`file_set`) and the build step for it.
