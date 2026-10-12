@@ -77,7 +77,7 @@ test("sibling corroboration: an unlinked webhook seal is corroborated by a roote
   assert.equal(causalRootState(cand, new Map(store.events.map((e) => [e.id, e]))), "unlinked");
   const text = renderProjectStatus(s);
   assert.match(text, /sibling corroboration \(read-time, roots nothing\): 1 unlinked commit seals/);
-  assert.match(text, /1\/2 unlinked commits/, "the CLI headline keeps the true unlinked count");
+  assert.match(text, /1\/2 unlinked commit seals/, "the CLI headline keeps the true unlinked count");
   assert.doesNotMatch(text, /covered by a sibling/);
   // the UI reads the same field on its own row, outside the Covered line
   const html = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../ui/retrace.html"), "utf8");
@@ -350,4 +350,82 @@ test("T10 raw-login totals include pre-hash, unstamped and declared-agent seals;
   assert.equal(legacy.actor.type, "human"); assert.equal(ownerLoginRecord(legacy), undefined);
   assert.match(renderProjectStatus(status), /read-time:.*computed at read, not sealed/);
   assert.equal(stats.computed_at_seq, (await store.head(f.project))!.seq);
+});
+
+test("commit_shas groups one 12-character id with the single longer id it prefixes, and unlinked_commits stays per seal", async () => {
+  const store = new MemStore();
+  const root = (await appendEvent(store, { project: "p", actor: { type: "human", id: "jordan@example.com" }, action: "instructed", artifacts: [{ id: "task:sha", role: "generated" }] })).event;
+  const full = "a".repeat(40);
+  await appendEvent(store, { project: "p", actor: { type: "agent", id: "grok", model: "Grok 4.7" }, action: "committed", artifacts: [{ id: `commit:acme/app@${full.slice(0, 12)}`, role: "generated" }], caused_by: root.id, location: { system: "git" } });
+  await appendEvent(store, { project: "p", actor: { type: "system", id: "github-webhook" }, action: "committed", artifacts: [{ id: `commit:acme/app@${full}`, role: "generated" }], location: { system: "github" } });
+  const s = await buildProjectStatus(store, "p");
+  assert.equal(s.capture.commits, 2);
+  assert.equal(s.capture.commit_shas, 1);
+  assert.equal(s.capture.unlinked_commits, 1);
+  assert.equal("commit_records" in s.capture, false);
+  assert.equal("unlinked_commit_records" in s.capture, false);
+});
+
+test("a 12-character id that prefixes two longer shas stays its own group", async () => {
+  const store = new MemStore();
+  const prefix = "b".repeat(12);
+  const fullA = prefix + "a".repeat(28);
+  const fullB = prefix + "c".repeat(28);
+  for (const sha of [prefix, fullA, fullB]) {
+    await appendEvent(store, { project: "p", actor: { type: "human", id: "jordan@example.com" }, action: "committed", artifacts: [{ id: `commit:acme/app@${sha}`, role: "generated" }] });
+  }
+  const s = await buildProjectStatus(store, "p");
+  assert.equal(s.capture.commits, 3);
+  assert.equal(s.capture.commit_shas, 3);
+  assert.equal(s.capture.unlinked_commits, 3);
+});
+
+test("the same sha in two repos counts once per repo", async () => {
+  const store = new MemStore();
+  const sha = "d".repeat(40);
+  await appendEvent(store, { project: "p", actor: { type: "human", id: "jordan@example.com" }, action: "committed", artifacts: [{ id: `commit:acme/app@${sha}`, role: "generated" }] });
+  await appendEvent(store, { project: "p", actor: { type: "human", id: "jordan@example.com" }, action: "merged", artifacts: [{ id: `commit:other/repo@${sha}`, role: "generated" }] });
+  const s = await buildProjectStatus(store, "p");
+  assert.equal(s.capture.commits, 2);
+  assert.equal(s.capture.commit_shas, 2);
+});
+
+test("commit_shas ignores a malformed ref and folds case, length, and two refs on one record", async () => {
+  const store = new MemStore();
+  const full = "e".repeat(40);
+  const seven = "f".repeat(7);
+  await appendEvent(store, { project: "p", actor: { type: "human", id: "jordan@example.com" }, action: "committed", artifacts: [{ id: "commit:@aaaaaaaaaaaa", role: "generated" }] });
+  await appendEvent(store, { project: "p", actor: { type: "human", id: "jordan@example.com" }, action: "committed", artifacts: [{ id: "commit:repo@not-a-sha", role: "generated" }] });
+  await appendEvent(store, { project: "p", actor: { type: "human", id: "jordan@example.com" }, action: "committed", artifacts: [{ id: "commit:repoaaaaaaaaaaaa", role: "generated" }] });
+  await appendEvent(store, { project: "p", actor: { type: "human", id: "jordan@example.com" }, action: "committed", artifacts: [{ id: `commit:acme/app@${full.slice(0, 12).toUpperCase()}`, role: "generated" }] });
+  await appendEvent(store, { project: "p", actor: { type: "human", id: "jordan@example.com" }, action: "committed", artifacts: [{ id: `commit:acme/app@${full}`, role: "generated" }] });
+  await appendEvent(store, { project: "p", actor: { type: "human", id: "jordan@example.com" }, action: "committed", artifacts: [{ id: `commit:acme/app@${seven}`, role: "generated" }, { id: `commit:other/repo@${seven}${"a".repeat(33)}`, role: "generated" }] });
+  const s = await buildProjectStatus(store, "p");
+  assert.equal(s.capture.commits, 6);
+  assert.equal(s.capture.unlinked_commits, 6);
+  assert.equal(s.capture.commit_shas, 3);
+});
+
+test("a 7-12-40 chain of one commit is one group", async () => {
+  const store = new MemStore();
+  const full = "f".repeat(40);
+  for (const sha of [full.slice(0, 7), full.slice(0, 12), full]) {
+    await appendEvent(store, { project: "p", actor: { type: "human", id: "jordan@example.com" }, action: "committed", artifacts: [{ id: `commit:acme/app@${sha}`, role: "generated" }] });
+  }
+  const s = await buildProjectStatus(store, "p");
+  assert.equal(s.capture.commits, 3);
+  assert.equal(s.capture.commit_shas, 1);
+});
+
+test("a 7-character id that prefixes two different 40s stays its own group", async () => {
+  const store = new MemStore();
+  const prefix = "a".repeat(7);
+  const fullA = prefix + "b".repeat(33);
+  const fullB = prefix + "c".repeat(33);
+  for (const sha of [prefix, fullA, fullB]) {
+    await appendEvent(store, { project: "p", actor: { type: "human", id: "jordan@example.com" }, action: "committed", artifacts: [{ id: `commit:acme/app@${sha}`, role: "generated" }] });
+  }
+  const s = await buildProjectStatus(store, "p");
+  assert.equal(s.capture.commits, 3);
+  assert.equal(s.capture.commit_shas, 3);
 });

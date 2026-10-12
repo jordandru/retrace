@@ -35,6 +35,51 @@ function emptySourceCounts(): Record<ModelSourceBucket, number> {
   return Object.fromEntries(MODEL_SOURCE_ORDER.map((key) => [key, 0])) as Record<ModelSourceBucket, number>;
 }
 
+const COMMIT_SHA = /^(?:[0-9a-f]{7}|[0-9a-f]{12}|[0-9a-f]{40})$/;
+
+/**
+ * `commit:<repo>@<sha>` with a non-empty repository and a hexadecimal sha of 7, 12, or 40
+ * characters. The sha is lower-cased. The repository string is taken as written: it is not
+ * trimmed, lower-cased, or passed through policy aliases. Anything else is not a sha.
+ */
+function parseCommitRef(id: string): { repo: string; sha: string } | undefined {
+  if (!id.startsWith("commit:")) return undefined;
+  const at = id.lastIndexOf("@");
+  if (at < "commit:".length) return undefined;
+  const repo = id.slice("commit:".length, at);
+  if (repo.length === 0) return undefined;
+  const sha = id.slice(at + 1).toLowerCase();
+  if (!COMMIT_SHA.test(sha)) return undefined;
+  return { repo, sha };
+}
+
+/** Distinct commit shas named by seal records, counted per repo. A count of claimed shas — records are claims; it roots nothing and links nothing. A sha is maximal when no other sha of the same repository extends it. Each maximal sha is one group. A shorter id joins the single maximal sha it prefixes; if it prefixes two or more maximal shas it stays its own group. A ref the parser rejects is not counted. The same sha in two repositories counts once per repository. */
+function commitShaCount(events: Event[]): number {
+  const byRepo = new Map<string, Set<string>>();
+  for (const event of events) {
+    for (const artifact of event.artifacts) {
+      const ref = parseCommitRef(artifact.id);
+      if (!ref) continue;
+      const set = byRepo.get(ref.repo) ?? new Set<string>();
+      set.add(ref.sha);
+      byRepo.set(ref.repo, set);
+    }
+  }
+  let count = 0;
+  for (const shas of byRepo.values()) {
+    const list = [...shas];
+    const maximal = list.filter((sha) => !list.some((other) => other.length > sha.length && other.startsWith(sha)));
+    const groups = new Set(maximal);
+    for (const sha of list) {
+      if (maximal.includes(sha)) continue;
+      const matches = maximal.filter((other) => other.startsWith(sha));
+      if (matches.length !== 1) groups.add(sha);
+    }
+    count += groups.size;
+  }
+  return count;
+}
+
 export type StatusActor = { type: Event["actor"]["type"]; id: string; events: number; last_seen: string; models: string[]; amended_from?: {type: Event["actor"]["type"]; id: string}[] };
 export type StatusIntegration = { system: string; events: number; last_seen: string };
 export type ProjectStatus = {
@@ -60,7 +105,10 @@ export type ProjectStatus = {
     agent_events_without_model_by_cause: { source_none: number; no_source_recorded: number };
     instructions: number;
     instructions_without_followup: number;
+    /** Seal records: one per `committed` or `merged` event, not distinct commits. */
     commits: number;
+    /** A count of claimed shas — records are claims; it roots nothing and links nothing. Only `commit:<repo>@<sha>` with a non-empty repository and a 7-, 12-, or 40-character hexadecimal sha counts; the sha is lower-cased and the repository string is taken as written. A sha is maximal when no other sha of that repository extends it, and each maximal sha is one group. A shorter id joins the single maximal sha it prefixes; if it prefixes two or more maximal shas it stays its own group. Anything the parser rejects is not a sha. */
+    commit_shas: number;
     /** commit seals that are neither rooted nor attested (true count; sibling corroboration does not reduce it) */
     unlinked_commits: number;
     amended_unlinked_commits: number;
@@ -215,6 +263,7 @@ export async function buildProjectStatus(
       instructions: instructions.length,
       instructions_without_followup: instructions.filter((e) => !caused.has(e.id)).length,
       commits: commits.length,
+      commit_shas: commitShaCount(commits),
       unlinked_commits: commits.filter((e) => causalRootState(e, byId) !== "rooted" && !attested.has(e.id)).length,
       amended_unlinked_commits: commits.filter((e) => attested.has(e.id)).length,
       sibling_corroborated: siblingCorroborated,
@@ -349,7 +398,7 @@ export function renderProjectStatus(s: ProjectStatus): string {
     ].join(" · ")}\n`
     : "";
   return `${markUntrustedText(s.project)} — ${health}\n` +
-    `${s.events.total} events · ${s.causality.coverage_pct}% causal coverage · ${s.capture.unlinked_commits}/${s.capture.commits} unlinked commits · ${s.capture.unverified_links} unverified links · ${s.capture.legacy_client} legacy-client seals\n` +
+    `${s.events.total} events · ${s.causality.coverage_pct}% causal coverage · ${s.capture.unlinked_commits}/${s.capture.commits} unlinked commit seals · ${s.capture.commit_shas} distinct commit shas · ${s.capture.unverified_links} unverified links · ${s.capture.legacy_client} legacy-client seals\n` +
     `${s.capture.agent_events_without_model}/${s.capture.agent_events} agent events missing model (${byCause.source_none} declared none · ${byCause.no_source_recorded} no source recorded) · ${s.capture.instructions_without_followup}/${s.capture.instructions} instructions without follow-up · ${s.capture.artifact_refs_without_role}/${s.capture.artifact_refs} artifact refs missing role\n` +
     (sourceParts.length ? `model sources: ${sourceParts.join(" · ")}\n` : "") +
     `append-only amendments: ${s.capture.amended_unlinked_commits} commits attested · ${s.capture.amended_artifact_refs} artifact roles supplied · ${s.capture.ineffective_amendments} rejected links\n` +
