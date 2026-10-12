@@ -56,7 +56,14 @@ delimiters, L2). Instead, a review that contains any sequence an HTML parser tur
 declarations and CDATA, `<?` for processing instructions, `</` not followed by a letter, and the closer `-->`) anywhere, in code
 or not, is refused whole before any other parsing: "HTML comment markers are not allowed in a review". The prompt and the
 packet's contract tell the reviewer to write none. Other raw HTML is not inspected; scripts/nooa/README.md states that limit and
-why. CRLF line endings stay accepted. Self-test: `python3 nooa-review-generic.py --selftest` (no host modules needed).
+why. CRLF line endings stay accepted.
+
+v2.6 (PR 225 fix round 6, Codex evt_4e43578c): the sealed verdict carries its own reading rule. `method.params.record_surface`
+says that the record is the exact stored review file whose sha256 is change.after_hash, that rendered Markdown is not the
+record, and that raw HTML other than the refused comment-family markers is not inspected, so an unclosed element can collapse or
+hide what follows it, the verdict block included; the sealed intent ends with the stored file's sha256. `verdict_payload()`
+builds the sealed params and intent as a pure function, and the self-test checks both (H1).
+Self-test: `python3 nooa-review-generic.py --selftest` (no host modules needed).
 The canonical copy lives in the repository at scripts/nooa/nooa-review-generic.py; push-and-launch.sh
 copies the one in its own directory, so copy the repository file over it after a merge.
 """
@@ -172,6 +179,39 @@ def parse_verdict_block(review_markdown: str) -> dict:
         raise ValueError("VERDICT: approved cannot carry a High or Medium finding; write 'needs changes', or reclassify the finding")
     return {"action": action, "verdict": verdict,
             "params": {"findings": {"high": high, "medium": medium, "low": lo}, "blocking": blocking}}
+
+
+# What the sealed verdict says about its own record (Codex, PR 225 r6, H1): the stored bytes are the record, not a rendering.
+RECORD_SURFACE = ("the record is the exact bytes of the stored review file, this wrapper's header followed by the reviewer's text "
+                  "unedited, whose sha256 is change.after_hash; rendered Markdown is not the record; raw HTML other than the refused "
+                  "comment-family markers is not inspected, and an unclosed element, a details element for example, can collapse or "
+                  "hide what follows it in rendered Markdown, the verdict block included")
+
+
+def verdict_payload(shape: dict, digest: str, *, pr: str, title: str, round_: str, cls: str, surface: str, reviewed_head: str,
+                    routing_event: str, launcher_trust: str, model: str, rubric: str, packet_chars: int, scope: str,
+                    packet_sha256: str) -> dict:
+    """The method.params and the intent the wrapper seals for one verdict, as a pure function of its inputs, so the self-test
+    checks what is sealed without the host (PR 225 r6, H1). `digest` is the sha256 of the stored review file."""
+    params = {
+        **shape["params"],
+        "routing_event_id": routing_event,
+        "reviewed_head": reviewed_head,
+        "class": cls,
+        "review_surface": surface,
+        "launcher_trust": launcher_trust,
+        "record_surface": RECORD_SURFACE,
+        "reasoning_effort": (f"not_applicable — {model} exposes no effort control (models.json supports_effort=false); "
+                             f"routed rubric effort was {rubric}"),
+        "review_scope": (f"packet-scoped and advisory: the reviewer was INSTRUCTED to read the whole packet ({packet_chars} characters: "
+                         f"{scope}) in slices of at most 20,000 characters, because the harness cuts printed output at 50,000; "
+                         "what it actually read is stated in its own Limits section; it executed nothing"),
+        "packet_sha256": packet_sha256,
+    }
+    intent = (f"NOOA independent review of Retrace PR {pr} ({title}, {round_}, class {cls}, witness seat; {surface}) at "
+              f"{reviewed_head[:12]}: {shape['verdict']}; record: stored review text sha256 {digest[:12]}; rendered Markdown is "
+              "not the record")
+    return {"params": params, "intent": intent}
 
 
 def _selftest() -> None:
@@ -306,6 +346,19 @@ def _selftest() -> None:
             cases += 1
             continue
         raise AssertionError("accepted a review that contains an HTML comment marker:\n" + text)
+    # r6 H1: the sealed payload names its record: record_surface in the params, the stored file's sha256 in the intent.
+    sample = parse_verdict_block(base + block)
+    digest = "ab" * 32
+    payload = verdict_payload(sample, digest, pr="225", title="t", round_="r6", cls="c", surface="class (c): scripts",
+                              reviewed_head="9" * 40, routing_event="evt_" + "1" * 32, launcher_trust="lt", model="m",
+                              rubric="high", packet_chars=1, scope="s", packet_sha256="0" * 64)
+    rs = payload["params"].get("record_surface", "")
+    assert rs == RECORD_SURFACE and "change.after_hash" in rs and "rendered Markdown is not the record" in rs, rs
+    assert "details element" in rs and "comment-family markers" in rs and "<" not in rs and ">" not in rs, rs
+    cases += 1
+    assert payload["intent"].endswith(f"; record: stored review text sha256 {digest[:12]}; rendered Markdown is not the record"), payload["intent"]
+    assert payload["params"]["launcher_trust"] == "lt" and payload["params"]["findings"] == sample["params"]["findings"], payload
+    cases += 1
     print(f"nooa-review-generic selftest: {cases} cases OK")
 
 
@@ -383,6 +436,10 @@ class PRReviewer(ra.RetraceDesignReviewer):
         with path.open("xb") as fh:
             fh.write(body)
         digest = sha256(body).hexdigest()
+        payload = verdict_payload(shape, digest, pr=PR, title=TITLE, round_=ROUND, cls=CLASS, surface=SURFACE,
+                                  reviewed_head=REVIEWED_HEAD, routing_event=ROUTING_EVENT, launcher_trust=LAUNCHER_TRUST,
+                                  model=ra.MODEL, rubric=RUBRIC, packet_chars=len(ra.DESIGN_TEXT), scope=SCOPE,
+                                  packet_sha256=ra.DESIGN_SHA)
 
         logged = await self.retrace.retrace_log(
             action=action,
@@ -398,20 +455,10 @@ class PRReviewer(ra.RetraceDesignReviewer):
                  "label": f"review packet sha256 {ra.DESIGN_SHA[:12]}", "role": "used"},
                 {"id": f"file:{path}", "kind": "review", "label": path.name, "role": "generated"},
             ],
-            change={"after_hash": digest, "summary": "Exact review text as written by the reviewer, unedited"},
-            method={"tool": "review", "automated": True, "params": {
-                **shape["params"],
-                "routing_event_id": ROUTING_EVENT,
-                "reviewed_head": REVIEWED_HEAD,
-                "class": CLASS,
-                "review_surface": SURFACE,
-                "launcher_trust": LAUNCHER_TRUST,
-                "reasoning_effort": f"not_applicable — {ra.MODEL} exposes no effort control (models.json supports_effort=false); routed rubric effort was {RUBRIC}",
-                "review_scope": f"packet-scoped and advisory: the reviewer was INSTRUCTED to read the whole packet ({len(ra.DESIGN_TEXT)} characters: {SCOPE}) in slices of at most 20,000 characters, because the harness cuts printed output at 50,000; what it actually read is stated in its own Limits section; it executed nothing",
-                "packet_sha256": ra.DESIGN_SHA,
-            }},
+            change={"after_hash": digest, "summary": "Exact stored review file: this wrapper's header, then the reviewer's text unedited; this sha256 is the record"},
+            method={"tool": "review", "automated": True, "params": payload["params"]},
             tags=["review", f"pr-{PR}", *TAGS, "gate"],
-            intent=f"NOOA independent review of Retrace PR {PR} ({TITLE}, {ROUND}, class {CLASS}, witness seat; {SURFACE}) at {REVIEWED_HEAD[:12]}: {verdict}",
+            intent=payload["intent"],
         )
         logged_text = ra._text(logged)
         print(f"NOOA_REVIEW_RESULT action={action} verdict={verdict!r} review={path}", file=sys.stderr, flush=True)

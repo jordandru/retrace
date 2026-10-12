@@ -53,7 +53,7 @@ never on a command line. Writes nothing to the ledger. Pushing and launching sta
 the coordinator's own `sent` event, logged before the push, carries the local hashes it computed, and any launch outcome it logs
 afterwards is its act, not the script's.
 
-## `nooa-review-generic.py` (v2.5)
+## `nooa-review-generic.py` (v2.6)
 
 The canonical copy of the host wrapper. It reads **one anchored block at the very end** of the review — the last three
 non-blank lines, bare, at column zero, in order: `FINDINGS: high=<n> medium=<n> low=<n>`, `BLOCKING: yes|no`, `VERDICT: …` —
@@ -70,15 +70,21 @@ replaces the comment emulation of v2.3 and v2.4, which disagreed with GitHub's r
 Fence state is tracked line by line, so a block after an unclosed fence is inside it and refused, as is a keyword line inside a
 closed one; a keyword line that is indented, blockquoted, a list item, a heading, bold or inline code, anywhere in the review,
 is refused, as is a second keyword line or text after the block. Refusal seals nothing, keeps the text, and reports the error.
-`python3 scripts/nooa/nooa-review-generic.py --selftest` runs its 58 cases without the host.
+`python3 scripts/nooa/nooa-review-generic.py --selftest` runs its 60 cases without the host.
 
 **Limit, stated.** Other raw HTML is not inspected. A raw HTML element can still collapse or hide what follows it in rendered
 Markdown (an unclosed `<details>`, for example), and the wrapper does not claim that a sealed block is visible in every Markdown
-renderer. What it seals is bound to the exact bytes of the stored review, whose plain text shows the block. Refusing every `<`
+renderer. What it seals is bound to the exact bytes of the stored review, whose plain text shows the block. The sealed verdict
+says so itself: `method.params.record_surface` states that the stored file, whose sha256 is `change.after_hash`, is the record,
+that rendered Markdown is not, and that raw HTML other than the refused markers is not inspected; the sealed intent ends with
+that sha256 ("record: stored review text sha256 …; rendered Markdown is not the record"). Refusing every `<`
 followed by a letter or a slash would close that too, but 49 of the 162 NOOA reviews stored under `~/.retrace` contain one
 (placeholders such as `<id>` and `<path>`, generics such as `Record<string, unknown>`, an email address in angle brackets), so
 it would refuse about three reviews in ten. Of the same 162, one contains a comment marker: NOOA's review of this wrapper's
-round 4, which described the comment parser.
+round 4, which described the comment parser. **The rule's measured cost:** NOOA's round-6 witness review of this PR typed comment
+markers on 7 lines although its packet told it not to (coordinator receipt `evt_4136c126…`; 7 counted again on the stored copy),
+so under this wrapper such a review is refused whole and needs a re-run. The refusal is the cost of the rule, not a path to a
+hidden verdict.
 
 Before the run it checks the shape of every launcher value (PR number, full event id, full 40-hex head, round, rubric, class in
 a/b/c/S, surface) and refuses unless `NOOA_MODEL` **equals** the pinned witness model; a prefix is not a pin. Those values are
