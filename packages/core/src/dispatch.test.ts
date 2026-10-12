@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { paneTextProblem, paneTextSha256, splitSentSuffix, withSentSuffix, verifySentEvent, briefNamedIn, briefNameProblem, briefNameUnparseable, briefPathNames, resolveBriefName, expandHome, PANE_TEXT_MAX_BYTES } from "./dispatch.js";
+import { paneTextProblem, paneTextSha256, splitSentSuffix, withSentSuffix, verifySentEvent, briefNamedIn, briefNameProblem, briefNameUnparseable, parseBriefName, pathLikeToken, briefPathNames, resolveBriefName, expandHome, PANE_TEXT_MAX_BYTES } from "./dispatch.js";
 import type { Event } from "./schema.js";
 
 const ID = "evt_" + "a".repeat(32);
@@ -43,7 +43,7 @@ test("briefNamedIn: the three forms the coordinator uses, and texts that name no
   assert.equal(briefNamedIn("CLAUDE-CODE review PR 220 r8 per brief agent-ops-20/BRIEF-220-r8.md CLAUDE-CODE"), "agent-ops-20/BRIEF-220-r8.md");
   assert.equal(briefNamedIn("CLAUDE-CODE stand by CLAUDE-CODE"), undefined);
   assert.equal(briefNamedIn("CLAUDE-CODE the brief is ready CLAUDE-CODE"), undefined, "the word brief without a path names nothing");
-  assert.equal(briefNamedIn("CLAUDE-CODE see pr222/notes.md later CLAUDE-CODE"), undefined, "a relative path not introduced by brief names nothing");
+  assert.equal(briefNamedIn("CLAUDE-CODE see pr222/notes.md later CLAUDE-CODE"), undefined, "a relative path not introduced by brief binds nothing (and is refused, r5 M1)");
 });
 
 test("briefNameProblem: a name the grammar cannot bind whole is refused, never bound to a prefix (M1 r3)", () => {
@@ -75,12 +75,46 @@ test("briefNameUnparseable: nothing visibly brief-like is read as no brief (M1 r
   // A pointer names one brief: a second name, after or before, is not silently left unbound.
   assert.equal(briefNameProblem("CLAUDE-CODE brief /tmp/A.md and brief /tmp/B.md CLAUDE-CODE"), "brief_name_unparseable");
   assert.equal(briefNameProblem("CLAUDE-CODE brief pr222/A.md worktree /home/alice/wt CLAUDE-CODE"), "brief_name_unparseable");
+  // Accepted at r4, refused at r5 (M1): one spelling of the word, one path-like token per text.
+  assert.equal(briefNameProblem("CLAUDE-CODE Brief: /tmp/A.md sha256 12 CLAUDE-CODE"), "brief_name_unparseable", "the brief is named by the bare word brief");
+  assert.equal(briefNameProblem("CLAUDE-CODE brief /tmp/A.md sha256 1 then /tmp/A.md CLAUDE-CODE"), "brief_name_unparseable", "the same path twice is a second path-like token");
+  assert.equal(briefNameProblem("CLAUDE-CODE progress ~5/10 CLAUDE-CODE"), "brief_name_unparseable", "a slash or tilde token");
+  assert.equal(briefNameProblem("CLAUDE-CODE see pr222/notes.md later CLAUDE-CODE"), "brief_name_unparseable", "a path without the word brief");
   // Still accepted.
-  assert.equal(briefNameProblem("CLAUDE-CODE Brief: /tmp/A.md sha256 12 CLAUDE-CODE"), undefined, "an absolute name binds after any spelling of the word");
-  assert.equal(briefNameProblem("CLAUDE-CODE brief /tmp/A.md sha256 1 then /tmp/A.md CLAUDE-CODE"), undefined, "the same name twice is one brief");
   assert.equal(briefNameProblem("CLAUDE-CODE debrief at 5, briefly, briefs CLAUDE-CODE"), undefined, "debrief, briefly, briefs are other words");
-  assert.equal(briefNameProblem("CLAUDE-CODE progress ~5/10 CLAUDE-CODE"), undefined, "~ before a digit is not a home path");
-  assert.equal(briefNameProblem("CLAUDE-CODE see pr222/notes.md later CLAUDE-CODE"), undefined, "a relative path without the word brief names nothing, as before");
+});
+
+test("parseBriefName: path candidates are found without the binder; a text binds exactly one, as brief <path>, or is refused (M1 r5)", () => {
+  // Codex's round-5 probes: at 289e081d each named no brief and no problem, or bound A while B stayed visible and unsealed.
+  const probes: Array<[string, string]> = [
+    ["CLAUDE-CODE PR 222 r5 brief:pr222/x.md CLAUDE-CODE", "brief:pr222/x.md"],
+    ["CLAUDE-CODE PR 222 r5 brief:/tmp/x.md CLAUDE-CODE", "brief:/tmp/x.md"],
+    ["CLAUDE-CODE PR 222 r5 brief=pr222/x.md CLAUDE-CODE", "brief=pr222/x.md"],
+    ["CLAUDE-CODE PR 222 r5 read `/tmp/A.md` first CLAUDE-CODE", "`/tmp/A.md`"],
+    ["CLAUDE-CODE PR 222 r5 brief /tmp/A.md and `/tmp/B.md` CLAUDE-CODE", "`/tmp/B.md`"],
+  ];
+  for (const [t, token] of probes) {
+    const r = parseBriefName(t);
+    assert.equal(r.named, undefined, t);
+    assert.equal(r.problem?.reason, "brief_name_unparseable", t);
+    assert.equal(r.problem?.token, token, t);
+  }
+  // The real forms: a pointer with its brief, and a report line with no path.
+  const pointer = `CLAUDE-CODE PR 222 r5 289e081d brief pr222/BRIEF-222-r5.md sha256 ${"0".repeat(64)} rt evt_${"a".repeat(32)} CLAUDE-CODE`;
+  assert.deepEqual(parseBriefName(pointer), { named: "pr222/BRIEF-222-r5.md" });
+  assert.deepEqual(parseBriefName("CLAUDE-CODE PR 222 fix round 5: brief pr222/FIX-ROUND-5-222.md sha256 05c65061f7739d2270db93153b29c8f65ed0a74b44e3017351010eef9aa60bb5 rt evt_e25ae06058aa494db2b8d7c8b3e00365 CLAUDE-CODE"), { named: "pr222/FIX-ROUND-5-222.md" }, "the round-5 pointer as the coordinator sent it");
+  const report = `CLAUDE-CODE PR 222 head ${"1".repeat(40)} body-sha256 ${"2".repeat(64)} CLAUDE-CODE`;
+  assert.deepEqual(parseBriefName(report), {}, "no path and no word brief: names no brief");
+  assert.deepEqual(parseBriefName("CLAUDE-CODE brief brief-222/x.md CLAUDE-CODE"), { named: "brief-222/x.md" }, "a path that opens with brief is the path, not a second word");
+  // A word brief that introduces no path, and an extensionless or unsupported path, are refused, never "no brief".
+  for (const t of ["CLAUDE-CODE brief FIX-ROUND-5-222 CLAUDE-CODE", "CLAUDE-CODE the brief is ready CLAUDE-CODE", "CLAUDE-CODE brief ~/.retrace/x/ CLAUDE-CODE", "CLAUDE-CODE brief /tmp/A,B.md CLAUDE-CODE", "CLAUDE-CODE brief pr222\\x.md CLAUDE-CODE"])
+    assert.equal(parseBriefName(t).problem?.reason, "brief_name_unparseable", t);
+  // The accepted cost: prose with any other path, URL or slash token, or a file-like dotted token, is refused.
+  for (const t of ["CLAUDE-CODE see https://github.com/jordandru/retrace/pull/222 CLAUDE-CODE", "CLAUDE-CODE PRs 221/222 CLAUDE-CODE", "CLAUDE-CODE and/or CLAUDE-CODE", "CLAUDE-CODE about ~240 bytes CLAUDE-CODE", "CLAUDE-CODE note v1.5 CLAUDE-CODE", "CLAUDE-CODE see retrace.dev CLAUDE-CODE"])
+    assert.equal(parseBriefName(t).problem?.reason, "brief_name_unparseable", t);
+  // pathLikeToken, the candidate test itself.
+  for (const t of ["/tmp/A.md", "~/x", "~", "a\\b", "BRIEF.md", "BRIEF.md.", "(BRIEF.md)", "`x.md`,", "x.md~", "brief:pr222/x.md"]) assert.equal(pathLikeToken(t), true, t);
+  for (const t of ["brief", "Brief:", "evt_e25ae060…", "289e081d", "round:", "5,", "(same", "sent-event", "CLAUDE-CODE", "etc."]) assert.equal(pathLikeToken(t), false, t);
 });
 
 test("briefPathNames / resolveBriefName: one rule on both sides; a pointer naming A never binds to B (H1)", () => {
@@ -139,6 +173,9 @@ test("verifySentEvent: each failure is named and the signature word matches rule
     ["unparseable brief name (r3 M1)", raw({ params: { text_sha256: await paneTextSha256("CLAUDE-CODE per brief /tmp/Brief A.md CLAUDE-CODE"), brief_sha256: "1".repeat(64), brief_path: "/tmp/Brief" } }), { text: "CLAUDE-CODE per brief /tmp/Brief A.md CLAUDE-CODE", briefSha256: "1".repeat(64) }, "mismatch", "brief_path"],
     ["~user/ after brief, the event records no brief (r4 M1)", raw({ params: { text_sha256: await paneTextSha256("CLAUDE-CODE PR 222: brief ~other/pr222/BRIEF.md CLAUDE-CODE") } }), { text: "CLAUDE-CODE PR 222: brief ~other/pr222/BRIEF.md CLAUDE-CODE" }, "mismatch", "brief_path"],
     ["bare filename after brief, the event records no brief (r4 M1)", raw({ params: { text_sha256: await paneTextSha256("CLAUDE-CODE PR 222: brief BRIEF.md CLAUDE-CODE") } }), { text: "CLAUDE-CODE PR 222: brief BRIEF.md CLAUDE-CODE" }, "mismatch", "brief_path"],
+    ["joined brief:path, the event records no brief (r5 M1)", raw({ params: { text_sha256: await paneTextSha256("CLAUDE-CODE PR 222 r5 brief:pr222/x.md CLAUDE-CODE") } }), { text: "CLAUDE-CODE PR 222 r5 brief:pr222/x.md CLAUDE-CODE" }, "mismatch", "brief_path"],
+    ["a backticked path, the event records no brief (r5 M1)", raw({ params: { text_sha256: await paneTextSha256("CLAUDE-CODE PR 222 r5 read `/tmp/A.md` first CLAUDE-CODE") } }), { text: "CLAUDE-CODE PR 222 r5 read `/tmp/A.md` first CLAUDE-CODE" }, "mismatch", "brief_path"],
+    ["brief A sealed, a backticked B beside it (r5 M1)", raw({ params: { text_sha256: await paneTextSha256("CLAUDE-CODE PR 222 r5 brief /tmp/A.md and `/tmp/B.md` CLAUDE-CODE"), brief_sha256: "1".repeat(64), brief_path: "/tmp/A.md" } }), { text: "CLAUDE-CODE PR 222 r5 brief /tmp/A.md and `/tmp/B.md` CLAUDE-CODE", briefSha256: "1".repeat(64), briefPresent: true }, "mismatch", "brief_path"],
     ["pinned seal of another seat (r1 M3)", raw({ params: { text_sha256: h, brief_sha256: "1".repeat(64), brief_path: BP, sealed_by: "pinned:Grok MCP (pinned) (signing)" } }), { briefSha256: "1".repeat(64), briefPresent: true }, "mismatch", "sealed_by"],
     ["not sent", raw({ action: "received", params: { text_sha256: h } }), {}, "mismatch", "action"],
     ["other actor", raw({ actor: { type: "agent", id: "codex" }, params: { text_sha256: h } }), {}, "mismatch", "actor"],

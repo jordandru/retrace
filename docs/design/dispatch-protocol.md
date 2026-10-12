@@ -1,16 +1,18 @@
 # The dispatch and verdict protocol as product — `retrace_send`, `retrace_verify_send`, the verdict shape (design note v1)
 
-**Status:** v1.3, 2026-10-12, by claude-code (the "system optimization" pane; `claude-mythos-5-1`, model source
-harness-runtime, effort high). v1.1 was the fix round for Codex's round-1 verdict `evt_6db893faeafc4f12a8b6c6af5c25001c`
+**Status:** v1.5, 2026-10-12. v1 to v1.3 by claude-code (the "system optimization" pane; `claude-mythos-5-1`, model source
+harness-runtime, effort high); v1.4 and v1.5 by claude-code (the coverage-audit pane; `claude-opus-5-5`, harness-runtime) on
+a handover from that pane for throughput. v1.1 was the fix round for Codex's round-1 verdict `evt_6db893faeafc4f12a8b6c6af5c25001c`
 (3 High, 6 Medium, 2 Low at `6ac80c98`), on the coordinator's verified pointer `evt_7a0fff88…`; its changes are listed in
-§4a. **v1.2 is the fix round for Codex's round-2 verdict `evt_841c4bb7af364d90917c1a7a96fbe8c5` (2 High, 5 Medium at
+§4a. v1.2 is the fix round for Codex's round-2 verdict `evt_841c4bb7af364d90917c1a7a96fbe8c5` (2 High, 5 Medium at
 `9aca8b37`), on the coordinator's verified pointer `evt_ad06f82c…`; its changes are listed in §4b. v1.3 is the fix round
 for Codex's round-3 verdict `evt_ea979a1085054bc7858f13cac334357a` (1 High, 2 Medium, 1 Low at `c6ea2d87`), on the
 coordinator's verified pointer `evt_939211c9…`; its changes are listed in §4c. v1.4 is the fix round for Codex's round-4
 verdict `evt_15db62c90e874719a3f88068d7d527fd` (1 Medium, 1 Low at `51dada16`), on the coordinator's verified pointer
-`evt_410d8231…`, written by the coverage-audit pane (claude-code, `claude-opus-5-5`, harness-runtime) on a handover from
-this note's author pane for throughput; its changes are listed in §4d.** Every sentence of this note was checked
-against the code at v1.2 (Codex r2 M5) and the changed sentences again at v1.3 and v1.4. Class **(a)** under agent-rules 12: it governs how seats dispatch to each other and what a
+`evt_410d8231…`; its changes are listed in §4d. **v1.5 is the fix round for Codex's round-5 verdict
+`evt_d09dbbc057ce4880ad2d63800d8f32e6` (2 Medium, 2 Low at `289e081d`), on the coordinator's verified pointer
+`evt_3d1d7ad2…`; its changes are listed in §4e.** Every sentence of this note was checked
+against the code at v1.2 (Codex r2 M5) and the changed sentences again at v1.3, v1.4 and v1.5. Class **(a)** under agent-rules 12: it governs how seats dispatch to each other and what a
 review verdict must carry, and it ships the code that does both (class c for the MCP server, with one validator shared
 with the doctor). Written and built on Jordan's signed go `evt_c83cad7552a149a5940b27a0bcc84b0b` ("Let's go on your top 3
 items starting with 1", received `evt_85ad930c…`), item 1 of `~/.retrace/ops-2026-10-11/system-optimization/OPTIMIZATION-PLAN.md`
@@ -74,30 +76,44 @@ with `--enter` and seals `enter_pressed_by: "retrace_send (tool)"` (Codex r2 M4)
    `SEAT ` and ends with ` SEAT` where SEAT is this server's configured actor id upper-cased; no enveloped span `JD … JD`
    (`owner_envelope_forbidden`; owner-protocol §5) — a lone `JD` token, as in a message that talks about the envelope, is
    allowed (Codex r1 L2); no `[sent-event ` inside. Each failure is a word.
-3. **Brief.** The text names a brief in one of three forms: `~/…`, `/…`, or `brief <dir>/<file>` relative to one
-   `~/.retrace/ops-<date>/` directory (the form the coordinator's pointers use, e.g. `brief pr222/BRIEF-222-r2.md`). When
-   it does, `brief_path` is required (`brief_required`) **and must denote that same file** — equal after `~` expansion and
-   normalisation for the first two forms, `<home>/.retrace/ops-<date>/<name>` for the third — else `brief_name_mismatch`
-   (Codex r2 H1: a pointer naming A can no longer seal B). The grammar stops at whitespace, so a name it cannot bind whole
-   — a path with a space, a name without a file extension, a name followed by a token that looks like the rest of a path —
-   is `brief_name_unparseable` and refused; a prefix of the visible name is never sealed (Codex r3 M1). Paths with
-   whitespace are not supported. **Nothing visibly brief-like is read as "no brief" (Codex r4 M1).** The word `brief`, in
-   any letter case and with punctuation attached (`brief`, `Brief:`, `(brief`), is reserved for naming the brief: the
-   token after it must be the name the grammar binds, whole, or the text is `brief_name_unparseable` (`brief BRIEF.md`,
-   `brief ~other/x.md`, `Brief: pr222/x.md` — the relative form binds only right after the bare word — `brief … x.md`,
-   `the brief is ready`). A `~user/…` path anywhere is `brief_name_unparseable` (only `~/…` is a supported form, and it
-   binds anywhere). A text names one brief: a second, different name is `brief_name_unparseable`. The refusal names the
-   offending token. The file is read and hashed over its **exact bytes** (sha256,
-   full 64 hex; never a decoded and re-encoded string, Codex r1 M6) before anything is written; missing →
-   `brief_missing`, unreadable (a directory, a permission error) → `brief_unreadable`.
+3. **Brief.** A text names a brief in one place only: the bare word `brief`, whitespace, then the brief's path as one
+   token, in one of three forms — `~/…`, `/…`, or `<dir>/<file>` relative to one `~/.retrace/ops-<date>/` directory (the
+   form the coordinator's pointers use, e.g. `brief pr222/BRIEF-222-r2.md`) — of ASCII letters, digits, `.`, `_`, `-` and
+   `/`, ending in a file extension. **Candidates first (Codex r5 M1).** Before anything is bound, every *path-like* token
+   in the whole text is found without that grammar — a token with a `/`, `\` or `~` anywhere in it, or one that ends,
+   once trailing punctuation is dropped, in a dot followed by letters or digits (`BRIEF.md`, `BRIEF.md.`, `` `x.md` ``,
+   `brief:pr222/x.md`, `v1.5`) — and every other token that opens with the word `brief` in any case, wrapped, punctuated
+   or joined, is a *brief word* (`brief`, `Brief:`, `(brief`, `brief=x`; `briefly`, `briefs`, `debrief` are other words).
+   Neither: the text names no brief. Otherwise the text must read `… brief <path> …` exactly once — one brief word,
+   written bare, followed by a path-like token that is the only one in the text and is a supported path with an
+   extension — or it is `brief_name_unparseable`, refused naming the offending token. **A dispatch text therefore carries no other path, URL or slash token** (no `https://…`, `221/222`,
+   `and/or` or `~240`, and no dotted token that ends like a file, such as `v1.5` or `retrace.dev`), and prose that does is
+   refused: that is the accepted cost of a rule that does not depend on knowing every form a path can take. Rounds 3, 4
+   and 5 each found a form the binder did not know (a name with a space; `~user/` and a bare name; `brief:path`,
+   `brief=path`, a backticked path, and a second backticked path beside a bound one, which verified with that file
+   unsealed). When the text binds a brief, `brief_path` is required (`brief_required`) **and must denote that same file**
+   — equal after `~` expansion and normalisation for the first two forms, `<home>/.retrace/ops-<date>/<name>` for the
+   third — else `brief_name_mismatch` (Codex r2 H1: a pointer naming A can no longer seal B). Paths with whitespace are
+   not supported. The file is read and hashed over its **exact bytes** (sha256, full 64 hex; never a decoded and
+   re-encoded string, Codex r1 M6) before anything is written; missing → `brief_missing`, unreadable (a directory, a
+   permission error) → `brief_unreadable`.
 4. **Pane.** `orca-ide terminal list --json` must list the handle (`pane_not_live`), writable, **its `agentIdentity`
    must equal the registry entry's `agent_identity`** (`identity_mismatch`), **and its `incarnationId` must equal the
    entry's `incarnation_id`** (`incarnation_mismatch`): Orca gives a pane a new incarnation id when it is relaunched, so
    a handle that now hosts another incarnation of the same agent, or a pane a human has taken over since it was
    registered, is refused until the operator re-registers it after reading the pane (Codex r2 M3).
-5. **Gate.** Two `terminal read --screen --json` reads, 3 s apart; both must show an empty composer (last rendered line
-   matches the harness's empty prompt — `❯`, `›`, `» Ask Codex to do anything` — and no `draft`); else `composer_not_empty`.
-   Nothing rendered counts as not empty.
+5. **Gate.** Two `terminal read --screen --json` reads, 3 s apart; both must show the harness's **composer** empty and no
+   `draft`, else `composer_not_empty`, naming the composer row seen or saying that none was found. The composer is found
+   by the harness's own layout (`composerOf`, chosen by the registry's `agent_identity`, which step 4 matched to Orca's
+   live label), never as the last rendered row: on every harness here the last row is a status row (Codex r5 M2; v1.4's
+   gate read the last row and so refused every send, §4e). Layouts, measured on this host's panes 2026-10-12: **Claude
+   Code** draws `❯` between two rules of `─`, status rows below; the composer is every row between the last two rules,
+   and its first row starts with `❯`. **Codex** draws `› Ask Codex to do anything` at column 0 with indented status rows
+   below, and its own output starts at column 0 (`• …`); the composer row is the last row that starts at column 0, which
+   must start with `›` (`»` in older builds) and have rows below it. **Grok** draws `│ ❯` inside a box of `╭─` and `╰─`,
+   a footer below; the composer is the last box's inner rows, the first starting with `❯`. Empty is a one-row composer
+   holding the bare prompt or Codex's placeholder; a pane's `empty_composer` in the registry overrides that pattern. A harness whose layout this code does not know has no
+   composer it can find, so the gate refuses. Nothing rendered counts as not empty.
 6. **Seal.** `sent` event, `action_detail: pane-message`, under the seat's credential and producer key: artifacts `pane:<handle>`
    (generated), the brief (used), the routing event (used); params `text_sha256`, `text_bytes`, `brief_path` (resolved,
    absolute), `brief_sha256`, `brief_bytes`, `brief_named` (the name as written in the text), `routing_event_id`,
@@ -107,29 +123,32 @@ with `--enter` and seals `enter_pressed_by: "retrace_send (tool)"` (Codex r2 M4)
 7. **Last look, then send.** One more screen read; if the composer filled during the write, nothing is sent and the
    outcome says so. Otherwise `terminal send --terminal <h> --text "<text> [sent-event <id>]" --enter --json`.
 8. **Outcome.** `executed` event, `caused_by` the sent event, with Orca's receipt and what the post-send screen proved.
-   `delivered` has three values (Codex r1 M2, r2 M2, r3 M2). **`true` only on positive evidence:** the read succeeded,
-   Orca returned the rendered screen (`source: screen`), it is non-empty, the line is not on the last row or in the draft,
-   and it is echoed on an earlier row — the harness took it into its transcript — **with this send's `[sent-event <id>]`
-   on that row or in its continuation run** (a wrapped line, the id possibly split across the wrap): the rows after it,
-   leading indentation dropped, joined without a separator, until the run holds as many characters as the line, the
-   next row is the composer, or 12 rows — ceil(240 / 20), enough for a maximum-size line in a pane 20 columns wide. The
-   first row must still show 24 characters of the text, so a pane too narrow for that, or one where the id falls past
-   12 rows, leaves delivery `"unknown"`, never `true` (Codex r4 L1: at 59 columns a 240-byte line puts the id on its
-   fourth row, beyond v1.3's two continuation rows). A row that
-   matches only the text is a transcript of some earlier send of the same words and proves nothing about this one:
-   `"unknown"`, `stale_prefix_only`, after a second read one gate interval later. **`false`** when the line (or its first 40
-   characters, or a ≥ 24-character prefix cut off by the screen width, or its `[sent-event <id>]` suffix after a wrap) is
-   on the last row or in the draft, **or the last row is a tail of this send's line** (a wrapped line still in the
-   composer ends there, possibly with only its closing `]`; v1.3 found the id on the rows above such a tail and called
-   the line delivered, and the wider scan would find it more often; r4 L1): `line_sits_in_composer`, the measured
-   second-Enter failure; or when the CLI itself
-   failed. **`"unknown"`**, with the reason, for everything the screen cannot settle: `post_send_read_failed`,
-   `post_send_screen_unavailable`, `post_send_screen_empty`, `line_not_on_screen` after a second read one gate interval
-   later (lag, or a frame that scrolled), or `stale_prefix_only`. The `executed` event's `action_detail` says which (`delivered`, `not
-   delivered`, `delivery unknown`) and its params carry `delivered`, `accepted`, the reason and the frame's last line. The
-   caller sees `delivered`, `accepted`, both ids and the exact line; on `false` or `"unknown"` it reads the pane before
-   relying on the send. A human pressing Enter on a sitting line is that human's keystroke, logged by the human, not this
-   tool's act.
+   `delivered` has three values, and each rests on the composer as step 5 finds it, never on which row happens to be
+   last (Codex r1 M2, r2 M2, r3 M2, r5 M2). **`false`** (`line_sits_in_composer`) only on positive evidence that the line
+   is still in the composer: Orca's `draft`, or the composer's own rows, show the start of this send's text (its first 40
+   characters, or a prefix of at least 24 ending a row) or its id; or the CLI itself failed (`orca_send_failed`). Only
+   `line_sits_in_composer` comes with advice: read the pane, then a human presses Enter as a separately logged keystroke.
+   **`true`** only on positive evidence: the read succeeded, Orca returned the rendered screen (`source: screen`), the
+   composer is found and does not hold the line, and a transcript row above it shows the start of the text **with this
+   send's `[sent-event <id>]` on that row or in its continuation run**: the rows after it, leading indentation dropped,
+   joined without a separator (a wrap may split the id), until the run holds as many characters as the line or reaches
+   the composer. That bound is the line's own length in content characters, so it holds at every width with no row cap
+   (Codex r5 L1: v1.4 capped the run at 12 rows, ceil(240 / 20), which assumed 20 content columns; a two-column prompt
+   makes a 240-byte line 13 rows at 20 columns). At width W, with a P-column prompt and I-column indentation, an
+   L-character line spans 1 + ⌈(L − (W − P)) / (W − I)⌉ rows when the harness breaks rows at the column limit. The first
+   row must show 24 characters of the text after the prompt, so **the narrowest pane in which delivery can be proved is
+   the prompt's width plus 24 columns: 26 for a two-column prompt** (`> `, `❯ `, `› `; Codex measured 26), more if the
+   harness breaks rows at word boundaries; narrower, delivery is `"unknown"`. A row that shows the text with no id, or
+   with another id, is a transcript of some earlier send of the same words and proves nothing about this one:
+   `"unknown"`, `stale_prefix_only`. **`"unknown"`**, with the reason, for everything else the screen cannot settle:
+   `post_send_read_failed`, `post_send_screen_unavailable`, `post_send_screen_empty`, `composer_not_on_screen` (an echo
+   that ends the screen, an unrelated last row such as `]`, output or a dialog where the composer was, a harness whose
+   layout is not known), `line_not_on_screen` (lag, a frame that scrolled, or a pane narrower than the minimum), or
+   `stale_prefix_only`; the last three after a second read one gate interval later. `"unknown"` carries no advice to
+   press Enter. The `executed` event's `action_detail` says which (`delivered`, `not delivered`, `delivery unknown`) and
+   its params carry `delivered`, `accepted`, the reason, the frame's last line and the composer row. The caller sees
+   `delivered`, `accepted`, both ids and the exact line; on `false` or `"unknown"` it reads the pane before relying on
+   the send. A human pressing Enter on a sitting line is that human's keystroke, logged by the human, not this tool's act.
 
 **Receiver (`retrace_verify_send`).** Inputs: the received line as it arrived, optional `brief_path` (when given it
 must be the brief the text names), optional own `caused_by`, optional `intent`. Order: split the suffix (no suffix →
@@ -148,9 +167,9 @@ seat naming its own pane — a same-credential configuration check — not pane 
 with the same seat credential could set the same handle and claim it. What it refuses is a dispatch addressed to another
 seat, or to another terminal of this seat; it does not prove which process at that terminal is reading (Codex r3 L1)),
 `text_sha256` equals the sha256 of the received text with the suffix removed (the suffix is the final bytes, nothing after
-it; L1), **`brief_path`: the text's brief name is unparseable → `brief_name_unparseable`, nothing bound (r3 M1; the same
-rule as the sender's step 3, so a `~user/…` path, a bare filename after `brief`, or a second brief name fails here with the
-receipt sealed and `act: false`, r4 M1); otherwise
+it; L1), **`brief_path`: the text cannot be bound to one brief → `brief_name_unparseable`, nothing bound (r3 M1; the same
+rule as the sender's step 3, so a path-like token outside `brief <path>`, a second one, or a word `brief` that is not bare
+or not followed by a supported path fails here with the receipt sealed and `act: false`, r4 M1, r5 M1); otherwise
 the name resolves to the event's `brief_path`, and a receiver-supplied path must equal that one path after normalisation
 — a same-tail file in another `ops-*` directory is `brief_path_mismatch`** (Codex r2 H1, r3 H1: a pointer naming A never
 verifies against B, the relative form never verifies with no brief or with a different brief, and the receiver cannot
@@ -187,10 +206,10 @@ its verdicts show up in the doctor's count until its review agent adopts the sha
 | one line, ≤ 240 bytes with the suffix, no trailing whitespace | the sender counts | `too_long`, `multi_line`, `trailing_whitespace` |
 | the owner's envelope is never used by an agent (§5) | a rule sentence | `owner_envelope_forbidden`, before any write |
 | `sent` logged **before** the send, with text and brief sha256, target, who presses Enter | three steps, two hashes | one write; the suffix is appended only after the id exists; the tool presses Enter and the record says so |
-| the brief a pointer names is the brief that was hashed | the sender's care | `brief_name_mismatch` and `brief_name_unparseable` on send (the word `brief` reserved for the brief's name; one brief per pointer); `brief_path` check on verify resolving the name to the event's one path, the receiver's path equal to it or refused |
+| the brief a pointer names is the brief that was hashed | the sender's care | `brief_name_mismatch` and `brief_name_unparseable` on send (path-like tokens found without the binder; one bare `brief <path>`, no other path, URL or slash token); `brief_path` check on verify resolving the name to the event's one path, the receiver's path equal to it or refused |
 | never send into a human's pane | the sender knows | the registry bound to Orca's live `agentIdentity` and `incarnationId`; unknown, mismatched or relaunched → refused |
-| read the pane before sending; a human may be typing | two reads 3 s apart by hand | two reads, then a third after the write |
-| the line left the composer | the sender reads the pane again | `delivered: true` only when the screen shows the line with this send's id in the transcript; `false` when it sits; `"unknown"` with the reason otherwise (a same-words row without the id included) |
+| read the pane before sending; a human may be typing | two reads 3 s apart by hand | two reads of the harness's composer, found by its layout, then a third after the write |
+| the line left the composer | the sender reads the pane again | `delivered: true` only when the screen shows the line with this send's id in the transcript above the composer; `false` only when the composer itself holds it; `"unknown"` with the reason otherwise (a same-words row without the id, or no composer on screen, included) |
 | receiver reads the event raw, six checks, then `received` | `curl` with the token from env, six comparisons | `retrace_verify_send`; one `received` record with every check's result, written on every path; the pinned credential must name the seat; the dispatch must be addressed to this seat at this terminal; the named brief must be the sealed brief and must hash |
 | the verdict of record self-reports effort and cites the routing event | partially (17 of 55 without counts) | counts, full head, routing id, blocking derived from severity: refused without them |
 
@@ -220,6 +239,9 @@ could read) and the brief binding on both sides (previously the pointer's name a
 - **Delivery is three-valued.** A `sent` event stands whatever the screen later shows; the outcome record says `true`,
   `false` or `"unknown"` and why. `"unknown"` is not a defect of the tool, it is the screen not proving the claim; the
   coordinator reads the pane before relying on such a send, as it does today after a hand send.
+- **Layouts.** The composer is found per harness (Claude Code, Codex, Grok), from layouts measured on this host. A new
+  harness, or a harness that changes how it draws its composer, makes the gate refuse (`composer_not_empty`, "no …
+  composer on screen") and delivery `"unknown"` until `composerOf` learns it: fail closed, and stated in the refusal.
 - **Race.** The composer gate is not race-free (measured 10-07: typing began in a sub-second gap). The third read after
   the write narrows it; the outcome record states what the screen showed after the send, so a collision is on record.
 - **Local stores.** On a local SQLite ledger nothing stamps `sealed_by`, so `retrace_verify_send` fails `sealed_by` by
@@ -282,6 +304,24 @@ its usage limit).
 | M1 a `~user/…` path or a bare filename after `brief` named no brief, so the pointer verified with none sealed | `briefNameUnparseable` (core `dispatch.ts`): the word `brief` is reserved, and the token after it must be the bound name, whole; a `~user/…` path anywhere and a second brief name are unparseable too; `retrace_send` refuses naming the token, `retrace_verify_send` fails `brief_path` with the receipt sealed and `act: false`; tests on both sides for `~other/pr222/BRIEF.md` and `BRIEF.md` |
 | L1 at 59 columns the id sat beyond the prefix row and two continuation rows, so delivery stayed `"unknown"` | `deliveryFromScreen` (`dispatch-mcp.ts`) follows the continuation run, indentation dropped, up to 12 rows; a last row that is a tail of this line is `line_sits_in_composer`, which also closes v1.3's `true` for a wrapped line still in the composer with only `]` on its last row; regressions at 40 and 59 columns, plain and indented, echoed, sitting and stale |
 
+**v1.5 replaced these mechanisms (§4e):** the word `brief` now binds only when written bare, and every path-like token
+is found without the binder; the 12-row cap became the line's own length; the tail-of-line rule became the composer found
+by its layout.
+
+## 4e. Fix round 5 (Codex `evt_d09dbbc0…`, applied in v1.5)
+
+The rule chosen for M1 is the coordinator's: find path candidates first, without the binder, and bind exactly one, in
+the one supported position, or refuse. Rounds 3, 4 and 5 each found a path form outside the binder, so v1.5 stops
+enumerating forms.
+
+| finding | change |
+|---|---|
+| M1 visible brief candidates bypassed binding: `brief:pr222/x.md`, `brief:/tmp/x.md`, `brief=pr222/x.md` and a backticked `/tmp/A.md` verified with no brief; `brief /tmp/A.md` beside a backticked `/tmp/B.md` verified with only A sealed | `parseBriefName` (core `dispatch.ts`) finds every path-like token and every `brief` word in the whole text first (`pathLikeToken`); the text must read `brief <path>` exactly once with no other path-like token, the word bare (v1.4 also accepted `Brief:` and `(brief`), or it is `brief_name_unparseable`: refused on send, a failing `brief_path` check on verify with the receipt sealed and `act: false`. The same path written twice is a second token and is refused. Regressions on both sides for Codex's five probes; passes for `… r5 289e081d brief pr222/BRIEF-222-r5.md sha256 <64 hex> rt evt_<32 hex> …`, for the round-5 pointer as sent and for a report line with no path |
+| M2 an echo that ends the screen, or an unrelated last row of only `]`, was `line_sits_in_composer`, and the tool told a human to press Enter | `composerOf` (`dispatch-mcp.ts`) finds the composer by the harness's layout (§2 step 5); `false` only when the draft or the composer's own rows hold the line; no composer found is `"unknown"`, `composer_not_on_screen`, with no Enter advice. Tests: the echo at screen end and the unrelated `]` on each layout, Codex's composer replaced by output, an unknown harness, and the tool's outcome text |
+| L1 the stated 20-column bound was false (13 rows at 20 columns; 26 is the true minimum) | the run is bounded by the line's own length in characters, with no row cap; the minimum is the prompt's width plus 24 columns (26 for a two-column prompt); tested at 26, 40, 59 and 80 columns (true, plain and indented, on Claude Code's and Codex's layouts) and at 25 and 20 (`"unknown"`) |
+| L2 the status line said v1.3 | the status line says v1.5 and lists every round, v1.4 and v1.5 among them |
+| found in this round: the gate read the last rendered row, which is a status row on all three live harnesses, so `retrace_send` refused every send to every live pane | the gate reads the composer through the same `composerOf`. Replayed on three live panes, each with an empty composer (Claude Code, Codex, Grok), on 2026-10-12: v1.4 `empty` false on all three, v1.5 true. The default empty form now accepts Codex's placeholder after `›` (v1.4 accepted it only after `»`). A screen without the layout's composer is not empty |
+
 ## 5. Rollout
 
 1. This PR: core (`dispatch.ts`, `review-verdict.ts` + tests), MCP server (`dispatch-mcp.ts`, registration, the
@@ -289,7 +329,8 @@ its usage limit).
    measures the counts in §1 if routed).
 2. On merge: each seat's MCP server runs the checkout's `dist` (agent-ops 3/4/7), so the tools appear after the primary
    checkout is rebuilt at an idle moment and the panes are restarted. Each seat host gets a `~/.retrace/panes.json` with
-   `agent_identity` and `incarnation_id` per agent pane, refreshed when a pane is relaunched; a seat started outside Orca
+   `agent_identity` (which also selects the composer layout: `claude`, `codex`, `grok`) and `incarnation_id` per agent
+   pane, refreshed when a pane is relaunched; a seat started outside Orca
    gets `RETRACE_TERMINAL` in its MCP config, or its receipts stay `unverifiable`.
 3. The coordinator uses `retrace_send` for every pane dispatch and `retrace_verify_send` for every receipt; reviewers
    seal verdicts with the shape (Codex and Grok through this server; NOOA's `review_agent.py` in item 2's PR).

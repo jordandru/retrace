@@ -21,7 +21,7 @@ import { join } from "node:path";
 import type { McpServer } from "@modelcontextprotocol/server";
 import {
   type Actor as CoreActor, type Location, type Event, type EventInput, EventInput as EventInputSchema, type EventStore,
-  appendEvent, paneTextProblem, paneTextSha256, withSentSuffix, splitSentSuffix, verifySentEvent, briefNamedIn, briefNameProblem, briefNameUnparseable, briefPathNames,
+  appendEvent, paneTextProblem, paneTextSha256, withSentSuffix, splitSentSuffix, verifySentEvent, briefNamedIn, briefNameUnparseable, parseBriefName, briefPathNames,
   resolveBriefName, expandHome, PANE_MESSAGE_MAX_BYTES, type SentVerification,
 } from "@retrace-dev/core";
 import { AuditActor } from "./audit-mcp.js";
@@ -108,22 +108,75 @@ function parseJson(stdout: string): unknown {
   try { return JSON.parse(stdout); } catch { return undefined; }
 }
 
-/** The empty composer of each harness this environment runs: Claude Code `❯` (plus a NBSP), Codex `»` with its placeholder, a bare `›`. */
-const DEFAULT_EMPTY_COMPOSER = "^(?:❯|›|»(?: Ask Codex to do anything)?)[\\s\\u00a0]*$";
+/** The empty composer row of each harness this environment runs, as `composerOf` returns it: Claude Code and Grok `❯`
+ *  (Claude Code adds a NBSP), Codex `›` (`»` in older builds) alone or with its placeholder. */
+const DEFAULT_EMPTY_COMPOSER = "^(?:❯|[›»](?: Ask Codex to do anything)?)[\\s\\u00a0]*$";
+
+/** A composer found on a rendered screen: `top` is the first row of it or its frame (everything above is the transcript);
+ *  `lines` are its rows with the frame removed, the first one starting with the harness's prompt. */
+export type Composer = { top: number; lines: string[] };
+
+const RULE_ROW_RE = /^─{8,}$/u;
+const PROMPT_ROW_RE = /^❯(?:[\s\u00a0]|$)/u;
+const CODEX_PROMPT_ROW_RE = /^[›»](?:[\s\u00a0]|$)/u;
+const BOX_TOP_RE = /^\s*╭─/u;
+const BOX_BOTTOM_RE = /^\s*╰─/u;
+
+/**
+ * Where the harness's composer is on a rendered screen, or undefined when the screen does not show it the way that harness
+ * draws it. A row is in the composer only on the layout's own evidence, never because it is the last row (Codex, PR 222
+ * r5 M2). `layout` is Orca's `agentIdentity` for the pane, which the registry entry must match. Measured on this host's
+ * panes, 2026-10-12, with `orca-ide terminal read --screen`; on all three the last rendered row is a status row:
+ *  - `claude` (Claude Code): `❯` between two rules of `─`, status rows below the second rule. The composer is every row
+ *    between the last two rules, and its first row starts with `❯`.
+ *  - `codex`: `› Ask Codex to do anything` at column 0, then indented status rows (`  <model> · <dir> · …`, `  ? for
+ *    shortcuts`). The composer row is the last row that starts at column 0; it must start with `›` (or `»`) and have at
+ *    least one row below it. Codex's own output rows start at column 0 (`• …`), so a transcript row followed by output is
+ *    not taken for the composer, and neither is a row that ends the screen.
+ *  - `grok`: `│ ❯` inside a box drawn with `╭─` and `╰─`, a footer below. The composer is the last box's inner rows.
+ * Any other layout has no composer this code can find: the gate refuses and delivery stays `"unknown"`.
+ */
+export function composerOf(rows: string[], layout: string | undefined): Composer | undefined {
+  if (layout === "claude") {
+    const rules = rows.flatMap((r, i) => (RULE_ROW_RE.test(r.trim()) ? [i] : []));
+    const [top, bottom] = rules.slice(-2);
+    if (top === undefined || bottom === undefined || bottom - top < 2 || !PROMPT_ROW_RE.test(rows[top + 1]!)) return undefined;
+    return { top, lines: rows.slice(top + 1, bottom) };
+  }
+  if (layout === "codex") {
+    let k = rows.length - 1;
+    while (k >= 0 && /^[\s\u00a0]/u.test(rows[k]!)) k--;
+    if (k < 0 || k === rows.length - 1 || !CODEX_PROMPT_ROW_RE.test(rows[k]!)) return undefined;
+    return { top: k, lines: [rows[k]!] };
+  }
+  if (layout === "grok") {
+    let top = -1;
+    for (let i = rows.length - 1; i >= 0 && top < 0; i--) if (BOX_TOP_RE.test(rows[i]!)) top = i;
+    const bottom = top < 0 ? -1 : rows.findIndex((r, i) => i > top && BOX_BOTTOM_RE.test(r));
+    if (top < 0 || bottom < 0 || bottom - top < 2) return undefined;
+    const lines = rows.slice(top + 1, bottom).map((r) => r.replace(/^\s*│[\s\u00a0]?/u, "").replace(/[\s\u00a0]*│$/u, ""));
+    if (!PROMPT_ROW_RE.test(lines[0]!)) return undefined;
+    return { top, lines };
+  }
+  return undefined;
+}
 
 export type ScreenRead = {
-  /** The last rendered line matches the harness's empty prompt and there is no draft. False when nothing rendered. */
+  /** The harness's composer is on screen (`composerOf`), is one row matching its empty form, and there is no draft. False
+   *  when nothing rendered or no composer was found. */
   empty: boolean;
   last_line: string;
   /** Every rendered non-blank row, in order. */
   rows: string[];
+  /** The composer's first row as found (`composerOf`), absent when no composer was found. */
+  composer_line?: string;
   draft?: string;
   /** Orca's `source`: `screen` is the rendered frame; `stream` or `screen-unavailable` is accumulated output, not what the pane shows. */
   source?: string;
   error?: string;
 };
 
-export async function readComposer(run: OrcaRunner, handle: string, emptyPattern = DEFAULT_EMPTY_COMPOSER): Promise<ScreenRead> {
+export async function readComposer(run: OrcaRunner, handle: string, layout: string | undefined, emptyPattern = DEFAULT_EMPTY_COMPOSER): Promise<ScreenRead> {
   const r = await run(["terminal", "read", "--terminal", handle, "--screen", "--json"]);
   const j = parseJson(r.stdout) as any;
   if (r.code !== 0 || !j) return { empty: false, last_line: "", rows: [], error: `orca-ide terminal read exited ${r.code}: ${(r.stderr || r.stdout).trim().slice(0, 200)}` };
@@ -132,75 +185,80 @@ export async function readComposer(run: OrcaRunner, handle: string, emptyPattern
   const rows = tail.map((l) => l.replace(/\s+$/u, "")).filter((l) => l.trim().length > 0);
   const last = rows.length ? rows[rows.length - 1]! : "";
   const draft = typeof term.draft === "string" && term.draft.length ? term.draft : undefined;
-  let empty = new RegExp(emptyPattern, "u").test(last) && !draft;
-  if (!rows.length) empty = false; // nothing rendered: cannot say the composer is empty
-  return { empty, last_line: last, rows, ...(draft ? { draft } : {}), ...(typeof term.source === "string" ? { source: term.source } : {}) };
+  // The gate reads the composer itself (Codex, PR 222 r5 M2): the last rendered row is a status row on every harness here.
+  const composer = composerOf(rows, layout);
+  const empty = composer !== undefined && composer.lines.length === 1 && new RegExp(emptyPattern, "u").test(composer.lines[0]!) && !draft;
+  return { empty, last_line: last, rows, ...(composer ? { composer_line: composer.lines[0]! } : {}), ...(draft ? { draft } : {}), ...(typeof term.source === "string" ? { source: term.source } : {}) };
 }
 
-/** Does a rendered row show (the start of) our text? Whole probe, or the row ends with a long enough prefix of the text
- *  (the screen cut the line off, or wrapped it). A prefix alone never proves THIS send: see `deliveryFromScreen`. */
+/** What a gate read saw, for a refusal: the composer row, or that none was found and the last row. */
+function composerDetail(read: ScreenRead, layout: string | undefined): string {
+  if (read.error) return read.error;
+  const seen = read.composer_line !== undefined ? `composer ${JSON.stringify(read.composer_line)}` : `no ${layout ?? "known"} composer on screen (last line ${JSON.stringify(read.last_line)})`;
+  return `${seen}${read.draft ? ` draft ${JSON.stringify(read.draft)}` : ""}`;
+}
+
+/** How much of the text a row must show to count as showing it: its first 40 characters anywhere in the row, or a prefix
+ *  of at least this many characters ending the row (the screen cut the line off, or wrapped it). */
+export const PREFIX_MIN_CHARS = 24;
+/** Does a rendered row show (the start of) our text? A prefix alone never proves THIS send: see `deliveryFromScreen`. */
 function rowShowsPrefix(row: string, text: string): boolean {
-  if (row.includes(text.slice(0, 40))) return true;
-  for (let n = Math.min(text.length, 120); n >= 24; n--) if (row.endsWith(text.slice(0, n))) return true;
-  return false;
+  return prefixOffset(row, text) >= 0;
 }
-/** Does a row show our line at all: its text prefix or its unique sent-event suffix (a wrapped continuation row)? */
-function rowShows(row: string, text: string, sentEventId: string): boolean {
-  return rowShowsPrefix(row, text) || row.includes(`[sent-event ${sentEventId}]`);
-}
-/** Where our text starts in a row that shows its prefix (the same two tests as `rowShowsPrefix`), or -1. */
+/** Where our text starts in a row that shows its prefix (the two tests above), or -1. */
 function prefixOffset(row: string, text: string): number {
   const i = row.indexOf(text.slice(0, 40));
   if (i >= 0) return i;
-  for (let n = Math.min(text.length, 120); n >= 24; n--) if (row.endsWith(text.slice(0, n))) return row.length - n;
+  for (let n = Math.min(text.length, 120); n >= PREFIX_MIN_CHARS; n--) if (row.endsWith(text.slice(0, n))) return row.length - n;
   return -1;
 }
-
-/** The longest run the delivery scan follows: a 240-byte line wraps over at most ceil(240 / 20) = 12 rows in a pane 20
- *  columns wide. The first row must still show 24 characters of the text (`rowShowsPrefix`); a pane too narrow for that,
- *  or one where the id falls past 12 rows, leaves delivery `"unknown"`, never `true` (Codex, PR 222 r4, L1). */
-export const DELIVERY_SCAN_MAX_ROWS = Math.ceil(PANE_MESSAGE_MAX_BYTES / 20);
 
 /**
  * The wrapped run that starts at `body[i]`: that row from where our text starts, then each continuation row with its
  * leading indentation dropped (harnesses indent wrapped rows), joined without a separator (a wrap may split the id), until
- * the run holds as many characters as the whole line, the body ends (the next row is the composer), or
- * DELIVERY_SCAN_MAX_ROWS rows (Codex, PR 222 r4, L1: at 59 columns a 240-byte line puts the id on its fourth row).
+ * the run holds as many characters as the whole line or the body ends at the composer. The bound is the line's own length
+ * in content characters, so it holds at every width and needs no row count (Codex, PR 222 r5 L1: v1.4's 12-row cap
+ * assumed 20 content columns, and a two-column prompt makes a 240-byte line 13 rows at width 20). At width W, with a
+ * P-column prompt and I-column indentation, an L-character line spans 1 + ⌈(L − (W − P)) / (W − I)⌉ rows when the harness
+ * breaks rows at the column limit.
  */
 function continuationRun(body: string[], i: number, text: string, lineLength: number): string {
   let run = body[i]!.slice(Math.max(0, prefixOffset(body[i]!, text)));
-  for (let j = i + 1; j < body.length && j - i < DELIVERY_SCAN_MAX_ROWS && run.length < lineLength; j++) run += body[j]!.trimStart();
+  for (let j = i + 1; j < body.length && run.length < lineLength; j++) run += body[j]!.trimStart();
   return run;
 }
 
-/** A line that sits in the composer ends on the last row; wrapped, the last row is a tail of it, possibly only `]` or the
- *  last characters of the id. That row can show neither the text prefix nor the whole suffix, so `rowShows` misses it; the
- *  wider scan would then find the id above it and call a sitting line delivered (r4, L1). */
-function lastRowIsTailOf(lastRow: string, line: string): boolean {
-  const tail = lastRow.trimStart();
-  return tail.length > 0 && line.endsWith(tail);
+/** Do these composer rows hold this send's line: a row shows the start of its text, or the rows joined show its id. */
+function composerHolds(lines: string[], text: string, sentEventId: string): boolean {
+  return lines.some((l) => rowShowsPrefix(l, text)) || lines.map((l) => l.trimStart()).join("").includes(sentEventId);
 }
 
 export type Delivery = { delivered: true | false | "unknown"; reason?: string };
 
 /**
- * What the post-send screen proves (Codex, PR 222 r1 M2, r2 M2, r3 M2). `true` only on positive evidence: the frame was
- * read, is the rendered screen, is non-empty, our line is NOT on the last row or in the draft, and it IS echoed on an
- * earlier row (the harness accepted it into its transcript) **with the current sent-event id on that row or in its
- * continuation run (a wrapped line, up to DELIVERY_SCAN_MAX_ROWS rows; r4 L1)**. A row that matches only the text prefix is
- * a transcript of some send with the same words — an earlier dispatch of the same line — and proves nothing about this one:
- * `"unknown"`, `stale_prefix_only`. A line on the last row or in the draft, or a last row that is a tail of this line (a
- * wrapped line still in the composer), is `false` (`line_sits_in_composer`). Anything else the screen cannot settle — a
- * read error, an unrendered or empty frame, a frame that shows the line nowhere yet — is `"unknown"` with the reason.
+ * What the post-send screen proves (Codex, PR 222 r1 M2, r2 M2, r3 M2, r5 M2). Every answer rests on the harness's
+ * composer as its layout draws it (`composerOf`), never on which row happens to be last:
+ *  - `false`, `line_sits_in_composer`, only on positive evidence that the line is still in the composer: Orca's `draft`
+ *    or the composer's own rows show the start of this send's text or its id;
+ *  - `true` only when the composer is found and does not hold the line, and a transcript row above it shows the start of
+ *    the text **with this send's id** on that row or in its continuation run (`continuationRun`). A row with the text and
+ *    no id, or another id, is some earlier send of the same words: `"unknown"`, `stale_prefix_only`;
+ *  - `"unknown"`, with the reason, for everything else: a read error, a frame that is not the rendered screen or is empty,
+ *    no composer on screen (`composer_not_on_screen`: an echo that ends the screen, a dialog in the composer's place, a
+ *    harness whose layout this code does not know), or no row above the composer showing the text (`line_not_on_screen`;
+ *    also a pane too narrow for a row to show `PREFIX_MIN_CHARS` of the text after the prompt).
+ * Only `false` comes with advice to press Enter; `"unknown"` says to read the pane.
  */
-export function deliveryFromScreen(after: ScreenRead, text: string, sentEventId: string): Delivery {
+export function deliveryFromScreen(after: ScreenRead, text: string, sentEventId: string, layout: string | undefined): Delivery {
   if (after.error) return { delivered: "unknown", reason: `post_send_read_failed: ${after.error}` };
   if (after.source !== undefined && after.source !== "screen") return { delivered: "unknown", reason: `post_send_screen_unavailable: source ${after.source}` };
   if (!after.rows.length) return { delivered: "unknown", reason: "post_send_screen_empty" };
+  if (after.draft !== undefined && composerHolds([after.draft], text, sentEventId)) return { delivered: false, reason: "line_sits_in_composer" };
+  const composer = composerOf(after.rows, layout);
+  if (!composer) return { delivered: "unknown", reason: "composer_not_on_screen" };
+  if (composerHolds(composer.lines, text, sentEventId)) return { delivered: false, reason: "line_sits_in_composer" };
   const line = withSentSuffix(text, sentEventId);
-  if ((after.draft !== undefined && rowShows(after.draft, text, sentEventId)) || rowShows(after.last_line, text, sentEventId) || lastRowIsTailOf(after.last_line, line))
-    return { delivered: false, reason: "line_sits_in_composer" };
-  const body = after.rows.slice(0, -1);
+  const body = after.rows.slice(0, composer.top);
   const prefixRows = body.map((row, i) => (rowShowsPrefix(row, text) ? i : -1)).filter((i) => i >= 0);
   if (!prefixRows.length) return { delivered: "unknown", reason: "line_not_on_screen" };
   // The id may sit on the same row or anywhere in the continuation run after a wrap (possibly split across a wrap).
@@ -245,11 +303,11 @@ export function registerDispatchTools(server: McpServer, deps: DispatchDeps): vo
     "retrace_send",
     {
       title: "Send a signed message into another agent's pane",
-      description: "Agent-rules 15 / agent-ops 18 in one step: checks the SEAT envelope and the byte rules, refuses the owner's JD envelope, refuses any pane not registered as an agent pane or whose live Orca identity or incarnation differs from the registry, requires the brief when the text names one (a name with whitespace is refused, never bound to a prefix) and refuses a brief_path that is not the brief the text names, waits for an empty composer, logs the `sent` event (text and brief hashes, target seat and terminal) under this seat's credential, then sends the line with ` [sent-event <id>]` appended, pressing Enter itself, and records what the post-send screen proved: delivered true (the line and its sent-event id are in the transcript), false (the line sits in the composer) or unknown (the screen could not settle it). A refusal writes nothing.",
+      description: "Agent-rules 15 / agent-ops 18 in one step: checks the SEAT envelope and the byte rules, refuses the owner's JD envelope, refuses any pane not registered as an agent pane or whose live Orca identity or incarnation differs from the registry, requires the brief when the text names one as `brief <path>` and refuses any other path-like token (a path, URL or slash token outside `brief <path>`) and a brief_path that is not the brief the text names, waits for the harness's composer (found by its layout: claude, codex, grok) to be empty, logs the `sent` event (text and brief hashes, target seat and terminal) under this seat's credential, then sends the line with ` [sent-event <id>]` appended, pressing Enter itself, and records what the post-send screen proved: delivered true (the line and its sent-event id are in the transcript above the composer), false (the composer itself holds the line) or unknown (the screen could not settle it). A refusal writes nothing.",
       inputSchema: z.object({
         to: z.string().min(1).describe("Orca terminal handle of the receiving agent pane (must be in the pane registry as kind agent)"),
         receiver: z.string().min(1).describe("The receiving seat's actor id, e.g. codex; must match the registry entry"),
-        text: z.string().min(1).describe("The one-line message: `SEAT … SEAT` with this seat's actor id upper-cased at both ends; ≤190 bytes; no newline; never the owner's JD envelope"),
+        text: z.string().min(1).describe("The one-line message: `SEAT … SEAT` with this seat's actor id upper-cased at both ends; ≤190 bytes; no newline; never the owner's JD envelope; a brief is named only as `brief <path>`, and no other path, URL or slash token may appear"),
         brief_path: z.string().optional().describe("Path of the brief the message names (`~/…`, `/…`, or the same file the text's relative `brief <dir>/<file>` form denotes under ~/.retrace/ops-*); its exact-byte sha256 goes on the sent event"),
         routing_event_id: z.string().optional().describe("The routing event this dispatch executes, when it is a review dispatch"),
         caused_by: z.string().describe("The instruction or act on this seat's chain that causes the send"),
@@ -269,7 +327,7 @@ export function registerDispatchTools(server: McpServer, deps: DispatchDeps): vo
       // The brief binding (Codex, PR 222 r1 H3, r2 H1): the text's brief name and brief_path must denote one file.
       const named = briefNamedIn(args.text);
       const unparseable = briefNameUnparseable(args.text);
-      if (unparseable) throw new DispatchRefusal(unparseable.reason, `${unparseable.why}: ${unparseable.token}; nothing is sealed for a brief the grammar cannot bind whole (Codex, PR 222 r3 M1, r4 M1)`);
+      if (unparseable) throw new DispatchRefusal(unparseable.reason, `${unparseable.why}: ${unparseable.token}; nothing is sealed for a text that cannot be bound to one brief (Codex, PR 222 r3 M1, r4 M1, r5 M1)`);
       if (named !== undefined && !args.brief_path) throw new DispatchRefusal("brief_required", `the text names a brief (${named}); pass brief_path so its sha256 is sealed on the sent event`);
       if (named !== undefined && args.brief_path && !briefPathNames(args.brief_path, named, homeDir))
         throw new DispatchRefusal("brief_name_mismatch", `the text names brief ${named} but brief_path is ${args.brief_path}; the sealed brief must be the one the receiver will resolve from the text`);
@@ -286,11 +344,13 @@ export function registerDispatchTools(server: McpServer, deps: DispatchDeps): vo
         throw new DispatchRefusal("identity_mismatch", `${args.to} is registered as ${entry.agent_identity} but Orca lists it as ${listed.agentIdentity ?? "(no agentIdentity)"}; the registry entry is stale or the pane was reused`);
       if (!listed.incarnationId || listed.incarnationId !== entry.incarnation_id)
         throw new DispatchRefusal("incarnation_mismatch", `${args.to} is registered as incarnation ${entry.incarnation_id} but Orca lists ${listed.incarnationId ?? "(no incarnationId)"}; the pane was relaunched or reused since it was registered; re-register it after reading the pane`);
-      const first = await readComposer(run, args.to, entry.empty_composer);
-      if (!first.empty) throw new DispatchRefusal("composer_not_empty", first.error ?? `first read: last line ${JSON.stringify(first.last_line)}${first.draft ? ` draft ${JSON.stringify(first.draft)}` : ""}`);
+      // The composer is found by the harness's own layout (the registry's agent_identity, equal to Orca's live label above).
+      const layout = entry.agent_identity;
+      const first = await readComposer(run, args.to, layout, entry.empty_composer);
+      if (!first.empty) throw new DispatchRefusal("composer_not_empty", `first read: ${composerDetail(first, layout)}`);
       await sleep(gateMs);
-      const second = await readComposer(run, args.to, entry.empty_composer);
-      if (!second.empty) throw new DispatchRefusal("composer_not_empty", second.error ?? `second read: last line ${JSON.stringify(second.last_line)}${second.draft ? ` draft ${JSON.stringify(second.draft)}` : ""}`);
+      const second = await readComposer(run, args.to, layout, entry.empty_composer);
+      if (!second.empty) throw new DispatchRefusal("composer_not_empty", `second read: ${composerDetail(second, layout)}`);
       const textSha = await paneTextSha256(args.text);
       const sentInput = EventInputSchema.parse({
         project: deps.writeProject(args.project),
@@ -322,31 +382,32 @@ export function registerDispatchTools(server: McpServer, deps: DispatchDeps): vo
       const line = withSentSuffix(args.text, sent.id);
       if (Buffer.byteLength(line, "utf8") > PANE_MESSAGE_MAX_BYTES) throw new Error(`internal: ${Buffer.byteLength(line, "utf8")} bytes exceeds ${PANE_MESSAGE_MAX_BYTES} after the suffix`);
       // One more look right before Enter: the ledger write took time and a human may have started typing.
-      const final = await readComposer(run, args.to, entry.empty_composer);
+      const final = await readComposer(run, args.to, layout, entry.empty_composer);
       let outcome: Record<string, unknown>;
       let delivery: Delivery;
       if (!final.empty) {
         delivery = { delivered: false, reason: "composer_not_empty" };
-        outcome = { sent: false, reason: "composer_not_empty", last_line: final.last_line, ...(final.draft ? { draft: final.draft } : {}) };
+        outcome = { sent: false, reason: "composer_not_empty", last_line: final.last_line, ...(final.composer_line !== undefined ? { composer_line: final.composer_line } : {}), ...(final.draft ? { draft: final.draft } : {}) };
       } else {
         const r = await run(["terminal", "send", "--terminal", args.to, "--text", line, "--enter", "--json"]);
         const j = parseJson(r.stdout) as any;
         const accepted = r.code === 0 && !!j && j.ok !== false;
         // Accepted by the CLI is not delivered (Codex, PR 222 r1 M2): the measured failure is a line that sits unsubmitted
-        // in the composer. The screen decides, on positive evidence only (r2 M2); a frame that has not caught up yet
-        // (`line_not_on_screen`) is read once more after the gate interval before it is called unknown.
-        let after = await readComposer(run, args.to, entry.empty_composer);
-        delivery = accepted ? deliveryFromScreen(after, args.text, sent.id) : { delivered: false, reason: `orca_send_failed: exit ${r.code}` };
-        if (accepted && delivery.delivered === "unknown" && (delivery.reason === "line_not_on_screen" || delivery.reason === "stale_prefix_only")) {
+        // in the composer. The screen decides, on positive evidence only (r2 M2, r5 M2); a frame that has not caught up yet
+        // (`line_not_on_screen`, `stale_prefix_only`, `composer_not_on_screen`) is read once more after the gate interval
+        // before it is called unknown.
+        let after = await readComposer(run, args.to, layout, entry.empty_composer);
+        delivery = accepted ? deliveryFromScreen(after, args.text, sent.id, layout) : { delivered: false, reason: `orca_send_failed: exit ${r.code}` };
+        if (accepted && delivery.delivered === "unknown" && ["line_not_on_screen", "stale_prefix_only", "composer_not_on_screen"].includes(delivery.reason ?? "")) {
           await sleep(gateMs);
-          after = await readComposer(run, args.to, entry.empty_composer);
-          delivery = deliveryFromScreen(after, args.text, sent.id);
+          after = await readComposer(run, args.to, layout, entry.empty_composer);
+          delivery = deliveryFromScreen(after, args.text, sent.id, layout);
         }
         outcome = {
           sent: delivery.delivered, accepted, exit: r.code,
           ...(delivery.reason ? { reason: delivery.reason } : {}),
           receipt: j?.result ?? j ?? (r.stderr || r.stdout).trim().slice(0, 300),
-          post_send: { last_line: after.last_line, composer_empty: after.empty, rows: after.rows.length, ...(after.source ? { source: after.source } : {}), ...(after.draft ? { draft: after.draft } : {}), ...(after.error ? { error: after.error } : {}) },
+          post_send: { last_line: after.last_line, ...(after.composer_line !== undefined ? { composer_line: after.composer_line } : {}), composer_empty: after.empty, rows: after.rows.length, ...(after.source ? { source: after.source } : {}), ...(after.draft ? { draft: after.draft } : {}), ...(after.error ? { error: after.error } : {}) },
         };
       }
       const delivered = delivery.delivered;
@@ -405,14 +466,15 @@ export function registerDispatchTools(server: McpServer, deps: DispatchDeps): vo
           let readError: string | undefined;
           try { raw = await deps.store.get(split.sentEventId); } catch (e) { readError = (e as Error).message; }
           const p = raw?.method?.params && typeof raw.method.params === "object" ? (raw.method.params as Record<string, unknown>) : {};
-          const named = briefNamedIn(split.text);
+          const parsed = parseBriefName(split.text);
           const eventBriefPath = typeof p.brief_path === "string" ? p.brief_path : undefined;
           // The brief to read: the one the text names, resolved through the event (relative form), else the receiver's path.
           // One resolution (r3 H1): the name resolves to the event's brief_path (or, for an absolute name, to itself); that is the
-          // file read. A receiver-supplied path is compared to it inside verifySentEvent and never substitutes for it.
-          briefPathUsed = named !== undefined && !briefNameProblem(split.text) ? resolveBriefName(named, homeDir, eventBriefPath) : undefined;
+          // file read. A receiver-supplied path is compared to it inside verifySentEvent and never substitutes for it. A text
+          // that cannot be bound (r5 M1) binds nothing: only a path the receiver passed is read, for the record.
+          briefPathUsed = parsed.named !== undefined ? resolveBriefName(parsed.named, homeDir, eventBriefPath) : undefined;
           if (briefPathUsed === undefined && args.brief_path) briefPathUsed = expandHome(args.brief_path, homeDir);
-          if (briefPathUsed === undefined && named === undefined && eventBriefPath !== undefined) briefPathUsed = expandHome(eventBriefPath, homeDir);
+          if (briefPathUsed === undefined && !parsed.problem && parsed.named === undefined && eventBriefPath !== undefined) briefPathUsed = expandHome(eventBriefPath, homeDir);
           let briefReadError: string | undefined;
           if (briefPathUsed !== undefined) {
             try { briefSha = sha256File(briefPathUsed).sha256; } catch (e) { briefReadError = `${briefPathUsed}: ${(e as Error).message}`; }
