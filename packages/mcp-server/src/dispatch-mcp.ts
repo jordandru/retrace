@@ -21,7 +21,7 @@ import { join } from "node:path";
 import type { McpServer } from "@modelcontextprotocol/server";
 import {
   type Actor as CoreActor, type Location, type Event, type EventInput, EventInput as EventInputSchema, type EventStore,
-  appendEvent, paneTextProblem, paneTextSha256, withSentSuffix, splitSentSuffix, verifySentEvent, briefNamedIn, briefPathNames,
+  appendEvent, paneTextProblem, paneTextSha256, withSentSuffix, splitSentSuffix, verifySentEvent, briefNamedIn, briefNameProblem, briefPathNames,
   resolveBriefName, expandHome, PANE_MESSAGE_MAX_BYTES, type SentVerification,
 } from "@retrace-dev/core";
 import { AuditActor } from "./audit-mcp.js";
@@ -137,30 +137,40 @@ export async function readComposer(run: OrcaRunner, handle: string, emptyPattern
   return { empty, last_line: last, rows, ...(draft ? { draft } : {}), ...(typeof term.source === "string" ? { source: term.source } : {}) };
 }
 
-/** Does a rendered row show (the start of) our line? Whole probe, or the row ends with a long enough prefix of the text
- *  (the screen cut the line off), or the row carries the unique sent-event suffix (the line wrapped). */
-function rowShows(row: string, text: string, sentEventId: string): boolean {
-  if (row.includes(text.slice(0, 40)) || row.includes(`[sent-event ${sentEventId}]`)) return true;
+/** Does a rendered row show (the start of) our text? Whole probe, or the row ends with a long enough prefix of the text
+ *  (the screen cut the line off, or wrapped it). A prefix alone never proves THIS send: see `deliveryFromScreen`. */
+function rowShowsPrefix(row: string, text: string): boolean {
+  if (row.includes(text.slice(0, 40))) return true;
   for (let n = Math.min(text.length, 120); n >= 24; n--) if (row.endsWith(text.slice(0, n))) return true;
   return false;
+}
+/** Does a row show our line at all: its text prefix or its unique sent-event suffix (a wrapped continuation row)? */
+function rowShows(row: string, text: string, sentEventId: string): boolean {
+  return rowShowsPrefix(row, text) || row.includes(`[sent-event ${sentEventId}]`);
 }
 
 export type Delivery = { delivered: true | false | "unknown"; reason?: string };
 
 /**
- * What the post-send screen proves (Codex, PR 222 r1 M2, r2 M2). `true` only on positive evidence: the frame was read,
- * is the rendered screen, is non-empty, our line is NOT on the last row or in the draft, and it IS echoed on an earlier
- * row (the harness accepted it into its transcript). A line on the last row or in the draft is `false`
- * (`line_sits_in_composer`). Anything the screen cannot settle — a read error, an unrendered or empty frame, a frame
- * that shows the line nowhere yet — is `"unknown"` with the reason, never `true`.
+ * What the post-send screen proves (Codex, PR 222 r1 M2, r2 M2, r3 M2). `true` only on positive evidence: the frame was
+ * read, is the rendered screen, is non-empty, our line is NOT on the last row or in the draft, and it IS echoed on an
+ * earlier row (the harness accepted it into its transcript) **with the current sent-event id on that row or on the one
+ * or two rows after it (a wrapped line)**. A row that matches only the text prefix is a transcript of some send with the
+ * same words — an earlier dispatch of the same line — and proves nothing about this one: `"unknown"`, `stale_prefix_only`.
+ * A line on the last row or in the draft is `false` (`line_sits_in_composer`). Anything else the screen cannot settle — a
+ * read error, an unrendered or empty frame, a frame that shows the line nowhere yet — is `"unknown"` with the reason.
  */
 export function deliveryFromScreen(after: ScreenRead, text: string, sentEventId: string): Delivery {
   if (after.error) return { delivered: "unknown", reason: `post_send_read_failed: ${after.error}` };
   if (after.source !== undefined && after.source !== "screen") return { delivered: "unknown", reason: `post_send_screen_unavailable: source ${after.source}` };
   if (!after.rows.length) return { delivered: "unknown", reason: "post_send_screen_empty" };
   if ((after.draft !== undefined && rowShows(after.draft, text, sentEventId)) || rowShows(after.last_line, text, sentEventId)) return { delivered: false, reason: "line_sits_in_composer" };
-  const echoed = after.rows.slice(0, -1).some((row) => rowShows(row, text, sentEventId));
-  if (!echoed) return { delivered: "unknown", reason: "line_not_on_screen" };
+  const body = after.rows.slice(0, -1);
+  const prefixRows = body.map((row, i) => (rowShowsPrefix(row, text) ? i : -1)).filter((i) => i >= 0);
+  if (!prefixRows.length) return { delivered: "unknown", reason: "line_not_on_screen" };
+  // The id may sit on the same row, or on a continuation row after a wrap (possibly split across the wrap: join without a separator).
+  const withId = prefixRows.some((i) => body.slice(i, i + 3).join("").includes(sentEventId));
+  if (!withId) return { delivered: "unknown", reason: "stale_prefix_only" };
   return { delivered: true };
 }
 
@@ -200,7 +210,7 @@ export function registerDispatchTools(server: McpServer, deps: DispatchDeps): vo
     "retrace_send",
     {
       title: "Send a signed message into another agent's pane",
-      description: "Agent-rules 15 / agent-ops 18 in one step: checks the SEAT envelope and the byte rules, refuses the owner's JD envelope, refuses any pane not registered as an agent pane or whose live Orca identity or incarnation differs from the registry, requires the brief when the text names one and refuses a brief_path that is not the brief the text names, waits for an empty composer, logs the `sent` event (text and brief hashes, target seat and terminal) under this seat's credential, then sends the line with ` [sent-event <id>]` appended, pressing Enter itself, and records what the post-send screen proved: delivered true, false (the line sits in the composer) or unknown (the screen could not settle it). A refusal writes nothing.",
+      description: "Agent-rules 15 / agent-ops 18 in one step: checks the SEAT envelope and the byte rules, refuses the owner's JD envelope, refuses any pane not registered as an agent pane or whose live Orca identity or incarnation differs from the registry, requires the brief when the text names one (a name with whitespace is refused, never bound to a prefix) and refuses a brief_path that is not the brief the text names, waits for an empty composer, logs the `sent` event (text and brief hashes, target seat and terminal) under this seat's credential, then sends the line with ` [sent-event <id>]` appended, pressing Enter itself, and records what the post-send screen proved: delivered true (the line and its sent-event id are in the transcript), false (the line sits in the composer) or unknown (the screen could not settle it). A refusal writes nothing.",
       inputSchema: z.object({
         to: z.string().min(1).describe("Orca terminal handle of the receiving agent pane (must be in the pane registry as kind agent)"),
         receiver: z.string().min(1).describe("The receiving seat's actor id, e.g. codex; must match the registry entry"),
@@ -223,6 +233,8 @@ export function registerDispatchTools(server: McpServer, deps: DispatchDeps): vo
       if (problem) throw new DispatchRefusal(problem, `text does not meet the pane-message rules for seat ${deps.seatId}`);
       // The brief binding (Codex, PR 222 r1 H3, r2 H1): the text's brief name and brief_path must denote one file.
       const named = briefNamedIn(args.text);
+      const nameProblem = briefNameProblem(args.text);
+      if (nameProblem) throw new DispatchRefusal(nameProblem, `the text names a brief the grammar cannot bind whole (${named}); paths with whitespace are not supported, and a prefix is never sealed`);
       if (named !== undefined && !args.brief_path) throw new DispatchRefusal("brief_required", `the text names a brief (${named}); pass brief_path so its sha256 is sealed on the sent event`);
       if (named !== undefined && args.brief_path && !briefPathNames(args.brief_path, named, homeDir))
         throw new DispatchRefusal("brief_name_mismatch", `the text names brief ${named} but brief_path is ${args.brief_path}; the sealed brief must be the one the receiver will resolve from the text`);
@@ -290,7 +302,7 @@ export function registerDispatchTools(server: McpServer, deps: DispatchDeps): vo
         // (`line_not_on_screen`) is read once more after the gate interval before it is called unknown.
         let after = await readComposer(run, args.to, entry.empty_composer);
         delivery = accepted ? deliveryFromScreen(after, args.text, sent.id) : { delivered: false, reason: `orca_send_failed: exit ${r.code}` };
-        if (accepted && delivery.delivered === "unknown" && delivery.reason === "line_not_on_screen") {
+        if (accepted && delivery.delivered === "unknown" && (delivery.reason === "line_not_on_screen" || delivery.reason === "stale_prefix_only")) {
           await sleep(gateMs);
           after = await readComposer(run, args.to, entry.empty_composer);
           delivery = deliveryFromScreen(after, args.text, sent.id);
@@ -361,7 +373,9 @@ export function registerDispatchTools(server: McpServer, deps: DispatchDeps): vo
           const named = briefNamedIn(split.text);
           const eventBriefPath = typeof p.brief_path === "string" ? p.brief_path : undefined;
           // The brief to read: the one the text names, resolved through the event (relative form), else the receiver's path.
-          briefPathUsed = named !== undefined ? resolveBriefName(named, homeDir, eventBriefPath) : undefined;
+          // One resolution (r3 H1): the name resolves to the event's brief_path (or, for an absolute name, to itself); that is the
+          // file read. A receiver-supplied path is compared to it inside verifySentEvent and never substitutes for it.
+          briefPathUsed = named !== undefined && !briefNameProblem(split.text) ? resolveBriefName(named, homeDir, eventBriefPath) : undefined;
           if (briefPathUsed === undefined && args.brief_path) briefPathUsed = expandHome(args.brief_path, homeDir);
           if (briefPathUsed === undefined && named === undefined && eventBriefPath !== undefined) briefPathUsed = expandHome(eventBriefPath, homeDir);
           let briefReadError: string | undefined;

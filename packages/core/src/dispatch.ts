@@ -52,12 +52,35 @@ export function paneTextProblem(text: string, seatId: string): string | undefine
   return undefined;
 }
 
+
 /** The brief name a pane text carries, if any, exactly as written (`~/…`, `/…`, or the relative form after `brief`).
  *  A text that names a brief must be bound to that brief on both sides (Codex, PR 222 r1 H3, r2 H1): otherwise the
  *  instruction body is replaceable after the pointer is signed. */
 export function briefNamedIn(text: string): string | undefined {
   const m = BRIEF_NAMED.exec(text);
   return m ? (m[1] ?? m[2]) : undefined;
+}
+
+/** A brief is a file: its name ends in an extension. */
+const FILE_EXT_RE = /\.[A-Za-z0-9]+$/;
+/** The token after a brief name must be another field, not a continuation of the path (an extension or a slash). */
+const PATH_LIKE_RE = /\/|\.[A-Za-z0-9]+$/;
+
+/**
+ * Why the brief name in a text cannot be bound whole, or undefined when it can (Codex, PR 222 r3, M1). The grammar stops
+ * at whitespace, so `brief /tmp/Brief A.md` would otherwise bind `/tmp/Brief` — a prefix of the visible pointer. A name
+ * without a file extension, or one followed by a token that looks like the rest of a path, is `brief_name_unparseable`:
+ * refused on send, a failing check on verify, never bound to a prefix. Paths with whitespace are not supported.
+ */
+export function briefNameProblem(text: string): string | undefined {
+  const m = BRIEF_NAMED.exec(text);
+  if (!m) return undefined;
+  const named = (m[1] ?? m[2])!;
+  if (!FILE_EXT_RE.test(named)) return "brief_name_unparseable";
+  const rest = text.slice(m.index + m[0].length).trimStart();
+  const next = rest.split(/\s+/)[0] ?? "";
+  if (next && PATH_LIKE_RE.test(next)) return "brief_name_unparseable";
+  return undefined;
 }
 
 /** `~` and `~/x` expanded against `homeDir`; `.`/`..` segments normalised; nothing else changed. */
@@ -69,7 +92,9 @@ export function expandHome(p: string, homeDir: string): string {
 /**
  * Does `briefPath` (as the sender passed it or the event recorded it) denote the brief the text names? Absolute and
  * home-relative names must resolve to the same path; the relative form must be the tail of `<home>/.retrace/ops-<something>/`.
- * Both sides use this one rule, so a pointer naming A can never be bound to a file B (Codex, PR 222 r2, H1).
+ * Both sides use this one rule, so a pointer naming A can never be bound to a file B (Codex, PR 222 r2, H1). This answers
+ * "may this path carry that name" for the SENDER; on the receiving side the name resolves to exactly one path, the event's
+ * `brief_path`, and anything the receiver supplies must equal it (r3, H1): two `ops-*` directories can both carry the tail.
  */
 export function briefPathNames(briefPath: string, named: string, homeDir: string): boolean {
   const b = expandHome(briefPath, homeDir);
@@ -203,13 +228,20 @@ export async function verifySentEvent(raw: Event | null | undefined, expect: Sen
   // The brief binding (Codex, PR 222 r1 H3, r2 H1): the brief the text names, the brief the event recorded and the
   // brief the receiver read must be one file, and its bytes must hash to the recorded sha256.
   const named = briefNamedIn(expect.text);
+  const nameProblem = briefNameProblem(expect.text);
   const recordedPath = typeof p.brief_path === "string" ? p.brief_path : undefined;
   const recordedBrief = typeof p.brief_sha256 === "string" ? p.brief_sha256 : undefined;
-  if (named !== undefined) {
+  if (nameProblem !== undefined) {
+    // The grammar cannot bind the name whole (whitespace in the path): nothing is bound, let alone a prefix (r3, M1).
+    checks.brief_path = { ok: false, detail: `${nameProblem}: the text names a brief the grammar cannot bind whole (${named}); paths with whitespace are not supported` };
+  } else if (named !== undefined) {
+    // One resolution (r3, H1): the name resolves to exactly the event's brief_path; the receiver's path, when given, must
+    // equal it after normalisation. Another ops-* directory carrying the same tail is brief_path_mismatch.
+    const resolved = recordedPath !== undefined && briefPathNames(recordedPath, named, expect.homeDir) ? expandHome(recordedPath, expect.homeDir) : undefined;
     if (recordedPath === undefined) checks.brief_path = { ok: false, detail: `the text names brief ${named} but the event records no brief_path` };
-    else if (!briefPathNames(recordedPath, named, expect.homeDir)) checks.brief_path = { ok: false, detail: `the text names brief ${named} but the event's brief_path is ${recordedPath}` };
-    else if (expect.briefPath !== undefined && !briefPathNames(expect.briefPath, named, expect.homeDir)) checks.brief_path = { ok: false, detail: `the receiver's brief_path ${expect.briefPath} is not the brief the text names (${named})` };
-    else checks.brief_path = { ok: true, detail: `${named} is ${expandHome(recordedPath, expect.homeDir)}` };
+    else if (resolved === undefined) checks.brief_path = { ok: false, detail: `the text names brief ${named} but the event's brief_path is ${recordedPath}` };
+    else if (expect.briefPath !== undefined && expandHome(expect.briefPath, expect.homeDir) !== resolved) checks.brief_path = { ok: false, detail: `brief_path_mismatch: the receiver's brief_path ${expect.briefPath} is not ${resolved}, the one path the text's brief name resolves to` };
+    else checks.brief_path = { ok: true, detail: `${named} is ${resolved}` };
   } else if (recordedPath !== undefined && expect.briefPath !== undefined && expandHome(recordedPath, expect.homeDir) !== expandHome(expect.briefPath, expect.homeDir)) {
     checks.brief_path = { ok: false, detail: `the event's brief_path ${recordedPath} is not the receiver's brief_path ${expect.briefPath}` };
   } else {

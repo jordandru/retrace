@@ -1,11 +1,13 @@
 # The dispatch and verdict protocol as product — `retrace_send`, `retrace_verify_send`, the verdict shape (design note v1)
 
-**Status:** v1.2, 2026-10-12, by claude-code (the "system optimization" pane; `claude-mythos-5-1`, model source
+**Status:** v1.3, 2026-10-12, by claude-code (the "system optimization" pane; `claude-mythos-5-1`, model source
 harness-runtime, effort high). v1.1 was the fix round for Codex's round-1 verdict `evt_6db893faeafc4f12a8b6c6af5c25001c`
 (3 High, 6 Medium, 2 Low at `6ac80c98`), on the coordinator's verified pointer `evt_7a0fff88…`; its changes are listed in
 §4a. **v1.2 is the fix round for Codex's round-2 verdict `evt_841c4bb7af364d90917c1a7a96fbe8c5` (2 High, 5 Medium at
-`9aca8b37`), on the coordinator's verified pointer `evt_ad06f82c…`; its changes are listed in §4b.** Every sentence of this
-note was checked against the code at v1.2 (Codex r2 M5). Class **(a)** under agent-rules 12: it governs how seats dispatch to each other and what a
+`9aca8b37`), on the coordinator's verified pointer `evt_ad06f82c…`; its changes are listed in §4b. v1.3 is the fix round
+for Codex's round-3 verdict `evt_ea979a1085054bc7858f13cac334357a` (1 High, 2 Medium, 1 Low at `c6ea2d87`), on the
+coordinator's verified pointer `evt_939211c9…`; its changes are listed in §4c.** Every sentence of this note was checked
+against the code at v1.2 (Codex r2 M5) and the changed sentences again at v1.3. Class **(a)** under agent-rules 12: it governs how seats dispatch to each other and what a
 review verdict must carry, and it ships the code that does both (class c for the MCP server, with one validator shared
 with the doctor). Written and built on Jordan's signed go `evt_c83cad7552a149a5940b27a0bcc84b0b` ("Let's go on your top 3
 items starting with 1", received `evt_85ad930c…`), item 1 of `~/.retrace/ops-2026-10-11/system-optimization/OPTIMIZATION-PLAN.md`
@@ -73,7 +75,10 @@ with `--enter` and seals `enter_pressed_by: "retrace_send (tool)"` (Codex r2 M4)
    `~/.retrace/ops-<date>/` directory (the form the coordinator's pointers use, e.g. `brief pr222/BRIEF-222-r2.md`). When
    it does, `brief_path` is required (`brief_required`) **and must denote that same file** — equal after `~` expansion and
    normalisation for the first two forms, `<home>/.retrace/ops-<date>/<name>` for the third — else `brief_name_mismatch`
-   (Codex r2 H1: a pointer naming A can no longer seal B). The file is read and hashed over its **exact bytes** (sha256,
+   (Codex r2 H1: a pointer naming A can no longer seal B). The grammar stops at whitespace, so a name it cannot bind whole
+   — a path with a space, a name without a file extension, a name followed by a token that looks like the rest of a path —
+   is `brief_name_unparseable` and refused; a prefix of the visible name is never sealed (Codex r3 M1). Paths with
+   whitespace are not supported. The file is read and hashed over its **exact bytes** (sha256,
    full 64 hex; never a decoded and re-encoded string, Codex r1 M6) before anything is written; missing →
    `brief_missing`, unreadable (a directory, a permission error) → `brief_unreadable`.
 4. **Pane.** `orca-ide terminal list --json` must list the handle (`pane_not_live`), writable, **its `agentIdentity`
@@ -93,14 +98,17 @@ with `--enter` and seals `enter_pressed_by: "retrace_send (tool)"` (Codex r2 M4)
 7. **Last look, then send.** One more screen read; if the composer filled during the write, nothing is sent and the
    outcome says so. Otherwise `terminal send --terminal <h> --text "<text> [sent-event <id>]" --enter --json`.
 8. **Outcome.** `executed` event, `caused_by` the sent event, with Orca's receipt and what the post-send screen proved.
-   `delivered` has three values (Codex r1 M2, r2 M2). **`true` only on positive evidence:** the read succeeded, Orca
-   returned the rendered screen (`source: screen`), it is non-empty, the line is not on the last row or in the draft, and
-   it is echoed on an earlier row — the harness took it into its transcript. **`false`** when the line (or its first 40
+   `delivered` has three values (Codex r1 M2, r2 M2, r3 M2). **`true` only on positive evidence:** the read succeeded,
+   Orca returned the rendered screen (`source: screen`), it is non-empty, the line is not on the last row or in the draft,
+   and it is echoed on an earlier row — the harness took it into its transcript — **with this send's `[sent-event <id>]`
+   on that row or on the one or two rows after it** (a wrapped line, the id possibly split across the wrap). A row that
+   matches only the text is a transcript of some earlier send of the same words and proves nothing about this one:
+   `"unknown"`, `stale_prefix_only`, after a second read one gate interval later. **`false`** when the line (or its first 40
    characters, or a ≥ 24-character prefix cut off by the screen width, or its `[sent-event <id>]` suffix after a wrap) is
    on the last row or in the draft: `line_sits_in_composer`, the measured second-Enter failure; or when the CLI itself
    failed. **`"unknown"`**, with the reason, for everything the screen cannot settle: `post_send_read_failed`,
-   `post_send_screen_unavailable`, `post_send_screen_empty`, or `line_not_on_screen` after a second read one gate
-   interval later (lag, or a frame that scrolled). The `executed` event's `action_detail` says which (`delivered`, `not
+   `post_send_screen_unavailable`, `post_send_screen_empty`, `line_not_on_screen` after a second read one gate interval
+   later (lag, or a frame that scrolled), or `stale_prefix_only`. The `executed` event's `action_detail` says which (`delivered`, `not
    delivered`, `delivery unknown`) and its params carry `delivered`, `accepted`, the reason and the frame's last line. The
    caller sees `delivered`, `accepted`, both ids and the exact line; on `false` or `"unknown"` it reads the pane before
    relying on the send. A human pressing Enter on a sitting line is that human's keystroke, logged by the human, not this
@@ -109,17 +117,25 @@ with `--enter` and seals `enter_pressed_by: "retrace_send (tool)"` (Codex r2 M4)
 **Receiver (`retrace_verify_send`).** Inputs: the received line as it arrived, optional `brief_path` (when given it
 must be the brief the text names), optional own `caused_by`, optional `intent`. Order: split the suffix (no suffix →
 `missing`); `GET /events/<id>` raw with the seat's own credential (the MCP server's store; `retrace_why`/`retrace_history`
-are not used); the brief to read is the one the text names, resolved from the name itself for `~/…` and `/…` and through
-the event's `brief_path` for the relative form; then the checks in order — envelope on the received text, event exists,
+are not used); the brief to read is the one the text names, **resolved to exactly one path**: the name itself for `~/…`
+and `/…`, the event's `brief_path` for the relative form (Codex r3 H1: two `ops-*` directories can carry the same tail,
+and only the event's is the brief); then the checks in order — envelope on the received text, event exists,
 `action: sent`, `actor.id` is the envelope's seat, `sealed_by` is `pinned:` **and the credential it names is the envelope's
 seat** (a pinned seal of another seat fails; Codex r1 M3), `producer_sig_verdict: verified`, **`receiver_seat` equals this
 server's actor id and `target_terminal` equals this server's own terminal handle** (`ORCA_TERMINAL_HANDLE`, which Orca sets
 in every pane's environment and the agent's MCP server inherits, or `RETRACE_TERMINAL`; a server that knows neither fails
 this check as `unverifiable` and says so — Codex r2 H2: a valid dispatch to codex at X is not a dispatch to grok, nor to
-codex at Y), `text_sha256` equals the sha256 of the received text with the suffix removed (the suffix is the final bytes,
-nothing after it; L1), **`brief_path`: the brief the text names is the brief the event sealed and, when the receiver passed
-one, the brief it passed** (Codex r2 H1: a pointer naming A never verifies against B, and the relative form no longer
-verifies with no brief), `brief_sha256` equals the brief on disk: text names a brief and the event records no hash or path →
+codex at Y. **What this check is, and is not:** `ORCA_TERMINAL_HANDLE` is what Orca told the pane, and `RETRACE_TERMINAL`
+is what the operator configured; both are read by a server running under the seat's own credential. The check is an honest
+seat naming its own pane — a same-credential configuration check — not pane authentication: another MCP server started
+with the same seat credential could set the same handle and claim it. What it refuses is a dispatch addressed to another
+seat, or to another terminal of this seat; it does not prove which process at that terminal is reading (Codex r3 L1)),
+`text_sha256` equals the sha256 of the received text with the suffix removed (the suffix is the final bytes, nothing after
+it; L1), **`brief_path`: the text's brief name is unparseable → `brief_name_unparseable`, nothing bound (r3 M1); otherwise
+the name resolves to the event's `brief_path`, and a receiver-supplied path must equal that one path after normalisation
+— a same-tail file in another `ops-*` directory is `brief_path_mismatch`** (Codex r2 H1, r3 H1: a pointer naming A never
+verifies against B, the relative form never verifies with no brief or with a different brief, and the receiver cannot
+substitute its own file), `brief_sha256` equals the brief on disk (the event's path, the one that was read): text names a brief and the event records no hash or path →
 `mismatch`; the event records a hash and the brief could not be read → `unverifiable`, with the read error (`EISDIR`,
 `ENOENT`) in the check (Codex r2 M1). Every step between the split and the receipt runs inside one guard, so an exception
 becomes a named failing check, never a return without a record; if the receipt write itself fails the tool says **no
@@ -152,10 +168,10 @@ its verdicts show up in the doctor's count until its review agent adopts the sha
 | one line, ≤ 240 bytes with the suffix, no trailing whitespace | the sender counts | `too_long`, `multi_line`, `trailing_whitespace` |
 | the owner's envelope is never used by an agent (§5) | a rule sentence | `owner_envelope_forbidden`, before any write |
 | `sent` logged **before** the send, with text and brief sha256, target, who presses Enter | three steps, two hashes | one write; the suffix is appended only after the id exists; the tool presses Enter and the record says so |
-| the brief a pointer names is the brief that was hashed | the sender's care | `brief_name_mismatch` on send; `brief_path` check on verify; one resolution rule for the three name forms |
+| the brief a pointer names is the brief that was hashed | the sender's care | `brief_name_mismatch` and `brief_name_unparseable` on send; `brief_path` check on verify resolving the name to the event's one path, the receiver's path equal to it or refused |
 | never send into a human's pane | the sender knows | the registry bound to Orca's live `agentIdentity` and `incarnationId`; unknown, mismatched or relaunched → refused |
 | read the pane before sending; a human may be typing | two reads 3 s apart by hand | two reads, then a third after the write |
-| the line left the composer | the sender reads the pane again | `delivered: true` only when the screen shows the line in the transcript; `false` when it sits; `"unknown"` with the reason otherwise |
+| the line left the composer | the sender reads the pane again | `delivered: true` only when the screen shows the line with this send's id in the transcript; `false` when it sits; `"unknown"` with the reason otherwise (a same-words row without the id included) |
 | receiver reads the event raw, six checks, then `received` | `curl` with the token from env, six comparisons | `retrace_verify_send`; one `received` record with every check's result, written on every path; the pinned credential must name the seat; the dispatch must be addressed to this seat at this terminal; the named brief must be the sealed brief and must hash |
 | the verdict of record self-reports effort and cites the routing event | partially (17 of 55 without counts) | counts, full head, routing id, blocking derived from severity: refused without them |
 
@@ -179,7 +195,9 @@ could read) and the brief binding on both sides (previously the pointer's name a
   seat's MCP server must know which pane it runs in: Orca sets `ORCA_TERMINAL_HANDLE` in every pane's environment and the
   agent process hands its environment to the MCP server; `RETRACE_TERMINAL` overrides it. A server with neither (a seat
   started outside Orca) cannot make the check and every receipt it writes is `unverifiable` with that reason — fail closed,
-  stated, until the operator configures it.
+  stated, until the operator configures it. The override is a same-credential configuration trust boundary, not pane
+  authentication (Codex r3 L1): a second server under the same seat credential can set the same handle, so the check
+  distinguishes seats and terminals, not processes at one terminal; that is what the seat's credential custody is for.
 - **Delivery is three-valued.** A `sent` event stands whatever the screen later shows; the outcome record says `true`,
   `false` or `"unknown"` and why. `"unknown"` is not a defect of the tool, it is the screen not proving the claim; the
   coordinator reads the pane before relying on such a send, as it does today after a hand send.
@@ -225,6 +243,15 @@ round (PR 225 round 1, head `248440f3`, aligned it; round 2, `d71d62a7`, kept th
 Where a claim was removed rather than a mechanism added: §4's sentence that same-identity reuse "needs a per-incarnation
 binding, named in §7" is gone because the binding is built; nothing else in this round removed a claim, each finding had a
 check the code could make.
+
+## 4c. Fix round 3 (Codex `evt_ea979a10…`, applied in v1.3)
+
+| finding | change |
+|---|---|
+| H1 a receiver-supplied same-tail file in another `ops-*` directory verified while the event's file was read | the name resolves to exactly one path (the event's `brief_path`; an absolute name to itself); a receiver path must equal it after normalisation, else `brief_path_mismatch`; `briefPathNames` stays the sender-side "may this path carry that name" rule |
+| M1 a brief name with a space was bound to its prefix | `briefNameProblem`: a name without a file extension, or followed by a path-like token, is `brief_name_unparseable`; refused on send, a failing `brief_path` check on verify; nothing bound |
+| M2 a stale transcript row proved a new send delivered | delivery evidence requires this send's id on the echoed row or its wrapped continuation (joined, so a split id still matches); a prefix-only row is `stale_prefix_only` → `"unknown"`, re-read once |
+| L1 the terminal override's trust boundary unstated | §2 and §4 say it: a same-credential configuration check, an honest seat naming its pane, not pane authentication |
 
 ## 5. Rollout
 

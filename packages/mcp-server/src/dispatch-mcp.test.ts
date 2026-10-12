@@ -17,7 +17,7 @@ const INC = "977b50fe-87d7-435e-8e21-1b57da749867";
 const ENV_KEYS = ["RETRACE_ACTOR", "RETRACE_ACTOR_MODEL", "RETRACE_ACTOR_MODEL_SOURCE", "RETRACE_ON_BEHALF_OF", "RETRACE_ACTOR_LOCK", "RETRACE_PROJECT", "RETRACE_PRODUCER_KEY", "RETRACE_PRODUCER_KEY_FILE", "RETRACE_PANES_FILE", "RETRACE_URL", "RETRACE_TOKEN", "RETRACE_DB", "RETRACE_TERMINAL", "ORCA_TERMINAL_HANDLE"];
 
 type Screen = { lines?: string[]; draft?: string; source?: string; fail?: boolean };
-type Fake = { calls: string[][]; screenLines: string[]; draft?: string; sendOk: boolean; listed: boolean; identity?: string; incarnation?: string; afterSend?: Screen[]; pending?: Screen[] };
+type Fake = { calls: string[][]; screenLines: string[]; draft?: string; sendOk: boolean; listed: boolean; identity?: string; incarnation?: string; afterSend?: Screen[]; pending?: Screen[]; sentLine?: string };
 function fakeOrca(f: Fake): OrcaRunner {
   return async (args) => {
     f.calls.push(args);
@@ -25,11 +25,11 @@ function fakeOrca(f: Fake): OrcaRunner {
     if (args[0] === "terminal" && args[1] === "read") {
       const s = f.pending?.shift();
       if (s?.fail) return { code: 1, stdout: "", stderr: "read failed" };
-      const lines = s?.lines ?? f.screenLines;
+      const lines = (s?.lines ?? f.screenLines).map((l) => l.replace("__LINE__", f.sentLine ?? "__LINE__"));
       const draft = s ? s.draft : f.draft;
       return { code: 0, stdout: JSON.stringify({ ok: true, result: { terminal: { tail: lines, source: s?.source ?? "screen", truncated: true, ...(draft ? { draft } : {}) } } }), stderr: "" };
     }
-    if (args[0] === "terminal" && args[1] === "send") { if (f.afterSend) f.pending = [...f.afterSend]; return f.sendOk ? { code: 0, stdout: JSON.stringify({ ok: true, result: { accepted: true, submission: "observed" } }), stderr: "" } : { code: 1, stdout: "", stderr: "transport failed" }; }
+    if (args[0] === "terminal" && args[1] === "send") { f.sentLine = args[5]; if (f.afterSend) f.pending = [...f.afterSend]; return f.sendOk ? { code: 0, stdout: JSON.stringify({ ok: true, result: { accepted: true, submission: "observed" } }), stderr: "" } : { code: 1, stdout: "", stderr: "transport failed" }; }
     return { code: 2, stdout: "", stderr: `unknown ${args.join(" ")}` };
   };
 }
@@ -88,6 +88,8 @@ test("retrace_send: refusals write nothing", async () => {
       [{ to: HANDLE, receiver: "codex", text: TEXT, caused_by: rootId }, /brief_required/],
       // H1: the text names A, brief_path is B.
       [{ to: HANDLE, receiver: "codex", text: TEXT, brief_path: other, caused_by: rootId }, /brief_name_mismatch/],
+      // M1 (r3): a brief name with whitespace is refused, never bound to a prefix.
+      [{ to: HANDLE, receiver: "codex", text: "CLAUDE-CODE per brief /tmp/Brief A.md sha256 1234 CLAUDE-CODE", brief_path: "/tmp/Brief", caused_by: rootId }, /brief_name_unparseable/],
       [{ to: HANDLE, receiver: "codex", text: `CLAUDE-CODE PR 222: brief pr222/BRIEF.md CLAUDE-CODE`, brief_path: other, caused_by: rootId }, /brief_name_mismatch/],
       // M1-adjacent on the sender: a brief that cannot be read is a refusal, not a crash.
       [{ to: HANDLE, receiver: "codex", text: TEXT, brief_path: "~/.retrace/x/BRIEF.md", caused_by: rootId }, /brief_unreadable/],
@@ -117,7 +119,7 @@ test("retrace_send: refusals write nothing", async () => {
 });
 
 test("retrace_send: logs the sent event, sends the suffixed line, proves delivery from the screen; verify_send binds brief and receiver", async () => {
-  const f: Fake = { calls: [], screenLines: ["❯ "], sendOk: true, listed: true, afterSend: [{ lines: ["older output", `> ${TEXT}`, "❯ "] }] };
+  const f: Fake = { calls: [], screenLines: ["❯ "], sendOk: true, listed: true, afterSend: [{ lines: ["older output", "> __LINE__", "❯ "] }] };
   const { store, client, rootId, dir, close } = await setup(f, registry);
   try {
     const brief = briefOf(dir);
@@ -214,6 +216,21 @@ test("retrace_send: logs the sent event, sends the suffixed line, proves deliver
     const relOtherFile = await stamp(store, REL, { text_sha256: await paneTextSha256(REL), brief_sha256: relSha, brief_path: other });
     const vo = await client.callTool({ name: "retrace_verify_send", arguments: { text: `${REL} [sent-event ${relOtherFile.event.id}]` } });
     assert.equal((vo.structuredContent as any).verification.failure, "brief_path", "a relative pointer bound to another file is refused (H1)");
+    // H1 (r3): the receiver supplies the same tail under another ops-* directory (an identical file) → refused; the event's own path → verified.
+    mkdirSync(join(dir, ".retrace", "ops-2026-10-12", "pr222"), { recursive: true });
+    const otherOps = join(dir, ".retrace", "ops-2026-10-12", "pr222", "BRIEF-222-r2.md"); writeFileSync(otherOps, "# r2\n");
+    const vx = await client.callTool({ name: "retrace_verify_send", arguments: { text: `${REL} [sent-event ${relOk.event.id}]`, brief_path: otherOps } });
+    assert.equal((vx.structuredContent as any).verification.failure, "brief_path", "same tail, other ops-* directory: brief_path_mismatch");
+    assert.match((vx.structuredContent as any).verification.checks.brief_path.detail, /^brief_path_mismatch/); assert.equal((vx.structuredContent as any).act, false);
+    const vy = await client.callTool({ name: "retrace_verify_send", arguments: { text: `${REL} [sent-event ${relOk.event.id}]`, brief_path: relBrief } });
+    assert.equal((vy.structuredContent as any).verification.signature, "verified", JSON.stringify((vy.structuredContent as any).verification.checks));
+    assert.equal((await store.get((vy.structuredContent as any).received_event_id))!.method!.params!.brief_path, relBrief, "the file read is the event's path");
+    // M1 (r3): an unparseable brief name on a received line is a failing check, not a prefix binding.
+    const SP = "CLAUDE-CODE per brief /tmp/Brief A.md sha256 1234 CLAUDE-CODE";
+    const spaced = await stamp(store, SP, { text_sha256: await paneTextSha256(SP), brief_sha256: "1".repeat(64), brief_path: "/tmp/Brief" });
+    const vs = await client.callTool({ name: "retrace_verify_send", arguments: { text: `${SP} [sent-event ${spaced.event.id}]` } });
+    assert.equal((vs.structuredContent as any).verification.failure, "brief_path"); assert.match((vs.structuredContent as any).verification.checks.brief_path.detail, /^brief_name_unparseable/);
+    assert.ok((vs.structuredContent as any).received_event_id);
     // no suffix → missing
     const v4 = await client.callTool({ name: "retrace_verify_send", arguments: { text: TEXT } });
     assert.equal((v4.structuredContent as any).verification.signature, "missing");
@@ -267,7 +284,12 @@ test("deliveryFromScreen: true only on positive evidence; sitting lines false; e
   const id = "evt_" + "b".repeat(32);
   const read = (over: Partial<ScreenRead>): ScreenRead => ({ empty: true, last_line: "❯ ", rows: ["x", "❯ "], source: "screen", ...over });
   assert.deepEqual(deliveryFromScreen(read({ rows: ["older", `> ${PLAIN} [sent-event ${id}]`, "❯ "] }), PLAIN, id), { delivered: true });
-  assert.deepEqual(deliveryFromScreen(read({ rows: ["older", `> ${PLAIN.slice(0, 30)}`, "⠋ thinking"], last_line: "⠋ thinking", empty: false }), PLAIN, id), { delivered: true }, "echoed, cut off on the right, harness busy: delivered");
+  assert.deepEqual(deliveryFromScreen(read({ rows: ["older", `> ${PLAIN.slice(0, 30)}`, `${PLAIN.slice(30)} [sent-event ${id}]`, "⠋ thinking"], last_line: "⠋ thinking", empty: false }), PLAIN, id), { delivered: true }, "echoed and wrapped, the id on the continuation row, harness busy: delivered");
+  assert.deepEqual(deliveryFromScreen(read({ rows: ["older", `> ${PLAIN} [sent-event ${id.slice(0, 20)}`, `${id.slice(20)}]`, "❯ "] }), PLAIN, id), { delivered: true }, "the id split across a wrap");
+  // M2 (r3, Codex's probe): a row that matches only the text prefix is some earlier send of the same words, not this one.
+  assert.deepEqual(deliveryFromScreen(read({ rows: ["older", `> ${PLAIN} [sent-event evt_${"0".repeat(32)}]`, "❯ "] }), PLAIN, id), { delivered: "unknown", reason: "stale_prefix_only" }, "an older row with another id");
+  assert.deepEqual(deliveryFromScreen(read({ rows: ["older", `> ${PLAIN}`, "❯ "] }), PLAIN, id), { delivered: "unknown", reason: "stale_prefix_only" }, "a row with the text and no id");
+  assert.deepEqual(deliveryFromScreen(read({ rows: ["older", `> ${PLAIN.slice(0, 30)}`, "⠋ thinking"], last_line: "⠋ thinking", empty: false }), PLAIN, id), { delivered: "unknown", reason: "stale_prefix_only" }, "cut off before the id: not evidence");
   assert.deepEqual(deliveryFromScreen(read({ error: "orca-ide terminal read exited 1" }), PLAIN, id), { delivered: "unknown", reason: "post_send_read_failed: orca-ide terminal read exited 1" });
   assert.deepEqual(deliveryFromScreen(read({ source: "screen-unavailable" }), PLAIN, id), { delivered: "unknown", reason: "post_send_screen_unavailable: source screen-unavailable" });
   assert.deepEqual(deliveryFromScreen(read({ rows: [], last_line: "", empty: false }), PLAIN, id), { delivered: "unknown", reason: "post_send_screen_empty" });
@@ -303,11 +325,15 @@ test("retrace_send: a failed orca send is not delivered; a stuck line is not del
     const o3 = await store.get(s3.outcome_event_id);
     assert.equal(o3!.action_detail, "pane-message delivery unknown"); assert.equal((o3!.method!.params as any).delivered, "unknown");
     assert.match(String((unread.content as any)[0].text), /delivery UNKNOWN/);
-    // One read late: the first frame still shows the pre-send prompt; the second shows the echo → delivered after a second look.
-    f.afterSend = [{ lines: ["❯ "] }, { lines: [`> ${PLAIN}`, "❯ "] }];
+    // One read late: the first frame still shows the pre-send prompt; the second shows the echo with this send's id → delivered after a second look.
+    f.afterSend = [{ lines: ["❯ "] }, { lines: ["> __LINE__", "❯ "] }];
     const lag = await client.callTool({ name: "retrace_send", arguments: { to: HANDLE, receiver: "codex", text: PLAIN, caused_by: rootId } });
-    assert.equal((lag.structuredContent as any).delivered, true);
-    assert.equal(f.calls.filter((c) => c[1] === "read").length - 0 > 0, true);
+    assert.equal((lag.structuredContent as any).delivered, true, JSON.stringify((lag.structuredContent as any).outcome));
+    // M2 (r3): the transcript shows an earlier send of the same words (another id); this send's id never appears → unknown, not true, after two reads.
+    f.afterSend = [{ lines: [`> ${PLAIN} [sent-event evt_${"0".repeat(32)}]`, "❯ "] }, { lines: [`> ${PLAIN} [sent-event evt_${"0".repeat(32)}]`, "❯ "] }];
+    const stale2 = await client.callTool({ name: "retrace_send", arguments: { to: HANDLE, receiver: "codex", text: PLAIN, caused_by: rootId } });
+    assert.equal((stale2.structuredContent as any).delivered, "unknown"); assert.equal((stale2.structuredContent as any).outcome.reason, "stale_prefix_only");
+    assert.equal((await store.get((stale2.structuredContent as any).outcome_event_id))!.action_detail, "pane-message delivery unknown");
     // Two frames with the line nowhere: unknown, with the reason.
     f.afterSend = [{ lines: ["❯ "] }, { lines: ["❯ "] }];
     const lost = await client.callTool({ name: "retrace_send", arguments: { to: HANDLE, receiver: "codex", text: PLAIN, caused_by: rootId } });

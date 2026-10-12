@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { paneTextProblem, paneTextSha256, splitSentSuffix, withSentSuffix, verifySentEvent, briefNamedIn, briefPathNames, resolveBriefName, expandHome, PANE_TEXT_MAX_BYTES } from "./dispatch.js";
+import { paneTextProblem, paneTextSha256, splitSentSuffix, withSentSuffix, verifySentEvent, briefNamedIn, briefNameProblem, briefPathNames, resolveBriefName, expandHome, PANE_TEXT_MAX_BYTES } from "./dispatch.js";
 import type { Event } from "./schema.js";
 
 const ID = "evt_" + "a".repeat(32);
@@ -46,6 +46,18 @@ test("briefNamedIn: the three forms the coordinator uses, and texts that name no
   assert.equal(briefNamedIn("CLAUDE-CODE see pr222/notes.md later CLAUDE-CODE"), undefined, "a relative path not introduced by brief names nothing");
 });
 
+test("briefNameProblem: a name the grammar cannot bind whole is refused, never bound to a prefix (M1 r3)", () => {
+  assert.equal(briefNameProblem(text), undefined);
+  assert.equal(briefNameProblem("CLAUDE-CODE PR 222 fix round 3: brief pr222/FIX-ROUND-3-222.md sha256 b7e6 rt evt_743e CLAUDE-CODE"), undefined);
+  assert.equal(briefNameProblem("CLAUDE-CODE per brief /tmp/A.md CLAUDE-CODE"), undefined, "a name at the end of the text");
+  assert.equal(briefNameProblem("CLAUDE-CODE stand by CLAUDE-CODE"), undefined, "no brief named, nothing to parse");
+  assert.equal(briefNameProblem("CLAUDE-CODE per brief /tmp/Brief A.md sha256 1234 CLAUDE-CODE"), "brief_name_unparseable", "Codex's probe: a space in the path");
+  assert.equal(briefNameProblem("CLAUDE-CODE per brief /tmp/My Brief.md CLAUDE-CODE"), "brief_name_unparseable");
+  assert.equal(briefNameProblem("CLAUDE-CODE brief pr222/Brief A.md CLAUDE-CODE"), "brief_name_unparseable", "the relative form too");
+  assert.equal(briefNameProblem("CLAUDE-CODE read ~/.retrace/ops-2026-10-11/pr222/ now CLAUDE-CODE"), "brief_name_unparseable", "a directory is not a brief");
+  assert.equal(briefNameProblem("CLAUDE-CODE brief /tmp/A.md /tmp/B.md CLAUDE-CODE"), "brief_name_unparseable", "a second path token after the name is not a field");
+});
+
 test("briefPathNames / resolveBriefName: one rule on both sides; a pointer naming A never binds to B (H1)", () => {
   const abs = `${HOME}/.retrace/ops-2026-10-11/pr222/FIX-ROUND-2-222.md`;
   assert.equal(expandHome("~/.retrace/x", HOME), `${HOME}/.retrace/x`);
@@ -67,6 +79,7 @@ test("briefPathNames / resolveBriefName: one rule on both sides; a pointer namin
   assert.equal(briefPathNames("/tmp/x/../A.md", "/tmp/A.md", HOME), true);
   assert.equal(resolveBriefName("~/.retrace/x/BRIEF.md", HOME), `${HOME}/.retrace/x/BRIEF.md`);
   assert.equal(resolveBriefName("/tmp/A.md", HOME, "/tmp/B.md"), "/tmp/A.md", "an absolute name resolves on its own, whatever the event says; brief_path is checked separately");
+  assert.equal(briefPathNames(`${HOME}/.retrace/ops-2026-10-12/pr222/FIX-ROUND-2-222.md`, "pr222/FIX-ROUND-2-222.md", HOME), true, "a sender may bind the name under any ops-* directory; the receiver must then use that one (H1 r3, below)");
 });
 
 function raw(over: Partial<Event> & { params?: Record<string, unknown> }): Event {
@@ -98,6 +111,7 @@ test("verifySentEvent: each failure is named and the signature word matches rule
     ["text names a brief, event records a hash but no path", raw({ params: { text_sha256: h, brief_sha256: "1".repeat(64) } }), { briefSha256: "1".repeat(64) }, "mismatch", "brief_path"],
     ["pointer names A, event bound B (r2 H1)", raw({ params: { text_sha256: h, brief_sha256: "1".repeat(64), brief_path: `${HOME}/.retrace/x/OTHER.md` } }), { briefSha256: "1".repeat(64), briefPresent: true }, "mismatch", "brief_path"],
     ["pointer names A, receiver supplies B (r2 H1)", raw({ params: { text_sha256: h, brief_sha256: "1".repeat(64), brief_path: BP } }), { briefSha256: "1".repeat(64), briefPresent: true, briefPath: "/tmp/B.md" }, "mismatch", "brief_path"],
+    ["unparseable brief name (r3 M1)", raw({ params: { text_sha256: await paneTextSha256("CLAUDE-CODE per brief /tmp/Brief A.md CLAUDE-CODE"), brief_sha256: "1".repeat(64), brief_path: "/tmp/Brief" } }), { text: "CLAUDE-CODE per brief /tmp/Brief A.md CLAUDE-CODE", briefSha256: "1".repeat(64) }, "mismatch", "brief_path"],
     ["pinned seal of another seat (r1 M3)", raw({ params: { text_sha256: h, brief_sha256: "1".repeat(64), brief_path: BP, sealed_by: "pinned:Grok MCP (pinned) (signing)" } }), { briefSha256: "1".repeat(64), briefPresent: true }, "mismatch", "sealed_by"],
     ["not sent", raw({ action: "received", params: { text_sha256: h } }), {}, "mismatch", "action"],
     ["other actor", raw({ actor: { type: "agent", id: "codex" }, params: { text_sha256: h } }), {}, "mismatch", "actor"],
@@ -131,6 +145,12 @@ test("verifySentEvent: each failure is named and the signature word matches rule
   assert.equal(relOk.signature, "verified", JSON.stringify(relOk.checks));
   const relBad = await verifySentEvent(raw({ params: { text_sha256: await paneTextSha256(rel), brief_sha256: "3".repeat(64), brief_path: `${HOME}/.retrace/ops-2026-10-11/pr222/OTHER.md` } }), { text: rel, sentEventId: ID, briefSha256: "3".repeat(64), ...RECEIVER });
   assert.equal(relBad.failure, "brief_path", "a relative pointer no longer verifies with a different brief (r2 H1)");
+  // r3 H1: the receiver supplies the same tail under another ops-* directory → refused; the event's own path → verified.
+  const otherOps = await verifySentEvent(raw({ params: { text_sha256: await paneTextSha256(rel), brief_sha256: "3".repeat(64), brief_path: relPath } }), { text: rel, sentEventId: ID, briefSha256: "3".repeat(64), briefPath: `${HOME}/.retrace/ops-2026-10-12/pr222/FIX-ROUND-2-222.md`, ...RECEIVER });
+  assert.equal(otherOps.failure, "brief_path", "another ops-* directory with the same tail is not the event's brief");
+  assert.match(otherOps.checks.brief_path!.detail, /^brief_path_mismatch/);
+  const sameOps = await verifySentEvent(raw({ params: { text_sha256: await paneTextSha256(rel), brief_sha256: "3".repeat(64), brief_path: relPath } }), { text: rel, sentEventId: ID, briefSha256: "3".repeat(64), briefPath: "~/.retrace/ops-2026-10-11/pr222/FIX-ROUND-2-222.md", ...RECEIVER });
+  assert.equal(sameOps.signature, "verified", "the same path, written with ~, is the event's path");
   const relNone = await verifySentEvent(raw({ params: { text_sha256: await paneTextSha256(rel) } }), { text: rel, sentEventId: ID, ...RECEIVER });
   assert.equal(relNone.signature, "mismatch", "a relative pointer no longer verifies with no brief (r2 H1)");
   assert.equal(relNone.failure, "brief_path");
