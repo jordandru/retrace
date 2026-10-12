@@ -2,13 +2,21 @@
 /**
  * build-packet — assemble a NOOA witness-review packet and its launcher from the routing event, the head under review
  * and a rules file, with the evidence the review needs INSIDE the packet by default: the PR body and commit messages
- * verbatim, the diff and interdiff, every ledger event the text cites read raw, the CI gate lines for the head, the
- * agent-rules items the rules file names, and (opt-in) a status snapshot.
+ * verbatim, the diff and interdiff, selected fields of every ledger event the text cites (each read raw, each entry naming
+ * the fields it does not carry), the CI gate lines for the head, the agent-rules items the rules file names, and (opt-in)
+ * a status snapshot.
  *
  * Why (measured 2026-10-11, ~/.retrace/ops-2026-10-11/system-optimization/FINDINGS.md M3): 4–5 of 18 review rejections
  * on six PRs that week were "unverifiable from packet" — the evidence existed but the hand-built packet did not carry
  * it — and two NOOA runs stalled 30 minutes on a 56 KB packet while a 16 KB one passed in 3 minutes. The packet is the
  * witness's whole world (it executes nothing), so what is left out becomes a finding and what is too long is not read.
+ *
+ * The routing event is this builder's authority, and it is authenticated before anything else is read or written (Codex,
+ * PR 225 round 1, H3): read raw from the Worker, it must be a `routing` event by the coordinator seat, sealed under the
+ * pinned claude-code credential with a verified producer signature, and its `pr`, `head_sha`, `class`, `round`,
+ * `reasoning_effort`, `seat`, `reviewer_actor` and `model` must each equal what this build asks for. Otherwise nothing is
+ * written. The witness model is the constant NOOA_MODEL, not a flag (M2); the launcher carries the class and the review
+ * surface the wrapper seals (M3).
  *
  *   node scripts/nooa/build-packet.mjs --pr 220 --head <40 hex> --routing evt_… --round r4 --rubric high --class a \
  *     --rules-file rules.md [--base <sha>] [--prev-head <sha>] [--context-file notes.md] [--instruction evt_…] \
@@ -31,6 +39,14 @@ import { fileURLToPath } from "node:url";
 export const EVENT_ID_RE = /evt_[0-9a-f]{32}/g;
 export const DEFAULT_MAX_BYTES = 45_000;
 export const REPO_FULL = "jordandru/retrace";
+/** The witness model, pinned here and in the routing event; `nooa-review-generic.py` refuses any other (Codex, PR 225 r1, M2). */
+export const NOOA_MODEL = "nvidia_nim/nvidia/nemotron-3-ultra-550b-a55b";
+/** The witness seat the routing event must name. */
+export const NOOA_SEAT = "nooa";
+/** The seat whose pinned credential must have sealed the routing event. */
+export const COORDINATOR_SEAT = "claude-code";
+
+const KNOWN_FLAGS = new Set(["pr", "head", "routing", "round", "rubric", "class", "rules-file", "base", "prev-head", "context-file", "instruction", "codex-routing", "events", "files", "ci", "status", "max-bytes", "out", "repo"]);
 
 export function parseArgs(argv) {
   const flags = {};
@@ -38,6 +54,8 @@ export function parseArgs(argv) {
     const a = argv[i];
     if (!a.startsWith("--")) throw new Error(`unexpected argument ${a}`);
     const key = a.slice(2);
+    if (key === "model") throw new Error(`--model is not a flag: the witness model is ${NOOA_MODEL}, pinned here and in the routing event (Codex, PR 225 r1, M2)`);
+    if (!KNOWN_FLAGS.has(key)) throw new Error(`unknown flag --${key}`);
     const next = argv[i + 1];
     if (next !== undefined && !next.startsWith("--")) { flags[key] = next; i++; } else flags[key] = true;
   }
@@ -67,7 +85,7 @@ export function parseArgs(argv) {
     maxBytes: typeof flags["max-bytes"] === "string" ? Number(flags["max-bytes"]) : DEFAULT_MAX_BYTES,
     out: typeof flags.out === "string" ? flags.out : process.cwd(),
     repo: typeof flags.repo === "string" ? flags.repo : process.cwd(),
-    model: typeof flags.model === "string" ? flags.model : "nvidia_nim/nvidia/nemotron-3-ultra-550b-a55b",
+    model: NOOA_MODEL,
   };
 }
 
@@ -81,25 +99,73 @@ export function collectEventIds(texts) {
 
 const clip = (s, n) => (typeof s === "string" && s.length > n ? `${s.slice(0, n)}…[${s.length} chars]` : s);
 
-/** The fields a witness needs from a raw event; signature material is never included, long strings are clipped. */
+/** Does a pinned credential name carry the seat id as a word? Same rule as packages/core/src/dispatch.ts (PR 222, M3). */
+export function credentialNamesSeat(sealedBy, seat) {
+  if (typeof sealedBy !== "string" || !sealedBy.startsWith("pinned:")) return false;
+  const name = sealedBy.slice("pinned:".length).trim();
+  return new RegExp(`(^|[^a-z0-9-])${seat.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}([^a-z0-9-]|$)`, "i").test(name);
+}
+
+/**
+ * Why the raw routing event does not authorize this build, or undefined when it does (Codex, PR 225 r1, H3). The event
+ * must be the one asked for, a `routing` event by agent/claude-code, sealed under the pinned claude-code credential with a
+ * verified producer signature, and every routed scope field must equal the request: pr, head_sha (full), class, round,
+ * reasoning_effort, seat and reviewer_actor (the witness seat), model (the pinned witness model).
+ */
+export function routingProblem(raw, o) {
+  if (!raw || typeof raw !== "object") return "the event could not be read";
+  if (raw.id !== o.routing) return `the event read is ${raw.id ?? "(no id)"}, not ${o.routing}`;
+  if (raw.method?.tool !== "routing") return `method.tool is ${JSON.stringify(raw.method?.tool ?? null)}, not "routing"`;
+  if (raw.actor?.type !== "agent" || raw.actor?.id !== COORDINATOR_SEAT) return `actor is ${raw.actor?.type ?? "?"}/${raw.actor?.id ?? "?"}, not agent/${COORDINATOR_SEAT}`;
+  const p = raw.method?.params ?? {};
+  if (!credentialNamesSeat(p.sealed_by, COORDINATOR_SEAT)) return `sealed_by is ${JSON.stringify(p.sealed_by ?? null)}, not the pinned ${COORDINATOR_SEAT} credential`;
+  if (p.producer_sig_verdict !== "verified") return `producer_sig_verdict is ${JSON.stringify(p.producer_sig_verdict ?? null)}, not "verified"`;
+  const want = { pr: o.pr, head_sha: o.head, class: o.cls, round: o.round, reasoning_effort: o.rubric, seat: NOOA_SEAT, reviewer_actor: NOOA_SEAT, model: NOOA_MODEL };
+  for (const [k, v] of Object.entries(want)) if (p[k] !== v) return `params.${k} is ${JSON.stringify(p[k] ?? null)}, not ${JSON.stringify(v)} as requested`;
+  return undefined;
+}
+
+/** Top-level fields of a raw event that Appendix A carries (intent clipped; artifacts and change with strings clipped). */
+export const EVENT_FIELDS_CARRIED = ["id", "seq", "timestamp", "actor", "action", "action_detail", "caused_by", "tags", "intent", "artifacts", "change", "method"];
+/** `method.params` keys Appendix A carries; every other key present in the event is listed by name under `omitted.params`. */
+export const PARAM_KEYS_CARRIED = [
+  "sealed_by", "producer_sig_verdict", "pr", "round", "class", "surface_class", "seat", "seat_order", "reviewer_actor", "model",
+  "reasoning_effort", "head_sha", "base_sha", "author", "author_instruction_event", "routing_event_id", "reviewed_head", "findings",
+  "blocking", "blocking_reason", "accepted_reason", "verdict", "finding_summary", "review_sha256", "packet_sha256", "validation_event_id",
+  "codex_verdict", "nooa_verdict", "text_sha256", "brief_sha256", "brief_path", "bytes", "pane", "enter_pressed_by", "target",
+  "target_event_id", "attest_causal_root", "input_signature", "github_action", "relayed_by", "owner_login_decision", "owner_pin_event",
+  "rules_digest", "models_digest", "merge_ready", "next",
+];
+
+/**
+ * Selected fields of a raw event for Appendix A (Codex, PR 225 r1, M4: a projection, labelled as one). Signature material
+ * is never carried. Every top-level field, `method` key and `method.params` key that IS in the raw event and is NOT carried
+ * here is listed by name under `omitted`, so a reader cannot take absence in the packet for absence in the ledger. Strings
+ * over their clip length end with `…[N chars]`.
+ */
 export function renderEvent(raw) {
   if (!raw || typeof raw !== "object") return raw;
   const p = raw.method?.params ?? {};
-  const commit = (raw.artifacts ?? []).find((a) => typeof a?.id === "string" && a.id.startsWith("commit:") && a.role === "generated")?.id;
   const out = {
     id: raw.id, seq: raw.seq, timestamp: raw.timestamp,
-    actor: raw.actor ? { type: raw.actor.type, id: raw.actor.id, ...(raw.actor.model ? { model: raw.actor.model, model_source: raw.actor.model_source } : {}) } : undefined,
+    ...(raw.actor ? { actor: raw.actor } : {}),
     action: raw.action, ...(raw.action_detail ? { action_detail: raw.action_detail } : {}),
     ...(raw.caused_by ? { caused_by: raw.caused_by } : {}),
     sealed_by: p.sealed_by ?? "(absent)", producer_sig_verdict: p.producer_sig_verdict ?? "(absent)",
-    ...(commit ? { commit } : {}),
     ...(raw.tags?.length ? { tags: raw.tags } : {}),
     intent_head: clip(raw.intent ?? "", 240),
+    ...(raw.artifacts?.length ? { artifacts: raw.artifacts.map((a) => (a && typeof a === "object" ? Object.fromEntries(Object.entries(a).map(([k, v]) => [k, typeof v === "string" ? clip(v, 160) : v])) : a)) } : {}),
+    ...(raw.change && typeof raw.change === "object" ? { change: Object.fromEntries(Object.entries(raw.change).map(([k, v]) => [k, typeof v === "string" ? clip(v, 300) : v])) } : {}),
+    ...(raw.method?.tool ? { method_tool: raw.method.tool } : {}),
   };
-  const keep = ["head_sha", "base_sha", "seat", "reviewer_actor", "model", "reasoning_effort", "class", "surface_class", "round", "pr", "target_event_id", "attest_causal_root", "text_sha256", "brief_sha256", "brief_path", "routing_event_id", "reviewed_head", "findings", "blocking", "blocking_reason", "accepted_reason", "verdict", "input_signature", "github_action", "relayed_by", "owner_login_decision", "target"];
   const params = {};
-  for (const k of keep) if (p[k] !== undefined) params[k] = typeof p[k] === "string" ? clip(p[k], 300) : p[k];
+  for (const k of PARAM_KEYS_CARRIED) if (k !== "sealed_by" && k !== "producer_sig_verdict" && p[k] !== undefined) params[k] = typeof p[k] === "string" ? clip(p[k], 300) : p[k];
   if (Object.keys(params).length) out.params = params;
+  out.omitted = {
+    fields: Object.keys(raw).filter((k) => !EVENT_FIELDS_CARRIED.includes(k)).sort(),
+    method: Object.keys(raw.method ?? {}).filter((k) => k !== "tool" && k !== "params").sort(),
+    params: Object.keys(p).filter((k) => !PARAM_KEYS_CARRIED.includes(k)).sort(),
+  };
   return out;
 }
 
@@ -141,13 +207,26 @@ export function gateLines(logText) {
   return out;
 }
 
+/** What the review surface is, from the routed class (agent-rules 12) and the files the packet carries; the wrapper seals it. */
+export const CLASS_TEXT = {
+  a: "class (a): a governing change under the design gate (agent-rules 12)",
+  b: "class (b): a non-governing document, one non-author review (agent-rules 12)",
+  c: "class (c): code or scripts under the code order of docs/team-roles.md (agent-rules 12)",
+  S: "class (S): a security change; the higher gate applies (agent-rules 12)",
+};
+export function reviewSurface(cls, files) {
+  const shown = files.slice(0, 6);
+  return `${CLASS_TEXT[cls]}; files under review: ${shown.join(", ")}${files.length > shown.length ? ` and ${files.length - shown.length} more` : ""}`;
+}
+
 export const ROLE_TEXT = `## Your role, and its limits — state these in your review
 
 You are the independent witness seat. You read **this file only** and execute nothing: no commands, no repository
 access, no network. Everything you can legitimately check is in this packet or is a matter of reasoning about it. Where a
 claim rests on a file, a line or an event you cannot see here, say "unverified from packet" rather than guessing either
-way. The raw ledger reads in Appendix A were fetched by the coordinator's builder from \`GET /events/<id>\` and are
-quotations with their signature material removed; treat them as quotations, not as your own verification.
+way. Appendix A holds selected fields of the ledger events the text cites, fetched raw by the coordinator's builder from
+\`GET /events/<id>\`; each entry lists under \`omitted\` the field names it does not carry, so a field's absence there is not
+its absence in the ledger. Treat them as quotations, not as your own verification.
 
 When the change under review is a design note or brief marked **not built**, a sentence stating what the design specifies
 is a statement of intent, not a claim that the code does it today. Judge whether the design is sound, complete and honest
@@ -184,12 +263,15 @@ BLOCKING: <yes|no>
 VERDICT: approved — <one line>   |   VERDICT: needs changes: <the blocking findings>
 \`\`\`
 
-The **last three lines** are bare text, in that order, no heading, no bold. They must agree with your findings: the counts
-are the findings you listed; \`BLOCKING: yes\` only with \`needs changes\`, and \`needs changes\` only with at least one
-Medium or High — if you still want to say "needs changes" with only Lows, add a line \`REASON: <why this blocks>\` before
-VERDICT, otherwise write \`VERDICT: approved\` and keep your Lows as findings. An approval with a Medium or High needs a
-\`REASON:\` line too. The seal refuses a review whose last lines disagree with each other; nothing is sealed, the run is
-reported as failed, and the text you wrote is kept.`;
+The **last three lines of the whole review** are bare text, in that order, with nothing after them: no heading, no bold, no
+code fence, no closing remark. They are derived from your findings, never declared: the counts are the findings you listed;
+\`BLOCKING: yes\` exactly when high + medium > 0, otherwise \`BLOCKING: no\`; \`needs changes\` needs at least one Medium or
+High; \`approved\` cannot carry a Medium or High. With only Lows write \`VERDICT: approved\` and keep the Lows as findings (a
+\`needs changes\` with only Lows is sealed as a non-blocking rejection; neither blocks a merge). There is no REASON line and no
+override. Write the word VERDICT at the start of exactly one line in the whole review: the seal reads the one block at the
+very end, refuses a second FINDINGS, BLOCKING or VERDICT line anywhere, refuses text after the block, and refuses lines that
+disagree with each other. Then nothing is sealed, the run is reported as failed, and the text you wrote is kept. These are
+the rules the repository's verdict validator applies to every sealed verdict (team-roles rule 8).`;
 
 const code = (lang, body) => `\`\`\`${lang}\n${body.replace(/\n$/, "")}\n\`\`\``;
 
@@ -231,7 +313,7 @@ function assemble(s) {
 export function renderLauncher(o) {
   const q = (v) => `'${String(v).replace(/'/g, `'\\''`)}'`;
   return `#!/usr/bin/env bash
-# NOOA witness review (${o.round}) of PR ${o.pr} at ${o.head} — generated by scripts/nooa/build-packet.mjs. Runs as user nooa. Prints nothing secret.
+# NOOA witness review (${o.round}) of PR ${o.pr} at ${o.head} — generated by scripts/nooa/build-packet.mjs from routing event ${o.routing}, which the builder read raw and authenticated. Runs as user nooa. Prints nothing secret.
 set -u
 cd /home/nooa/nooa-retrace
 set -a; . ./.env; set +a
@@ -242,11 +324,13 @@ export NOOA_PR=${o.pr}
 export NOOA_PR_TITLE=${q(o.title)}
 export NOOA_ROUTING_EVENT=${o.routing}
 export NOOA_REVIEWED_HEAD=${o.head}
+export NOOA_CLASS=${o.cls}
+export NOOA_SURFACE=${q(o.surface)}
 export NOOA_FILES=${q(o.files.join(","))}
 export NOOA_ROUND=${q(o.round)}
 export NOOA_RUBRIC=${q(o.rubric)}
-export NOOA_SCOPE=${q(`witness review of PR ${o.pr} ${o.round} at ${o.head}: the packet carries the PR body, commit messages, the diff${o.prevHead ? " and interdiff" : ""}, ${o.eventCount} raw ledger reads${o.ci ? ", CI gate lines" : ""}${o.rulesCited.length ? `, agent-rules ${o.rulesCited.join("/")}` : ""}${o.status ? ", a status snapshot" : ""}; judge the packet's numbered rules`)}
-export NOOA_JUDGEMENT=${q("whether the change does what its body claims and nothing more, judged against the packet's numbered rules; every finding with a severity and its rule; any Medium or High goes to Jordan; a Low-only verdict is approved with its Lows listed; do not merge")}
+export NOOA_SCOPE=${q(`witness review of PR ${o.pr} ${o.round} at ${o.head}: the packet carries the PR body, commit messages, the diff${o.prevHead ? " and interdiff" : ""}, selected fields of ${o.eventCount} ledger events${o.ci ? ", CI gate lines" : ""}${o.rulesCited.length ? `, agent-rules ${o.rulesCited.join("/")}` : ""}${o.status ? ", a status snapshot" : ""}; judge the packet's numbered rules`)}
+export NOOA_JUDGEMENT=${q("whether the change does what its body claims and nothing more, judged against the packet's numbered rules; every finding with a severity and its rule; any Medium or High goes to Jordan and blocks; a Low-only verdict does not block; do not merge")}
 export NOOA_TAGS=${q(`pr-${o.pr},class-${o.cls},${o.round}`)}
 nohup .venv/bin/python review/nooa-review-generic.py > review/pr${o.pr}-${o.round}-run.log 2>&1 < /dev/null &
 echo "launched pid $!"
@@ -255,6 +339,13 @@ echo "launched pid $!"
 
 /** Build the packet. `io` is injectable: { git(args), gh(args), fetchJson(path), readFile(path), now() }. */
 export async function build(o, io) {
+  // The routing event first, raw: it is the authority for everything that follows, and nothing is read or written until it
+  // authorizes exactly this build (Codex, PR 225 r1, H3).
+  let routingRaw;
+  try { routingRaw = await io.fetchJson(`/events/${o.routing}`); } catch (e) { throw new Error(`routing event ${o.routing} could not be read raw (${String(e?.message ?? e).slice(0, 120)}); nothing built`); }
+  const routingIssue = routingProblem(routingRaw, o);
+  if (routingIssue) throw new Error(`routing event ${o.routing} does not authorize this build: ${routingIssue}; nothing built`);
+
   const pr = JSON.parse(io.gh(["pr", "view", String(o.pr), "--json", "title,body,headRefOid,baseRefName,files,author"]));
   if (pr.headRefOid !== o.head) throw new Error(`PR ${o.pr} head on GitHub is ${pr.headRefOid}, not --head ${o.head}; the packet binds to the head you route`);
   const base = o.base ?? io.git(["merge-base", `origin/${pr.baseRefName ?? "main"}`, o.head]).trim();
@@ -277,11 +368,13 @@ export async function build(o, io) {
   const agentRules = io.git(["show", `${o.head}:docs/agent-rules.md`]);
   const ruleItems = extractRuleItems(agentRules, rulesCited);
 
-  const ids = collectEventIds([o.routing, o.codexRouting, o.instruction, pr.body, commits, rulesMd, context, ...o.extraEvents]);
+  // Every id the text cites, the diff and interdiff included (Codex, PR 225 r1, M1): an id that appears only in a changed line
+  // is still a claim the witness will read.
+  const ids = collectEventIds([o.routing, o.codexRouting, o.instruction, pr.body, commits, rulesMd, context, diff, interdiff, ...o.extraEvents]);
   const events = [];
   const unreadable = [];
   for (const id of ids) {
-    try { events.push(renderEvent(await io.fetchJson(`/events/${id}`))); } catch (e) { unreadable.push({ id, error: String(e?.message ?? e).slice(0, 120) }); }
+    try { events.push(renderEvent(id === o.routing ? routingRaw : await io.fetchJson(`/events/${id}`))); } catch (e) { unreadable.push({ id, error: String(e?.message ?? e).slice(0, 120) }); }
   }
 
   let ciText = "";
@@ -302,16 +395,16 @@ export async function build(o, io) {
     const sel = { generated_at: st.generated_at, events_total: st.events?.total, commits: st.capture?.commits, unlinked_commits: st.capture?.unlinked_commits, amended_unlinked_commits: st.capture?.amended_unlinked_commits, ineffective_amendments: st.capture?.ineffective_amendments, causality: st.causality };
     statusText = `# Appendix E — \`GET /projects/retrace/status\` (selected fields), read ${io.now()}\n${code("json", JSON.stringify(sel, null, 1))}`;
   }
-  const instructionText = o.instruction ? (() => { const e = events.find((x) => x.id === o.instruction); return e ? `# Appendix D — this round's instruction, raw\n${code("json", JSON.stringify(e, null, 1))}` : ""; })() : "";
+  const instructionText = o.instruction ? (() => { const e = events.find((x) => x.id === o.instruction); return e ? `# Appendix D — this round's instruction (selected fields, as in Appendix A)\n${code("json", JSON.stringify(e, null, 1))}` : ""; })() : "";
 
   const author = headSeal?.actor ? `${headSeal.actor.type}/${headSeal.actor.id}${headSeal.actor.model ? ` (${headSeal.actor.model})` : ""}` : `GitHub login ${pr.author?.login ?? "?"} (no hook seal found in the last 300 events)`;
   const header = `# Review packet — Retrace PR ${o.pr}: ${pr.title} — witness review, ${o.round} at ${o.head.slice(0, 8)} (${io.now().slice(0, 10)})
 
 - **What you review.** Repository \`${REPO_FULL}\`, PR ${o.pr}, head \`${o.head}\` (${commitShas.length} commit${commitShas.length === 1 ? "" : "s"} on base \`${base.slice(0, 12)}\`): ${prFiles.length} file${prFiles.length === 1 ? "" : "s"} changed${omittedFiles.length ? `, of which this packet carries the diff of ${files.length}: ${files.map((f) => `\`${f}\``).join(", ")}; **not in this packet** (say "unverified from packet" about them): ${omittedFiles.map((f) => `\`${f}\``).join(", ")}` : ` — ${files.map((f) => `\`${f}\``).join(", ")}`}. Author per the head's hook seal: ${author}${headSeal ? ` (seal \`${headSeal.id}\`)` : ""}. You did not write this.
-- **Classification.** Class (${o.cls}) under agent-rules 12. Routing event \`${o.routing}\`${o.codexRouting ? `; the first seat's routing \`${o.codexRouting}\`` : ""}. Rubric effort ${o.rubric}; your model exposes no effort control, so report \`not_applicable\`.
-- **What this packet carries.** The PR body and every commit message verbatim; the diff against base${o.prevHead ? ` and the interdiff against the previous head \`${o.prevHead.slice(0, 12)}\`` : ""}; raw reads of the ${events.length} ledger events the text cites (Appendix A)${unreadable.length ? `, ${unreadable.length} unreadable (listed there)` : ""}${o.ci ? "; the CI gate lines for this head (Appendix B)" : ""}${rulesCited.length ? `; the text of agent-rules ${rulesCited.join(", ")} (Appendix C)` : ""}${o.instruction ? "; this round's instruction raw (Appendix D)" : ""}${o.status ? "; a status snapshot (Appendix E)" : ""}. If a claim's evidence is not here, say "unverified from packet"; a section the builder dropped for size is listed under "Omitted for size" with where to find it.
+- **Classification.** Class (${o.cls}) under agent-rules 12. Routing event \`${o.routing}\`, read raw by the builder and authenticated before this packet was built: a \`routing\` event by agent/${COORDINATOR_SEAT}, sealed under the pinned ${COORDINATOR_SEAT} credential with a verified producer signature, naming PR ${o.pr}, head \`${o.head.slice(0, 12)}\`, class ${o.cls}, ${o.round}, effort ${o.rubric}, seat ${NOOA_SEAT}, model \`${NOOA_MODEL}\`${o.codexRouting ? `; the first seat's routing \`${o.codexRouting}\`` : ""}. Rubric effort ${o.rubric}; your model exposes no effort control, so report \`not_applicable\`.
+- **What this packet carries.** The PR body and every commit message verbatim; the diff against base${o.prevHead ? ` and the interdiff against the previous head \`${o.prevHead.slice(0, 12)}\`` : ""}; selected fields of the ${events.length} ledger events the text cites, each naming the fields it omits (Appendix A)${unreadable.length ? `, ${unreadable.length} unreadable (listed there)` : ""}${o.ci ? "; the CI gate lines for this head (Appendix B)" : ""}${rulesCited.length ? `; the text of agent-rules ${rulesCited.join(", ")} (Appendix C)` : ""}${o.instruction ? "; this round's instruction (Appendix D)" : ""}${o.status ? "; a status snapshot (Appendix E)" : ""}. If a claim's evidence is not here, say "unverified from packet"; a section the builder dropped for size is listed under "Omitted for size" with where to find it.
 - **What your verdict carries.** Cite routing \`${o.routing}\` and reviewed head \`${o.head}\`; artifacts the PR and the files. End with the three bare lines of the output contract (FINDINGS, BLOCKING, VERDICT). Do not merge. Do not push.
-- **Stop rule.** Any Medium or High goes to Jordan. A verdict with only Low findings is \`approved\` with the Lows listed; it does not block.`;
+- **Stop rule.** Any Medium or High goes to Jordan and blocks. A verdict with only Low findings does not block.`;
 
   const sections = {
     header,
@@ -323,7 +416,7 @@ export async function build(o, io) {
     diff: `## Diff vs base (-U3, verbatim; \`git diff ${base.slice(0, 12)} ${o.head.slice(0, 12)}\`)\n${code("diff", diff || "(empty diff)")}`,
     interdiff: o.prevHead ? `## Interdiff vs previous head (-U2, verbatim; \`git diff ${o.prevHead.slice(0, 12)} ${o.head.slice(0, 12)}\`)\n${code("diff", interdiff || "(empty interdiff)")}` : undefined,
     contract: CONTRACT_TEXT,
-    events: `# Appendix A — raw ledger reads of every event the text cites (\`GET /events/<id>\`; signature fields omitted; long strings clipped)\n\n${events.map((e) => code("json", JSON.stringify(e, null, 1))).join("\n\n") || "(none cited)"}${unreadable.length ? `\n\nUnreadable at build time: ${unreadable.map((u) => `\`${u.id}\` (${u.error})`).join("; ")}` : ""}`,
+    events: `# Appendix A — selected fields of every event the text cites (each read raw by the builder from \`GET /events/<id>\`; this is a projection: each entry lists under \`omitted\` the top-level fields, method keys and params keys present in the event and not carried here, so absence here is not absence in the ledger; signature material is never carried; strings over their clip length end with …[N chars])\n\n${events.map((e) => code("json", JSON.stringify(e, null, 1))).join("\n\n") || "(none cited)"}${unreadable.length ? `\n\nUnreadable at build time: ${unreadable.map((u) => `\`${u.id}\` (${u.error})`).join("; ")}` : ""}`,
     ci: ciText || undefined,
     rulesText: rulesCited.length ? `# Appendix C — agent-rules items the rules above cite, verbatim at ${o.head.slice(0, 12)}\n\n${rulesCited.map((n) => ruleItems[n] ?? `(rule ${n} not found in docs/agent-rules.md)`).join("\n\n")}` : undefined,
     instruction: instructionText || undefined,
@@ -337,8 +430,9 @@ export async function build(o, io) {
   const packet = assemble(sections);
   const packetName = `nooa-pr${o.pr}-packet-${o.round}.md`;
   const launcherName = `launch-pr${o.pr}-${o.round}.sh`;
-  const launcher = renderLauncher({ ...o, packetName, title: pr.title, files, eventCount: events.length, rulesCited });
-  return { packet, packetName, launcher, launcherName, bytes: Buffer.byteLength(packet, "utf8"), fits: Buffer.byteLength(packet, "utf8") <= o.maxBytes, omitted: trimmed.omitted, events: ids, unreadable, ciRuns, files, base };
+  const surface = reviewSurface(o.cls, files);
+  const launcher = renderLauncher({ ...o, packetName, title: pr.title, files, surface, eventCount: events.length, rulesCited });
+  return { packet, packetName, launcher, launcherName, bytes: Buffer.byteLength(packet, "utf8"), fits: Buffer.byteLength(packet, "utf8") <= o.maxBytes, omitted: trimmed.omitted, events: ids, unreadable, ciRuns, files, base, surface };
 }
 
 export function realIo(o) {
@@ -363,7 +457,8 @@ const sha256 = (s) => createHash("sha256").update(s).digest("hex");
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   let o;
   try { o = parseArgs(process.argv.slice(2)); } catch (e) { console.error(`build-packet: ${e.message}`); process.exit(2); }
-  const r = await build(o, realIo(o));
+  let r;
+  try { r = await build(o, realIo(o)); } catch (e) { console.error(`build-packet: ${e.message}`); process.exit(2); }
   mkdirSync(o.out, { recursive: true });
   const packetPath = join(o.out, r.packetName);
   const launcherPath = join(o.out, r.launcherName);

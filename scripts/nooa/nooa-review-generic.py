@@ -15,13 +15,22 @@ This wrapper fixes both and changes nothing else. The model is pinned by the cal
 defaulted here: `review_agent.py:30` defaults NOOA_MODEL to an Anthropic model, which would make
 this Anthropic reviewing Anthropic under an NVIDIA badge (docs/team-roles.md rule 3).
 
-v2 (2026-10-11, docs/design/dispatch-protocol.md §2, the verdict shape): the review's last lines carry
-`FINDINGS: high=<n> medium=<n> low=<n>`, `BLOCKING: yes|no`, optionally `REASON: …`, then `VERDICT:`.
-The seal records `findings`, `blocking` and the reason in method.params, and REFUSES (seals nothing, keeps the
-text) when the lines are missing or disagree: `needs changes` is blocking and needs a High or Medium or a
-REASON; `approved` is not blocking and, with a High or Medium, needs a REASON. Measured cause: 17 of 55
-verdicts on six PRs that week carried their counts only in prose, and one all-Low "needs changes" said of
-itself that it did not block. Self-test: `python3 nooa-review-generic.py --selftest` (no host modules needed).
+v2 (2026-10-11, docs/design/dispatch-protocol.md §2, the verdict shape): the review ENDS with three bare lines,
+`FINDINGS: high=<n> medium=<n> low=<n>`, `BLOCKING: yes|no`, `VERDICT: …`, and the seal records `findings` and
+`blocking` in method.params. Measured cause: 17 of 55 verdicts on six PRs that week carried their counts only in
+prose, and one all-Low "needs changes" said of itself that it did not block.
+
+v2.1 (PR 225 fix round 1, Codex evt_ecd4c216): the rules are the ones packages/core/src/review-verdict.ts applies
+to every sealed verdict (team-roles rule 8) — `blocking` is DERIVED, `high + medium > 0`, never declared: a BLOCKING line
+that disagrees with the counts is refused, an `approved` with a High or Medium is refused, a `needs changes` with only
+Lows is sealed as a non-blocking rejection, and there are no REASON overrides (H1). The parser reads ONE anchored block
+at the very end of the review and refuses a second FINDINGS/BLOCKING/VERDICT line anywhere and any text after the block,
+so the sealed action is the review's final verdict and no other (H2). NOOA_MODEL must EQUAL the pinned witness model
+(M2). The class and the review surface come from the launcher, which takes them from the routing event the builder
+authenticated; nothing about the class or the gate is hard-coded here (M3). Every launcher value is shape-checked before
+the run, and the seal records that the wrapper binds to those values and did not re-read the routing event: the host's
+MCP exposes no raw event read, so the raw authentication happens in scripts/nooa/build-packet.mjs on the laptop (H3,
+stated limit). Self-test: `python3 nooa-review-generic.py --selftest` (no host modules needed).
 The canonical copy lives in the repository at scripts/nooa/nooa-review-generic.py; push-and-launch.sh
 copies the one in its own directory, so copy the repository file over it after a merge.
 """
@@ -32,108 +41,165 @@ import sys
 from hashlib import sha256
 from pathlib import Path
 
-_VERDICT_RE = re.compile(r"(?m)^(?:#{1,6}\s*)?\**VERDICT:?\**:?\s*(.+?)\s*$")
-_FINDINGS_RE = re.compile(r"(?m)^\s*FINDINGS:\s*high\s*=\s*(\d+)\s+medium\s*=\s*(\d+)\s+low\s*=\s*(\d+)\s*$", re.I)
-_BLOCKING_RE = re.compile(r"(?m)^\s*BLOCKING:\s*(yes|no)\s*$", re.I)
-_REASON_RE = re.compile(r"(?m)^\s*REASON:\s*(.+?)\s*$")
+REQUIRED_MODEL = "nvidia_nim/nvidia/nemotron-3-ultra-550b-a55b"
+
+# The one block the seal reads: the last three non-blank lines of the review, bare, in this order, nothing after them.
+_BLOCK_RE = re.compile(
+    r"^[ \t]*FINDINGS:[ \t]*high[ \t]*=[ \t]*(\d+)[ \t]+medium[ \t]*=[ \t]*(\d+)[ \t]+low[ \t]*=[ \t]*(\d+)[ \t]*\n"
+    r"[ \t]*BLOCKING:[ \t]*(yes|no)[ \t]*\n"
+    r"[ \t]*VERDICT:[ \t]*([^\n]*?)[ \t]*\n?[ \t\n]*\Z",
+    re.M,
+)
+# Any line that starts (after optional heading marks or bold) with one of the three keywords and a colon, in any case.
+_LINE_RE = {
+    "FINDINGS": re.compile(r"(?mi)^[ \t]*(?:#{1,6}[ \t]*)?\**[ \t]*FINDINGS\**[ \t]*:"),
+    "BLOCKING": re.compile(r"(?mi)^[ \t]*(?:#{1,6}[ \t]*)?\**[ \t]*BLOCKING\**[ \t]*:"),
+    "VERDICT": re.compile(r"(?mi)^[ \t]*(?:#{1,6}[ \t]*)?\**[ \t]*VERDICT\**[ \t]*:"),
+}
+_REASON_RE = re.compile(r"(?mi)^[ \t]*(?:#{1,6}[ \t]*)?\**[ \t]*REASON\**[ \t]*:")
 
 
 def parse_verdict_block(review_markdown: str) -> dict:
-    """The sealed shape of a verdict, from the review's own last lines. Raises ValueError on anything missing or
-    inconsistent, so a malformed review seals nothing (fail closed) and the error names the line to fix."""
-    m = _VERDICT_RE.search(review_markdown)
+    """The sealed shape of a verdict, from the review's own final block. Raises ValueError on anything missing,
+    duplicated, trailing or inconsistent, so a malformed review seals nothing (fail closed) and the error names what to
+    fix. Same derivation and refusals as packages/core/src/review-verdict.ts: blocking = high + medium > 0."""
+    text = review_markdown.replace("\r\n", "\n")
+    if _REASON_RE.search(text):
+        raise ValueError("REASON: lines are not accepted: BLOCKING is derived from the counts, never declared (team-roles rule 8)")
+    for name, rx in _LINE_RE.items():
+        n = len(rx.findall(text))
+        if n != 1:
+            raise ValueError(f"the review has {n} lines starting with {name}:; exactly one is allowed, in the final block")
+    m = _BLOCK_RE.search(text)
     if not m:
-        raise ValueError("review must contain a line starting with VERDICT:")
-    verdict = m.group(1).strip()[:140]
+        raise ValueError("the review must END with exactly three bare lines, in order, nothing after them: "
+                         "'FINDINGS: high=<n> medium=<n> low=<n>', 'BLOCKING: yes' or 'BLOCKING: no', "
+                         "'VERDICT: approved …' or 'VERDICT: needs changes …'")
+    high, medium, lo = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    declared = m.group(4).lower() == "yes"
+    verdict = m.group(5).strip()[:140]
     if not verdict:
         raise ValueError("VERDICT: line is empty")
-    low = verdict.lower()
-    if low.startswith("approved"):
+    low_verdict = verdict.lower()
+    if low_verdict.startswith("approved"):
         action = "approved"
-    elif low.startswith("needs changes"):
+    elif low_verdict.startswith("needs changes"):
         action = "rejected"
     else:
         raise ValueError("VERDICT: must start with 'approved' or 'needs changes'; got: " + verdict)
-    f = _FINDINGS_RE.findall(review_markdown)
-    if not f:
-        raise ValueError("review must contain a line 'FINDINGS: high=<n> medium=<n> low=<n>' before VERDICT:")
-    high, medium, lo = (int(x) for x in f[-1])
-    b = _BLOCKING_RE.findall(review_markdown)
-    if not b:
-        raise ValueError("review must contain a line 'BLOCKING: yes' or 'BLOCKING: no' before VERDICT:")
-    blocking = b[-1].lower() == "yes"
-    reasons = _REASON_RE.findall(review_markdown)
-    reason = reasons[-1].strip() if reasons else None
-    severe = high + medium > 0
-    params = {"findings": {"high": high, "medium": medium, "low": lo}, "blocking": blocking}
-    if action == "rejected":
-        if not blocking:
-            raise ValueError("VERDICT: needs changes requires BLOCKING: yes (a Low-only review is VERDICT: approved with its Lows listed)")
-        if not severe:
-            if not reason:
-                raise ValueError("VERDICT: needs changes with no High or Medium finding requires a 'REASON: <why this blocks>' line")
-            params["blocking_reason"] = reason[:400]
-    else:
-        if blocking:
-            raise ValueError("VERDICT: approved requires BLOCKING: no")
-        if severe:
-            if not reason:
-                raise ValueError("VERDICT: approved with a High or Medium finding requires a 'REASON: <why it is accepted>' line")
-            params["accepted_reason"] = reason[:400]
-    return {"action": action, "verdict": verdict, "params": params}
+    blocking = high + medium > 0
+    if declared != blocking:
+        raise ValueError(f"BLOCKING: {'yes' if declared else 'no'} disagrees with FINDINGS high={high} medium={medium} low={lo}: "
+                         "BLOCKING is yes exactly when high + medium > 0 (team-roles rule 8)")
+    if action == "approved" and blocking:
+        raise ValueError("VERDICT: approved cannot carry a High or Medium finding; write 'needs changes', or reclassify the finding")
+    return {"action": action, "verdict": verdict,
+            "params": {"findings": {"high": high, "medium": medium, "low": lo}, "blocking": blocking}}
 
 
 def _selftest() -> None:
-    base = "## Findings\nNo findings\n\n## Limits\nread all\n\n"
+    base = "## Findings\nNo findings\n\n## What is sound\n- ok\n\n## Limits of this review\nread all\n\n"
+    cases = 0
     ok = parse_verdict_block(base + "FINDINGS: high=0 medium=0 low=2\nBLOCKING: no\nVERDICT: approved — fine")
-    assert ok["action"] == "approved" and ok["params"] == {"findings": {"high": 0, "medium": 0, "low": 2}, "blocking": False}, ok
-    rej = parse_verdict_block(base + "FINDINGS: high=0 medium=1 low=0\nBLOCKING: yes\nVERDICT: needs changes: M1")
-    assert rej["action"] == "rejected" and rej["params"]["blocking"] is True and "blocking_reason" not in rej["params"], rej
-    rr = parse_verdict_block(base + "FINDINGS: high=0 medium=0 low=1\nBLOCKING: yes\nREASON: head differs from the routed head\nVERDICT: needs changes: head")
-    assert rr["params"]["blocking_reason"].startswith("head differs"), rr
-    ar = parse_verdict_block(base + "FINDINGS: high=0 medium=1 low=0\nBLOCKING: no\nREASON: the Medium is accepted by the merger as a doc nit\nVERDICT: approved — with one Medium")
-    assert ar["params"]["accepted_reason"].startswith("the Medium"), ar
+    assert ok == {"action": "approved", "verdict": "approved — fine", "params": {"findings": {"high": 0, "medium": 0, "low": 2}, "blocking": False}}, ok
+    cases += 1
+    rej = parse_verdict_block(base + "FINDINGS: high=0 medium=1 low=0\nBLOCKING: yes\nVERDICT: needs changes: M1\n")
+    assert rej["action"] == "rejected" and rej["params"] == {"findings": {"high": 0, "medium": 1, "low": 0}, "blocking": True}, rej
+    cases += 1
+    # PR 222 parity: a Low-only rejection is allowed and is NOT blocking.
+    lr = parse_verdict_block(base + "FINDINGS: high=0 medium=0 low=1\nBLOCKING: no\nVERDICT: needs changes: L1 wording")
+    assert lr["action"] == "rejected" and lr["params"]["blocking"] is False, lr
+    cases += 1
+    # Trailing blank lines and leading indentation are tolerated; nothing else after the block is.
+    sp = parse_verdict_block(base + "  FINDINGS: high=1 medium=0 low=0\n  BLOCKING: yes\n  VERDICT: needs changes: H1\n\n\n")
+    assert sp["params"]["blocking"] is True and sp["action"] == "rejected", sp
+    cases += 1
     bad = [
+        # H2: an earlier VERDICT line with a terminal needs-changes block is refused, never sealed as approved.
+        base + "VERDICT: approved — early\n\nmore text\n\nFINDINGS: high=1 medium=0 low=0\nBLOCKING: yes\nVERDICT: needs changes: H1",
+        # H2: text after the block.
+        base + "FINDINGS: high=0 medium=0 low=0\nBLOCKING: no\nVERDICT: approved — fine\n\nThanks for reading.",
+        # H2: the block inside a code fence (the closing fence is trailing content).
+        base + "```\nFINDINGS: high=0 medium=0 low=0\nBLOCKING: no\nVERDICT: approved — fine\n```\n",
+        # H2: a second FINDINGS line.
+        base + "FINDINGS: high=0 medium=0 low=0\n\nFINDINGS: high=0 medium=0 low=0\nBLOCKING: no\nVERDICT: approved — fine",
+        # H2: wrong order.
+        base + "BLOCKING: no\nFINDINGS: high=0 medium=0 low=0\nVERDICT: approved — fine",
+        # H2: bold or heading forms are not the bare lines the contract asks for.
+        base + "FINDINGS: high=0 medium=0 low=0\nBLOCKING: no\n**VERDICT:** approved — bold",
+        # H1: an approval with a High, however the BLOCKING line reads.
+        base + "FINDINGS: high=1 medium=0 low=0\nBLOCKING: no\nVERDICT: approved — high accepted",
+        base + "FINDINGS: high=0 medium=1 low=0\nBLOCKING: yes\nVERDICT: approved — medium accepted",
+        # H1: a Low-only block that claims to block.
+        base + "FINDINGS: high=0 medium=0 low=3\nBLOCKING: yes\nVERDICT: needs changes: lows only",
+        # H1: a Medium that claims not to block.
+        base + "FINDINGS: high=0 medium=1 low=0\nBLOCKING: no\nVERDICT: needs changes: not blocking",
+        # H1: REASON overrides are gone.
+        base + "FINDINGS: high=0 medium=0 low=1\nBLOCKING: yes\nREASON: head differs\nVERDICT: needs changes: head",
+        base + "REASON: the Medium is accepted\nFINDINGS: high=0 medium=1 low=0\nBLOCKING: no\nVERDICT: approved — with one Medium",
+        # Missing lines and other verdict words.
         base + "VERDICT: approved — no counts",
         base + "FINDINGS: high=0 medium=0 low=0\nVERDICT: approved — no blocking line",
-        base + "FINDINGS: high=0 medium=0 low=3\nBLOCKING: yes\nVERDICT: needs changes: lows only",
-        base + "FINDINGS: high=0 medium=0 low=0\nBLOCKING: yes\nVERDICT: approved — contradiction",
-        base + "FINDINGS: high=1 medium=0 low=0\nBLOCKING: no\nVERDICT: approved — high without reason",
-        base + "FINDINGS: high=0 medium=1 low=0\nBLOCKING: no\nVERDICT: needs changes: not blocking",
         base + "FINDINGS: high=0 medium=0 low=0\nBLOCKING: no\nVERDICT: ready to build",
+        base + "FINDINGS: high=0 medium=0 low=0\nBLOCKING: no\nVERDICT:",
     ]
     for text in bad:
         try:
             parse_verdict_block(text)
         except ValueError:
+            cases += 1
             continue
         raise AssertionError("accepted a malformed verdict block:\n" + text)
-    print("nooa-review-generic selftest: 11 cases OK")
+    print(f"nooa-review-generic selftest: {cases} cases OK")
 
 
 if "--selftest" in sys.argv[1:]:
     _selftest()
     sys.exit(0)
 
+def _env(name: str, pattern: str | None = None, choices: tuple | None = None) -> str:
+    """A launcher value, present and well-formed, or the run is refused before anything is read or sealed."""
+    v = os.environ.get(name, "")
+    if not v:
+        sys.exit(f"REFUSED: {name} is not set; every per-run value comes from the launcher scripts/nooa/build-packet.mjs wrote")
+    if pattern and not re.fullmatch(pattern, v):
+        sys.exit(f"REFUSED: {name}={v!r} does not match {pattern}")
+    if choices and v not in choices:
+        sys.exit(f"REFUSED: {name}={v!r} is not one of {choices}")
+    return v
+
+
+# Every value below was written into the launcher by scripts/nooa/build-packet.mjs AFTER it read the routing event raw and
+# refused to build unless that event was a `routing` event by agent/claude-code, sealed under the pinned claude-code credential
+# with a verified producer signature, whose pr, head_sha, class, round, reasoning_effort, seat, reviewer_actor and model
+# equalled the build request. This wrapper binds the seal to those values and checks their shapes; it cannot re-read the
+# event raw on the host (the MCP exposes no raw read), and the seal says so (ROUTING_BINDING).
+PR = _env("NOOA_PR", r"\d+")
+TITLE = _env("NOOA_PR_TITLE")
+JUDGEMENT = _env("NOOA_JUDGEMENT")
+TAGS = [t for t in os.environ.get("NOOA_TAGS", "").split(",") if t]
+ROUTING_EVENT = _env("NOOA_ROUTING_EVENT", r"evt_[0-9a-f]{32}")
+REVIEWED_HEAD = _env("NOOA_REVIEWED_HEAD", r"[0-9a-f]{40}")
+REVIEWED_FILES = [p for p in _env("NOOA_FILES").split(",") if p]
+ROUND = _env("NOOA_ROUND", r"r\d+[a-z]?")
+RUBRIC = _env("NOOA_RUBRIC", choices=("low", "medium", "high", "xhigh", "max"))
+SCOPE = _env("NOOA_SCOPE")
+CLASS = _env("NOOA_CLASS", choices=("a", "b", "c", "S"))
+SURFACE = _env("NOOA_SURFACE")
+PR_URL = f"https://github.com/jordandru/retrace/pull/{PR}"
+ROUTING_BINDING = ("launcher values: scripts/nooa/build-packet.mjs read the routing event raw and refused to build unless it was a "
+                   "routing event by agent/claude-code under the pinned claude-code seal with a verified producer signature whose pr, "
+                   "head_sha, class, round, reasoning_effort, seat, reviewer_actor and model equalled this run's; this wrapper binds to "
+                   "those values and did not re-read the event (the host MCP exposes no raw event read)")
+
+if os.environ.get("NOOA_MODEL", "") != REQUIRED_MODEL:
+    sys.exit(f"REFUSED: NOOA_MODEL must equal {REQUIRED_MODEL!r}, the witness model pinned in the routing event and in "
+             f"scripts/nooa/build-packet.mjs; got {os.environ.get('NOOA_MODEL', '<unset>')!r}")
+
+# Only once every launcher value has passed does the wrapper touch the host.
 NOOA_HOME = Path.home() / "nooa-retrace"
 sys.path.insert(0, str(NOOA_HOME))
 os.chdir(NOOA_HOME)
-
-PR = os.environ["NOOA_PR"]                # e.g. "93"
-TITLE = os.environ["NOOA_PR_TITLE"]      # short title for labels and intents
-JUDGEMENT = os.environ["NOOA_JUDGEMENT"]  # the one-sentence judgement the reviewer is making
-TAGS = [t for t in os.environ["NOOA_TAGS"].split(",") if t]
-ROUTING_EVENT = os.environ["NOOA_ROUTING_EVENT"]
-REVIEWED_HEAD = os.environ["NOOA_REVIEWED_HEAD"]
-REVIEWED_FILES = [p for p in os.environ["NOOA_FILES"].split(",") if p]
-ROUND = os.environ["NOOA_ROUND"]    # e.g. "round 5" — set by the launcher, never hard-coded here
-RUBRIC = os.environ["NOOA_RUBRIC"]  # the routed rubric effort, copied from the routing event
-SCOPE = os.environ["NOOA_SCOPE"]    # what the packet contains, for review_scope
-PR_URL = f"https://github.com/jordandru/retrace/pull/{PR}"
-
-if not os.environ.get("NOOA_MODEL", "").startswith("nvidia_nim/"):
-    sys.exit("REFUSED: NOOA_MODEL must be pinned to an NVIDIA model for this review; got "
-             f"{os.environ.get('NOOA_MODEL', '<unset>')!r}")
 
 import review_agent as ra  # noqa: E402  (module-level code reads NOOA_* env)
 
@@ -146,7 +212,7 @@ class PRReviewer(ra.RetraceDesignReviewer):
         if len(review_markdown.strip()) < 200:
             raise ValueError("review is too short to be a review")
 
-        shape = parse_verdict_block(review_markdown)  # raises on a missing or inconsistent FINDINGS/BLOCKING/VERDICT block
+        shape = parse_verdict_block(review_markdown)  # raises on a missing, duplicated, trailing or inconsistent final block
         action, verdict = shape["action"], shape["verdict"]
 
         ra.ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -154,7 +220,7 @@ class PRReviewer(ra.RetraceDesignReviewer):
         header = (f"# NOOA review — Retrace PR {PR} ({ra.REPO_REL}) @ {REVIEWED_HEAD[:12]}\n\n"
                   f"run: {ra.RUN_ID}\nreviewer: nooa (model {ra.MODEL})\n"
                   f"packet sha256: {ra.DESIGN_SHA}\nrouting event: {ROUTING_EVENT}\n"
-                  f"reviewed head: {REVIEWED_HEAD}\ncaused_by: {caused_by}\n\n---\n\n")
+                  f"reviewed head: {REVIEWED_HEAD}\nclass: {CLASS}\ncaused_by: {caused_by}\n\n---\n\n")
         body = (header + review_markdown.strip() + "\n").encode("utf-8")
         with path.open("xb") as fh:
             fh.write(body)
@@ -179,19 +245,22 @@ class PRReviewer(ra.RetraceDesignReviewer):
                 **shape["params"],
                 "routing_event_id": ROUTING_EVENT,
                 "reviewed_head": REVIEWED_HEAD,
+                "class": CLASS,
+                "review_surface": SURFACE,
+                "routing_binding": ROUTING_BINDING,
                 "reasoning_effort": f"not_applicable — {ra.MODEL} exposes no effort control (models.json supports_effort=false); routed rubric effort was {RUBRIC}",
                 "review_scope": f"packet-scoped and advisory: the reviewer was INSTRUCTED to read the whole packet ({len(ra.DESIGN_TEXT)} characters: {SCOPE}) in slices of at most 20,000 characters, because the harness cuts printed output at 50,000; what it actually read is stated in its own Limits section; it executed nothing",
                 "packet_sha256": ra.DESIGN_SHA,
             }},
             tags=["review", f"pr-{PR}", *TAGS, "gate"],
-            intent=f"NOOA independent review of Retrace PR {PR} ({TITLE}, {ROUND}, class a, witness seat of the design gate) at {REVIEWED_HEAD[:12]}: {verdict}",
+            intent=f"NOOA independent review of Retrace PR {PR} ({TITLE}, {ROUND}, class {CLASS}, witness seat; {SURFACE}) at {REVIEWED_HEAD[:12]}: {verdict}",
         )
         logged_text = ra._text(logged)
         print(f"NOOA_REVIEW_RESULT action={action} verdict={verdict!r} review={path}", file=sys.stderr, flush=True)
         return f"review: {path}\nsha256: {digest}\naction: {action}\nverdict: {verdict}\nreview event: {logged_text}"
 
 
-PR_DOC = """Review a change to a governing document in the Retrace repository as the independent witness seat of its design gate.
+PR_DOC = """Review a change to the Retrace repository as its independent witness seat: PR __PR__ (__TITLE__), __ROUND__ at __REV__; __SURFACE__.
     Do EACH step EXACTLY ONCE.
 
     1. Call retrace_instruct ONCE with human_id "jordansboxing@gmail.com" and the instruction
@@ -206,27 +275,29 @@ PR_DOC = """Review a change to a governing document in the Retrace repository as
        you read every one. A previous run printed it whole and saw only its head and tail.
        Then read `design_markdown` carefully and in full. It is a self-contained review packet: it states
        your role and its limits, gives you the facts you may rely on, gives the author's own account
-       of the change as a CLAIM UNDER TEST rather than as evidence, and ends with the complete
-       unified diff of the change. Follow the packet's "Output contract" section exactly — the
-       headings it names, in the order it names them, and nothing else.
+       of the change as a CLAIM UNDER TEST rather than as evidence, and carries the diff of the change.
+       Follow the packet's "Output contract" section exactly — the headings it names, in the order it
+       names them, and nothing else.
        The judgement you are making is: __JUDGEMENT__ ALSO whether each sentence of the change claims LESS THAN OR EXACTLY
        what the evidence carries, while still saying something true. Overcorrecting into vagueness is
        a defect of equal rank to overclaiming. Do not manufacture findings; if a claim is sound, say
        so. Where you cannot verify something from the packet alone, mark it unverified from packet
        rather than guessing in either direction.
-       The LAST THREE lines of your review MUST be bare text — not markdown headings, not bold — in this order:
-       "FINDINGS: high=<n> medium=<n> low=<n>" (the counts of the findings you listed), "BLOCKING: yes" or
-       "BLOCKING: no", and "VERDICT:" beginning with either "approved" or "needs changes". "needs changes" is
-       BLOCKING: yes and needs at least one Medium or High finding; with only Lows write "VERDICT: approved" and keep
-       the Lows as findings, or add a line "REASON: <why this blocks>" before VERDICT. An approval with a Medium or
-       High also needs a "REASON:" line. The seal refuses a review whose last lines disagree.
+       The LAST THREE lines of your whole review MUST be bare text — not headings, not bold, not in a code fence,
+       with nothing after them — in this order: "FINDINGS: high=<n> medium=<n> low=<n>" (the counts of the findings
+       you listed), "BLOCKING: yes" or "BLOCKING: no", and "VERDICT:" beginning with either "approved" or
+       "needs changes". BLOCKING is derived, not chosen: "yes" exactly when high + medium > 0. "needs changes" needs
+       at least one Medium or High; "approved" cannot carry a Medium or High; with only Lows write "VERDICT: approved"
+       and keep the Lows as findings. There is no REASON line. Write FINDINGS:, BLOCKING: and VERDICT: at the start
+       of exactly one line each in the whole review. The seal refuses anything else and seals nothing.
     3. Call self.seal_review(INSTRUCT_ID, <the complete review markdown>) ONCE. If seal_review
        raises, report the error verbatim and never invent a review event id.
     Finally reply with INSTRUCT_ID, the review path, its SHA-256, the action, and the review event id,
     copied verbatim from seal_review's returned text.
     """
 ra.RetraceDesignReviewer.review.__doc__ = (PR_DOC.replace("__REV__", REVIEWED_HEAD[:12]).replace("__ROUND__", ROUND)
-    .replace("__LEN__", str(len(ra.DESIGN_TEXT))).replace("__PR__", PR).replace("__TITLE__", TITLE).replace("__JUDGEMENT__", JUDGEMENT))
+    .replace("__LEN__", str(len(ra.DESIGN_TEXT))).replace("__PR__", PR).replace("__TITLE__", TITLE)
+    .replace("__SURFACE__", SURFACE).replace("__JUDGEMENT__", JUDGEMENT))
 
 
 async def main():
