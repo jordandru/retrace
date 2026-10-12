@@ -38,8 +38,9 @@ Appendix E (`--status`), a status snapshot. The head must equal the PR's head on
 The launcher carries, besides the packet name and the head, the routed `NOOA_CLASS` and a `NOOA_SURFACE` line (the class under
 agent-rules 12 and the files under review); the wrapper seals both, so a class-(c) scripts review is sealed as one. The launcher
 is a plain shell file. The builder's authentication of the routing event is a fact about the build on the laptop; it does not
-travel with the file. `push-and-launch.sh` transfers whatever bytes it is handed and records the packet hash, the launcher hash
-and the pid in its outcome event, and that record, not the wrapper, is what ties a run to a build.
+travel with the file. `push-and-launch.sh` transfers whatever bytes it is handed, prints the local and the host-echoed hashes and
+the pid, and **writes nothing to the ledger**. Whether a record of the launch exists, and what it binds, is the coordinator's act
+outside this code (today a `retrace_log` by hand after reading the script's output); nothing in `scripts/nooa` creates or binds it.
 
 Budget: default 45,000 bytes (the host prints at most 50,000). Over budget it drops, in order, CI lines, status, rule texts,
 the interdiff, the instruction, then clips event intents, and writes an "Omitted for size" section naming each cut and where
@@ -48,10 +49,11 @@ exceed the budget the exit code is 1 and the packet says so. It never splits int
 re-raised it from quoted reviewer text on PR 193).
 
 Reads: `gh` and `git` as subprocesses; the Worker with `RETRACE_URL`/`RETRACE_TOKEN` from the environment, in-process,
-never on a command line. Writes nothing to the ledger. Pushing and launching stays `push-and-launch.sh`, whose `sent` event
-records the hashes the host echoes back.
+never on a command line. Writes nothing to the ledger. Pushing and launching stays `push-and-launch.sh`, which prints the hashes;
+the coordinator's own `sent` event, logged before the push, carries the local hashes it computed, and any launch outcome it logs
+afterwards is its act, not the script's.
 
-## `nooa-review-generic.py` (v2.2)
+## `nooa-review-generic.py` (v2.3)
 
 The canonical copy of the host wrapper. It reads **one anchored block at the very end** of the review — the last three
 non-blank lines, bare, at column zero, in order: `FINDINGS: high=<n> medium=<n> low=<n>`, `BLOCKING: yes|no`, `VERDICT: …` —
@@ -60,21 +62,23 @@ are the ones `packages/core/src/review-verdict.ts` applies to every sealed verdi
 `high + medium > 0`; a BLOCKING line that disagrees with the counts is refused; `approved` with a High or Medium is refused;
 `needs changes` maps to the core action `rejected` and with only Lows is allowed, sealed as a non-blocking rejection; there is
 no REASON line and no override. The VERDICT line is parsed whole: `approved` or `needs changes`, alone or followed by one of
-`—`, `–`, `:`, `-` and the rest of the line; `approved? no — needs changes` matches neither and is refused, not mapped. Fence
-state is tracked line by line, so a block after an unclosed fence is inside it and refused; a keyword line that is indented,
+`—`, `–`, `:`, `-` and at least one word (a bare delimiter is refused); `approved? no — needs changes` matches neither and is
+refused, not mapped. Fence state and HTML-comment state (`<!--` … `-->`) are tracked line by line, so a block after an unclosed
+fence or comment is inside it and refused, as is a keyword line inside a closed one; a keyword line that is indented,
 blockquoted, a list item, a heading, bold or inline code, anywhere in the review, is refused, as is a second keyword line or
 text after the block. Refusal seals nothing, keeps the text, and reports the error. `python3 scripts/nooa/nooa-review-generic.py
---selftest` runs its 35 cases without the host.
+--selftest` runs its 42 cases without the host.
 
 Before the run it checks the shape of every launcher value (PR number, full event id, full 40-hex head, round, rubric, class in
 a/b/c/S, surface) and refuses unless `NOOA_MODEL` **equals** the pinned witness model; a prefix is not a pin. Those values are
-**trusted input from the coordinator's launch, taken as given.** The sealed verdict carries `class`, `review_surface` and
-`launcher_trust`, which states that: the builder authenticated the routing event raw on the laptop when it wrote the launcher;
-the wrapper checked shapes only, re-verified nothing against the routing event (the host's MCP exposes no raw event read), and
-cannot tell a builder-written launcher from an edited one. The record claims no authentication the wrapper did not perform.
+**taken from the launcher as given.** The sealed verdict carries `class`, `review_surface` and `launcher_trust`, which states
+only what this code did: the wrapper verified the shape of each value and the model pin, re-verified nothing against the
+routing event (the host's MCP exposes no raw event read), and cannot tell a builder-written launcher from an edited one; whether
+a record of the launch exists in the ledger, and what it binds, is the coordinator's act outside this code. The record claims
+nothing this code did not do.
 
 `push-and-launch.sh` copies the wrapper from its own directory (`~/.retrace/handoff-2026-09-23/nooa/`), so after a merge copy
-this file over that one and record the hash in the next `sent` event. Hand-written launchers from before the builder lack
+this file over that one and record the new hash on the coordinator's next `sent` event. Hand-written launchers from before the builder lack
 `NOOA_CLASS` and `NOOA_SURFACE` and are refused.
 
 ## Tests
@@ -82,5 +86,6 @@ this file over that one and record the hash in the next `sent` event. Hand-writt
 `node --test scripts/nooa/*.test.mjs` (also run by the root `npm test`): the pure functions, the routing-event authentication
 and every refusal it makes (including PR 225's routing event offered for a PR 223 build, which fails before any other read), a
 full build against a fake `git`/`gh`/Worker, ids that appear only in the diff or interdiff, the omitted-field enumeration
-(including an event with `action_detail: ""`, `tags: []` and `method.tool: ""`, each carried, none dropped), the head-mismatch
+(including an event with `action_detail: ""`, `tags: []` and `method.tool: ""`, each carried, none dropped; a present
+`method: {}` or `method.params: {}` carried as `{}`, `null` named under `omitted`), the head-mismatch
 refusal, the size budget, the wrapper's self-test, and the wrapper's start-up refusals.

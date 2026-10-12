@@ -38,7 +38,14 @@ VERDICT line is parsed whole against an explicit grammar, so "approved? no — n
 three sealed lines must start at column zero; fence state is tracked, so a block after an unclosed fence is inside it and
 refused; a keyword line in blockquote, list, heading, bold, inline-code or indented form anywhere in the review is refused
 (H3). A `needs changes` with only Lows is allowed and seals a non-blocking rejection; the prompt no longer says otherwise
-(M1). Self-test: `python3 nooa-review-generic.py --selftest` (no host modules needed).
+(M1).
+
+v2.3 (PR 225 fix round 3, Codex evt_501bdc45): `launcher_trust` says only what this code does — the values were taken from the
+launcher as given and only their shape and the model pin were checked; whether a launch record exists in the ledger, and what
+it binds, is the coordinator's act outside this code (push-and-launch.sh prints hashes and a pid and writes nothing) (H1). An
+HTML comment (`<!--` … `-->`) is tracked like a fence, so a keyword line inside one, or a terminal block after an unclosed
+comment, is refused: a human reader would not see it (H2). A VERDICT delimiter must be followed by text; `approved —` alone is
+refused (L1). Self-test: `python3 nooa-review-generic.py --selftest` (no host modules needed).
 The canonical copy lives in the repository at scripts/nooa/nooa-review-generic.py; push-and-launch.sh
 copies the one in its own directory, so copy the repository file over it after a merge.
 """
@@ -61,21 +68,37 @@ _BLOCK_RE = re.compile(
 )
 # The whole VERDICT line after the keyword: the action word, then nothing, or one delimiter and the rest of the line (Codex,
 # PR 225 r2, H2). "approved? no — needs changes" and "approvedness is not approval" match neither alternative: refused, not mapped.
-_VERDICT_RE = re.compile(r"(?i)^(approved|needs changes)(?:[ \t]*[—–:\-][ \t]*(.*))?$")
+_VERDICT_RE = re.compile(r"(?i)^(approved|needs changes)(?:[ \t]*[—–:\-][ \t]*(\S.*))?$")  # a delimiter needs text after it (L1)
 # Markdown dress a keyword line can wear: indentation, blockquote, list marker, heading, bold, inline code (H3). A keyword
 # line behind any of these, anywhere in the review, is refused: the three sealed lines are bare, at column zero.
 _MD_PREFIX_RE = re.compile(r"^(?:[ \t]+|>[ \t]*|[-*+][ \t]+|\d{1,3}[.)][ \t]+|#{1,6}[ \t]*|\*\*|__|`+)+")
 _KEYWORD_RE = re.compile(r"(?i)^(FINDINGS|BLOCKING|VERDICT|REASON)\**[ \t]*:")
 _FENCE_RE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})")
+# An HTML comment hides text from a human reader of rendered Markdown while the bytes stay in the file (Codex, PR 225 r3, H2).
+_COMMENT_OPEN, _COMMENT_CLOSE = "<!--", "-->"
 
 
 def keyword_lines(text: str) -> list:
     """Every line of the review that starts, after optional Markdown dress, with one of the four keywords and a colon, as
-    (line number, KEYWORD, dress, inside a code fence). Fence state is tracked line by line (a fence closes only on a line of
-    the same character at least as long, with nothing after it), so a block after an unclosed fence is inside it."""
+    (line number, KEYWORD, dress, hidden) where hidden is None, "fence" or "comment". Fence state is tracked line by line (a
+    fence closes only on a line of the same character at least as long, with nothing after it) and HTML-comment state the
+    same way (`<!--` opens, `-->` closes), so a block after an unclosed fence or comment is inside it (r2 H3, r3 H2)."""
     found = []
     fence = None
+    comment = False
     for i, line in enumerate(text.split("\n")):
+        if comment:
+            # Inside a comment: a keyword line here is hidden; the line that closes the comment is consumed whole.
+            km = _KEYWORD_RE.match(line.lstrip())
+            if km:
+                found.append((i + 1, km.group(1).upper(), "", "comment"))
+            if _COMMENT_CLOSE in line:
+                comment = False
+            continue
+        opens = line.rfind(_COMMENT_OPEN)
+        if opens != -1 and _COMMENT_CLOSE not in line[opens:]:
+            comment = True
+            line = line[:opens]  # only the visible part of this line can be a keyword line
         fm = _FENCE_RE.match(line)
         if fm:
             mark = fm.group(1)
@@ -88,7 +111,7 @@ def keyword_lines(text: str) -> list:
         rest = line[pm.end():] if pm else line
         km = _KEYWORD_RE.match(rest)
         if km:
-            found.append((i + 1, km.group(1).upper(), pm.group(0) if pm else "", fence is not None))
+            found.append((i + 1, km.group(1).upper(), pm.group(0) if pm else "", "fence" if fence is not None else None))
     return found
 
 
@@ -98,10 +121,13 @@ def parse_verdict_block(review_markdown: str) -> dict:
     fix. Same derivation and refusals as packages/core/src/review-verdict.ts: blocking = high + medium > 0."""
     text = review_markdown.replace("\r\n", "\n")
     found = keyword_lines(text)
-    for lineno, kw, dress, fenced in found:
-        if fenced:
+    for lineno, kw, dress, hidden in found:
+        if hidden == "fence":
             raise ValueError(f"line {lineno}: a {kw}: line is inside a code fence (opened earlier and, if never closed, running to "
                              "the end of the review); the three sealed lines are bare text outside any fence")
+        if hidden == "comment":
+            raise ValueError(f"line {lineno}: a {kw}: line is inside an HTML comment (opened earlier and, if never closed, running to "
+                             "the end of the review); a human reader would not see it, so nothing is sealed")
         if dress:
             raise ValueError(f"line {lineno}: a {kw}: line is in a Markdown form ({dress!r}: indentation, blockquote, list, heading, "
                              "bold or code); the three sealed lines start at column zero, bare, exactly once each")
@@ -124,8 +150,8 @@ def parse_verdict_block(review_markdown: str) -> dict:
         raise ValueError("VERDICT: line is empty")
     vm = _VERDICT_RE.fullmatch(verdict_line)
     if not vm:
-        raise ValueError("VERDICT: must read 'approved' or 'needs changes', alone or followed by one of — – : - and the rest of "
-                         "the line; got: " + verdict_line[:140])
+        raise ValueError("VERDICT: must read 'approved' or 'needs changes', alone or followed by one of — – : - and at least one "
+                         "word; a bare delimiter is refused; got: " + verdict_line[:140])
     action = "approved" if vm.group(1).lower() == "approved" else "rejected"
     verdict = verdict_line[:140]
     blocking = high + medium > 0
@@ -161,6 +187,13 @@ def _selftest() -> None:
     # A keyword mid-line, and a closed fence holding ordinary text, are not keyword lines.
     prose = parse_verdict_block(base + "The final VERDICT: line is below.\n```\nsome diff\n```\n\nFINDINGS: high=0 medium=0 low=0\nBLOCKING: no\nVERDICT: approved — fine")
     assert prose["action"] == "approved", prose
+    cases += 1
+    # r3 H2: a CLOSED HTML comment before the block, on one line or across lines, hides nothing that is sealed.
+    closed = parse_verdict_block(base + "<!-- reviewer note -->\n\nFINDINGS: high=0 medium=0 low=0\nBLOCKING: no\nVERDICT: approved — fine")
+    assert closed["action"] == "approved", closed
+    cases += 1
+    spanning = parse_verdict_block(base + "<!-- a note\nover two lines -->\n\nFINDINGS: high=0 medium=0 low=1\nBLOCKING: no\nVERDICT: approved — fine")
+    assert spanning["params"]["findings"]["low"] == 1, spanning
     cases += 1
     bad = [
         # H2 (r1): an earlier VERDICT line with a terminal needs-changes block is refused, never sealed as approved.
@@ -210,6 +243,14 @@ def _selftest() -> None:
         base + "`VERDICT: approved`\n\nFINDINGS: high=1 medium=0 low=0\nBLOCKING: yes\nVERDICT: needs changes: H1",
         # H3 (r2): a keyword line inside a closed fence earlier in the review is refused too, so quoted text never competes.
         base + "```\nVERDICT: approved — quoted contract\n```\n\nFINDINGS: high=1 medium=0 low=0\nBLOCKING: yes\nVERDICT: needs changes: H1",
+        # H2 (r3, Codex's probe): an unclosed HTML comment before the block hides it from a human reader.
+        base + "<!-- hidden from the reader\n\nFINDINGS: high=0 medium=0 low=0\nBLOCKING: no\nVERDICT: approved — fine",
+        # H2 (r3): a keyword line inside a closed comment, and a comment opened mid-line and never closed.
+        base + "<!--\nVERDICT: approved — commented\n-->\n\nFINDINGS: high=1 medium=0 low=0\nBLOCKING: yes\nVERDICT: needs changes: H1",
+        base + "Some prose <!-- starts here\nFINDINGS: high=0 medium=0 low=0\nBLOCKING: no\nVERDICT: approved — fine",
+        # L1 (r3): a delimiter with nothing after it.
+        base + "FINDINGS: high=0 medium=0 low=0\nBLOCKING: no\nVERDICT: approved — ",
+        base + "FINDINGS: high=1 medium=0 low=0\nBLOCKING: yes\nVERDICT: needs changes:",
     ]
     for text in bad:
         try:
@@ -237,12 +278,13 @@ def _env(name: str, pattern: str | None = None, choices: tuple | None = None) ->
     return v
 
 
-# Every value below is taken from the launcher AS GIVEN: trusted input from the coordinator's launch. scripts/nooa/build-packet.mjs
-# writes a launcher only after reading the routing event raw and refusing to build unless that event authorized the build, but the
-# launcher is a plain shell file, push-and-launch.sh transfers whatever bytes it is handed (its outcome event records the packet
-# hash, the launcher hash and the pid), and nothing on this host proves that these bytes are the builder's. So this wrapper checks
-# each value's SHAPE and nothing more: it re-verifies nothing against the routing event (the host MCP exposes no raw event read),
-# cannot tell a builder-written launcher from an edited one, and the sealed verdict says exactly that (LAUNCHER_TRUST).
+# Every value below is taken from the launcher AS GIVEN. scripts/nooa/build-packet.mjs writes a launcher only after reading the
+# routing event raw and refusing to build unless that event authorized the build, but the launcher is a plain shell file,
+# push-and-launch.sh transfers whatever bytes it is handed (it prints hashes and a pid and writes nothing to the ledger), and
+# nothing on this host proves that these bytes are the builder's. So this wrapper checks each value's SHAPE and the model pin and
+# nothing more: it re-verifies nothing against the routing event (the host MCP exposes no raw event read), cannot tell a
+# builder-written launcher from an edited one, and the sealed verdict says exactly that (LAUNCHER_TRUST). Whether a record of the
+# launch exists in the ledger, and what it binds, is the coordinator's act outside this code (Codex, PR 225 r3, H1).
 PR = _env("NOOA_PR", r"\d+")
 TITLE = _env("NOOA_PR_TITLE")
 JUDGEMENT = _env("NOOA_JUDGEMENT")
@@ -256,11 +298,10 @@ SCOPE = _env("NOOA_SCOPE")
 CLASS = _env("NOOA_CLASS", choices=("a", "b", "c", "S"))
 SURFACE = _env("NOOA_SURFACE")
 PR_URL = f"https://github.com/jordandru/retrace/pull/{PR}"
-LAUNCHER_TRUST = ("values taken from the launcher as given: trusted input from the coordinator's launch (push-and-launch.sh's outcome "
-                  "event records the packet hash, launcher hash and pid); scripts/nooa/build-packet.mjs authenticates the routing event "
-                  "raw on the laptop when it writes a launcher; this wrapper checked only the shape of each value, re-verified none of "
-                  "them against the routing event (the host MCP exposes no raw event read), and cannot tell a builder-written launcher "
-                  "from an edited one")
+LAUNCHER_TRUST = ("values taken from the launcher as given; this wrapper verified only their shape and the model pin, re-verified none "
+                  "of them against the routing event (the host MCP exposes no raw event read), and cannot tell a builder-written launcher "
+                  "from an edited one; whether a record of the launch exists in the ledger, and what it binds, is the coordinator's act "
+                  "outside this code")
 
 if os.environ.get("NOOA_MODEL", "") != REQUIRED_MODEL:
     sys.exit(f"REFUSED: NOOA_MODEL must equal {REQUIRED_MODEL!r}, the witness model pinned in the routing event and in "

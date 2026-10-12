@@ -107,19 +107,27 @@ test("renderEvent: a labelled projection — carries actor, artifacts, change an
   assert.ok(!PARAM_KEYS_CARRIED.includes("review_scope"), "long prose params are omitted by name, not silently");
 });
 
-/** Every key present in `raw` is either rendered or named under `omitted` (the Appendix A guarantee). */
+/** Every key present in `raw` is either rendered or named under `omitted` (the Appendix A guarantee), empty objects and null included (M1 r2, r3). */
 function assertAccounted(raw, r) {
+  const isObj = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
   for (const k of Object.keys(raw)) {
-    const carried = k === "method" ? true : k === "intent" ? "intent_head" in r : k in r;
+    const carried = k === "method" ? isObj(raw.method) : k === "intent" ? "intent_head" in r : k in r;
     assert.ok(carried !== r.omitted.fields.includes(k), `top-level ${k}: carried ${carried}, omitted ${r.omitted.fields.includes(k)}`);
   }
-  for (const k of Object.keys(raw.method ?? {})) {
-    const carried = k === "tool" ? "method_tool" in r : k === "params";
-    assert.ok(carried !== r.omitted.method.includes(k), `method.${k}`);
+  if (isObj(raw.method)) {
+    if (Object.keys(raw.method).length === 0) assert.deepEqual(r.method, {}, "an empty method object is carried as {}");
+    for (const k of Object.keys(raw.method)) {
+      const carried = k === "tool" ? "method_tool" in r : k === "params" ? "params" in r : false;
+      assert.ok(carried !== r.omitted.method.includes(k), `method.${k}: carried ${carried}`);
+    }
+    if ("params" in raw.method && !isObj(raw.method.params)) assert.ok(r.omitted.method.includes("params"), "a null or non-object params is named");
   }
-  for (const k of Object.keys(raw.method?.params ?? {})) {
-    const carried = k === "sealed_by" || k === "producer_sig_verdict" ? true : Boolean(r.params) && k in r.params;
-    assert.ok(carried !== r.omitted.params.includes(k), `params.${k}`);
+  if (isObj(raw.method?.params)) {
+    if (Object.keys(raw.method.params).length === 0) assert.deepEqual(r.params, {}, "an empty params object is carried as {}");
+    for (const k of Object.keys(raw.method.params)) {
+      const carried = k === "sealed_by" || k === "producer_sig_verdict" ? true : Boolean(r.params) && k in r.params;
+      assert.ok(carried !== r.omitted.params.includes(k), `params.${k}`);
+    }
   }
 }
 
@@ -137,6 +145,22 @@ test("renderEvent: empty present values are carried, not dropped, and omission i
   assert.equal(noParams.method_tool, "routing"); assert.equal(noParams.sealed_by, "(absent)"); assert.deepEqual(noParams.omitted, { fields: [], method: [], params: [] });
   const noMethod = renderEvent({ id: "x", method: null, extra: null });
   assert.deepEqual(noMethod.omitted, { fields: ["extra", "method"], method: [], params: [] }, "a method that is not an object is named as omitted");
+  assertAccounted({ id: "x", method: null, extra: null }, noMethod);
+  // M1 (r3): present empty objects are carried as {}, never dropped with empty omitted lists.
+  const emptyMethod = renderEvent({ id: "x", method: {} });
+  assert.deepEqual(emptyMethod.method, {}); assert.deepEqual(emptyMethod.omitted, { fields: [], method: [], params: [] });
+  assertAccounted({ id: "x", method: {} }, emptyMethod);
+  const emptyParams = renderEvent({ id: "x", method: { tool: "t", params: {} } });
+  assert.deepEqual(emptyParams.params, {}); assert.equal(emptyParams.method, undefined); assert.deepEqual(emptyParams.omitted, { fields: [], method: [], params: [] });
+  assertAccounted({ id: "x", method: { tool: "t", params: {} } }, emptyParams);
+  const nullParams = renderEvent({ id: "x", method: { tool: "t", params: null } });
+  assert.equal(nullParams.params, undefined); assert.deepEqual(nullParams.omitted, { fields: [], method: ["params"], params: [] }, "null params is named, not dropped");
+  assertAccounted({ id: "x", method: { tool: "t", params: null } }, nullParams);
+  const arrMethod = renderEvent({ id: "x", method: [] });
+  assert.deepEqual(arrMethod.omitted.fields, ["method"], "a non-object method is named");
+  const onlyAutomated = renderEvent({ id: "x", method: { automated: true } });
+  assert.equal(onlyAutomated.method, undefined); assert.deepEqual(onlyAutomated.omitted, { fields: [], method: ["automated"], params: [] });
+  assertAccounted({ id: "x", method: { automated: true } }, onlyAutomated);
 });
 
 test("extractRuleItems and citedRuleNumbers over a rules document", () => {
@@ -270,17 +294,20 @@ test("build: a tight budget drops the appendices in order and says so in the pac
   assert.ok(r.packet.includes("gh run view <id> --log"));
 });
 
-test("wrapper v2.2 self-test runs (python3 present) or is skipped", (t) => {
+test("wrapper v2.3 self-test runs (python3 present) or is skipped", (t) => {
   const py = spawnSync("python3", ["--version"], { encoding: "utf8" });
   if (py.status !== 0) { t.skip("python3 not available"); return; }
   const out = execFileSync("python3", ["-I", join(here, "nooa-review-generic.py"), "--selftest"], { encoding: "utf8" });
-  assert.match(out, /selftest: 35 cases OK/);
+  assert.match(out, /selftest: 42 cases OK/);
   const src = execFileSync("cat", [join(here, "nooa-review-generic.py")], { encoding: "utf8" });
-  assert.ok(!src.includes("routing_binding") && src.includes('"launcher_trust": LAUNCHER_TRUST'), "H1 (r2): the seal names the launcher values as trusted input");
+  assert.ok(!src.includes("routing_binding") && src.includes('"launcher_trust": LAUNCHER_TRUST'), "H1 (r2): the seal names the launcher values as given");
+  assert.ok(!/outcome event records/.test(src) && /coordinator's act outside this code/.test(src), "H1 (r3): no claim that the launch script records anything");
+  const readme = execFileSync("cat", [join(here, "README.md")], { encoding: "utf8" });
+  assert.ok(!/in its outcome event/.test(readme) && !/whose `sent` event/.test(readme) && /writes nothing to the ledger\*\*/.test(readme), "H1 (r3): the README says what push-and-launch.sh does");
   assert.ok(!/needs changes" needs\s+at least one/.test(src), "M1 (r2): the prompt no longer directs Low-only results to approval");
 });
 
-test("wrapper v2.2 refuses to start on a model that is not the pinned witness model or on a malformed launcher value (M2, H3)", (t) => {
+test("wrapper v2.3 refuses to start on a model that is not the pinned witness model or on a malformed launcher value (M2, H3)", (t) => {
   const py = spawnSync("python3", ["--version"], { encoding: "utf8" });
   if (py.status !== 0) { t.skip("python3 not available"); return; }
   const env = { PATH: process.env.PATH, HOME: "/nonexistent-home", NOOA_PR: "222", NOOA_PR_TITLE: "t", NOOA_JUDGEMENT: "j", NOOA_TAGS: "pr-222", NOOA_ROUTING_EVENT: ROUTING, NOOA_REVIEWED_HEAD: HEAD, NOOA_FILES: "docs/x.md", NOOA_ROUND: "r1", NOOA_RUBRIC: "high", NOOA_SCOPE: "s", NOOA_CLASS: "a", NOOA_SURFACE: "class (a)", NOOA_MODEL: NOOA_MODEL };

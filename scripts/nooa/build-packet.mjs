@@ -17,8 +17,8 @@
  * `reasoning_effort`, `seat`, `reviewer_actor` and `model` must each equal what this build asks for. Otherwise nothing is
  * written. The witness model is the constant NOOA_MODEL, not a flag (M2); the launcher carries the class and the review
  * surface the wrapper seals (M3). The launcher itself is a plain shell file: the host wrapper takes its values as given and
- * re-verifies none of them (PR 225 round 2, H1); what the coordinator's push-and-launch outcome event records (packet hash,
- * launcher hash, pid) is the record of what was launched.
+ * re-verifies none of them (PR 225 round 2, H1). The launch is `push-and-launch.sh`, which prints hashes and a pid and writes
+ * nothing to the ledger; any record of what was launched is the coordinator's own act, not this code's (round 3, H1).
  *
  *   node scripts/nooa/build-packet.mjs --pr 220 --head <40 hex> --routing evt_… --round r4 --rubric high --class a \
  *     --rules-file rules.md [--base <sha>] [--prev-head <sha>] [--context-file notes.md] [--instruction evt_…] \
@@ -28,8 +28,9 @@
  * file of the PR and marks which ones the packet carries, so the witness knows what it did not see).
  *
  * Writes nooa-pr<N>-packet-<round>.md and launch-pr<N>-<round>.sh into --out (default: cwd) and prints their sha256
- * and sizes plus anything omitted for size. It does not push or launch: that stays `push-and-launch.sh`, whose `sent`
- * event records the hashes the host echoes back (agent-ops 18). Reads the Worker with RETRACE_URL / RETRACE_TOKEN from
+ * and sizes plus anything omitted for size. It does not push or launch: that stays `push-and-launch.sh`, which prints the
+ * local hashes and the ones the host echoes back and writes nothing to the ledger; the coordinator's own `sent` event, logged
+ * before the push, carries the local hashes it computed (agent-ops 18). Reads the Worker with RETRACE_URL / RETRACE_TOKEN from
  * the environment, in-process, never on a command line. Nothing is written to the ledger.
  */
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
@@ -163,19 +164,23 @@ export function renderEvent(raw) {
     else if (k === "change") out.change = clipStrings(v, 300);
     else out[k] = v;
   }
-  const method = raw.method && typeof raw.method === "object" ? raw.method : undefined;
-  const p = method?.params && typeof method.params === "object" ? method.params : undefined;
+  const isObj = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+  const method = isObj(raw.method) ? raw.method : undefined;
+  const p = method && isObj(method.params) ? method.params : undefined;
   out.sealed_by = p && "sealed_by" in p ? p.sealed_by : "(absent)";
   out.producer_sig_verdict = p && "producer_sig_verdict" in p ? p.producer_sig_verdict : "(absent)";
   if (method && "tool" in method) out.method_tool = method.tool;
+  // A present but empty object is carried as `{}`, never dropped (Codex, PR 225 r3, M1); `null` or a non-object is named under `omitted`.
+  if (method && Object.keys(method).length === 0) out.method = {};
   if (p) {
     const params = {};
     for (const k of Object.keys(p)) if (!(k in PARAM_KEY_OUT) && PARAM_KEYS_CARRIED.includes(k)) params[k] = typeof p[k] === "string" ? clip(p[k], 300) : p[k];
-    if (Object.keys(params).length) out.params = params;
+    if (Object.keys(params).length || Object.keys(p).length === 0) out.params = params;
   }
-  // Omission, computed from what was emitted: a raw key is carried only if its rendered property exists in `out`.
+  // Omission, computed from what was emitted: a raw key is carried only if its rendered property exists in `out`, or (for
+  // `method`) every one of its keys is itself rendered or named below.
   const topCarried = (k) => (k === "method" ? Boolean(method) : (TOP_KEY_OUT[k] ?? k) in out);
-  const methodCarried = (k) => (k === "tool" ? "method_tool" in out : k === "params" ? Boolean(p) : false);
+  const methodCarried = (k) => (k === "tool" ? "method_tool" in out : k === "params" ? "params" in out : false);
   const paramCarried = (k) => (k in PARAM_KEY_OUT ? PARAM_KEY_OUT[k] in out : Boolean(out.params) && k in out.params);
   out.omitted = {
     fields: Object.keys(raw).filter((k) => !topCarried(k)).sort(),
@@ -283,7 +288,7 @@ The **last three lines of the whole review** are bare text starting at column ze
 not indented, no heading, no bold, no list marker, no blockquote, no code fence, no closing remark. They are derived from
 your findings, never declared: the counts are the findings you listed; \`BLOCKING: yes\` exactly when high + medium > 0,
 otherwise \`BLOCKING: no\`. The VERDICT line is \`approved\` or \`needs changes\`, alone or followed by one of the delimiters
-— – : - and one line. \`approved\` cannot carry a Medium or High. \`needs changes\` is sealed as the action \`rejected\`; with
+— – : - and at least one word (a bare delimiter is refused). \`approved\` cannot carry a Medium or High. \`needs changes\` is sealed as the action \`rejected\`; with
 only Lows it is allowed and reads \`BLOCKING: no\` (a non-blocking rejection; only a Medium or High blocks a merge). There is
 no REASON line and no override. Write FINDINGS, BLOCKING and VERDICT at the start of exactly one line each in the whole
 review and never quote them in a fence, a blockquote, a list or a heading: the seal reads the one block at the very end,
@@ -331,7 +336,7 @@ function assemble(s) {
 export function renderLauncher(o) {
   const q = (v) => `'${String(v).replace(/'/g, `'\\''`)}'`;
   return `#!/usr/bin/env bash
-# NOOA witness review (${o.round}) of PR ${o.pr} at ${o.head} — generated by scripts/nooa/build-packet.mjs from routing event ${o.routing} (read raw by the builder, which refused to build unless that event authorized this build). This file is plain shell: the wrapper takes its values as given and re-verifies none of them; the push-and-launch outcome event records this file's hash. Runs as user nooa. Prints nothing secret.
+# NOOA witness review (${o.round}) of PR ${o.pr} at ${o.head} — generated by scripts/nooa/build-packet.mjs from routing event ${o.routing} (read raw by the builder, which refused to build unless that event authorized this build). This file is plain shell: the wrapper takes its values as given and re-verifies none of them; push-and-launch.sh prints this file's hash and writes nothing to the ledger. Runs as user nooa. Prints nothing secret.
 set -u
 cd /home/nooa/nooa-retrace
 set -a; . ./.env; set +a
