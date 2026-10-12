@@ -1,13 +1,15 @@
-# The webhook as witness, not second author — one authoritative record per commit (design note v1.3)
+# The webhook as witness, not second author — one authoritative record per commit (design note v1.4)
 
-**Status:** v1.3, 2026-10-12, by claude-code (the "system optimization" pane; v1 to v1.2 written as `claude-mythos-5-1`,
-v1.3 as `claude-opus-5-5`, model source harness-runtime). v1.1 was the fix round for Codex's round-1 verdict
+**Status:** v1.4, 2026-10-12, by claude-code (the "system optimization" pane; v1 to v1.2 written as `claude-mythos-5-1`,
+v1.3 and v1.4 as `claude-opus-5-5`, model source harness-runtime). v1.1 was the fix round for Codex's round-1 verdict
 `evt_ba3081460461418b8cb2c5d6389bcc51` (3 High, 3 Medium, 1 Low at `9878437e`), on the coordinator's verified pointer
 `evt_b624313f…`; its changes and the two claims withdrawn are listed in §13. v1.2 was the fix round for Codex's round-2
 verdict `evt_8c06b938a8314099b37912fb372db6f4` (1 High, 2 Medium at `6ccfc718`), on the coordinator's verified pointer
-`evt_149ae739…`; its changes are listed in §14. **v1.3 is the fix round for Codex's round-3 verdict
+`evt_149ae739…`; its changes are listed in §14. v1.3 was the fix round for Codex's round-3 verdict
 `evt_ac00d53daea44e32b479b4bbe769807d` (1 High, 2 Medium at `7b5907c0`), on the coordinator's verified pointer
-`evt_47561202…`; its changes, and the v1.2 statements it withdraws, are listed in §15.** **It proposes no code in this PR**: a design note, class **(a)** under agent-rules 12,
+`evt_47561202…`; its changes are listed in §15. **v1.4 is the fix round for Codex's round-4 verdict
+`evt_9bf13c678bc645fe992d3892ce7ecc8e` (1 Medium, 1 Low at `5c6911c3`), on the coordinator's verified pointer
+`evt_82b3e328…`; it removes two guesses about GitHub's behaviour, listed in §16.** **It proposes no code in this PR**: a design note, class **(a)** under agent-rules 12,
 for the design gate. Written on Jordan's signed go `evt_c83cad7552a149a5940b27a0bcc84b0b` ("Let's go on your top 3 items starting
 with 1", received `evt_85ad930c…`), item 3 of `~/.retrace/ops-2026-10-11/system-optimization/OPTIMIZATION-PLAN.md` (sha256
 `499d1ee9…3527`, created `evt_71b02714…`). Items 1 and 2 are PRs 222 and 225. The measurements it rests on are
@@ -124,7 +126,7 @@ the witness may name only when every one of these holds; otherwise the push take
     eligibility: { stamp: "<the pinned stamp matched>", producer_sig: "verified", shape: "git", project: "<project>" },
     observed: {                                     // GitHub's side, recomputable from the payload and the hydrated commit
       message_sha256, message_bytes,                // digest of the exact message bytes GitHub delivered (frames below)
-      file_set_sha256, file_set_count, files_complete, file_set_reason?,  // the canonical file set (below); complete only when proven
+      file_set_sha256, file_set_nfc_sha256, file_set_count, files_complete, file_set_reason?,  // the canonical set (below)
       parents, parents_complete,                    // parent shas in git order, only from a hydrated commit; else [] and false
       author: { name, email, complete, source },    // email exactly as delivered, or null; never a github: substitute (r3 M2)
       author_login,                                 // the GitHub username: identity metadata, labelled, never compared
@@ -133,7 +135,8 @@ the witness may name only when every one of these holds; otherwise the push take
       hydration: { status: "ok" | "not_attempted" | "failed" | "deadline" | "truncated", pages, files_accumulated, http_status }
     },
     sealed: {                                       // the seal's side, the same frames over the seal's commitment and fields
-      message_sha256, file_set_sha256, file_set_count, files_complete, parents, author: { name, email }, trailer_actor
+      message_sha256, file_set_sha256, file_set_nfc_sha256, file_set_count, files_complete, parents, author: { name, email },
+      trailer_actor
     },
     comparison: {                                   // field by field; unknown = one side incomplete or absent
       message: "match" | "differ",
@@ -176,18 +179,31 @@ the witness may name only when every one of these holds; otherwise the push take
   without `-z` git quotes unusual paths, which is why the hook's present `git show --numstat` extraction is not the
   comparison source. `T` (a type change) maps to `M`. **Commit API side:** `files[].status` `added` → `A filename`,
   `removed` → `D filename`, `modified` → `M filename`, `renamed` → `D previous_filename` and `A filename`, `copied` → `A
-  filename`, and `changed`, whose meaning GitHub does not document, → `M filename`, to be confirmed by the end-to-end
-  fixture's mode-change commit before merge; `unchanged`, a `renamed` record without `previous_filename`, or any other
-  status makes the file comparison `unknown` (`file_set_reason: unmapped_status`) rather than a guess. For a merge commit
+  filename`. GitHub's documentation lists the status values without defining them; these five are taken at their names, and
+  test 1b checks each against the local tree diff on recorded responses. **Every other value, `changed` and `unchanged`
+  included, makes that file, and so the file comparison, `unknown`** (`file_set_reason: unmapped_status:<value>`), never
+  `match` and never `differ`, until a recorded response exercises the value and the local tree diff shows which of `A`,
+  `D` or `M` it means; a `renamed` record without `previous_filename` is `unknown` the same way. Of the two options the
+  round-4 brief offered, this is the first; deriving every kind from the two trees through GitHub's Git Data API was not
+  chosen, because it adds a second provider surface with its own truncation flag. (v1.3 mapped `changed` to `M` ahead of
+  that evidence; withdrawn.) For a merge commit
   the Commit API lists the first-parent diff: measured on merge `af13caf1`, whose one listed file equals git's
   first-parent diff while the second-parent diff has two, so both sides use the first parent. **Persistence:** the hook
-  seal commits to the set, `method.params.file_set: { encoding: "retrace-witness-files/2", sha256, count, complete,
-  reason? }`, and does not store the list: the set is a pure function of the commit and its first parent, both fixed by
+  seal commits to the set, `method.params.file_set: { encoding: "retrace-witness-files/2", sha256, nfc_sha256, count,
+  complete, reason? }`, and does not store the list: the set is a pure function of the commit and its first parent, both fixed by
   the sha, so any reader reconstructs the seal's list with the command above. The witness stores GitHub's side the same
   way and, on `conflict`, GitHub's list verbatim as `(kind, path)` elements. A path that is not valid UTF-8 cannot be
   compared with the API's JSON strings, so the hook marks `complete: false`, `reason: non_utf8_path`, and the comparison
-  is `unknown`. The hook's existing `repo:…#path` file artifacts, built from `git show --numstat` without `-z`, stay as
-  they are and are not the comparison source; aligning them is a separate change.
+  is `unknown`. **Unicode normalisation, the one observable** (Codex r4 M1). Paths are compared as raw bytes, so a
+  producer that normalised Unicode (the NFC and NFD forms of one name) would otherwise read as a conflict. The hook seal
+  therefore also commits to an NFC digest of the same set (`file_set.nfc_sha256`, frame below), and the witness computes
+  both digests over GitHub's list. Raw digests equal: the file comparison is `match`. Raw digests different and NFC
+  digests equal: the sides differ only by Unicode normalisation, and which producer normalised cannot be told from the
+  digests, so the file comparison is `unknown` (`file_set_reason: unicode_normalisation`), never `conflict`. NFC digests
+  also different: the comparison is `differ` and the verdict `conflict`. (v1.3 said NFD paths would become `unknown` if
+  GitHub normalises them, while its rule would have produced `conflict`; replaced by this rule.) The hook's existing
+  `repo:…#path` file artifacts, built from `git show --numstat` without `-z`, stay as they are and are not the comparison
+  source; aligning them is a separate change.
 - **Digest encoding, one for both sides** (Codex r2 M1, r3 M1). Every digest is sha256 over a domain-separated,
   length-prefixed byte string, so that no legal path or message can collide with another by framing:
   `message_sha256 = sha256("retrace-witness-message/1" ‖ 0x00 ‖ len32be(m) ‖ m)` where `m` is the exact UTF-8 bytes of
@@ -195,8 +211,11 @@ the witness may name only when every one of these holds; otherwise the push take
   byte-wise ascending order of its path: kind ‖ len32be(p) ‖ p)`, where `kind` is the one byte `A`, `D` or `M` and paths
   are unique within a set; `parents_sha256` with domain `retrace-witness-parents/1` over the 40-byte lowercase hex shas
   **in git order** (parents are ordered; the list is not sorted). `len32be` and `count32be` are unsigned 32-bit
-  big-endian. No normalisation is applied: bytes are hashed as the producer gives them, Unicode NFC and NFD forms of a
-  name are different paths and digest differently, and an empty set digests the frame with `count32be = 0`. The v1.2
+  big-endian. No normalisation is applied in `file_set_sha256`: bytes are hashed as the producer gives them, Unicode NFC
+  and NFD forms of a name are different paths and digest differently, and an empty set digests the frame with
+  `count32be = 0`. `file_set_nfc_sha256` is the same frame with domain `retrace-witness-files-nfc/1` over `(kind,
+  NFC(path))`, the elements in byte-wise ascending order of the normalised path and then of the kind, duplicates kept
+  (two raw paths can normalise to one); it is used only to tell a normalisation difference from a real one. The v1.2
   `files/1` frame, over whatever path list each side happened to hold, is withdrawn.
 - **The author, with its own completeness** (Codex r3 M2). GitHub's published push schema makes
   `commits[].author.email` a `string | null` with an optional `username`, and the push mapper today substitutes
@@ -323,7 +342,7 @@ other.
 - `commit witness` finding on `--gate`: FAIL when the HEAD sha's witness says `conflict`; **PASS only when it says
   `matches`, which by §3 means every compared field is `match`**; WARN, never PASS, when it says `incomplete` (a field was
   `unknown` on one side: no hydration, a file listing at the 3,000-file cap, an unmapped file status, a non-UTF-8 path,
-  an author without an exact email), naming the fields, `observed.hydration.status` and `file_set_reason`, with D6
+  a path difference that NFC erases, an author without an exact email), naming the fields, `observed.hydration.status` and `file_set_reason`, with D6
   deciding whether that becomes FAIL; PASS also when the only record is a fallback capture (the hook was absent or
   ineligible; today's "HEAD delivery" finding already names that, and `fallback_reason` says why). Until hydration exists
   every witness is `incomplete` and this finding warns on every gated HEAD; that noise is the measurement that hydration is
@@ -370,14 +389,21 @@ other.
    the webhook; `status.commits` unchanged, `commit_records` +0, `witnesses.matches` +1. The same push **without
    hydration** → the witness with `files`/`parents` `unknown`, `verdict: incomplete`, `witnesses.incomplete` +1, never
    `matches`.
-1b. **One canonical file set, end to end** (r2 M1, r3 M1): a fixture repository built by the test, with commits whose paths
-   contain a tab, a newline, a double quote, a backslash, a non-ASCII name in NFC and the same name in NFD, and commits
-   that make a pure rename, a rename with edits, a copy, a deletion, a mode change, a type change, a root commit and a
-   merge. For every commit the hook extraction (`git diff-tree -z …`, §3) and the Commit API mapping produce the same
-   `(kind, path)` set and the same `file_set_sha256`. The API side runs on recorded Commit API responses for the same
-   commits, captured once from a scratch GitHub repository the fixture commits were pushed to and checked in with the
-   capture date (CI cannot reach GitHub). A path that is not valid UTF-8 makes the hook side `complete: false`, `reason:
-   non_utf8_path`. The frame-level checks of v1.2 (delimiter characters, the empty set) stay as unit cases.
+1b. **One canonical file set, end to end** (r2 M1, r3 M1, r4 M1): a fixture repository built by the test, with commits
+   whose paths contain a tab, a newline, a double quote, a backslash, a non-ASCII name in NFC and the same name in NFD,
+   and commits that make a pure rename, a rename with edits, a copy, a deletion, a mode change, a type change, a root
+   commit and a merge. For every commit the hook extraction (`git diff-tree -z …`, §3) and the Commit API mapping produce
+   the same `(kind, path)` set and the same `file_set_sha256`. The API side runs on recorded Commit API responses for the
+   same commits, captured once from a scratch GitHub repository the fixture commits were pushed to and checked in with
+   the capture date (CI cannot reach GitHub). A path that is not valid UTF-8 makes the hook side `complete: false`,
+   `reason: non_utf8_path`. **Branch fixtures, each asserting the reason string so a branch that never ran fails the
+   test:** (i) a synthetic response that carries `changed` for one file → `comparison.files: unknown`, `file_set_reason:
+   unmapped_status:changed`; (ii) an NFD path on the hook side and the same name in NFC in a synthetic response → raw
+   digests differ, NFC digests equal, `comparison.files: unknown`, `file_set_reason: unicode_normalisation`; (iii) a
+   synthetic response whose path differs in a way NFC does not erase → `comparison.files: differ`, `verdict: conflict`.
+   If a recorded response carries `changed`, or GitHub's `filename` comes back in NFC for the NFD fixture, the recorded
+   case must reach the same `unknown` and its reason, and the test asserts that too. The frame-level checks of v1.2
+   (delimiter characters, the empty set) stay as unit cases.
 1c. **Provider-faithful completeness** (r2 H1, r3 H1): (a) a push commit with empty `added/modified/removed` arrays for a
    commit that changed files, and a push commit with no `parents` field (the published shape) → `files_complete: false`,
    `parents_complete: false`, both comparisons `unknown`, `verdict: incomplete`; (b) hydration whose last page is short
@@ -470,16 +496,16 @@ root states, the class table, the two unlinked counts 180 and 164 (records, and 
 `8c4933eb`; pages at `per_page=10` end with a short page and no `next` link; the merge commit `af13caf1` lists its
 first-parent diff; `git diff-tree -z --name-status` emits NUL-delimited raw paths. **Estimated** (§3, §7): witness bytes
 per record and per commit. **Specified but unbuilt:** the witness record; the canonical file set and the hook's
-`file_set` commitment; the digest frames; Commit API hydration with its credential, pagination, cap and deadline rules;
+`file_set` commitment with its NFC digest; the digest frames; Commit API hydration with its credential, pagination, cap and deadline rules;
 the author's completeness state; `derived_cause` with its `root_state`. **Deferred:** A3 (merge classification from the
 push mapper) until hydration exists, because the push payload carries no parents; the third unlinked count
 (`unlinked_commits`, §5), to be measured before merge; the latency of the indexed read and of hydration (§9 test 8);
 confirmation that the Worker resolves the trusted hook-stamp set from the stored policy at delivery the way `router.ts`
 already does for producer verification (`trusted_hook_stamps`), and if a project's policy pins no stamp, A1 degrades to
 today's behaviour for that project and says so in `fallback_reason`; the recorded Commit API responses for test 1b,
-captured once from a scratch GitHub repository; and two provider facts that capture settles before merge, what the
-`changed` status means and whether GitHub's `filename` preserves NFD bytes (if it normalises, NFD paths become a stated
-`unknown`). **Not claimed:** that the push payload proves any file list, parent set or author email complete; that a
+captured once from a scratch GitHub repository; and two provider facts those responses will show, what the `changed`
+status means and whether GitHub's `filename` preserves NFD bytes. Until then `changed` is `unknown`, and a path difference
+that NFC erases is `unknown` by the rule in §3, so neither fact can produce a `match` or a `conflict`. **Not claimed:** that the push payload proves any file list, parent set or author email complete; that a
 Commit API listing of 3,000 files is complete; that any response field counts files. The design says `unknown` wherever
 that is so. The class counts are the coverage audit's (Grok's CSV, verified by Codex's independent derivation to the same
 totals; Codex's set diff was pending at 20:48Z).
@@ -523,3 +549,13 @@ One deferral (A3), one relabelling (`root` → `seal_caused_by`), one admission 
 
 Withdrawn rather than reworded: the v1.2 Commit API rule (300 per page, `stats.total`, a short page as the signal) and the
 `files/1` frame. Added: one commitment on the hook seal (`file_set`) and the build step for it.
+
+## 16. Fix round 4 (Codex `evt_9bf13c67…`, applied in v1.4)
+
+| finding | change | where |
+|---|---|---|
+| M1 the canonical API mapping guessed provider semantics the note deferred: the undocumented `changed` mapped to `M`; NFD paths were said to become `unknown` while the rule would give `conflict`; the fixtures need not exercise either branch | **Two guesses removed, no new comparison rule beyond the observable the brief named.** `changed`, `unchanged` and any status outside the five mapped values make the file comparison `unknown` (`unmapped_status:<value>`), never `match` or `differ`, until a recorded response and the local tree diff show the meaning (option one of the brief; deriving kinds from the trees was not chosen). The normalisation observable is stated: raw digests different and NFC digests equal give `unknown` (`unicode_normalisation`), NFC digests different give `conflict`; the hook seal commits to `nfc_sha256` so the Worker can evaluate it. Test 1b's branch fixtures assert the reason string, so a branch that never ran fails. **Withdrawn:** "`changed` → `M`", and "NFD paths become a stated `unknown`" as written in v1.3 | §3 shape, canonical-set and digest bullets, §6, §9 test 1b, §12 |
+| L1 the PR body's Record attributed the round-3 fix to `claude-mythos-5-1` | corrected in the PR body, which now scopes the author's model by round; this note's status line already did | PR body |
+
+Withdrawn rather than reworded: the `changed` mapping and the v1.3 sentence about NFD paths. Added: `nfc_sha256` on the hook
+seal's `file_set` commitment, the one field the stated observable needs.
