@@ -53,7 +53,7 @@ function parseCommitRef(id: string): { repo: string; sha: string } | undefined {
   return { repo, sha };
 }
 
-/** Distinct commit shas named by seal records, counted per repo. A count of claimed shas — records are claims; it roots nothing and links nothing. A 7- or 12-character id groups with the single longer id of the same repository that it prefixes; a prefix of two or more longer ids stays its own group. A ref the parser rejects is not counted. The same sha in two repositories counts once per repository. */
+/** Distinct commit shas named by seal records, counted per repo. A count of claimed shas — records are claims; it roots nothing and links nothing. A sha is maximal when no other sha of the same repository extends it. Each maximal sha is one group. A shorter id joins the single maximal sha it prefixes; if it prefixes two or more maximal shas it stays its own group. A ref the parser rejects is not counted. The same sha in two repositories counts once per repository. */
 function commitShaCount(events: Event[]): number {
   const byRepo = new Map<string, Set<string>>();
   for (const event of events) {
@@ -67,11 +67,13 @@ function commitShaCount(events: Event[]): number {
   }
   let count = 0;
   for (const shas of byRepo.values()) {
-    const groups = new Set<string>();
-    for (const sha of shas) {
-      const longer = [...shas].filter((other) => other.length > sha.length && other.startsWith(sha));
-      if (longer.length === 1) continue;
-      groups.add(sha);
+    const list = [...shas];
+    const maximal = list.filter((sha) => !list.some((other) => other.length > sha.length && other.startsWith(sha)));
+    const groups = new Set(maximal);
+    for (const sha of list) {
+      if (maximal.includes(sha)) continue;
+      const matches = maximal.filter((other) => other.startsWith(sha));
+      if (matches.length !== 1) groups.add(sha);
     }
     count += groups.size;
   }
@@ -105,7 +107,7 @@ export type ProjectStatus = {
     instructions_without_followup: number;
     /** Seal records: one per `committed` or `merged` event, not distinct commits. */
     commits: number;
-    /** A count of claimed shas — records are claims; it roots nothing and links nothing. Only `commit:<repo>@<sha>` with a non-empty repository and a 7-, 12-, or 40-character hexadecimal sha counts; the sha is lower-cased and the repository string is taken as written. A 7- or 12-character id groups with the single longer id of that repository that it prefixes; a prefix of two or more longer ids stays its own group. Anything the parser rejects is not a sha. */
+    /** A count of claimed shas — records are claims; it roots nothing and links nothing. Only `commit:<repo>@<sha>` with a non-empty repository and a 7-, 12-, or 40-character hexadecimal sha counts; the sha is lower-cased and the repository string is taken as written. A sha is maximal when no other sha of that repository extends it, and each maximal sha is one group. A shorter id joins the single maximal sha it prefixes; if it prefixes two or more maximal shas it stays its own group. Anything the parser rejects is not a sha. */
     commit_shas: number;
     /** commit seals that are neither rooted nor attested (true count; sibling corroboration does not reduce it) */
     unlinked_commits: number;

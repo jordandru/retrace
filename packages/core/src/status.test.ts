@@ -405,3 +405,27 @@ test("commit_shas ignores a malformed ref and folds case, length, and two refs o
   assert.equal(s.capture.unlinked_commits, 6);
   assert.equal(s.capture.commit_shas, 3);
 });
+
+test("a 7-12-40 chain of one commit is one group", async () => {
+  const store = new MemStore();
+  const full = "f".repeat(40);
+  for (const sha of [full.slice(0, 7), full.slice(0, 12), full]) {
+    await appendEvent(store, { project: "p", actor: { type: "human", id: "jordan@example.com" }, action: "committed", artifacts: [{ id: `commit:acme/app@${sha}`, role: "generated" }] });
+  }
+  const s = await buildProjectStatus(store, "p");
+  assert.equal(s.capture.commits, 3);
+  assert.equal(s.capture.commit_shas, 1);
+});
+
+test("a 7-character id that prefixes two different 40s stays its own group", async () => {
+  const store = new MemStore();
+  const prefix = "a".repeat(7);
+  const fullA = prefix + "b".repeat(33);
+  const fullB = prefix + "c".repeat(33);
+  for (const sha of [prefix, fullA, fullB]) {
+    await appendEvent(store, { project: "p", actor: { type: "human", id: "jordan@example.com" }, action: "committed", artifacts: [{ id: `commit:acme/app@${sha}`, role: "generated" }] });
+  }
+  const s = await buildProjectStatus(store, "p");
+  assert.equal(s.capture.commits, 3);
+  assert.equal(s.capture.commit_shas, 3);
+});
