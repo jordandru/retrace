@@ -46,6 +46,17 @@ export function compareInstants(a: string, b: string): number {
 export function instantKey(s: string): string {
   return instantFromText(s) ?? s;
 }
+/** The order of two timestamps as the instants they name under the schema grammar (`instantFromText`): negative when `a`
+ *  is earlier, 0 for the same instant, positive when `a` is later, and `undefined` when either text is outside the
+ *  grammar. Unlike `compareInstants` there is no byte fallback: a caller that decides something from the order says what
+ *  an unparseable timestamp means (issue #227: `causedByProblem` fails closed to `not_older`). The grammar parse, not
+ *  `Date.parse`, because issue #131 found `Date.parse` reads zone-less text as local time; within the timestamp grammar
+ *  the schema enforces at append the two name the same instant. */
+export function instantOrder(a: string, b: string): number | undefined {
+  const ka = instantFromText(a), kb = instantFromText(b);
+  if (ka === undefined || kb === undefined) return undefined;
+  return ka === kb ? 0 : ka < kb ? -1 : 1;
+}
 /** A `since`/`until` cursor outside the accepted grammar (issue #131). The Worker answers 400, the MCP tool reports it,
  *  and every store refuses it before reading a row. */
 export class InvalidHistoryCursorError extends Error {
@@ -945,7 +956,9 @@ export function sealedByKind(v: unknown): "owner" | "pinned" | "assert" | "webho
 }
 export type CausedByProblem = "missing" | "wrong_project" | "not_older";
 
-/** Classify a claimed parent. `not_older` is timestamp (Drive Activity can predate the current instruct). */
+/** Classify a claimed parent. `not_older` is timestamp (Drive Activity can predate the current instruct), compared as
+ *  instants (issue #227): a push-webhook record keeps its committer's offset (`09:47:47-06:00`), which a string compare
+ *  put after a `Z` parent sealed a minute earlier. A timestamp outside the grammar fails closed to `not_older`. */
 export function causedByProblem(
   parent: Event | null | undefined,
   input: Pick<EventInput, "caused_by" | "project" | "timestamp">,
@@ -953,7 +966,10 @@ export function causedByProblem(
   if (!input.caused_by) return undefined;
   if (!parent) return "missing";
   if (parent.project !== input.project) return "wrong_project";
-  if (input.timestamp && parent.timestamp > input.timestamp) return "not_older";
+  if (input.timestamp) {
+    const order = instantOrder(parent.timestamp, input.timestamp);
+    if (order === undefined || order > 0) return "not_older";
+  }
   return undefined;
 }
 

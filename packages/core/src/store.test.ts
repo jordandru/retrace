@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {
   adapterIdempotencyError, AdapterIdempotencyError, CAUSED_BY_UNVERIFIED_TAG, appendEvent,
   EventInput, Event, EventStore, Share, likeContains, clampHistoryLimit, HISTORY_LIMIT_MAX,
-  pageHistoryNewest, collectHistory, asHistoryPage, explainEvent, compareInstants, instantKey, TIMESTAMP_INSTANT_SQL, assertHistoryCursors, InvalidHistoryCursorError, TIMESTAMP_MAX_FRACTION_DIGITS, timestampFractionDigits, instantFromText, TIMESTAMP_RE, LIKE_PATTERN_NEEDLE_MAX_BYTES, asciiLower,
+  pageHistoryNewest, collectHistory, asHistoryPage, explainEvent, compareInstants, instantKey, instantOrder, causedByProblem, TIMESTAMP_INSTANT_SQL, assertHistoryCursors, InvalidHistoryCursorError, TIMESTAMP_MAX_FRACTION_DIGITS, timestampFractionDigits, instantFromText, TIMESTAMP_RE, LIKE_PATTERN_NEEDLE_MAX_BYTES, asciiLower,
   artifactIndexRows, eventsReferencingArtifactKeys, artifactKeyMatchSql, BACKFILL_ARTIFACT_INDEX_SQL, eventsReferencingArtifactsSql, eventsReferencingArtifactsStatements, prefixRangeUpperBound, ARTIFACT_INDEX_MAX_TERMS, D1_MAX_BOUND_PARAMS, D1_MAX_COMPOUND_SELECT_TERMS,
   ARTIFACT_INDEX_DEFAULT_ROW_CAP, D1_LIKE_GLOB_PATTERN_MAX_BYTES, ALIAS_KEY_RANGE_LO, runArtifactIndexStatements,
   InvalidArtifactIdError,
@@ -149,6 +149,33 @@ test("appendEvent: caused_by is optional; dangling/cross-project/newer is sealed
 
   const none = await appendEvent(store, ev({}));
   assert.equal(none.event.caused_by, undefined);
+});
+
+test("#227 causedByProblem compares instants: an offset record whose Z parent is older is not flagged; a newer parent or an unparseable timestamp is", async () => {
+  const parent = (timestamp: string) => ({ id: "evt_p", seq: 1, project: "p", actor: { type: "agent", id: "a" }, action: "edited", artifacts: [{ id: "x" }], timestamp, received_at: timestamp, prev_hash: "", hash: "h1", hash_v: 2 } as Event);
+  const input = (timestamp?: string) => ({ caused_by: "evt_p", project: "p", ...(timestamp ? { timestamp } : {}) });
+  // The issue's example: the PR 220 merge's push record evt_a4a4da7f at 09:47:47-06:00 (15:47:47Z), its cause sealed at 15:46:43.689Z.
+  assert.ok("2026-10-12T15:46:43.689Z" > "2026-10-12T09:47:47-06:00", "the string order the old compare used is backwards here");
+  assert.equal(causedByProblem(parent("2026-10-12T15:46:43.689Z"), input("2026-10-12T09:47:47-06:00")), undefined, "a minute older as an instant: no problem");
+  assert.equal(causedByProblem(parent("2026-10-12T15:47:47.000Z"), input("2026-10-12T09:47:47-06:00")), undefined, "the same instant is not newer");
+  assert.equal(causedByProblem(parent("2026-10-12T15:48:00.000Z"), input("2026-10-12T09:47:47-06:00")), "not_older", "a genuinely newer parent");
+  assert.equal(causedByProblem(parent("2026-10-12T09:48:00-06:00"), input("2026-10-12T15:47:47.000Z")), "not_older", "a newer parent stamped with an offset");
+  assert.equal(causedByProblem(parent("not-a-time"), input("2026-10-12T15:47:47.000Z")), "not_older", "an unparseable parent timestamp fails closed");
+  assert.equal(causedByProblem(parent("2026-10-12T15:46:43.689Z"), input("not-a-time")), "not_older", "an unparseable record timestamp fails closed");
+  assert.equal(causedByProblem(parent("2026-10-12T15:46:43.689Z"), input()), undefined, "no timestamp on the input: not checked, as before");
+  assert.equal(instantOrder("2026-10-12T09:47:47-06:00", "2026-10-12T15:47:47.000Z"), 0);
+  assert.equal(instantOrder("2026-10-12T09:47:48-06:00", "2026-10-12T15:47:47.000Z"), 1);
+  assert.equal(instantOrder("2026-10-12T15:47:46.999Z", "2026-10-12T09:47:47-06:00"), -1);
+  assert.equal(instantOrder("not-a-time", "2026-10-12T15:47:47.000Z"), undefined, "no byte fallback");
+  // Through appendEvent: the offset record is sealed without the unverified tag; a genuinely newer parent still flags it.
+  const store = new MemStore();
+  const root = (await appendEvent(store, ev({ action: "instructed", actor: { type: "human", id: "j@x" }, artifacts: [{ id: "task:1" }], timestamp: "2026-10-12T15:46:43.689Z" }))).event;
+  const push = (await appendEvent(store, ev({ caused_by: root.id, timestamp: "2026-10-12T09:47:47-06:00" }))).event;
+  assert.ok(!push.tags?.includes(CAUSED_BY_UNVERIFIED_TAG));
+  assert.equal(push.method?.params?.caused_by_problem, undefined);
+  const early = (await appendEvent(store, ev({ caused_by: root.id, timestamp: "2026-10-12T09:46:00-06:00" }))).event;
+  assert.ok(early.tags?.includes(CAUSED_BY_UNVERIFIED_TAG));
+  assert.equal(early.method?.params?.caused_by_problem, "not_older");
 });
 
 test("explainEvent never follows an unverified caused_by link into another project", async () => {
