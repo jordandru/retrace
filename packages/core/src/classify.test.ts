@@ -215,6 +215,29 @@ test("caused-by source follows the message, and a different claimed id is a conf
     assert.notEqual(unstamped.record.caused_by.root?.id, parent.id);
   }
 
+  const legacy = commitInput({ caused_by: parent.id });
+  const legacyParams = { ...(legacy.method?.params ?? {}) };
+  delete legacyParams.raw_message;
+  legacy.method = { ...legacy.method, params: legacyParams };
+  const legacyResult = await classify(store, legacy);
+  assert.equal(legacyResult.kind, "decision");
+  if (legacyResult.kind === "decision") {
+    assert.equal(legacyResult.record.caused_by.source, "unstamped");
+    assert.equal(legacyResult.record.caused_by.id, parent.id);
+    assert.equal(legacyResult.record.caused_by.root?.id, parent.id);
+  }
+
+  for (const stamp of ["trailer", "body"] as const) {
+    const stamped = commitInput({ raw: bare, caused_by: other.id });
+    stamped.method = { ...stamped.method, params: { ...stamped.method?.params, caused_by_source: stamp } };
+    const stampedResult = await classify(store, stamped);
+    assert.equal(stampedResult.kind, "decision");
+    if (stampedResult.kind === "decision") {
+      assert.equal(stampedResult.record.caused_by.source, stamp);
+      assert.equal(stampedResult.record.caused_by.root?.id, other.id);
+    }
+  }
+
   const messageId = "evt_" + "a".repeat(32);
   const conflictRaw = `work\n\nRetrace-Actor: codex\nRetrace-Caused-By: ${messageId}\n`;
   const conflict = await classify(store, commitInput({ raw: conflictRaw, caused_by: parent.id }));

@@ -105,7 +105,7 @@ export interface ClaimRecord {
 
 export interface CausedByRecord {
   id?: string;
-  source: "trailer" | "env" | "file" | "body" | "none" | "conflict";
+  source: "trailer" | "env" | "file" | "body" | "unstamped" | "none" | "conflict";
   /** The other valid id when `raw_message` and `caused_by` disagree. `id` stays the message id. */
   claimed_id?: string;
   root?: { id: string; action: string; actor: { type: string; id: string } };
@@ -275,19 +275,24 @@ function lowerCausedById(value: string | undefined): string | undefined {
   return validCausedById(value)?.toLowerCase();
 }
 
-/** Source is the shared parse plus an explicit env/file/body stamp. The legacy first trailer is not a source. */
+/**
+ * Source is the shared parse, else an explicit producer stamp. A valid caused_by with no
+ * raw_message and no stamp is "unstamped": the producer asserted the link and this record
+ * says so. A raw_message that carries no id, with no stamp, is "none".
+ */
 export function causedBySourceOf(input: EventInput, _trailers: Record<string, string[]>): CausedByRecord["source"] {
   const params = (input.method?.params ?? {}) as Record<string, unknown>;
   if (typeof params.caused_by_rejected === "string" && params.caused_by_rejected.length > 0) return "none";
-  const raw = typeof params.raw_message === "string" ? params.raw_message : "";
-  const fromMessage = raw ? causedByFrom(raw) : {};
+  const hasMessage = typeof params.raw_message === "string";
+  const fromMessage = hasMessage && params.raw_message ? causedByFrom(String(params.raw_message)) : {};
   if (fromMessage.rejected) return "none";
   const messageId = fromMessage.id;
   const claimed = lowerCausedById(input.caused_by);
   if (messageId && claimed && messageId !== claimed) return "conflict";
   if (messageId) return "trailer";
   const stamp = params.caused_by_source;
-  if (claimed && (stamp === "env" || stamp === "file" || stamp === "body")) return stamp;
+  if (claimed && (stamp === "trailer" || stamp === "env" || stamp === "file" || stamp === "body")) return stamp;
+  if (claimed && !hasMessage) return "unstamped";
   return "none";
 }
 
