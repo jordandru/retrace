@@ -239,6 +239,7 @@ test("hook and webhook reject each bare unicode suffix and a lowercase key does 
         }],
       }, { includePush: true });
       assert.equal(hook.caused_by, undefined, JSON.stringify(suffix));
+      assert.equal(hook.method?.params?.caused_by_source, undefined);
       assert.equal(hook.caused_by, pushed.caused_by);
       assert.equal(hook.method?.params?.caused_by_rejected, `${full}${suffix}`);
       assert.equal(pushed.method?.params?.caused_by_rejected, hook.method?.params?.caused_by_rejected);
@@ -260,9 +261,45 @@ test("hook and webhook reject each bare unicode suffix and a lowercase key does 
         }],
       }, { includePush: true });
       assert.equal(hook.caused_by, full, key);
+      assert.equal(hook.method?.params?.caused_by_source, "trailer");
       assert.notEqual(hook.caused_by, other);
       assert.equal(pushed.caused_by, hook.caused_by);
+      assert.equal(pushed.method?.params?.caused_by_source, "trailer");
     }
+  } finally {
+    if (saved === undefined) delete process.env.RETRACE_CAUSED_BY;
+    else process.env.RETRACE_CAUSED_BY = saved;
+  }
+});
+
+test("hook stamps env and file fall-throughs and does not use them when the message rejects", async () => {
+  const fromEnv = "evt_" + "ab".repeat(16);
+  const fromFile = "evt_" + "cd".repeat(16);
+  const dir = mkdtempSync(join(tmpdir(), "retrace-git-cause-source-"));
+  sh(dir, "git", ["init", "-q", "-b", "main"]);
+  sh(dir, "git", ["config", "core.hooksPath", "/dev/null"]);
+  const saved = process.env.RETRACE_CAUSED_BY;
+  process.env.RETRACE_CAUSED_BY = fromEnv.toUpperCase();
+  try {
+    writeFileSync(join(dir, "a.ts"), "export const a = 1;\n");
+    writeFileSync(join(dir, "msg.txt"), "work\n\nRetrace-Actor: grok\n");
+    sh(dir, "git", ["add", "."]);
+    sh(dir, "git", ["commit", "-qF", join(dir, "msg.txt")]);
+    const envSha = sh(dir, "git", ["rev-parse", "HEAD"]).trim();
+    const envHook = commitToEvent(dir, envSha, { project: "p", repoName: "acme/app" });
+    assert.equal(envHook.caused_by, fromEnv);
+    assert.equal(envHook.method?.params?.caused_by_source, "env");
+
+    delete process.env.RETRACE_CAUSED_BY;
+    const gitDir = sh(dir, "git", ["rev-parse", "--absolute-git-dir"]).trim();
+    writeFileSync(join(gitDir, "retrace-caused-by"), `  ${fromFile.toUpperCase()}\n`);
+    writeFileSync(join(dir, "a.ts"), "export const a = 2;\n");
+    sh(dir, "git", ["add", "."]);
+    sh(dir, "git", ["commit", "-qF", join(dir, "msg.txt")]);
+    const fileSha = sh(dir, "git", ["rev-parse", "HEAD"]).trim();
+    const fileHook = commitToEvent(dir, fileSha, { project: "p", repoName: "acme/app" });
+    assert.equal(fileHook.caused_by, fromFile);
+    assert.equal(fileHook.method?.params?.caused_by_source, "file");
   } finally {
     if (saved === undefined) delete process.env.RETRACE_CAUSED_BY;
     else process.env.RETRACE_CAUSED_BY = saved;

@@ -36,8 +36,9 @@
  *   WHERE  system=git, path=repo root, environment=local (override RETRACE_ENV), device=hostname (override
  *          RETRACE_DEVICE), session=CLAUDE_CODE_SESSION_ID or GROK_SESSION_ID when an agent's shell drove the commit (absent for a
  *          human's own `git commit` — see below), ide/workspace when an IDE names itself (Orca), surface=tty|agent
- *   WHY    intent = commit subject (+ body); caused_by = trailer `Retrace-Caused-By: evt_…`, else env RETRACE_CAUSED_BY,
- *          else contents of .git/retrace-caused-by (a scratch file agents/MCP can write)
+ *   WHY    intent = commit subject (+ body); caused_by = causedByFrom on the message, else env RETRACE_CAUSED_BY,
+ *          else contents of .git/retrace-caused-by (a scratch file agents/MCP can write). The env and file
+ *          fall-throughs stamp method.params.caused_by_source as env or file. A message id stamps trailer.
  *   HOW    tool=git, params { branch, parents, files, insertions, deletions, sha, raw_message, author }, automated = agent commit
  */
 import { execFileSync } from "node:child_process";
@@ -231,13 +232,23 @@ export function commitToEvent(repo: string, sha: string, cfg: Cfg, live = false)
 
   const fromMessage = causedByFrom(message);
   let causedBy = fromMessage.id;
+  let causedBySource: "trailer" | "env" | "file" | undefined = fromMessage.id ? "trailer" : undefined;
   const causedByRejected = fromMessage.rejected;
   if (!causedBy && !causedByRejected) {
-    causedBy = validCausedById(process.env.RETRACE_CAUSED_BY);
-    if (!causedBy) {
+    const fromEnv = validCausedById(process.env.RETRACE_CAUSED_BY);
+    if (fromEnv) {
+      causedBy = fromEnv.toLowerCase();
+      causedBySource = "env";
+    } else {
       const f = join(git(repo, ["rev-parse", "--git-dir"]), "retrace-caused-by");
       const fp = resolve(repo, f);
-      if (existsSync(fp)) causedBy = validCausedById(readFileSync(fp, "utf8"));
+      if (existsSync(fp)) {
+        const fromFile = validCausedById(readFileSync(fp, "utf8"));
+        if (fromFile) {
+          causedBy = fromFile.toLowerCase();
+          causedBySource = "file";
+        }
+      }
     }
   }
   const isMerge = parentList.length > 1;
@@ -262,7 +273,7 @@ export function commitToEvent(repo: string, sha: string, cfg: Cfg, live = false)
     },
     intent: resolved.intent, // prose "Key: value" lines survive (backlog #12)
     caused_by: causedBy,
-        method: { tool: "git", automated: actor.type !== "human", params: { branch, parents: parentList, files: files.length, insertions: ins, deletions: del, sha: fullSha, raw_message: message, author: { name: an, email: ae }, model_claim: resolved.modelClaim, principal_rule: "agent-address/1", ...(causedByRejected ? { caused_by_rejected: causedByRejected } : {}) } },
+        method: { tool: "git", automated: actor.type !== "human", params: { branch, parents: parentList, files: files.length, insertions: ins, deletions: del, sha: fullSha, raw_message: message, author: { name: an, email: ae }, model_claim: resolved.modelClaim, principal_rule: "agent-address/1", ...(causedByRejected ? { caused_by_rejected: causedByRejected } : {}), ...(causedBySource ? { caused_by_source: causedBySource } : {}) } },
     idempotency_key: `git:${fullSha}`,
     tags: ["git", ...(isMerge ? ["merge"] : [])],
   };

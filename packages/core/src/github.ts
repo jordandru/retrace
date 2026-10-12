@@ -126,7 +126,7 @@ export async function mapGithubWebhook(event: string, payload: any, opts: Github
     const prCause = causedByFrom(pr.body);
     const base: Omit<EventInput, "action"> = {
       project, actor: githubActor(payload.sender), artifacts: [prArtifact(pr)], timestamp: pr.updated_at ?? new Date().toISOString(),
-      location: where(pr.html_url), caused_by: prCause.id, method: { tool: "github", automated: false, params: { action: a, head: pr.head?.ref, base: pr.base?.ref, head_sha: pr.head?.sha, additions: pr.additions, deletions: pr.deletions, changed_files: pr.changed_files, github_payload: githubPayload, ...(prCause.rejected ? { caused_by_rejected: prCause.rejected } : {}) } },
+      location: where(pr.html_url), caused_by: prCause.id, method: { tool: "github", automated: false, params: { action: a, head: pr.head?.ref, base: pr.base?.ref, head_sha: pr.head?.sha, additions: pr.additions, deletions: pr.deletions, changed_files: pr.changed_files, github_payload: githubPayload, ...(prCause.id ? { caused_by_source: "body" } : {}), ...(prCause.rejected ? { caused_by_rejected: prCause.rejected } : {}) } },
       idempotency_key: idem(`pr${pr.number}:${a}:${pr.updated_at}`), tags: ["github", "pr"],
     };
     if (a === "opened" || a === "reopened") return [{ ...base, action: "created", artifacts: [prArtifact(pr, "generated")], intent: trim(pr.body) ?? `Opened PR: ${pr.title}`, change: { summary: `${pr.title} (${pr.head?.ref} → ${pr.base?.ref})`, after_hash: pr.head?.sha } }];
@@ -148,7 +148,7 @@ export async function mapGithubWebhook(event: string, payload: any, opts: Github
       project, actor: githubActor(r.user ?? payload.sender), action, action_detail: action === "other" ? "reviewed" : undefined,
       artifacts: [prArtifact(pr, "used")], timestamp: r.submitted_at ?? new Date().toISOString(), location: where(r.html_url ?? pr.html_url),
       intent: trim(r.body) ?? (state === "approved" ? `approved PR #${pr.number}` : state === "changes_requested" ? `requested changes on PR #${pr.number}` : `reviewed PR #${pr.number}`),
-      caused_by: cause.id, method: { tool: "github-review", automated: false, params: { state, commit: r.commit_id, ...(cause.rejected ? { caused_by_rejected: cause.rejected } : {}), github_payload: {
+      caused_by: cause.id, method: { tool: "github-review", automated: false, params: { state, commit: r.commit_id, ...(cause.id ? { caused_by_source: "body" } : {}), ...(cause.rejected ? { caused_by_rejected: cause.rejected } : {}), github_payload: {
         login: r.user?.login ?? payload.sender?.login, login_source: r.user?.login != null ? "review.user" : "sender",
         branch: pr.head?.ref, head_repo: pr.head?.repo?.full_name,
         body_sha256: await githubBodySha256(r.body ?? ""), body_null: r.body == null,
@@ -163,7 +163,7 @@ export async function mapGithubWebhook(event: string, payload: any, opts: Github
     const commentCause = causedByFrom(c.body);
     return [{
       project, actor: githubActor(c.user ?? payload.sender), action: "sent", artifacts: [{ id: `pr:${repoFull}#${n}`, kind: "pr", label: `PR #${n} ${payload.issue.title ?? ""}`.trim(), role: "used" as const }],
-      timestamp: c.created_at, location: where(c.html_url), intent: trim(c.body), caused_by: commentCause.id, method: { tool: "github-comment", automated: false, params: { ...(commentCause.rejected ? { caused_by_rejected: commentCause.rejected } : {}), github_payload: {
+      timestamp: c.created_at, location: where(c.html_url), intent: trim(c.body), caused_by: commentCause.id, method: { tool: "github-comment", automated: false, params: { ...(commentCause.id ? { caused_by_source: "body" } : {}), ...(commentCause.rejected ? { caused_by_rejected: commentCause.rejected } : {}), github_payload: {
         login: c.user?.login ?? payload.sender?.login, login_source: c.user?.login != null ? "comment.user" : "sender",
         body_sha256: await githubBodySha256(c.body ?? ""), body_null: c.body == null, comment_id: c.id,
         delivery: opts.deliveryId, ingress_at: opts.ingressAt, payload_time: c.created_at,
@@ -201,6 +201,7 @@ export async function mapGithubWebhook(event: string, payload: any, opts: Github
         change: { after_hash: c.id, summary: `${files.length} file${files.length === 1 ? "" : "s"} (pushed to ${String(payload.ref ?? "").replace(/^refs\/heads\//, "")})` },
         method: { tool: "git", automated: actor.type !== "human", params: {
           sha: c.id, producer: "github-push", ref: payload.ref, pusher: payload.pusher?.name,
+          ...(pushCause.id ? { caused_by_source: "trailer" } : {}),
           ...(pushCause.rejected ? { caused_by_rejected: pushCause.rejected } : {}),
           raw_message: String(c.message ?? ""), author: { name: c.author?.name, email: c.author?.email ?? (c.author?.username ? `github:${c.author.username}` : undefined) },
           parents, parents_complete: parentsComplete, model_claim: r.modelClaim, principal_rule: "agent-address/1",

@@ -105,7 +105,9 @@ export interface ClaimRecord {
 
 export interface CausedByRecord {
   id?: string;
-  source: "trailer" | "env" | "file" | "none";
+  source: "trailer" | "env" | "file" | "body" | "none" | "conflict";
+  /** The other valid id when `raw_message` and `caused_by` disagree. `id` stays the message id. */
+  claimed_id?: string;
   root?: { id: string; action: string; actor: { type: string; id: string } };
   problem?: CausedByProblem | "cyclic";
 }
@@ -269,12 +271,23 @@ export function deriveCommitClaim(input: EventInput): {
   };
 }
 
-export function causedBySourceOf(input: EventInput, trailers: Record<string, string[]>): CausedByRecord["source"] {
-  const param = input.method?.params?.caused_by_source;
-  if (param === "trailer" || param === "env" || param === "file" || param === "none") return param;
-  const trailerId = validCausedById(trailers["retrace-caused-by"]?.[0]);
-  if (trailerId && trailerId === input.caused_by) return "trailer";
-  if (input.caused_by) return "env";
+function lowerCausedById(value: string | undefined): string | undefined {
+  return validCausedById(value)?.toLowerCase();
+}
+
+/** Source is the shared parse plus an explicit env/file/body stamp. The legacy first trailer is not a source. */
+export function causedBySourceOf(input: EventInput, _trailers: Record<string, string[]>): CausedByRecord["source"] {
+  const params = (input.method?.params ?? {}) as Record<string, unknown>;
+  if (typeof params.caused_by_rejected === "string" && params.caused_by_rejected.length > 0) return "none";
+  const raw = typeof params.raw_message === "string" ? params.raw_message : "";
+  const fromMessage = raw ? causedByFrom(raw) : {};
+  if (fromMessage.rejected) return "none";
+  const messageId = fromMessage.id;
+  const claimed = lowerCausedById(input.caused_by);
+  if (messageId && claimed && messageId !== claimed) return "conflict";
+  if (messageId) return "trailer";
+  const stamp = params.caused_by_source;
+  if (claimed && (stamp === "env" || stamp === "file" || stamp === "body")) return stamp;
   return "none";
 }
 
@@ -927,10 +940,12 @@ async function resolveCausedBy(store: EventStore, input: EventInput, trailers: R
   const raw = typeof params.raw_message === "string" ? params.raw_message : "";
   const fromMessage = raw ? causedByFrom(raw) : {};
   if (fromMessage.rejected) return { source: "none" };
-  const ingested = validCausedById(input.caused_by);
-  const id = ingested ?? (fromMessage.id ? validCausedById(fromMessage.id) : undefined);
-  if (!id) return { source: "none" };
-  const source = ingested ? causedBySourceOf(input, trailers) : "trailer";
+  const messageId = fromMessage.id;
+  const claimed = lowerCausedById(input.caused_by);
+  if (messageId && claimed && messageId !== claimed) return { id: messageId, source: "conflict", claimed_id: claimed };
+  const id = messageId ?? claimed;
+  const source = causedBySourceOf(input, trailers);
+  if (!id || source === "none" || source === "conflict") return { source: "none" };
   const parent = await store.get(id);
   const problem = causedByProblem(parent, { caused_by: id, project: input.project, timestamp: input.timestamp });
   if (problem) return { id, source, problem };

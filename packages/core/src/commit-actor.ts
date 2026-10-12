@@ -3,6 +3,7 @@
  * producers derive the SAME actor from the same bytes; a disagreement between them then means the commit was rewritten
  * after the hook ran, or one producer's event was forged — never a difference of parsers (reconciliation phase B).
  */
+import { causedByFrom } from "./github.js";
 import { EventInput, ModelSource } from "./schema.js";
 
 const AGENT_COAUTHOR = /claude|copilot|codex|cursor|devin|aider|gpt|gemini|grok|\[bot\]/i;
@@ -90,7 +91,7 @@ export interface CommitActorResolution {
   claimSource: "retrace-actor" | "co-authored-by" | "bot-author" | "human-author" | "malformed";
   /** Completeness of Retrace-Model / Retrace-Model-Source (Decision A/B). */
   modelClaim: ModelClaimCompleteness;
-  /** valid Retrace-Caused-By trailer, if any */
+  /** Id from `causedByFrom` on the same message. Absent when that parser rejects or finds no id. */
   causedBy?: string;
   trailers: Record<string, string[]>;
   /** subject + body with the trailer paragraphs removed */
@@ -162,5 +163,5 @@ export function resolveCommitActor(input: { message: string; authorName?: string
       : "human-author";
   const withSource = applyModelSourceTrailers(actor, trailers);
   const cleanBody = stripTrailers(body, trailerText.length);
-  return { actor: withSource.actor, claimSource, modelClaim: withSource.modelClaim, causedBy: validCausedById(trailers["retrace-caused-by"]?.[0]), trailers, intent: cleanBody ? `${subject}\n\n${cleanBody}` : subject, isMerge: (input.parents?.length ?? 0) > 1 };
+  return { actor: withSource.actor, claimSource, modelClaim: withSource.modelClaim, causedBy: causedByFrom(message).id, trailers, intent: cleanBody ? `${subject}\n\n${cleanBody}` : subject, isMerge: (input.parents?.length ?? 0) > 1 };
 }

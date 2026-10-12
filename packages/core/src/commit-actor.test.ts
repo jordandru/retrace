@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { resolveCommitActor } from "./commit-actor.js";
+import { causedByFrom } from "./github.js";
 
 test("resolveCommitActor reports every claim source without changing actor precedence", () => {
   const retraceActor = resolveCommitActor({
@@ -193,4 +194,18 @@ test("T8 agent-address/1 treats known agent author addresses as transport metada
   });
   assert.equal(human.actor.type, "human");
   assert.equal(human.actor.id, "noreply@anthropic.com");
+});
+
+test("resolveCommitActor.causedBy is the shared causedByFrom id", () => {
+  const a = "evt_" + "a".repeat(32);
+  const b = "evt_" + "b".repeat(32);
+  const upper = `s\n\nRetrace-Caused-By: ${a.toUpperCase()}\n`;
+  const two = `s\n\nRetrace-Caused-By: ${a}\nRetrace-Caused-By: ${b}\n`;
+  const rejected = `s\n\nRetrace-Caused-By: ${a}\nRetrace-Caused-By: ${b}\u00A0\n`;
+  for (const message of [upper, two, rejected]) {
+    assert.equal(resolveCommitActor({ message }).causedBy, causedByFrom(message).id);
+  }
+  assert.equal(resolveCommitActor({ message: upper }).causedBy, a);
+  assert.equal(resolveCommitActor({ message: two }).causedBy, b);
+  assert.equal(resolveCommitActor({ message: rejected }).causedBy, undefined);
 });

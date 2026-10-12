@@ -109,15 +109,31 @@ const agentClaim = (id = "codex"): ClaimRecord => ({
   type: "agent", id, source: "retrace-actor", model_claim: "absent", raw_trailers: { "retrace-actor": id },
 });
 
+async function instruct(store: MemoryEventStore) {
+  const { event } = await appendEvent(store, {
+    project: "p",
+    actor: { type: "human", id: "jordan@example.com" },
+    action: "instructed",
+    artifacts: [{ id: "task:cause" }],
+    timestamp: "2026-09-10T10:00:00.000Z",
+  });
+  return event;
+}
+
 test("a rejecting caused-by trailer is not a classification root", async () => {
   const full = "evt_" + "d".repeat(32);
-  const followed = `work\n\nRetrace-Actor: codex\nRetrace-Caused-By: ${ROOT}\nRetrace-Caused-By: ${full}\u00A0`;
-  const nbsp = `work\n\nRetrace-Actor: codex\nRetrace-Caused-By: ${ROOT}\u00A0`;
-  for (const raw of [followed, nbsp]) {
-    const store = new MemoryEventStore();
-    await putPolicy(store);
+  const storeA = new MemoryEventStore();
+  await putPolicy(storeA);
+  const earlier = await instruct(storeA);
+  const followed = `work\n\nRetrace-Actor: codex\nRetrace-Caused-By: ${earlier.id}\nRetrace-Caused-By: ${full}\u00A0`;
+  const storeB = new MemoryEventStore();
+  await putPolicy(storeB);
+  const nbspParent = await instruct(storeB);
+  const nbsp = `work\n\nRetrace-Actor: codex\nRetrace-Caused-By: ${nbspParent.id}\u00A0`;
+  for (const [store, raw, parentId] of [[storeA, followed, earlier.id], [storeB, nbsp, nbspParent.id]] as const) {
     const result = await classify(store, commitInput({
       raw,
+      caused_by: parentId,
       method: {
         tool: "git",
         automated: true,
@@ -131,7 +147,83 @@ test("a rejecting caused-by trailer is not a classification root", async () => {
       },
     }));
     assert.equal(result.kind, "decision", raw);
-    if (result.kind === "decision") assert.equal(result.record.caused_by.root, undefined);
+    if (result.kind !== "decision") continue;
+    assert.deepEqual(result.record.caused_by, { source: "none" });
+    assert.notEqual(result.record.caused_by.id, parentId);
+    assert.notEqual(result.record.caused_by.root?.id, parentId);
+  }
+});
+
+test("caused-by source follows the message, and a different claimed id is a conflict", async () => {
+  const store = new MemoryEventStore();
+  await putPolicy(store);
+  const parent = await instruct(store);
+  const other = await instruct(store);
+  const upper = `work\n\nRetrace-Actor: codex\nRetrace-Caused-By: ${parent.id.toUpperCase()}\n`;
+  const upperResult = await classify(store, commitInput({ raw: upper, caused_by: parent.id }));
+  assert.equal(upperResult.kind, "decision");
+  if (upperResult.kind === "decision") {
+    assert.equal(upperResult.record.caused_by.source, "trailer");
+    assert.equal(upperResult.record.caused_by.id, parent.id);
+    assert.equal(upperResult.record.caused_by.root?.id, parent.id);
+  }
+
+  const two = `work\n\nRetrace-Actor: codex\nRetrace-Caused-By: ${other.id}\nRetrace-Caused-By: ${parent.id}\n`;
+  const twoResult = await classify(store, commitInput({ raw: two, caused_by: parent.id }));
+  assert.equal(twoResult.kind, "decision");
+  if (twoResult.kind === "decision") {
+    assert.equal(twoResult.record.caused_by.source, "trailer");
+    assert.equal(twoResult.record.caused_by.id, parent.id);
+    assert.equal(twoResult.record.caused_by.root?.id, parent.id);
+    assert.notEqual(twoResult.record.caused_by.id, other.id);
+  }
+
+  const push = await classify(store, commitInput({ raw: upper, caused_by: parent.id }), { producer: "github-push" });
+  assert.equal(push.kind, "decision");
+  if (push.kind === "decision") assert.equal(push.record.caused_by.source, "trailer");
+
+  const stampedEnv = commitInput({ raw: upper, caused_by: parent.id });
+  stampedEnv.method = { ...stampedEnv.method, params: { ...stampedEnv.method?.params, caused_by_source: "env" } };
+  const envOverMessage = await classify(store, stampedEnv);
+  assert.equal(envOverMessage.kind, "decision");
+  if (envOverMessage.kind === "decision") assert.equal(envOverMessage.record.caused_by.source, "trailer");
+
+  const bare = `work\n\nRetrace-Actor: codex\n`;
+  const fromFile = commitInput({ raw: bare, caused_by: parent.id });
+  fromFile.method = { ...fromFile.method, params: { ...fromFile.method?.params, caused_by_source: "file" } };
+  const fileResult = await classify(store, fromFile);
+  assert.equal(fileResult.kind, "decision");
+  if (fileResult.kind === "decision") {
+    assert.equal(fileResult.record.caused_by.source, "file");
+    assert.equal(fileResult.record.caused_by.id, parent.id);
+    assert.equal(fileResult.record.caused_by.root?.id, parent.id);
+  }
+
+  const fromEnv = commitInput({ raw: bare, caused_by: other.id });
+  fromEnv.method = { ...fromEnv.method, params: { ...fromEnv.method?.params, caused_by_source: "env" } };
+  const envResult = await classify(store, fromEnv);
+  assert.equal(envResult.kind, "decision");
+  if (envResult.kind === "decision") {
+    assert.equal(envResult.record.caused_by.source, "env");
+    assert.equal(envResult.record.caused_by.root?.id, other.id);
+  }
+
+  const unstamped = await classify(store, commitInput({ raw: bare, caused_by: parent.id }));
+  assert.equal(unstamped.kind, "decision");
+  if (unstamped.kind === "decision") {
+    assert.deepEqual(unstamped.record.caused_by, { source: "none" });
+    assert.notEqual(unstamped.record.caused_by.root?.id, parent.id);
+  }
+
+  const messageId = "evt_" + "a".repeat(32);
+  const conflictRaw = `work\n\nRetrace-Actor: codex\nRetrace-Caused-By: ${messageId}\n`;
+  const conflict = await classify(store, commitInput({ raw: conflictRaw, caused_by: parent.id }));
+  assert.equal(conflict.kind, "decision");
+  if (conflict.kind === "decision") {
+    assert.equal(conflict.record.caused_by.source, "conflict");
+    assert.equal(conflict.record.caused_by.id, messageId);
+    assert.equal(conflict.record.caused_by.claimed_id, parent.id);
+    assert.equal(conflict.record.caused_by.root, undefined);
   }
 });
 
