@@ -1,9 +1,11 @@
-# The webhook as witness, not second author — one authoritative record per commit (design note v1.1)
+# The webhook as witness, not second author — one authoritative record per commit (design note v1.2)
 
-**Status:** v1.1, 2026-10-12, by claude-code (the "system optimization" pane; `claude-mythos-5-1`, model source
-harness-runtime, effort high). **v1.1 is the fix round for Codex's round-1 verdict `evt_ba3081460461418b8cb2c5d6389bcc51`
-(3 High, 3 Medium, 1 Low at `9878437e`), on the coordinator's verified pointer `evt_b624313f…`; what changed, and the two
-claims withdrawn, are listed in §13.** **It proposes no code in this PR**: a design note, class **(a)** under agent-rules 12,
+**Status:** v1.2, 2026-10-12, by claude-code (the "system optimization" pane; `claude-mythos-5-1`, model source
+harness-runtime, effort high). v1.1 was the fix round for Codex's round-1 verdict `evt_ba3081460461418b8cb2c5d6389bcc51`
+(3 High, 3 Medium, 1 Low at `9878437e`), on the coordinator's verified pointer `evt_b624313f…`; its changes and the two
+claims withdrawn are listed in §13. **v1.2 is the fix round for Codex's round-2 verdict `evt_8c06b938a8314099b37912fb372db6f4`
+(1 High, 2 Medium at `6ccfc718`), on the coordinator's verified pointer `evt_149ae739…`; its changes, one deferral and one
+relabelling, are listed in §14.** **It proposes no code in this PR**: a design note, class **(a)** under agent-rules 12,
 for the design gate. Written on Jordan's signed go `evt_c83cad7552a149a5940b27a0bcc84b0b` ("Let's go on your top 3 items starting
 with 1", received `evt_85ad930c…`), item 3 of `~/.retrace/ops-2026-10-11/system-optimization/OPTIMIZATION-PLAN.md` (sha256
 `499d1ee9…3527`, created `evt_71b02714…`). Items 1 and 2 are PRs 222 and 225. The measurements it rests on are
@@ -25,16 +27,22 @@ same facts, or can it be a *witness* to the first record, and what would that ch
   ingress time and the ledger sequence at ingress), carries **GitHub's observed values of the compared fields as
   collision-resistant digests with completeness metadata** (message, file list, parents, author, trailer actor), the
   field-by-field comparison with the seal, and a verdict `matches` | `conflict` | `incomplete`; on `conflict` it keeps
-  GitHub's observed value of every differing field verbatim, so both sides stay inspectable. It is sealed by
-  `webhook:github` like today; it is still a second producer; it is not a second copy.
+  GitHub's observed value of every differing field verbatim, so both sides stay inspectable. **The push payload alone
+  cannot prove the file list or the parents complete** (§3, Codex r2 H1): without the Commit API hydration §3 specifies,
+  those two fields are `unknown`, the verdict is `incomplete`, and `matches` cannot occur; message, author and trailer
+  actor are still compared from the payload. It is sealed by `webhook:github` like today; it is still a second producer;
+  it is not a second copy.
 - **A2. The PR-merge record records a derived causal candidate, outside `caused_by`, when the PR body carries no full
   token**: the hook's `merged` seal of the merge commit if it exists at delivery, else the hook seal of the PR head, in
   `method.params.derived_cause` with its source, and the seal cited as an artifact. `caused_by` is populated only from a
   full token in the PR body, as today, because every consumer walks `caused_by` as assertion (§4). The record stays (it
   is the only place GitHub's `merged_by` login and the owner-login decision are recorded).
-- **A3. The push mapper names merges**: a pushed commit with two parents is `merged`, not `committed`
-  (`packages/core/src/github.ts`, the push branch: `action: "committed"` unconditionally today; Grok's class table found
-  7 of 11 `human_merge_no_trailer` seals are push records of merges stored as `committed`).
+- **A3. The push mapper names merges — deferred until hydration exists** (Codex r2 H1): a pushed commit with two parents
+  is `merged`, not `committed` (`packages/core/src/github.ts`, the push branch: `action: "committed"` unconditionally
+  today; Grok's class table found 7 of 11 `human_merge_no_trailer` seals are push records of merges stored as
+  `committed`). GitHub's push `commits[]` carries no `parents`, and the mapper today reads parents only when a non-standard
+  `c.parents` array is present (`github.ts`, `parentsComplete = Array.isArray(c.parents)`), so the parent count is not
+  available from the push event; A3 is built on the hydrated commit (§3) or not at all.
 - **A4. `status` counts commits and records separately.** Today `capture.commits` is the number of `committed`/`merged`
   *events* (`packages/core/src/status.ts:133`), 1,662 at 20:48Z, while the ledger holds 836 distinct shas; "180 unlinked
   commits" is 180 records of 164 commits. Both numbers stay reported; the words change to match them.
@@ -112,12 +120,14 @@ the witness may name only when every one of these holds; otherwise the push take
     producer: "github-push", witness_of: "<hook seal id>", witness_of_seq: <seal seq>, sha, ref, pusher, delivery,
     ingress_at, ingress_seq,                          // the ledger head sequence read at ingress (M1)
     eligibility: { stamp: "<the pinned stamp matched>", producer_sig: "verified", shape: "git", project: "<project>" },
-    observed: {                                     // GitHub's side, recomputable by anyone holding the payload
-      message_sha256, message_bytes,                // sha256 of the exact message bytes GitHub delivered
-      files_sha256, files_count, files_complete,    // sha256 over the sorted path list; complete=false when truncated
-      parents, parents_complete,                    // the full parent shas GitHub delivered
+    observed: {                                     // GitHub's side, recomputable by anyone holding the payload (and the hydrated commit)
+      message_sha256, message_bytes,                // digest of the exact message bytes GitHub delivered (encoding below)
+      files_sha256, files_count, files_complete,    // digest over the byte-sorted path list; complete only when proven (below)
+      parents, parents_complete,                    // the parent shas, in order, only from a hydrated commit; else [] and false
       author: { name, email },
-      trailer_actor                                 // the Retrace-Actor the webhook side parsed, or null
+      trailer_actor,                                // the Retrace-Actor the webhook side parsed, or null
+      source: "push" | "push+commit-api",           // where files and parents came from
+      hydration: { status: "ok" | "not_attempted" | "failed" | "deadline" | "truncated", files_pages, files_total, http_status }
     },
     sealed: {                                       // the seal's side, the same digests over the seal's stored fields
       message_sha256, files_sha256, files_count, parents, author: { name, email }, trailer_actor
@@ -142,15 +152,43 @@ the witness may name only when every one of these holds; otherwise the push take
 
 - **Not a commit record.** `status`, reconcile and the doctor count `committed`/`merged`; a witness is `other`. So the
   sha is counted once, by its seal, and the witness is evidence about the seal.
-- **What the witness keeps, and what it does not** (Codex r1 H1). It keeps GitHub's observed values as sha256 digests
-  over exact bytes (message) and canonical lists (sorted paths; parent shas in order), with the counts and completeness
-  flags that say whether the digest covers the whole value, and it keeps the seal's digests computed the same way, so a
-  reader recomputes either side from the stored seal or from GitHub's API and checks the comparison instead of trusting
-  it. On `conflict` it also keeps GitHub's verbatim value of each differing field, so both sides of a disagreement are in
+- **What the witness keeps, and what it does not** (Codex r1 H1). It keeps GitHub's observed values as digests over exact
+  bytes (message) and over lists (paths; parent shas), with the counts and completeness flags that say whether the digest
+  covers the whole value, and it keeps the seal's digests computed the same way, so a reader recomputes either side from
+  the stored seal or from GitHub's API and checks the comparison instead of trusting it.
+- **Digest encoding, one for both sides** (Codex r2 M1). Every digest is sha256 over a domain-separated, length-prefixed
+  byte string, so that no legal path or message can collide with another by framing:
+  `message_sha256 = sha256("retrace-witness-message/1" ‖ 0x00 ‖ len32be(m) ‖ m)` where `m` is the exact UTF-8 bytes of
+  the message as delivered; `files_sha256 = sha256("retrace-witness-files/1" ‖ 0x00 ‖ count32be ‖ for each path, in
+  byte-wise ascending order of its UTF-8 encoding: len32be(p) ‖ p)`; `parents_sha256` likewise with domain
+  `retrace-witness-parents/1` over the 40-byte lowercase hex shas **in delivered order** (parents are ordered; the list is
+  not sorted). `len32be` and `count32be` are unsigned 32-bit big-endian. No normalisation is applied to paths or messages:
+  bytes are hashed as GitHub (or the hook) gives them, Unicode NFC and NFD forms of the same name are different paths and
+  digest differently, duplicates are kept, and an empty list digests the frame with `count32be = 0`. The seal's side uses
+  the same frames over the seal's stored `raw_message`, `files` and `parents`. Acceptance test 1b carries the adversarial
+  names.
+- **Completeness is proven, never assumed** (Codex r2 H1). GitHub's push event gives, per commit, `message`, `author`,
+  `committer`, `added`, `modified`, `removed` and no `parents`; GitHub documents that the three file arrays may be empty
+  for large pushes even when files changed, so an omitted list is indistinguishable from an empty one, and the mapper
+  today reads parents only from a non-standard `c.parents` (`github.ts`). So from the push payload alone: `message`,
+  `author` and `trailer_actor` are compared; `files_complete` and `parents_complete` are **false**, `comparison.files` and
+  `comparison.parents` are `unknown`, the verdict is `incomplete`, and `matches` cannot occur. The only route to a
+  complete file list and to parents is **hydration from the Commit API**, specified here and built as its own class S
+  step (D1): `GET /repos/{owner}/{repo}/commits/{sha}` with a read-only token the Worker does not hold today (a GitHub App
+  installation token or a fine-grained PAT with `contents: read` on the repository, stored as a Worker secret, class S);
+  the response's `parents[]` is complete; `files[]` is paginated at 300 entries per page (`page=`), GitHub caps the listing
+  at 3,000 files and says so by returning fewer than the commit's `stats.total` entries, so `files_complete` is true only
+  when every page was read and the count equals what the API reports as the whole; the call counts against the 5,000/h
+  authenticated rate limit and runs inside the same 2,000 ms delivery budget — a deadline, a non-2xx status, a rate-limit
+  response or a short page sets `hydration.status` to `deadline` / `failed` / `truncated` and leaves the field `unknown`.
+  The witness is still written in those cases (the seal exists; `incomplete` is the honest verdict), with
+  `observed.source` and `observed.hydration` saying what was tried. Until the hydration step is built, every witness is
+  `incomplete`, the doctor warns on every HEAD (§6), and A3 is not built: that is the cost of not claiming completeness
+  the payload cannot give, and D1 orders hydration before the witness ships as a gate signal. On `conflict` it also keeps GitHub's verbatim value of each differing field, so both sides of a disagreement are in
   the ledger. What it does **not** keep in the quiet case is GitHub's verbatim copy of a message or file list that matched
   the seal's: that copy is the second byte-identical `raw_message` §1 measured, and the seal has it. `unknown` on any
-  field (a truncated file list, `parents_complete: false`, no trailer actor parsed on one side) makes the verdict
-  `incomplete`, never `matches`.
+  field (a file list not proven complete, `parents_complete: false`, no trailer actor parsed on one side) makes the
+  verdict `incomplete`, never `matches`; there is no path from `unknown` to `matches` (§9 test 1c).
 - **Rooted by construction** when the seal is rooted: `caused_by` is the seal. This is a direct relation, not an
   inference: the witness exists because the seal was found. A witness never creates a new unlinked chain, which is what
   58 of the 73 unlinked records on recent main are (PR-merge, §1) — the push half of that class (the 7 push records of
@@ -195,15 +233,22 @@ Proposed, each outcome labelled in `method.params.caused_by_source`:
    "<token>"` and **not** used — the 3 broken links of 2026-09-30, 2026-10-08 and 2026-10-11 are that regex capturing
    `evt_dd964d92`, `evt_57b9aa95`, `evt_052a3936`). This is the only path that populates `caused_by`.
 2. `none`, with a candidate: `caused_by` stays empty, and the record carries `method.params.derived_cause: { source:
-   "merge_seal" | "head_seal", event: "<seal id>", root: "<the seal's caused_by, if any>" }` and cites the seal as an
-   artifact (`event:<seal id>`, label `causal candidate, not asserted`). The seal is found at delivery under §3's
+   "merge_seal" | "head_seal", event: "<seal id>", seal_caused_by: "<the seal's immediate caused_by, if any>",
+   root_state: "rooted" | "broken" | "unlinked" | "not_computed", root_event?: "<the human instructed event>",
+   chain_length?: <hops> }` and cites the seal as an artifact (`event:<seal id>`, label `causal candidate, not asserted`).
+   `seal_caused_by` is the seal's own immediate link and nothing more — not a root, not verified ancestry (Codex r2 M2:
+   v1.1 called it `root`, which it was not). `root_state` is what `causalRootState` returns when walked from the seal at
+   delivery within the read budget, `root_event` the terminal human `instructed` event only when `rooted`, `chain_length`
+   the hops walked; when the walk does not fit the budget the field says `not_computed` rather than guessing. None of
+   these authorises anything: the record's own `caused_by` stays empty. The seal is found at delivery under §3's
    eligibility and sequence rules; `merge_seal` (the hook's `merged` seal of `merge_commit_sha`) is preferred over
    `head_seal` (the hook seal of the PR head).
 3. `none`, no candidate: as today, empty, and the record says so.
 
 The record keeps its actor (`system/github:jordandru` or the identity-mapped seat, owner-login design), its
 `owner_login_decision` and its GitHub facts. What changes is that a reader of the merge record can **open** the seal the
-webhook found and see where it roots, while `status`, reconcile and the doctor go on counting the record as unlinked
+webhook found and read, as separate labelled facts, its immediate link and the root state the Worker computed, while
+`status`, reconcile and the doctor go on counting the record as unlinked
 until the merger cites the token in the PR body. The forward fix for the 116-record class (§8) is therefore the merger's
 token, not A2; A2 makes the candidate inspectable and nothing more. The label stays the difference between "the merger
 said" and "the webhook found", and the field placement is what keeps every existing reader from mistaking one for the
@@ -221,7 +266,8 @@ other.
   record is unlinked while its hook seal is rooted counts in the second number and not the third). The doctor prints all
   three for one release so the readings sit side by side; docs that cite the headline cite `unlinked_commits` once it is
   measured, and `commits_with_unlinked_record` until then, by that name.
-- `capture.witnesses: { matches, conflict, fallback_captures }` reports A1's outcomes.
+- `capture.witnesses: { matches, conflict, incomplete, fallback_captures }` reports A1's outcomes; while hydration is not
+  built, `matches` is 0 by construction and `incomplete` counts every witness.
 - Reconcile: the `missing_commit` branch (`reconcile.ts:362–372`) already treats a webhook-merged head as "made where no
   hook runs"; a `commit-witness` with `verdict: conflict` becomes a reconcile finding `witness_conflict` (fail) naming the
   fields that differ; `matches` adds nothing. The merge branch is untouched (A6).
@@ -230,9 +276,11 @@ other.
 
 - `commit witness` finding on `--gate`: FAIL when the HEAD sha's witness says `conflict`; **PASS only when it says
   `matches`, which by §3 means every compared field is `match`**; WARN, never PASS, when it says `incomplete` (a field was
-  `unknown` on one side), naming the fields, with D6 deciding whether that becomes FAIL; PASS also when the only record is
-  a fallback capture (the hook was absent or ineligible; today's "HEAD delivery" finding already names that, and
-  `fallback_reason` says why).
+  `unknown` on one side), naming the fields and `observed.hydration.status`, with D6 deciding whether that becomes FAIL;
+  PASS also when the only record is a fallback capture (the hook was absent or ineligible; today's "HEAD delivery"
+  finding already names that, and `fallback_reason` says why). Until hydration exists every witness is `incomplete` and
+  this finding warns on every gated HEAD; that noise is the measurement that hydration is missing, not a reason to relax
+  the rule.
 - The existing "HEAD delivery" check (`headDelivery`) accepts a hook seal **or** a push record today; after A1 it accepts
   a hook seal with or without a witness, or a fallback capture. Nothing becomes weaker: a sha with no record of any kind
   still fails.
@@ -269,9 +317,21 @@ other.
 
 ## 9. Acceptance tests (each names the finding it closes)
 
-1. Push of a sha whose eligible hook seal exists at or before `ingress_seq` → one `commit-witness`, `caused_by` the seal,
-   `verdict: matches` with every comparison field `match`, `observed` and `sealed` digests equal and recomputable from the
-   fixture, no `committed` record from the webhook; `status.commits` unchanged, `commit_records` +0, `witnesses.matches` +1.
+1. Push of a sha whose eligible hook seal exists at or before `ingress_seq`, **with hydration** → one `commit-witness`,
+   `caused_by` the seal, `verdict: matches` with every comparison field `match`, `observed.source: push+commit-api`,
+   `observed` and `sealed` digests equal and recomputable from the fixture, no `committed` record from the webhook;
+   `status.commits` unchanged, `commit_records` +0, `witnesses.matches` +1. The same push **without hydration** → the
+   witness with `files`/`parents` `unknown`, `verdict: incomplete`, `witnesses.incomplete` +1, never `matches`.
+1b. **Digest encoding** (M1): fixtures with paths containing a newline, a `\u0000`-adjacent name, `,` `|` `;` and `\n`
+   delimiter characters, NFC and NFD forms of `é`, a duplicate path, and an empty list → both sides compute the same
+   `files_sha256` from the frames in §3; the two Unicode forms differ; the delimiter names do not collide with any
+   split-and-join encoding; the empty list digests `count32be = 0`.
+1c. **Provider-faithful completeness** (H1): a push commit with empty `added/modified/removed` arrays for a commit that
+   changed files, and a push commit with no `parents` field (the published shape) → `files_complete: false`,
+   `parents_complete: false`, both comparisons `unknown`, `verdict: incomplete`; a hydration response that is a 403, a
+   429, a timeout at the 2,000 ms budget, or a `files` page shorter than the commit's total → `hydration.status`
+   `failed` / `failed` / `deadline` / `truncated`, the field `unknown`, the verdict `incomplete`. No fixture can produce
+   `matches` without `hydration.status: ok` and `files_complete && parents_complete`.
 2. Push of a sha with no seal → full record with `fallback_capture: true`; a later hook seal is a second full record;
    `status` shows two records, one commit.
 2b. **Eligibility** (H3): a candidate sealed by another `assert:` credential, by a `pinned:` credential, with
@@ -283,16 +343,22 @@ other.
    carries, for the sealed sha, a message whose bytes differ from the seal's `raw_message` (a mapper/source divergence
    fixture: the hook's bytes against GitHub's normalised text) → `comparison.message: differ`, `verdict: conflict`,
    `differing.message` holds GitHub's text, doctor `--gate` FAIL `commit witness`, reconcile `witness_conflict`; (b) the
-   payload's file list is truncated → `comparison.files: unknown`, `verdict: incomplete`, doctor WARN not PASS; (c)
-   `parents_complete: false` → `incomplete` likewise; (d) the trailer actor parsed on one side only → `incomplete`.
+   Commit API's `files` listing hits GitHub's 3,000-file cap or a page comes back short of the commit's total (the real
+   provider signal; v1.1 said "truncated" without naming one) → `hydration.status: truncated`, `comparison.files:
+   unknown`, `verdict: incomplete`, doctor WARN not PASS; (c) no hydration → `parents_complete: false` → `incomplete`
+   likewise; (d) the trailer actor parsed on one side only → `incomplete`; (e) hydrated files that differ from the seal's
+   → `comparison.files: differ`, `verdict: conflict`, `differing.files` holds GitHub's list.
 3b. **Forced ref replacement**: amend and force-push over a sealed sha → a new sha with no seal takes the fallback path;
    the old sha's seal and any witness stand; `status` shows both shas.
 4. Redelivery of the same push → dedup on `gh:push:<repo>:<sha>` whichever record exists; no second witness.
 5. PR merged with no body token, eligible merge seal present → PR-merge record `caused_by` empty, `caused_by_source: none`,
-   `derived_cause: { source: merge_seal, event, root }`, the seal cited as an artifact, and `causalRootState` of the record
-   `unlinked` (H2: the candidate is inspectable, not asserted); with only the head seal → `head_seal`; with an 8-hex token
+   `derived_cause: { source: merge_seal, event, seal_caused_by, root_state, root_event?, chain_length? }`, the seal cited
+   as an artifact, and `causalRootState` of the record `unlinked` (H2: the candidate is inspectable, not asserted; r2 M2:
+   `seal_caused_by` equals the seal's own `caused_by` and `root_state` equals `causalRootState(seal)`, with a fixture
+   whose seal chain is broken → `root_state: broken` and no `root_event`, and one beyond the read budget → `not_computed`); with only the head seal → `head_seal`; with an 8-hex token
    in the body → `caused_by_rejected` and the same; with a 32-hex token → `body` and `caused_by` set.
-6. Pushed merge commit (two parents) → `action: merged` from the push mapper; a single-parent commit → `committed`.
+6. Pushed merge commit → `action: merged` from the push mapper **only from a hydrated commit with two `parents`**; a
+   single-parent hydrated commit → `committed`; without hydration the mapper leaves `committed` as today (A3 deferred).
 7. `status` on the current ledger prints `commit_records: 1,6xx`, `commits: 8xx`, `unlinked_commit_records: 180`,
    `commits_with_unlinked_record: 164` (the audit's two numbers) and `unlinked_commits: <measured>` (M2: derived from the
    audit's per-record data before the code merges, and written here), and the doctor prints the three lines.
@@ -317,10 +383,11 @@ other.
 
 - **D1. Adopt A1–A4 as the design** and route the build as class S code in this order, **after PR 223 merges** (it already
   carries the 32-hex `causedByFrom` fix and the shared caused-by parser; v1 listed that fix as this plan's first step
-  without naming the open PR — Codex r1 L1): `status` counts (quick win 3, with the third count measured first) → push
-  mapper `merged` → `derived_cause` on the PR-merge record → `ingress_seq` on the pending row → witness record +
-  eligibility + reconcile + doctor, each its own PR. Overrule by striking any letter; A1 without A4 leaves the headline
-  counting records.
+  without naming the open PR — Codex r1 L1): `status` counts (quick win 3, with the third count measured first) →
+  `derived_cause` on the PR-merge record → `ingress_seq` on the pending row → **Commit API hydration (class S: a new
+  read-only GitHub credential in the Worker, the pagination and deadline rules of §3)** → witness record + eligibility +
+  reconcile + doctor → push mapper `merged` (A3, on hydrated parents), each its own PR. Overrule by striking any letter;
+  A1 without A4 leaves the headline counting records; A1 before hydration ships a witness that is always `incomplete`.
 - **D2. The fallback stays a full record** (not a witness that waits). Overrule: make the drain convert fallbacks when a
   seal lands later, accepting a third record in that case.
 - **D3. Do not attest the 116 historic PR-merge records by batch.** Attest only where a rooted merge seal exists and a
@@ -337,11 +404,14 @@ other.
 Nothing here is built or measured in code. **Measured** (§1, from the ledger pull of 2026-10-11 20:50Z and the coverage
 audit): the record and sha counts, the producer combinations, the byte means, the 198 identical `raw_message` pairs, the
 root states, the class table, the two unlinked counts 180 and 164 (records, and shas with an unlinked record). **Estimated**
-(§3, §7): witness bytes per record and per commit. **Deferred to the build, before merge:** the third unlinked count
-(`unlinked_commits`, §5), the latency of the indexed read (§9 test 8), and confirmation that the Worker resolves the
-trusted hook-stamp set from the stored policy at delivery the way `router.ts` already does for producer verification
-(`trusted_hook_stamps`); if a project's policy pins no stamp, A1 degrades to today's behaviour for that project and says
-so in `fallback_reason`. The class counts are the coverage audit's (Grok's CSV, verified by Codex's independent derivation
+(§3, §7): witness bytes per record and per commit. **Specified but unbuilt:** the witness record, the digest frames (§3), the Commit API hydration with its credential,
+pagination, rate-limit and deadline rules, and `derived_cause` with its `root_state`. **Deferred:** A3 (merge
+classification from the push mapper) until hydration exists, because the push payload carries no parents; the third
+unlinked count (`unlinked_commits`, §5), to be measured before merge; the latency of the indexed read and of hydration (§9
+test 8); and confirmation that the Worker resolves the trusted hook-stamp set from the stored policy at delivery the way
+`router.ts` already does for producer verification (`trusted_hook_stamps`); if a project's policy pins no stamp, A1
+degrades to today's behaviour for that project and says so in `fallback_reason`. **Not claimed:** that the push payload
+proves any file list or parent set complete — it does not, and the design says `unknown` wherever that is so. The class counts are the coverage audit's (Grok's CSV, verified by Codex's independent derivation
 to the same totals; Codex's set diff was pending at 20:48Z).
 
 ## 13. Fix round 1 (Codex `evt_ba308146…`, applied in v1.1)
@@ -359,3 +429,15 @@ to the same totals; Codex's set diff was pending at 20:48Z).
 Two claims were withdrawn rather than reworded: that a derived link may populate `caused_by` (H2), and that any
 `assert:` credential may seal a witnessable record (H3). One claim was narrowed to what the design keeps: "no field is
 lost" (H1). One number was relabelled to what it measures: 164 (M2).
+
+## 14. Fix round 2 (Codex `evt_8c06b938…`, applied in v1.2)
+
+| finding | change | where |
+|---|---|---|
+| H1 the push payload cannot prove file or parent completeness, so `files_complete`, `parents_complete`, a quiet `matches` and A3 were derived from input that does not carry them | option (b) chosen and option (a) specified as the only route to `matches`: from the payload alone files and parents are `unknown` and the verdict `incomplete`; Commit API hydration is specified (read-only credential the Worker does not hold, class S; `parents[]` complete; `files` 300 per page, 3,000 cap with a short page as the signal; 5,000/h rate limit; the 2,000 ms budget; `hydration.status` on the witness; the witness still written on failure); **A3 deferred** until hydration exists; provider-faithful fixtures prove `unknown` never becomes `matches`; the doctor's always-warn state before hydration stated as the cost | §0 A1, §0 A3, §3 (shape, completeness bullet), §5, §6, §9 tests 1, 1c, 3, 6, §11 D1, §12 |
+| M1 the list digests had no byte encoding, framing or domain separation | one injective encoding for message, files and parents: `sha256(domain ‖ 0x00 ‖ count32be ‖ len32be ‖ bytes…)`, paths byte-sorted, parents in delivered order, no normalisation, bytes as given; adversarial-name acceptance test | §3 (shape, digest bullet), §9 test 1b |
+| M2 `derived_cause.root` was the seal's immediate `caused_by`, named as if a verified root | relabelled `seal_caused_by`; `root_state` (`causalRootState` of the seal), `root_event` only when rooted, `chain_length`, `not_computed` when the walk does not fit the budget; the text says none of it authorises | §4 step 2, §9 test 5 |
+| r1 M3 follow-up: the truncated-file fixture had no provider signal | restated on the Commit API's page/cap signal; the push payload's empty arrays are the "no signal → unknown" case | §9 tests 1c and 3(b) |
+
+One deferral (A3), one relabelling (`root` → `seal_caused_by`), one admission the design now carries in its own record
+(`observed.hydration`): what the second producer saw, and what it could not see.
