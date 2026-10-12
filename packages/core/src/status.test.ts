@@ -389,3 +389,19 @@ test("the same sha in two repos counts once per repo", async () => {
   assert.equal(s.capture.commits, 2);
   assert.equal(s.capture.commit_shas, 2);
 });
+
+test("commit_shas ignores a malformed ref and folds case, length, and two refs on one record", async () => {
+  const store = new MemStore();
+  const full = "e".repeat(40);
+  const seven = "f".repeat(7);
+  await appendEvent(store, { project: "p", actor: { type: "human", id: "jordan@example.com" }, action: "committed", artifacts: [{ id: "commit:@aaaaaaaaaaaa", role: "generated" }] });
+  await appendEvent(store, { project: "p", actor: { type: "human", id: "jordan@example.com" }, action: "committed", artifacts: [{ id: "commit:repo@not-a-sha", role: "generated" }] });
+  await appendEvent(store, { project: "p", actor: { type: "human", id: "jordan@example.com" }, action: "committed", artifacts: [{ id: "commit:repoaaaaaaaaaaaa", role: "generated" }] });
+  await appendEvent(store, { project: "p", actor: { type: "human", id: "jordan@example.com" }, action: "committed", artifacts: [{ id: `commit:acme/app@${full.slice(0, 12).toUpperCase()}`, role: "generated" }] });
+  await appendEvent(store, { project: "p", actor: { type: "human", id: "jordan@example.com" }, action: "committed", artifacts: [{ id: `commit:acme/app@${full}`, role: "generated" }] });
+  await appendEvent(store, { project: "p", actor: { type: "human", id: "jordan@example.com" }, action: "committed", artifacts: [{ id: `commit:acme/app@${seven}`, role: "generated" }, { id: `commit:other/repo@${seven}${"a".repeat(33)}`, role: "generated" }] });
+  const s = await buildProjectStatus(store, "p");
+  assert.equal(s.capture.commits, 6);
+  assert.equal(s.capture.unlinked_commits, 6);
+  assert.equal(s.capture.commit_shas, 3);
+});

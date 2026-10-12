@@ -35,29 +35,43 @@ function emptySourceCounts(): Record<ModelSourceBucket, number> {
   return Object.fromEntries(MODEL_SOURCE_ORDER.map((key) => [key, 0])) as Record<ModelSourceBucket, number>;
 }
 
-/** Distinct commit shas named by seal records, counted per repo. A count of claimed shas — records are claims; it roots nothing and links nothing. A 12-character id groups with the single longer id of the same repo that it prefixes; a prefix that matches two or more longer ids stays its own group. */
+const COMMIT_SHA = /^(?:[0-9a-f]{7}|[0-9a-f]{12}|[0-9a-f]{40})$/;
+
+/**
+ * `commit:<repo>@<sha>` with a non-empty repository and a hexadecimal sha of 7, 12, or 40
+ * characters. The sha is lower-cased. The repository string is taken as written: it is not
+ * trimmed, lower-cased, or passed through policy aliases. Anything else is not a sha.
+ */
+function parseCommitRef(id: string): { repo: string; sha: string } | undefined {
+  if (!id.startsWith("commit:")) return undefined;
+  const at = id.lastIndexOf("@");
+  if (at < "commit:".length) return undefined;
+  const repo = id.slice("commit:".length, at);
+  if (repo.length === 0) return undefined;
+  const sha = id.slice(at + 1).toLowerCase();
+  if (!COMMIT_SHA.test(sha)) return undefined;
+  return { repo, sha };
+}
+
+/** Distinct commit shas named by seal records, counted per repo. A count of claimed shas — records are claims; it roots nothing and links nothing. A 7- or 12-character id groups with the single longer id of the same repository that it prefixes; a prefix of two or more longer ids stays its own group. A ref the parser rejects is not counted. The same sha in two repositories counts once per repository. */
 function commitShaCount(events: Event[]): number {
   const byRepo = new Map<string, Set<string>>();
   for (const event of events) {
     for (const artifact of event.artifacts) {
-      if (!artifact.id.startsWith("commit:") || !artifact.id.includes("@")) continue;
-      const at = artifact.id.lastIndexOf("@");
-      const repo = artifact.id.slice(0, at);
-      const sha = artifact.id.slice(at + 1);
-      if (!sha) continue;
-      const set = byRepo.get(repo) ?? new Set<string>();
-      set.add(sha);
-      byRepo.set(repo, set);
+      const ref = parseCommitRef(artifact.id);
+      if (!ref) continue;
+      const set = byRepo.get(ref.repo) ?? new Set<string>();
+      set.add(ref.sha);
+      byRepo.set(ref.repo, set);
     }
   }
   let count = 0;
   for (const shas of byRepo.values()) {
-    const longer = [...shas].filter((sha) => sha.length !== 12);
-    const groups = new Set(longer);
-    for (const short of shas) {
-      if (short.length !== 12) continue;
-      const matches = longer.filter((sha) => sha.startsWith(short));
-      if (matches.length !== 1) groups.add(short);
+    const groups = new Set<string>();
+    for (const sha of shas) {
+      const longer = [...shas].filter((other) => other.length > sha.length && other.startsWith(sha));
+      if (longer.length === 1) continue;
+      groups.add(sha);
     }
     count += groups.size;
   }
@@ -91,7 +105,7 @@ export type ProjectStatus = {
     instructions_without_followup: number;
     /** Seal records: one per `committed` or `merged` event, not distinct commits. */
     commits: number;
-    /** A count of claimed shas — records are claims; it roots nothing and links nothing. A 12-character id groups with the single longer id of the same repo that it prefixes; a prefix that matches two or more longer ids stays its own group; the same sha in two repos counts once per repo. */
+    /** A count of claimed shas — records are claims; it roots nothing and links nothing. Only `commit:<repo>@<sha>` with a non-empty repository and a 7-, 12-, or 40-character hexadecimal sha counts; the sha is lower-cased and the repository string is taken as written. A 7- or 12-character id groups with the single longer id of that repository that it prefixes; a prefix of two or more longer ids stays its own group. Anything the parser rejects is not a sha. */
     commit_shas: number;
     /** commit seals that are neither rooted nor attested (true count; sibling corroboration does not reduce it) */
     unlinked_commits: number;
