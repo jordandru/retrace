@@ -11,6 +11,8 @@ export * from "./export.js";
 export * from "./checkpoint.js";
 export * from "./checkpoint-cron.js";
 export * from "./export-cache.js";
+export type { ExportSignature, ExportSigner } from "./export-signer.js";
+export * from "./export-stream.js";
 export * from "./report.js";
 export * from "./lineage.js";
 export * from "./github.js";

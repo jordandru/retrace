@@ -41,7 +41,8 @@ import {
 } from "./policy.js";
 import { sealEvent, sha256Hex } from "./chain.js";
 import { buildExportBundle, verifyExportBundle } from "./export.js";
-import { ExportCacheLastRefresh, ExportCacheStore, readExportCacheStatus } from "./export-cache.js";
+import { CachedExportRead, ExportCacheLastRefresh, ExportCacheStore, readExportCacheStatus } from "./export-cache.js";
+import { utf8Length } from "./export-stream.js";
 import {
   CLAIM_DECISION_PARAM, PRODUCER_SIGNED_ACTOR_PARAM, PRODUCER_SIG_FORMAT, PRODUCER_SIG_FORMAT_V2,
   PRODUCER_SIG_V2_MIN_CLI_VERSION, PRODUCER_SIG_VERDICT_PARAM, ProducerKey, ProducerSigVerdict,
@@ -451,7 +452,7 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
         ? json({ error: "export cache is not configured" }, 503, extra)
         : null;
     }
-    let cached;
+    let cached: CachedExportRead | null;
     try {
       cached = await opts.exportCache.get(project);
     } catch (error: any) {
@@ -466,38 +467,54 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
         { ...extra, "x-retrace-export-cache": "miss" },
       )
       : null;
-    const head = await store.head(project);
-    if (!head) {
-      return cacheOnly
-        ? json(
-          { error: `no live head for project "${project}"; a project with no head has nothing to serve` },
-          404,
-          { ...extra, "x-retrace-export-cache": "miss" },
-        )
-        : null;
-    }
-    const hit = head.seq === cached.head_seq && head.hash === cached.head_hash;
-    if (!hit) {
-      const atCachedHead = await store.history({ project, before_seq: cached.head_seq + 1, limit: 1 });
-      if (atCachedHead.events[0]?.seq !== cached.head_seq || atCachedHead.events[0]?.hash !== cached.head_hash) {
+    const entry = cached;
+    // A streamed body that is not served is cancelled, so the store's read does not stay open.
+    const discard = async () => {
+      if ("body" in entry) await entry.body.cancel().catch(() => {});
+    };
+    let head: Awaited<ReturnType<typeof store.head>>;
+    let hit: boolean;
+    try {
+      head = await store.head(project);
+      if (!head) {
+        await discard();
         return cacheOnly
           ? json(
-            { error: `cached export for project "${project}" is not a prefix of the live ledger` },
-            503,
-            { ...extra, "x-retrace-export-cache": "stale" },
+            { error: `no live head for project "${project}"; a project with no head has nothing to serve` },
+            404,
+            { ...extra, "x-retrace-export-cache": "miss" },
           )
           : null;
       }
+      hit = head.seq === entry.head_seq && head.hash === entry.head_hash;
+      if (!hit) {
+        const atCachedHead = await store.history({ project, before_seq: entry.head_seq + 1, limit: 1 });
+        if (atCachedHead.events[0]?.seq !== entry.head_seq || atCachedHead.events[0]?.hash !== entry.head_hash) {
+          await discard();
+          return cacheOnly
+            ? json(
+              { error: `cached export for project "${project}" is not a prefix of the live ledger` },
+              503,
+              { ...extra, "x-retrace-export-cache": "stale" },
+            )
+            : null;
+        }
+      }
+    } catch (error) {
+      await discard();
+      throw error;
     }
-    return new Response(cached.bundle_json, {
+    // The stored bytes pass through, a stream when the store gives one, with their length (export-cache handoff §4f).
+    return new Response("body" in entry ? entry.body : entry.bundle_json, {
       status: 200,
       headers: {
         "content-type": "application/json",
+        "content-length": String("body" in entry ? entry.bytes : utf8Length(entry.bundle_json)),
         ...CORS,
         ...extra,
         "x-retrace-export-cache": hit ? "hit" : "stale",
-        "x-retrace-export-generated-at": cached.generated_at,
-        ...(hit ? {} : { "x-retrace-export-cached-head": String(cached.head_seq), "x-retrace-export-live-head": String(head.seq) }),
+        "x-retrace-export-generated-at": entry.generated_at,
+        ...(hit ? {} : { "x-retrace-export-cached-head": String(entry.head_seq), "x-retrace-export-live-head": String(head.seq) }),
       },
     });
   };

@@ -28,7 +28,7 @@ export function publicFromPrivate(priv: JsonWebKey): JsonWebKey {
 }
 
 const b64u = {
-  enc: (buf: ArrayBuffer) => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, ""),
+  enc: (buf: ArrayBuffer | Uint8Array) => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, ""),
   dec: (s: string) => Uint8Array.from(atob(s.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(s.length / 4) * 4, "=")), (c) => c.charCodeAt(0)),
 };
 
@@ -38,6 +38,11 @@ const b64u = {
 function importable(jwk: JsonWebKey): JsonWebKey {
   const { alg: _alg, ...rest } = jwk as any;
   return rest;
+}
+
+/** A signature as bundles carry it: unpadded base64url, the encoding signCanonical returns. */
+export function encodeSignature(sig: Uint8Array): string {
+  return b64u.enc(sig);
 }
 
 export async function signCanonical(priv: JsonWebKey, value: unknown): Promise<string> {

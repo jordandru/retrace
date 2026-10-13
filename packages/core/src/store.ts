@@ -217,6 +217,11 @@ export interface EventStore {
   getMany?(ids: string[], metrics?: StoreReadMetricsSink): Promise<Event[]>;
   history(q: HistoryQuery): Promise<HistoryPage>;
   all(project: string): Promise<Event[]>;
+  /** Keyset page for the streaming export: events of `project` with afterSeq < seq ≤ throughSeq, ascending, at most
+   *  `limit` rows, parsed as `all` parses them. A row is kept while the stored characters of the rows before it on the
+   *  page stay under `maxChars`, so a page holds at least one row when any remain and at most one row past the budget.
+   *  Optional: only the streaming export needs it. */
+  eventsPage?(project: string, afterSeq: number, throughSeq: number, limit: number, maxChars: number): Promise<Event[]>;
   /** Attribution-amendment candidates through inclusive sequence U, ascending, capped by the caller's LIMIT. */
   amendmentEventsUpTo?(project: string, throughSeq: number, limit: number, metrics?: StoreReadMetricsSink): Promise<Event[]>;
   projects(): Promise<string[]>;

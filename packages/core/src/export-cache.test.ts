@@ -1,10 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { createHash, createPrivateKey, sign as nodeSign } from "node:crypto";
 import {
   appendEvent, buildExportBundle, createHandler, generateSigningKey, verifyExportBundle,
-  refreshExportCache, exportBuilder, CachedExport, ExportCacheStore, TornExportCacheError,
-  EventStore, Event, EventInput, Share, pageHistoryNewest, verifyCanonical,
+  refreshExportCache, refreshExportCacheStream, exportBuilder, CachedExport, CachedExportMeta, ExportCacheStore, TornExportCacheError,
+  EventStore, Event, EventInput, Share, pageHistoryNewest, verifyCanonical, MemoryEventStore, publicFromPrivate,
 } from "./index.js";
+import type { ExportByteSink, ExportSigner, RefreshResult } from "./index.js";
 
 class MemStore implements EventStore {
   events: Event[] = []; shares = new Map<string, Share>();
@@ -234,4 +236,177 @@ test("router: signed head uses the export issuer key while plain head stays unch
     { project: emptyBody.project, seq: emptyBody.seq, hash: emptyBody.hash, signed_at: emptyBody.signed_at },
     emptyBody.signature,
   ), true);
+});
+
+const sha256 = () => {
+  const h = createHash("sha256");
+  return { update: (b: Uint8Array) => h.update(b), digest: () => new Uint8Array(h.digest()) };
+};
+
+/** Keeps M and signs it with node:crypto's Ed25519 (RFC 8032, as WebCrypto): equal to signCanonical's signature
+ *  exactly when M equals the canonical bundle. The Worker's streaming signer is tested in apps/worker. */
+function referenceSigner(privateJwk: JsonWebKey): ExportSigner {
+  const { alg: _alg, ...jwk } = privateJwk as JsonWebKey & { alg?: string };
+  const key = createPrivateKey({ key: jwk as any, format: "jwk" });
+  return {
+    publicKey: publicFromPrivate(privateJwk),
+    begin() {
+      const one: Uint8Array[] = [];
+      const two: Uint8Array[] = [];
+      return {
+        nonce: (c) => { one.push(c.slice()); },
+        challenge: (c) => { two.push(c.slice()); },
+        finish: () => {
+          const m = Buffer.concat(one);
+          if (!m.equals(Buffer.concat(two))) throw new Error("signature refused");
+          return new Uint8Array(nodeSign(null, m, key));
+        },
+        dispose: () => {},
+      };
+    },
+    dispose() {},
+  };
+}
+
+/** A store that streams, as R2ExportCache does, over bytes in memory: putStream keeps the old entry unless `write`
+ *  returns after exactly `bytes`; get returns a ReadableStream and counts cancellations. */
+class StreamCache implements ExportCacheStore {
+  entries = new Map<string, { meta: CachedExportMeta; bytes: Uint8Array }>();
+  gets = 0;
+  cancelled = 0;
+  async meta(p: string) { return this.entries.get(p)?.meta ?? null; }
+  async get(p: string) {
+    this.gets++;
+    const entry = this.entries.get(p);
+    if (!entry) return null;
+    const self = this;
+    const body = new ReadableStream<Uint8Array>({
+      pull(c) { c.enqueue(entry.bytes); c.close(); },
+      cancel() { self.cancelled++; },
+    });
+    return { ...entry.meta, body, bytes: entry.bytes.length };
+  }
+  async put(e: CachedExport) {
+    const { bundle_json, ...meta } = e;
+    this.entries.set(e.project, { meta, bytes: new TextEncoder().encode(bundle_json) });
+  }
+  async putStream(meta: CachedExportMeta, bytes: number, write: (sink: ExportByteSink) => Promise<void>) {
+    const chunks: Uint8Array[] = [];
+    let n = 0;
+    await write({ write: async (c) => { n += c.length; if (n > bytes) throw new Error("too many bytes"); chunks.push(c); } });
+    if (n !== bytes) throw new Error("too few bytes");
+    this.entries.set(meta.project, { meta, bytes: Buffer.concat(chunks) });
+  }
+}
+
+const NOW = new Date("2026-10-13T05:07:00.000Z");
+
+test("refreshExportCache decides through meta when the store has it, never downloading the export", async () => {
+  const store = new MemStore();
+  await appendEvent(store, ev("p"));
+  const key = await generateSigningKey();
+  const cache = new StreamCache();
+  const build = exportBuilder(store, { signingKey: key.privateKey });
+  assert.deepEqual((await refreshExportCache(store, cache, ["p"], build)).map((r) => r.action), ["refreshed"]);
+  assert.deepEqual((await refreshExportCache(store, cache, ["p"], build)).map((r) => r.action), ["unchanged"]);
+  assert.equal(cache.gets, 0, "no get: the head comparison read only metadata");
+});
+
+test("refreshExportCacheStream: started then refreshed, the bytes buildExportBundle gives, unchanged without a build, and a failed build keeps the old entry", async () => {
+  const store = new MemoryEventStore();
+  for (let i = 0; i < 40; i++) await appendEvent(store, ev("p", { intent: `event ${i} — é 😀` }));
+  await appendEvent(store, ev("q"));
+  const key = await generateSigningKey();
+  const cache = new StreamCache();
+  const hooks: string[] = [];
+  const opts = {
+    signer: referenceSigner(key.privateKey), now: NOW, sha256, pageRows: 16,
+    onStart: async (p: string) => { hooks.push(`started ${p}`); },
+    onResult: async (r: RefreshResult) => { hooks.push(`${r.action} ${r.project}`); },
+  };
+
+  const r1 = await refreshExportCacheStream(store, cache, ["p", "q", "ghost", "p"], opts);
+  assert.deepEqual(r1.map((r) => [r.project, r.action, r.head_seq]), [["p", "refreshed", 39], ["q", "refreshed", 0], ["ghost", "skipped", undefined]]);
+  assert.deepEqual(hooks, ["started p", "refreshed p", "started q", "refreshed q", "skipped ghost"]);
+  const stored = cache.entries.get("p")!;
+  const expected = JSON.stringify(await buildExportBundle(store, { project: "p" }, { signingKey: key.privateKey, now: NOW }));
+  assert.equal(Buffer.from(stored.bytes).toString("utf8"), expected, "the stored bytes are buildExportBundle's");
+  assert.deepEqual(stored.meta, { project: "p", head_seq: 39, head_hash: (await store.head("p"))!.hash, generated_at: NOW.toISOString() });
+  assert.equal((await verifyExportBundle(JSON.parse(expected), key.publicKey)).signature, "valid");
+  assert.equal(cache.gets, 0);
+
+  hooks.length = 0;
+  const r2 = await refreshExportCacheStream(store, cache, ["p"], opts);
+  assert.deepEqual(r2.map((r) => r.action), ["unchanged"]);
+  assert.deepEqual(hooks, ["unchanged p"], "no build, so no started");
+
+  await appendEvent(store, ev("p"));
+  hooks.length = 0;
+  let pages = 0;
+  const failing: EventStore = Object.create(store, {
+    eventsPage: { value: async (...args: Parameters<NonNullable<EventStore["eventsPage"]>>) => {
+      if (++pages === 7) throw new Error("D1 unavailable mid-pass");
+      return store.eventsPage(...args);
+    } },
+  });
+  const r3 = await refreshExportCacheStream(failing, cache, ["p"], opts);
+  assert.deepEqual(r3.map((r) => [r.action, r.error]), [["failed", "D1 unavailable mid-pass"]]);
+  assert.deepEqual(hooks, ["started p", "failed p"]);
+  assert.equal(cache.entries.get("p"), stored, "the old entry stays");
+
+  const noStream: ExportCacheStore = { get: async () => null, put: async () => {} };
+  const r4 = await refreshExportCacheStream(store, noStream, ["p"], { ...opts, onStart: undefined, onResult: undefined });
+  assert.deepEqual(r4.map((r) => [r.action, r.error]), [["failed", "export cache store cannot write a stream"]]);
+});
+
+test("router: a streamed cache entry is served as a stream with Content-Length; paths that do not serve it cancel it", async () => {
+  const store = new MemoryEventStore();
+  await appendEvent(store, ev("p", { intent: "dash — and 😀" }));
+  await appendEvent(store, ev("p"));
+  const key = await generateSigningKey();
+  const cache = new StreamCache();
+  assert.deepEqual((await refreshExportCacheStream(store, cache, ["p"], { signer: referenceSigner(key.privateKey), now: NOW, sha256 })).map((r) => r.action), ["refreshed"]);
+  const stored = cache.entries.get("p")!;
+  const token = "owner-token-owner-token-owner-ok";
+  const handle = createHandler(store, { token, signingKey: key.privateKey, exportCache: cache });
+  const get = (path: string) => handle(new Request(`http://x${path}`, { headers: { authorization: `Bearer ${token}` } }));
+
+  for (const path of ["/projects/p/export", "/projects/p/export?cached=1"]) {
+    const res = await get(path);
+    assert.equal(res.status, 200, path);
+    assert.equal(res.headers.get("content-type"), "application/json");
+    assert.equal(res.headers.get("content-length"), String(stored.bytes.length), `${path}: Content-Length is the stored size`);
+    assert.equal(res.headers.get("x-retrace-export-cache"), "hit");
+    assert.equal(res.headers.get("x-retrace-export-generated-at"), NOW.toISOString());
+    assert.ok(Buffer.from(await res.arrayBuffer()).equals(Buffer.from(stored.bytes)), `${path}: the stored bytes`);
+  }
+  await store.createShare({ id: "sh_stream00000000000000000", project: "p", created_at: new Date().toISOString() });
+  const shared = await handle(new Request("http://x/s/sh_stream00000000000000000/export"));
+  assert.equal(shared.status, 200);
+  assert.equal(shared.headers.get("content-length"), String(stored.bytes.length));
+  assert.equal(shared.headers.get("cache-control"), "public, max-age=15");
+  assert.ok(Buffer.from(await shared.arrayBuffer()).equals(Buffer.from(stored.bytes)));
+
+  await appendEvent(store, ev("p"));
+  const stale = await get("/projects/p/export");
+  assert.equal(stale.headers.get("x-retrace-export-cache"), "stale");
+  assert.equal(stale.headers.get("content-length"), String(stored.bytes.length));
+  assert.ok(Buffer.from(await stale.arrayBuffer()).equals(Buffer.from(stored.bytes)));
+  assert.equal(cache.cancelled, 0);
+
+  cache.entries.set("p", { ...stored, meta: { ...stored.meta, head_hash: "f".repeat(64) } });
+  assert.equal((await get("/projects/p/export?cached=1")).status, 503);
+  assert.equal(cache.cancelled, 1, "a cached entry that is not a prefix of the ledger is cancelled, not served");
+  const fresh = await get("/projects/p/export?fresh=1");
+  assert.equal(fresh.headers.get("x-retrace-export-cache"), null);
+  assert.equal(JSON.parse(await fresh.text()).chain.total_events, 3);
+  cache.entries.set("ghost", { ...stored, meta: { ...stored.meta, project: "ghost" } });
+  assert.equal((await get("/projects/ghost/export?cached=1")).status, 404);
+  assert.equal(cache.cancelled, 2, "a cached entry for a project with no head is cancelled");
+
+  const strings = new StreamCache();
+  const plain = createHandler(store, { token, exportCache: { get: async () => ({ project: "p", head_seq: 2, head_hash: (await store.head("p"))!.hash, generated_at: NOW.toISOString(), bundle_json: "{\"é\":\"😀\"}" }), put: async () => {} } });
+  const text = await plain(new Request("http://x/projects/p/export", { headers: { authorization: `Bearer ${token}` } }));
+  assert.equal(text.headers.get("content-length"), String(Buffer.byteLength("{\"é\":\"😀\"}")), "a whole-text entry carries its UTF-8 length");
+  assert.equal(strings.gets, 0);
 });

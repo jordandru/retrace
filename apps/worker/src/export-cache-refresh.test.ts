@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readExportCacheLastRefresh, recordExportCacheRefreshResults } from "./export-cache-refresh.js";
+import { readExportCacheLastRefresh, recordExportCacheRefreshResults, recordExportCacheRefreshStarted } from "./export-cache-refresh.js";
 
 class Statement {
   params: unknown[] = [];
@@ -60,4 +60,23 @@ test("refresh status reader returns optional error and last_ok_at", async () => 
   assert.deepEqual(await readExportCacheLastRefresh(db as unknown as D1Database, "p"), db.row);
   db.row = null;
   assert.equal(await readExportCacheLastRefresh(db as unknown as D1Database, "p"), null);
+});
+
+test("a build's start is recorded as started, with no head or error, and keeps the last success", async () => {
+  const db = new FakeD1();
+  const attemptedAt = "2026-10-13T05:07:00.000Z";
+  await recordExportCacheRefreshStarted(db as unknown as D1Database, "p", attemptedAt);
+  assert.equal(db.runs.length, 1);
+  assert.deepEqual(db.runs[0]!.params, ["p", attemptedAt, "started", null, null, "started", attemptedAt]);
+  assert.match(db.runs[0]!.sql, /WHEN excluded\.result IN \('refreshed', 'unchanged'\) THEN excluded\.attempted_at\s+ELSE export_cache_refresh\.last_ok_at/);
+  db.failRun = true;
+  const original = console.error;
+  const messages: unknown[][] = [];
+  console.error = (...args: unknown[]) => { messages.push(args); };
+  try {
+    await recordExportCacheRefreshStarted(db as unknown as D1Database, "p", attemptedAt);
+  } finally {
+    console.error = original;
+  }
+  assert.match(messages[0]!.join(" "), /export cache refresh status write failed for p: D1 unavailable/);
 });

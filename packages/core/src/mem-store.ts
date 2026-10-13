@@ -56,6 +56,18 @@ export class MemoryEventStore implements EventStore {
     return this.events.filter((e) => wanted.has(e.id));
   }
   async all(p: string) { return this.events.filter((e) => e.project === p).sort((a, b) => a.seq - b.seq); }
+  /** EventStore.eventsPage; an event's stored characters are its JSON's length, as D1 stores `JSON.stringify(e)`. */
+  async eventsPage(p: string, afterSeq: number, throughSeq: number, limit: number, maxChars: number) {
+    const rows = this.events.filter((e) => e.project === p && e.seq > afterSeq && e.seq <= throughSeq).sort((a, b) => a.seq - b.seq).slice(0, limit);
+    const page: Event[] = [];
+    let chars = 0;
+    for (const e of rows) {
+      if (chars >= maxChars) break;
+      page.push(e);
+      chars += JSON.stringify(e).length;
+    }
+    return page;
+  }
   async amendmentEventsUpTo(p: string, throughSeq: number, limit: number) {
     return this.events
       .filter((e) => e.project === p && e.seq <= throughSeq && isAttributionAmendment(e))

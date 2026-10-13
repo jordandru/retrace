@@ -7,11 +7,13 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "migrate": "node ./migrate.mjs",
-    "test": "node -e \"require('node:fs').rmSync('.test-dist', { recursive: true, force: true })\" && esbuild src/*.test.ts --bundle --platform=node --format=esm --external:miniflare --outdir=.test-dist --out-extension:.js=.mjs && node --test .test-dist/*.test.mjs",
+    "test": "node -e \"require('node:fs').rmSync('.test-dist', { recursive: true, force: true })\" && esbuild src/*.test.ts --bundle --platform=node --format=esm --external:miniflare --external:esbuild --outdir=.test-dist --out-extension:.js=.mjs && node --test .test-dist/*.test.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "^2.0.0",
+    "@noble/curves": "2.4.0",
+    "@noble/hashes": "2.4.0",
     "@retrace-dev/cli": "*",
     "@retrace-dev/core": "*"
   },

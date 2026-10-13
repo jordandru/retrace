@@ -11,11 +11,14 @@
  *   GET /projects/:p/export|report|lineage · POST /projects/:p/share · GET /.well-known/retrace-pubkey
  *   POST /hooks/github  (GitHub webhook; HMAC-verified with RETRACE_GITHUB_SECRET; project from repo via RETRACE_GITHUB_PROJECTS)
  */
-import { createHandler, parseCheckpointProjectAllowlist, parseCredentials, parseGithubRepoProjects, parseOwnerPrincipal, parseSigningKey, parseTrailerPolicy, runCheckpointCron, refreshExportCache, exportBuilder, keyId, drainPendingGithubDeliveries } from "@retrace-dev/core";
+import { createHandler, parseCheckpointProjectAllowlist, parseCredentials, parseGithubRepoProjects, parseOwnerPrincipal, parseSigningKey, parseTrailerPolicy, runCheckpointCron, refreshExportCacheStream, keyId, drainPendingGithubDeliveries } from "@retrace-dev/core";
+import type { ExportSigner, RefreshResult } from "@retrace-dev/core";
+import { sha256 } from "@noble/hashes/sha2.js";
 import { D1Store } from "./d1-store.js";
 import { D1CheckpointLog } from "./checkpoint-log.js";
+import { createStreamingEd25519Signer } from "./ed25519-stream.js";
 import { R2ExportCache } from "./export-cache-r2.js";
-import { readExportCacheLastRefresh, recordExportCacheRefreshResults } from "./export-cache-refresh.js";
+import { readExportCacheLastRefresh, recordExportCacheRefreshResults, recordExportCacheRefreshStarted } from "./export-cache-refresh.js";
 import { handleRemoteMcp } from "./mcp.js";
 
 export interface Env {
@@ -123,12 +126,32 @@ export default {
           (results) => console.log("checkpoint cron:", JSON.stringify(results)),
           (e) => console.error("checkpoint cron failed:", String((e as Error)?.message ?? e)),
         )
-        // Export cache refresh runs after checkpoints so one project's bundle build cannot starve the witnesses.
+        // Export cache refresh runs after checkpoints so one project's bundle build cannot starve the witnesses. Each
+        // export is built and signed a page of events at a time and streamed into R2 (export-cache handoff db4bb0d6
+        // §4); a project's row reads `started` until its build records the outcome.
         .then(async () => {
           const attemptedAt = new Date().toISOString();
-          const results = await refreshExportCache(store, exportCache, projects, exportBuilder(store, { signingKey, issuerName: env.RETRACE_ISSUER, producers }));
-          await recordExportCacheRefreshResults(env.DB, results, attemptedAt);
-          return results;
+          let signer: ExportSigner;
+          try {
+            signer = createStreamingEd25519Signer(signingKey);
+          } catch (e) {
+            const error = String((e as Error)?.message ?? e).slice(0, 200);
+            const results: RefreshResult[] = [...new Set(projects)].map((project) => ({ project, action: "failed", error }));
+            await recordExportCacheRefreshResults(env.DB, results, attemptedAt);
+            return results;
+          }
+          try {
+            return await refreshExportCacheStream(store, exportCache, projects, {
+              signer,
+              issuerName: env.RETRACE_ISSUER,
+              producers,
+              sha256: () => sha256.create(),
+              onStart: (project) => recordExportCacheRefreshStarted(env.DB, project, attemptedAt),
+              onResult: (result) => recordExportCacheRefreshResults(env.DB, [result], attemptedAt),
+            });
+          } finally {
+            signer.dispose();
+          }
         })
         .then(
           (results) => console.log("export cache:", JSON.stringify(results)),
