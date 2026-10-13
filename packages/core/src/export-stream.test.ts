@@ -226,6 +226,40 @@ test("a pass that reads different events aborts before the signature exists; the
   }
 });
 
+test("served bytes that outgrow pass 0's count never complete a fixed-length put", async () => {
+  const key = await generateSigningKey();
+  const store = await ledger(400);
+  const opts = { signer: referenceSigner(key.privateKey), now: NOW, sha256, pageRows: 16 };
+  // Make the declared length a multiple of the 64 KiB write chunk (padding one event, which also breaks the chain:
+  // the verdict, and so the length, is the same for any padding after the first). Without the guard, a pass 2 that
+  // grows would then land a chunk boundary exactly on the declared length: the write after which R2 stores the object,
+  // abort or not.
+  const pad = (n: number) => { store.events[100] = { ...store.events[100]!, intent: `${store.events[100]!.intent}${"a".repeat(n)}` }; };
+  pad(1);
+  pad((65_536 - ((await StreamedFullExport.plan(store, "p", opts)).bytes % 65_536)) % 65_536);
+  let armed = false;
+  const plan = await StreamedFullExport.plan(store, "p", {
+    ...opts,
+    onPage: (page) => {
+      if (armed && page.pass === 2 && page.index === 0) store.events[300] = { ...store.events[300]!, intent: `${store.events[300]!.intent}${"z".repeat(200_000)}` };
+    },
+  });
+  assert.equal(plan.bytes % 65_536, 0);
+  armed = true;
+  // FixedLengthStream into R2: a write past the declared length throws; a write that reaches it exactly stores it.
+  let total = 0;
+  let stored = false;
+  const sink = {
+    write: async (c: Uint8Array) => {
+      if (total + c.length > plan.bytes) throw new Error("Attempt to write too many bytes through a FixedLengthStream.");
+      total += c.length;
+      if (total === plan.bytes) stored = true;
+    },
+  };
+  await assert.rejects(() => plan.write(sink), /the served bytes outgrew pass 0's count/);
+  assert.equal(stored, false, `the declared ${plan.bytes} bytes were never reached (wrote ${total})`);
+});
+
 test("a pass that does not end at the pinned head aborts", async () => {
   const key = await generateSigningKey();
   const store = await ledger(40);

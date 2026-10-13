@@ -108,16 +108,33 @@ function digestsEqual(a: Uint8Array, b: Uint8Array): boolean {
   return diff === 0;
 }
 
-/** Collects bytes into WRITE_CHUNK pieces for the sink, counting what it has accepted. */
+/**
+ * Collects bytes into WRITE_CHUNK pieces for the sink. Content never reaches the declared length: `push` refuses
+ * anything past `contentLimit`, the declared length less the closing bytes, and only `close` may write those. A
+ * fixed-length R2 put stores the object as soon as the declared length has arrived, even if the writer is aborted
+ * afterwards (observed in workerd), so bytes that outgrew pass 0's count must fail before they could complete it.
+ */
 class ChunkedWriter {
   private buf = new Uint8Array(WRITE_CHUNK);
   private pos = 0;
   private flushed = 0;
-  constructor(private sink: ExportByteSink) {}
+  constructor(private sink: ExportByteSink, private readonly contentLimit: number, private readonly declared: number) {}
   get total(): number {
     return this.flushed + this.pos;
   }
   async push(bytes: Uint8Array): Promise<void> {
+    if (this.total + bytes.length > this.contentLimit) throw new Error(`streaming export: the served bytes outgrew pass 0's count of ${this.contentLimit} before the closing bytes`);
+    await this.append(bytes);
+  }
+  /** The closing bytes, which alone may complete the declared length. */
+  async close(closing: Uint8Array): Promise<void> {
+    if (this.total !== this.contentLimit || this.total + closing.length !== this.declared) {
+      throw new Error(`streaming export: ${this.total + closing.length} bytes built, pass 0 counted ${this.declared}`);
+    }
+    await this.append(closing);
+    await this.flush();
+  }
+  private async append(bytes: Uint8Array): Promise<void> {
     let off = 0;
     while (off < bytes.length) {
       const n = Math.min(bytes.length - off, this.buf.length - this.pos);
@@ -127,7 +144,7 @@ class ChunkedWriter {
       if (this.pos === this.buf.length) await this.flush();
     }
   }
-  async flush(): Promise<void> {
+  private async flush(): Promise<void> {
     if (!this.pos) return;
     const chunk = this.buf.subarray(0, this.pos);
     this.buf = new Uint8Array(WRITE_CHUNK);
@@ -243,7 +260,7 @@ export class StreamedFullExport {
         await this.replay(1, (canonical) => signature.nonce(canonical));
         signature.nonce(encoder.encode(`${this.signed!.after}}`));
       }
-      const out = new ChunkedWriter(sink);
+      const out = new ChunkedWriter(sink, this.bytes - (this.signed ? SIGNATURE_FIELD_BYTES : 0) - 1, this.bytes);
       await out.push(encoder.encode(this.served.before));
       if (signature) signature.challenge(encoder.encode(this.signed!.before));
       await this.replay(2, (canonical) => signature?.challenge(canonical), async (e, first) => {
@@ -258,10 +275,7 @@ export class StreamedFullExport {
         if (sig.length !== 64) throw new Error("streaming export: the signer returned a signature that is not 64 bytes");
         close = `,"signature":${JSON.stringify(encodeSignature(sig))}}`;
       }
-      const closing = encoder.encode(close);
-      if (out.total + closing.length !== this.bytes) throw new Error(`streaming export: ${out.total + closing.length} bytes built, pass 0 counted ${this.bytes}`);
-      await out.push(closing);
-      await out.flush();
+      await out.close(encoder.encode(close));
     } catch (error) {
       signature?.dispose();
       throw error;
