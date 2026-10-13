@@ -1,5 +1,7 @@
 # Retrace — setup walkthrough (v0.1.6)
 
+*Correction, 2026-10-08 (issue #86; claude-code, measured with the published CLI 0.3.1): the walkthrough's steps hold, but its version pins are stale. The published package is `@retrace-dev/cli@0.3.1`; where this file says `0.1.6`, read the current version. Each stale line below carries its own dated note.*
+
 Work top to bottom. Each stage ends with a check. Commands assume macOS/Linux or **Ubuntu WSL**. Fill in `<angle brackets>`.
 
 This checkout already has a live Worker (`retrace-api.slcwitit.workers.dev`, D1 `retrace-db`) and pinned credentials for Claude, Codex, Gemini, Grok, and GitHub Copilot. The GitHub repo is **public**. Stages 1–4 still matter on a new machine; 5 is already done here.
@@ -44,6 +46,8 @@ pwd
 ```
 
 Consumers who only need the CLI can skip the clone and use a named binary such as `npx -p @retrace-dev/cli retrace doctor` / `npx -p @retrace-dev/cli retrace-git install --project <project>`, or `npm i -g @retrace-dev/cli@0.1.6`. Bundles sealed after 2026-08-30 need verify >= 0.1.2; the strict rules (`hash_v`, trusted-key signatures, checkpoint conflicts) ship in >= 0.1.3.
+
+*Correction, 2026-10-08 (issue #86): `npm i -g @retrace-dev/cli@0.1.6` pins a version three minors old; the current one is `0.3.1` (`npm view @retrace-dev/cli version`).*
 
 ---
 
@@ -103,6 +107,8 @@ npx -p @retrace-dev/cli retrace doctor
 ```
 
 READY when the repo is wired to a ledger it can reach. On a **local-only** scratch repo (no Worker URL, no credential) expect `FAIL credential` — that's doctor telling you the hook has no token, not a broken install; add `"db": "<path>"` to `.retrace.json` for a purely local ledger, or the `url` + `credential` pair for a remote one. Failures name the repair. Hook misses go in `.git/retrace-hook.log`; re-log with `retrace-git commit <sha>`.
+
+*Correction, 2026-10-08 (issue #86; claude-code, measured): on a local-only scratch repo `retrace doctor` (CLI 0.3.1) does **not** print `FAIL credential`. With `.retrace.json` = `{"project":"widget","environment":"local"}` and no `db` key it prints `WARN deployment — no RETRACE_URL or .retrace.json url; remote checks skipped` and `READY — 5 passed, 1 warnings, 0 failures`, and the ledger lands in the default store `~/.retrace/retrace.db` (or `RETRACE_DB`). A `db` key is optional, not required. The sentence above described an older doctor; the `url` + `credential` pair for a remote ledger still applies.*
 
 To reconcile a local-only repository, allow its unstamped hook seals explicitly:
 
