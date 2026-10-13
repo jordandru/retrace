@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Miniflare, convertV4MiniflareOptions } from "miniflare";
 import { R2ExportCache } from "./export-cache-r2.js";
+import { installFixedLengthStream } from "./test-fixed-length-stream.js";
+
+installFixedLengthStream(); // R2ExportCache runs in Node here, against workerd's R2 through Miniflare
 
 test("R2 in workerd stores and returns a 33 MiB export as one byte-equal object", { timeout: 120_000 }, async () => {
   const mf = new Miniflare(convertV4MiniflareOptions({
@@ -25,8 +28,9 @@ test("R2 in workerd stores and returns a 33 MiB export as one byte-equal object"
       bundle_json,
     });
     const stored = await cache.get("large");
-    assert.equal(stored?.bundle_json.length, bundle_json.length);
-    assert.equal(stored?.bundle_json, bundle_json);
+    assert.ok(stored && "body" in stored);
+    assert.equal(stored.bytes, bundle_json.length);
+    assert.equal(await new Response(stored.body).text(), bundle_json);
     const object = await bucket.head("export-cache/v1/large.json");
     assert.equal(object?.httpMetadata?.contentType, "application/json");
     assert.deepEqual(object?.customMetadata, {

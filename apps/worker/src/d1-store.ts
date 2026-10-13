@@ -117,6 +117,18 @@ export class D1Store implements EventStore {
     return results.map((r) => JSON.parse(r.body) as Event);
   }
 
+  /** EventStore.eventsPage, one query: the inner SELECT takes at most `limit` rows through the UNIQUE(project, seq)
+   *  index; the window sum then keeps a row while the characters of the rows before it stay under `maxChars`. */
+  async eventsPage(project: string, afterSeq: number, throughSeq: number, limit: number, maxChars: number) {
+    const { results } = await this.db.prepare(
+      `SELECT body FROM (
+         SELECT seq, body, SUM(length(body)) OVER (ORDER BY seq ROWS UNBOUNDED PRECEDING) AS upto
+         FROM (SELECT seq, body FROM events WHERE project = ? AND seq > ? AND seq <= ? ORDER BY seq LIMIT ?)
+       ) WHERE upto - length(body) < ? ORDER BY seq`,
+    ).bind(project, afterSeq, throughSeq, limit, maxChars).all<{ body: string }>();
+    return results.map((r) => JSON.parse(r.body) as Event);
+  }
+
   async amendmentEventsUpTo(project: string, throughSeq: number, limit: number, metrics?: StoreReadMetricsSink) {
     const result = await this.db.prepare(
       `SELECT body FROM events

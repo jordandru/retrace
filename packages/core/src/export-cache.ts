@@ -13,6 +13,7 @@
  */
 import { buildExportBundle, ExportBundle, ExportOptions } from "./export.js";
 import { EventStore } from "./store.js";
+import { ExportByteSink, StreamedFullExport, StreamingExportOptions } from "./export-stream.js";
 
 export interface CachedExport {
   project: string;
@@ -26,11 +27,18 @@ export interface CachedExport {
 
 export type CachedExportMeta = Omit<CachedExport, "bundle_json">;
 
+/** A cached export as `get` returns it: the stored JSON whole, or, from a store that streams, its UTF-8 bytes as a
+ *  stream with their exact count, so that serving never holds the export in memory (export-cache handoff §4f). */
+export type CachedExportRead = CachedExport | (CachedExportMeta & { body: ReadableStream<Uint8Array>; bytes: number });
+
 export interface ExportCacheStore {
-  get(project: string): Promise<CachedExport | null>;
+  get(project: string): Promise<CachedExportRead | null>;
   put(entry: CachedExport): Promise<void>;
   meta?(project: string): Promise<CachedExportMeta | null>;
   delete?(project: string): Promise<boolean>;
+  /** Writes a new entry of exactly `bytes` bytes, produced by `write`. A throw from `write`, or any other length,
+   *  leaves the old entry in place. */
+  putStream?(entry: CachedExportMeta, bytes: number, write: (sink: ExportByteSink) => Promise<void>): Promise<void>;
 }
 
 /** Absent cache is null; a torn/inconsistent chunk set must throw this instead of looking like a miss. */
@@ -51,7 +59,9 @@ export interface RefreshResult {
 
 export interface ExportCacheLastRefresh {
   attempted_at: string;
-  result: RefreshResult["action"];
+  /** `started`: a build began at `attempted_at` and has not recorded its outcome. It is not a success: a run the
+   *  runtime ends during the build leaves it, and `last_ok_at` still names the last success. */
+  result: RefreshResult["action"] | "started";
   error?: string;
   last_ok_at?: string;
 }
@@ -75,17 +85,7 @@ export async function readExportCacheStatus(
   const live = liveHead ? { live_head_seq: liveHead.seq } : {};
   try {
     if (!readLastRefresh) throw new Error("export cache refresh status reader is not configured");
-    const [cached, lastRefresh] = await Promise.all([
-      cache.meta
-        ? cache.meta(project)
-        : cache.get(project).then((entry) => entry && ({
-          project: entry.project,
-          head_seq: entry.head_seq,
-          head_hash: entry.head_hash,
-          generated_at: entry.generated_at,
-        })),
-      readLastRefresh(project),
-    ]);
+    const [cached, lastRefresh] = await Promise.all([cachedExportMeta(cache, project), readLastRefresh(project)]);
     const refresh = lastRefresh ? { last_refresh: lastRefresh } : {};
     if (!cached) return { state: "miss", ...live, ...refresh };
     const generatedAt = Date.parse(cached.generated_at);
@@ -101,6 +101,16 @@ export async function readExportCacheStatus(
   } catch {
     return { state: "unavailable", ...live };
   }
+}
+
+/** The cached entry's claim, read through `meta` (an R2 head) when the store has it, so that deciding never downloads
+ *  the export (export-cache handoff §4a); otherwise through `get`, cancelling a streamed body unread. */
+export async function cachedExportMeta(cache: ExportCacheStore, project: string): Promise<CachedExportMeta | null> {
+  if (cache.meta) return cache.meta(project);
+  const entry = await cache.get(project);
+  if (!entry) return null;
+  if ("body" in entry) await entry.body.cancel().catch(() => {});
+  return { project: entry.project, head_seq: entry.head_seq, head_hash: entry.head_hash, generated_at: entry.generated_at };
 }
 
 /**
@@ -122,7 +132,7 @@ export async function refreshExportCache(
         results.push({ project, action: "skipped" });
         continue;
       }
-      const cached = await cache.get(project);
+      const cached = await cachedExportMeta(cache, project);
       if (cached && cached.head_seq === head.seq && cached.head_hash === head.hash) {
         results.push({ project, action: "unchanged" });
         continue;
@@ -153,4 +163,51 @@ export async function refreshExportCache(
 /** Convenience for hosts that build with a fixed key/producer set (the Worker's scheduled handler). */
 export function exportBuilder(store: EventStore, opts: ExportOptions): (project: string) => Promise<ExportBundle> {
   return (project) => buildExportBundle(store, { project }, opts);
+}
+
+export interface StreamingRefreshOptions extends StreamingExportOptions {
+  /** Called before a project's build starts (the Worker records `started`). The host's hook logs its own failures. */
+  onStart?: (project: string) => Promise<void>;
+  /** Called with each project's result as soon as it is known (the Worker records it). */
+  onResult?: (result: RefreshResult) => Promise<void>;
+}
+
+/**
+ * `refreshExportCache` for a store that streams: each moved project's export is built and signed by
+ * `StreamedFullExport` straight into `cache.putStream`, in memory bounded by a page of events. The cache records the
+ * bundle's own claim, as `refreshExportCache` does. A failure on one project never blocks the others, and a failed
+ * build leaves the old entry.
+ */
+export async function refreshExportCacheStream(
+  store: EventStore,
+  cache: ExportCacheStore,
+  projects: readonly string[],
+  opts: StreamingRefreshOptions,
+): Promise<RefreshResult[]> {
+  const results: RefreshResult[] = [];
+  for (const project of new Set(projects)) {
+    let result: RefreshResult;
+    try {
+      if (!cache.putStream) throw new Error("export cache store cannot write a stream");
+      const head = await store.head(project);
+      const cached = head ? await cachedExportMeta(cache, project) : null;
+      if (!head) result = { project, action: "skipped" };
+      else if (cached && cached.head_seq === head.seq && cached.head_hash === head.hash) result = { project, action: "unchanged" };
+      else {
+        await opts.onStart?.(project);
+        const plan = await StreamedFullExport.plan(store, project, opts);
+        if (!plan.head_hash || plan.total_events < 1) result = { project, action: "skipped" };
+        else {
+          const head_seq = plan.total_events - 1;
+          await cache.putStream({ project, head_seq, head_hash: plan.head_hash, generated_at: plan.generated_at }, plan.bytes, (sink) => plan.write(sink));
+          result = { project, action: "refreshed", head_seq };
+        }
+      }
+    } catch (e) {
+      result = { project, action: "failed", error: String((e as Error)?.message ?? e).slice(0, 200) };
+    }
+    results.push(result);
+    await opts.onResult?.(result);
+  }
+  return results;
 }
