@@ -103,21 +103,41 @@ export interface VerifyResult {
   legacy_events?: number;
 }
 
+/**
+ * `verifyChain` one event at a time, for callers that stream a ledger (the cached export reads it in pages). Push
+ * events in seq order; after the first failed check later pushes are ignored, and `result()` is exactly what
+ * `verifyChain` returns for the same events.
+ */
+export class ChainVerifier {
+  private prevHash = GENESIS_HASH;
+  private expectedSeq = 0;
+  private legacy = 0;
+  private failure: VerifyResult | undefined;
+
+  /** False once the chain has failed (this event or an earlier one). */
+  async push(e: Event): Promise<boolean> {
+    if (this.failure) return false;
+    if (hashRule(e) === "legacy") this.legacy++;
+    const expectedSeq = this.expectedSeq;
+    if (e.seq !== expectedSeq) this.failure = { ok: false, checked: expectedSeq, first_bad_seq: e.seq, reason: `sequence gap: expected ${expectedSeq}, got ${e.seq}` };
+    else if (e.prev_hash !== this.prevHash) this.failure = { ok: false, checked: expectedSeq, first_bad_seq: e.seq, reason: "prev_hash mismatch (chain broken)" };
+    else if ((await computeHash(e)) !== e.hash) this.failure = { ok: false, checked: expectedSeq, first_bad_seq: e.seq, reason: "content hash mismatch (event tampered)" };
+    if (this.failure) return false;
+    this.prevHash = e.hash;
+    this.expectedSeq++;
+    return true;
+  }
+
+  result(): VerifyResult {
+    return this.failure ? { ...this.failure } : { ok: true, checked: this.expectedSeq, legacy_events: this.legacy };
+  }
+}
+
 /** Verify a project's chain, given events sorted by seq ascending. */
 export async function verifyChain(events: Event[]): Promise<VerifyResult> {
-  let prevHash = GENESIS_HASH;
-  let expectedSeq = 0;
-  let legacy = 0;
-  for (const e of events) {
-    if (hashRule(e) === "legacy") legacy++;
-    if (e.seq !== expectedSeq) return { ok: false, checked: expectedSeq, first_bad_seq: e.seq, reason: `sequence gap: expected ${expectedSeq}, got ${e.seq}` };
-    if (e.prev_hash !== prevHash) return { ok: false, checked: expectedSeq, first_bad_seq: e.seq, reason: "prev_hash mismatch (chain broken)" };
-    const recomputed = await computeHash(e);
-    if (recomputed !== e.hash) return { ok: false, checked: expectedSeq, first_bad_seq: e.seq, reason: "content hash mismatch (event tampered)" };
-    prevHash = e.hash;
-    expectedSeq++;
-  }
-  return { ok: true, checked: expectedSeq, legacy_events: legacy };
+  const verifier = new ChainVerifier();
+  for (const e of events) if (!(await verifier.push(e))) break;
+  return verifier.result();
 }
 
 /** Verify a v2-only chain suffix anchored to an already verified cached head. */
