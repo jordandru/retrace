@@ -4,6 +4,67 @@ Core schemas, hash-chain verification, causal status, signed exports, and human-
 
 Most users should install [`@retrace-dev/cli`](https://www.npmjs.com/package/@retrace-dev/cli) instead. This package is the runtime library for adapters and custom integrations.
 
+## 0.4.0 — breaking changes and new shapes since 0.3.0
+
+**Breaking for consumers of the exported API (each one a required change when upgrading):**
+
+- **Timestamps follow one grammar** (`schema.ts` `Timestamp`, PR 203). `EventInput.timestamp`, `Event.timestamp` and `Event.received_at` must be
+  `YYYY-MM-DDTHH:MM:SS[.SSS]` followed by `Z` or `±HH:MM`: a real calendar instant, at most three fractional digits, an offset hour of at most 14.
+  Values 0.3.0's `datetime` check accepted, such as a time without seconds, four or more fractional digits, a compact `+0530` offset or an offset
+  hour above 14, are now refused by `EventInput.parse`, `sealEvent`, `appendEvent` and `POST /events` (400). Stored rows are not re-parsed on read.
+- **History cursors are validated** (`store.ts`, PR 203). A `since` or `until` outside `INSTANT_RE` throws `InvalidHistoryCursorError` (the router
+  answers 400); 0.3.0 compared any string byte by byte. Cursors and caused-by timestamps now compare as instants (PRs 203 and 230).
+- **A producer key registered to another credential is refused** (`router.ts`, PR 201): `POST /events` answers 401 `kid_mismatch` and seals nothing.
+- **`Retrace-Caused-By` parsing is stricter** (`github.ts` `causedByFrom`, now exported; PR 223). Only a full `evt_` id of 32 hex characters on a
+  line that starts with `Retrace-Caused-By:` (in any letter case) counts; the last such line wins, and the id is lowercased. 0.3.0 took the first
+  `Retrace-Caused-By: evt_<hex>` match anywhere in the text, at any length, and kept its case. `mapGithubWebhook` events gain `caused_by_source` and
+  `caused_by_rejected`; `resolveCommitActor().causedBy` and `causedBySourceOf` (which now reads `raw_message`) follow the same rule;
+  `CausedByRecord.source` gains `body`, `unstamped` and `conflict`, and the record gains `claimed_id`.
+- **Webhook seals are keyed by the full commit sha** (`capture.ts`, PR 214). `webhookSealsFromEvents` keys by the full lowercase sha instead of a
+  12-character prefix, and `WebhookSeal` requires `sha`. `restrictedSealEligibility` adds the reasons `wrong_action`, `wrong_tool` and
+  `ambiguous_commit`, and returns `fullSha` when eligible.
+- **`ExportCacheStore.get` returns `CachedExportRead`** (`export-cache.ts`, PR 235), which may be a stream with no `bundle_json`. This changes
+  TypeScript callers; implementers of the interface are unaffected.
+- **Widened unions**, which only an exhaustive `switch` notices: `ExportCacheLastRefresh.result` gains `started` (PR 235), and the attribution
+  diagnostics reason gains `non_seal_commit_record` (PR 198).
+
+**New exports and shapes:**
+
+- The timestamp and instant helpers: `Timestamp`, `TIMESTAMP_RE`, `INSTANT_RE`, `instantFromText` and their constants (`schema.ts`), and
+  `compareInstants`, `instantKey`, `InvalidHistoryCursorError`, `assertHistoryCursors`, `TIMESTAMP_INSTANT_SQL` (`store.ts`) (PRs 203 and 230).
+- The streaming export (PR 235): `export-stream.ts`, `ChainVerifier`, `encodeSignature`, the `ExportSignature` and `ExportSigner` types,
+  `refreshExportCacheStream`, and the optional `EventStore.eventsPage`.
+- `offlinePolicySelectionVerifier` (`policy.ts`, PR 238).
+- The pane-message checks of agent-rules 15 (`dispatch.ts`: `verifySentEvent`, `paneTextSha256`, `withSentSuffix`, `splitSentSuffix` and the
+  brief-name helpers) and the review-verdict rules (`review-verdict.ts`: `isReviewVerdict`, `reviewVerdictProblem`, `blockingFor`) (PR 222).
+- `ReconcileReport.attribution` (PR 198); `ProjectStatus` `capture.commit_shas` (PR 224) and the `sibling_corroborated` counts (PR 221);
+  `RouterOptions.now` (PR 218).
+
+**Behaviour changes that need no change from a caller, but that a caller or an HTTP client can observe:**
+
+- A history text search whose escaped pattern is longer than 50 bytes runs as `instr(lower(body), ?)` instead of a `LIKE` pattern. It
+  matches the same events, and it no longer fails on the Worker's D1 (`store.ts`, PR 207).
+- A classification that misses its deadline is reported with the reason `deadline`, not `store_error` (`classify.ts`, PR 208).
+- A push webhook with push capture on that is not finished by the delivery deadline answers HTTP 202 with `pending` (the commit shas) and
+  `reason: "deadline"`, and the delivery stays queued (`router.ts`, PR 219).
+- `renderProjectStatus` reports "unlinked commit seals · N distinct commit shas" (PR 224) and a sibling-corroboration line, which reads
+  "disabled" when the project has no policy or routes only by environment fallback (PRs 221 and 229).
+- Attribution: a commit reference on a record that is not seal-shaped, and does not resolve, becomes an ignored diagnostic
+  (`non_seal_commit_record`) instead of failing the whole attribution context (`attribution-context.ts`, PR 198). Attribution and reconcile
+  diagnose every event that carries a restricted hook stamp, not only commit events (PR 214).
+- The cached export is served with its `Content-Length`, as a stream when the store gives one (`router.ts`, PR 235).
+
+**Same output, less work:** `verifyExportBundle` checks policy selection in one forward pass (PR 238), and `parseJsonRejectDuplicateKeys` builds
+each string in one step (PR 241). Both are tested for equivalence against the code they replace.
+
+**Runtime:** the entry point now loads `dispatch.ts`, which imports `node:path` and uses `Buffer`. Node and Cloudflare Workers with `nodejs_compat`
+(the repository's Worker) load it; other runtimes are not tested.
+
+**CLI (`@retrace-dev/cli` 0.4.0):** it already calls core functions that 0.3.0 does not have, so the two ship together, and the CLI pins this exact
+core version. Its README lists the CLI changes. Publish order: core first, then cli.
+
+No environment variable became required.
+
 ## 0.3.0 — breaking changes and new shapes since 0.2.0
 
 **Breaking for consumers of the exported API (each one a required change when upgrading):**

@@ -12,6 +12,26 @@ The package also installs `retrace-git`, `retrace-mcp`, `retrace-serve`, `retrac
 
 Node.js 22 or newer is required by the local SQLite-backed server. See the [repository README](https://github.com/jordandru/retrace#readme) for configuration and cloud deployment.
 
+**0.4.0** tracks `@retrace-dev/core` 0.4.0 (exact pin). The CLI already calls core functions that core 0.3.0 does not have, so the two ship
+together; see the [core README](https://www.npmjs.com/package/@retrace-dev/core) for the core changes (the timestamp grammar, `Retrace-Caused-By`
+parsing, `kid_mismatch`). In the CLI:
+
+- **New MCP tools `retrace_send` and `retrace_verify_send`** (PR 222), the signed pane messages of agent-rules 15. `retrace_send` runs `orca-ide`
+  and sends only to a pane listed as an agent pane in `RETRACE_PANES_FILE` (default `~/.retrace/panes.json`); `retrace_verify_send` binds the
+  receiver to `RETRACE_TERMINAL` or, failing that, `ORCA_TERMINAL_HANDLE`. Both variables are optional.
+- **`retrace_log` refuses a review verdict that is incomplete** (PR 222): an agent's `approved` or `rejected` event tagged `review` must carry
+  `findings {high, medium, low}`, `routing_event_id`, a 40-hex `reviewed_head`, and a `blocking` equal to `high + medium > 0`. `retrace_log` and
+  `retrace_instruct` apply core's timestamp grammar, and `retrace_history` answers an invalid `since`/`until` with an error result (PR 203).
+- `serverInfo.version` is the package version (PR 206); `retrace doctor` prints READY / NOT READY first (PR 204).
+- `retrace-admin add-agent` gains the `claude-code-openshell` harness, and `new-team` refuses the `claude-code-cloud` and `claude-code-openshell`
+  harnesses (PR 196). `retrace-export checkpoint` refuses a bundle whose `generated_at` does not parse (PR 200). `retrace-git reconcile --json`
+  adds `attribution` (PR 198).
+- The git hook keeps a seal queued when its target never ran and bounds npx's network wait (PR 202). The hook script is written at install, so an
+  existing repository gets those two changes when `retrace-git install` is run again.
+- The remote store retries an idempotent GET once after a socket-level failure (PR 210).
+
+No binary was added or removed, and no environment variable became required.
+
 **0.3.1** keeps the exact pin on `@retrace-dev/core` 0.3.0 (core is unchanged) and fixes one message: `retrace-export verify` and
 `retrace-export render` run outside a recorded repository with no `--policy` now report the attribution evaluation as unavailable with
 `no_repository_context` and how to supply the repository, instead of a raw `ENOENT`. Verdicts, policy handling and exit codes are unchanged.
