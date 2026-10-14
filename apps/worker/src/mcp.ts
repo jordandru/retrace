@@ -28,6 +28,7 @@ import {
   verifyProject,
   projectStatusForModel,
   readProjectPages,
+  UnpageableLedgerError,
   lineageForModel,
   type Actor,
   type Credential,
@@ -114,26 +115,30 @@ function textResult(text: string, structuredContent?: Record<string, unknown>): 
   return { content: [{ type: "text", text }], ...(structuredContent ? { structuredContent } : {}) };
 }
 
-/** The attribution collection `history` and `why` render, as `collectAttributionAmendments(await store.all(project))`
- *  gives it, without loading the ledger (#237 §4.3). Without attribution options that collection depends on one fact:
- *  whether any body is an attribution amendment (empty if none, `untrusted_snapshot` if one). The first candidate the
- *  partial index admits at the pinned head decides it when its body agrees. A candidate whose body refutes it (its
- *  `action` column says `other`, its body does not) is an anomaly; then every body is scanned a page at a time, as
- *  `all` would have read them. A body that is an amendment under an `action` column other than `other` is never a
- *  candidate, so for that row the note reads as if it were absent. */
+/** The attribution collection `history` and `why` render, exactly `collectAttributionAmendments(await store.all(project))`,
+ *  holding one page of bodies at a time (#237 §4.3). Without attribution options that collection depends on one fact:
+ *  `events.some(isAttributionAmendment)` (empty if false, `untrusted_snapshot` if true). Every body is read, never a
+ *  column-filtered projection (PR 244 r1, Codex M): `isAttributionAmendment` is judged in seq order up to the first match
+ *  or throw, and a throw is held until every page is parsed, because `all` parses every body before `.some` judges any.
+ *  A ledger that cannot be paged is read with `all`. */
 export async function attributionNoteCollection(store: EventStore, project: string) {
-  if (!store.amendmentEventsUpTo) return collectAttributionAmendments(await store.all(project));
-  const head = await store.head(project);
-  if (!head) return collectAttributionAmendments([]);
-  const [candidate] = await store.amendmentEventsUpTo(project, head.seq, 1);
-  if (!candidate || isAttributionAmendment(candidate)) return collectAttributionAmendments(candidate ? [candidate] : []);
   if (!store.eventRowsPage) return collectAttributionAmendments(await store.all(project));
-  // `events.some(isAttributionAmendment)` over every body: stop judging at the first match, keep parsing every page.
-  let found: Event | undefined;
-  for await (const page of readProjectPages(store, project)) {
-    if (!found) found = page.find((row) => isAttributionAmendment(row.event))?.event;
+  try {
+    let found: Event | undefined, judged = false, thrown = false, error: unknown;
+    for await (const page of readProjectPages(store, project)) {
+      for (const row of page) {
+        if (judged) break;
+        try {
+          if (isAttributionAmendment(row.event)) { found = row.event; judged = true; }
+        } catch (e) { error = e; thrown = judged = true; }
+      }
+    }
+    if (thrown) throw error;
+    return collectAttributionAmendments(found ? [found] : []);
+  } catch (e) {
+    if (e instanceof UnpageableLedgerError) return collectAttributionAmendments(await store.all(project));
+    throw e;
   }
-  return collectAttributionAmendments(found ? [found] : []);
 }
 
 export function buildRemoteMcpServer(

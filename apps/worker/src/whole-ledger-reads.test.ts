@@ -63,26 +63,14 @@ test("differential: tampering is the same verdict on both paths", { timeout: 300
   }
 });
 
-test("a body that is not JSON: verify and status fail as today's path fails; the MCP note no longer reads it", { timeout: 120_000 }, async () => {
-  for (const seq of [2, 29]) {
+test("a body that is not JSON anywhere: every moved response fails exactly as today's path fails", { timeout: 120_000 }, async () => {
+  for (const seq of [2, 13, 29]) {
     const { store, ids } = await tampered("UPDATE events SET body = '{not json' WHERE project = ? AND seq = ?", [P, seq]);
-    // why on #0, an instruction with no cause, so the chain never reaches the bad row.
-    const now = await responses(store, { whyEventId: ids[0] });
-    const today = await responses(todayStore(store), { whyEventId: ids[0] });
-    for (const key of ["verify", "share_verify", "status_json", "verify_direct", "mcp_verify"]) assert.deepEqual(now[key], today[key], `seq ${seq}: ${key}`);
-    assert.equal(now.verify.status, 500);
-    assert.match(now.verify_direct.body, /^threw SyntaxError: /);
-    // A history page that holds the bad row fails on both paths, before the note (the default limit covers all 30 rows).
-    assert.deepEqual(now.mcp_history_all, today.mcp_history_all, `seq ${seq}: mcp_history_all`);
-    assert.equal(now.mcp_history_all.status, 1);
-    // Otherwise today's history and why fail loading every body for the note; the note now reads amendment candidates only.
-    const answers = seq === 2 ? ["mcp_history", "mcp_why"] : ["mcp_why"];
-    if (seq === 29) assert.deepEqual(now.mcp_history, today.mcp_history, "the newest seven rows hold #29");
-    for (const key of answers) {
-      assert.equal(today[key].status, 1, `seq ${seq}: today's ${key} is an error`);
-      assert.match(today[key].body, /JSON/);
-      assert.equal(now[key].status, 0, `seq ${seq}: ${key} now answers`);
-    }
+    // why on #0, an instruction with no cause, so its own chain never reaches the bad row: only the note reads it.
+    const got = await assertSameResponses(store, `non-JSON #${seq}`, { whyEventId: ids[0] });
+    assert.equal(got.verify.status, 500);
+    assert.match(got.verify_direct.body, /^threw SyntaxError: /);
+    for (const key of ["mcp_history", "mcp_history_all", "mcp_why"]) assert.equal(got[key].status, 1, `#${seq}: ${key} is an error, as today`);
   }
 });
 
@@ -125,20 +113,43 @@ test("attribution note: none, one and several amendments, and candidates the col
   }
 });
 
-test("attribution note: an amendment body under an `action` column that is not `other` is not a candidate (stated divergence)", async () => {
+test("attribution note is exact when the action column disagrees with the body, in both directions", { timeout: 120_000 }, async () => {
+  // An amendment body under a column that says `edited`: today's note reads the body and says untrusted_snapshot.
   const { sqlite, store } = sqliteD1();
   const ids = await seedLedger(store, 30, { amendments: [12] });
   sqlite.prepare("UPDATE events SET action = 'edited' WHERE project = ? AND seq = 12").run(P);
-  const now = await responses(store, { whyEventId: ids[20] });
-  const today = await responses(todayStore(store), { whyEventId: ids[20] });
-  for (const key of ["verify", "share_verify", "status_json", "verify_direct", "mcp_verify"]) assert.deepEqual(now[key], today[key], key);
-  // Today's note reads the body and says the evaluation is unavailable; the indexed read never sees the row.
-  assert.match(json(today.mcp_history_all).content[0].text, /untrusted_snapshot/);
-  assert.doesNotMatch(json(now.mcp_history_all).content[0].text, /untrusted_snapshot/);
-  assert.match(json(now.mcp_history_all).content[0].text, /^#0 /, "no banner: the empty collection prints none");
+  const got = await assertSameResponses(tinyPages(store, 4), "amendment under an edited column", { whyEventId: ids[20] });
+  assert.equal(json(got.verify).ok, true, "only a column changed");
+  assert.match(json(got.mcp_history_all).content[0].text, /untrusted_snapshot/);
+  assert.match(json(got.mcp_why).content[0].text, /untrusted_snapshot/);
+  // The other direction (a decoy body under a column changed to `other`) is in the test above.
 });
 
-test("D1 queries per request: /verify is 1 + one per page; MCP history and why read no page", { timeout: 600_000 }, async (t) => {
+test("attribution note is exact for bodies the schema refuses", { timeout: 120_000 }, async () => {
+  const shaped = async (tags: string, later?: string) => {
+    const { sqlite, store } = sqliteD1();
+    const ids = await seedLedger(store, 30, { decoys: [6] });
+    // A decoy (edited, amended, tags ["attribution"]) given action other and a malformed `tags`, column and body alike.
+    sqlite.prepare(`UPDATE events SET action = 'other', body = json_set(json_set(body, '$.action', 'other'), '$.tags', json(?)) WHERE project = ? AND seq = 6`).run(tags, P);
+    if (later) sqlite.prepare(later).run(P);
+    return { store: tinyPages(store, 4), ids };
+  };
+  // A string `tags`: `"xattributionx".includes("attribution")` is true in the body check; SQL's json_each would say no.
+  let { store, ids } = await shaped('"xattributionx"');
+  let got = await assertSameResponses(store, "string tags", { whyEventId: ids[0] });
+  assert.match(json(got.mcp_history_all).content[0].text, /untrusted_snapshot/);
+  // A number `tags`: the body check throws a TypeError today, and now.
+  ({ store, ids } = await shaped("5"));
+  got = await assertSameResponses(store, "number tags", { whyEventId: ids[0] });
+  assert.match(got.mcp_history.body, /TypeError|is not a function/);
+  // A number `tags` before a non-JSON body: today `all` throws on the non-JSON body before any body is judged.
+  ({ store, ids } = await shaped("5", "UPDATE events SET body = '{' WHERE project = ? AND seq = 22"));
+  got = await assertSameResponses(store, "number tags, then a non-JSON body", { whyEventId: ids[0] });
+  assert.match(got.mcp_history.body, /JSON/);
+  assert.doesNotMatch(got.mcp_history.body, /is not a function/);
+});
+
+test("D1 queries per request: /verify is 1 + one per page; MCP history and why add 1 + one per page for the note", { timeout: 600_000 }, async (t) => {
   const counts: Record<string, number> = {};
   for (const n of [0, 1001, 2500]) {
     const { d1, store } = sqliteD1();
@@ -151,14 +162,17 @@ test("D1 queries per request: /verify is 1 + one per page; MCP history and why r
     const tiny = d1.queries;
     await verifyProject(store, P, { pageChars: 1 });
     assert.equal(d1.queries - tiny, 1 + n, `n=${n}: a one-character budget is one row per page`);
-    // why on #0 (an instruction, no cause): a chain of one, so only the note could make it grow.
+    // why on #0 (an instruction, no cause): a chain of one, so only the note grows with the ledger.
     const mcp = await mcpQueryCounts(store, d1, ids[0]);
     counts[`verify n=${n}`] = verifyQueries;
     counts[`mcp_history n=${n}`] = mcp.history;
     counts[`mcp_why n=${n}`] = mcp.why;
   }
-  assert.equal(counts["mcp_history n=1001"], counts["mcp_history n=2500"], "history's queries do not grow with the ledger");
-  assert.equal(counts["mcp_why n=1001"], counts["mcp_why n=2500"], "why's queries do not grow with the ledger");
+  for (const n of [0, 1001, 2500]) {
+    const pages = Math.ceil(n / 1000);
+    assert.equal(counts[`mcp_history n=${n}`], 2 + pages, `n=${n}: the history page, the head, one query per page`);
+    if (n) assert.equal(counts[`mcp_why n=${n}`], 3 + pages, `n=${n}: two point reads for a chain of one, the head, one query per page`);
+  }
   t.diagnostic(`D1 queries: ${JSON.stringify(counts)}`);
 });
 
@@ -205,4 +219,36 @@ test("snapshot: events appended during a paged verify change neither the verdict
   assert.equal(got.checked, 23);
   assert.equal(appended, 5, "one append after each of the five pages");
   assert.equal((await verifyProject(store, P)).checked, 28, "the appended events are on the chain afterwards");
+});
+
+/** Codex r1 H's shape: 1,501 rows, a content tamper at #1,200 (past page one), and one row's `seq` column changed to a
+ *  TEXT, BLOB or REAL value. SQLite sorts TEXT and BLOB above every number, so the head is that row. */
+test("a seq column that is not a safe integer: verify falls back to today's read and gives today's verdict", { timeout: 900_000 }, async () => {
+  const shapes: Array<[string, string]> = [["TEXT", "'not-an-integer'"], ["BLOB", "x'0102'"], ["REAL", "1500.5"]];
+  for (const [kind, value] of shapes) {
+    for (const at of [1500, 600]) {
+      const { sqlite, store } = sqliteD1();
+      const ids = await seedLedger(store, 1501);
+      sqlite.prepare("UPDATE events SET body = json_set(body, '$.intent', 'changed') WHERE project = ? AND seq = 1200").run(P);
+      sqlite.prepare(`UPDATE events SET seq = ${kind === "REAL" && at === 600 ? "600.5" : value} WHERE project = ? AND seq = ?`).run(P, at);
+      assert.equal(sqlite.prepare("SELECT typeof(seq) AS t FROM events WHERE project = ? AND id = ?").get(P, ids[at]!)?.t, kind.toLowerCase());
+      const got = await assertSameResponses(store, `${kind} seq at #${at}`, { whyEventId: ids[1400] });
+      const verdict = json(got.verify);
+      assert.equal(verdict.ok, false, `${kind} at #${at}: the tamper is reported`);
+      if (at === 1500) assert.deepEqual(verdict, { ok: false, checked: 1200, first_bad_seq: 1200, reason: "content hash mismatch (event tampered)" });
+    }
+  }
+});
+
+test("page bounds that read no row are refused", async () => {
+  const { store } = sqliteD1();
+  await seedLedger(store, 3);
+  for (const pageRows of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+    await assert.rejects(verifyProject(store, P, { pageRows }), RangeError, `pageRows ${pageRows}`);
+    await assert.rejects(verifyProject(todayStore(store), P, { pageRows }), RangeError, `pageRows ${pageRows} without eventRowsPage`);
+  }
+  for (const pageChars of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+    await assert.rejects(verifyProject(store, P, { pageChars }), RangeError, `pageChars ${pageChars}`);
+  }
+  assert.deepEqual(await verifyProject(store, P, { pageRows: 1, pageChars: 0.5 }), { ok: true, checked: 3, legacy_events: 0 });
 });

@@ -67,3 +67,17 @@ test("D1 in workerd: tampered rows give today's verdict", { timeout: 300_000 }, 
     });
   }
 });
+
+test("D1 in workerd: a TEXT seq column falls back to today's read, with a tamper past page one", { timeout: 300_000 }, async () => {
+  for (const at of [15, 6]) {
+    await withD1(async (db) => {
+      const store = new D1Store(db);
+      const ids = await seedLedger(store, 16);
+      await db.prepare("UPDATE events SET body = json_set(body, '$.intent', 'changed') WHERE project = ? AND seq = 10").bind(P).run();
+      await db.prepare("UPDATE events SET seq = 'not-an-integer' WHERE project = ? AND seq = ?").bind(P, at).run();
+      assert.equal((await db.prepare("SELECT typeof(seq) AS t FROM events WHERE id = ?").bind(ids[at]).first<{ t: string }>())?.t, "text");
+      const got = await assertSameResponses(tinyPages(store, 4), `workerd TEXT seq at #${at}`, { whyEventId: ids[12] });
+      assert.equal(JSON.parse(got.verify.body).ok, false, "the tamper at #10 is reported");
+    });
+  }
+});
