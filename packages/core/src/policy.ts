@@ -217,31 +217,26 @@ export function parseJsonRejectDuplicateKeys(raw: string): unknown {
   let i = 0;
   const skipWs = () => { while (i < s.length && (s[i] === " " || s[i] === "\t" || s[i] === "\n" || s[i] === "\r")) i++; };
   const fail = (m: string): never => { throw new PolicyError(400, m); };
+  // One scan checks the literal, in the same order and with the same messages as a decoding scan would. JSON.parse of the checked
+  // literal then builds the string in one step. Appending one character at a time made a V8 cons-string chain of about one node
+  // per character (about 550 MB of heap on a 38 MB export); a slice of `s` would keep the whole raw string reachable.
   const parseString = (): string => {
     if (s[i] !== "\"") fail("invalid JSON string");
-    i++;
-    let out = "";
+    const start = i++;
     while (i < s.length) {
-      const c = s[i]!;
-      if (c === "\"") { i++; return out; }
-      if (c === "\\") {
+      const c = s.charCodeAt(i);
+      if (c === 0x22) { i++; return JSON.parse(s.slice(start, i)) as string; }
+      if (c === 0x5c) {
         const e = s[++i];
         i++;
-        if (e === "\"" || e === "\\" || e === "/") out += e;
-        else if (e === "b") out += "\b";
-        else if (e === "f") out += "\f";
-        else if (e === "n") out += "\n";
-        else if (e === "r") out += "\r";
-        else if (e === "t") out += "\t";
-        else if (e === "u") {
-          const hex = s.slice(i, i + 4);
-          if (!/^[0-9a-fA-F]{4}$/.test(hex)) fail("invalid \\u escape");
-          out += String.fromCharCode(parseInt(hex, 16));
+        if (e === "u") {
+          if (!/^[0-9a-fA-F]{4}$/.test(s.slice(i, i + 4))) fail("invalid \\u escape");
           i += 4;
-        } else fail("invalid escape");
+        } else if (!(e === "\"" || e === "\\" || e === "/" || e === "b" || e === "f" || e === "n" || e === "r" || e === "t")) {
+          fail("invalid escape");
+        }
       } else {
-        if (c.charCodeAt(0) < 0x20) fail("unescaped control character in JSON string");
-        out += c;
+        if (c < 0x20) fail("unescaped control character in JSON string");
         i++;
       }
     }
@@ -1130,10 +1125,12 @@ export function verifyPolicySelectionOffline(opts: {
 type DecisiveActivation = Extract<ReturnType<typeof evaluateActivation>, { status: "eligible" | "incomplete" }>;
 
 /**
- * verifyPolicySelectionOffline for many references over one event set, in linear time. The returned function gives, for
- * every input, the findings of verifyPolicySelectionOffline({ project, claimedDigest, readHeadSeq, events, policies,
- * coverageComplete }). One call costs about n log n (a map over every event, filters and sorts of every event ≤ U), so a
- * loop over m references costs m × n log n; this precomputes once what each call recomputes:
+ * verifyPolicySelectionOffline for many references over one event set: one forward pass over the events and a binary search per
+ * reference. It is not linear for every event set: the eligible-version check is O(A²) in eligible activations, and the document
+ * findings are O(P × D) for P reference projects and D documents. The returned function gives, for every input, the findings of
+ * verifyPolicySelectionOffline({ project, claimedDigest, readHeadSeq, events, policies, coverageComplete }). One call costs
+ * about n log n (a map over every event, filters and sorts of every event ≤ U), so a loop over m references costs m × n log n;
+ * this precomputes once what each call recomputes:
  * - the documents map, which does not depend on the project, and its findings per project;
  * - the longest contiguous seq prefix from 0, which answers chainCompleteThrough for any U;
  * - one ascending pass that evaluates every event against the eligible versions of the events before it (what
