@@ -4,7 +4,7 @@
 2026-10-14 by pull request on Jordan's signed instruction `evt_872ab2c1ef8b40a48adbb005b3d35845` ("Omarchy pane writes
 the Oct 8 incident note; Codex reviews"), routed by Coordinator 34 (`evt_f6ce9efc28424436b2c2dbe1ef365ba5`). The working
 records it is written from (the revival plan, the decision record, the hand-offs, the repair record) and the evidence
-images stay in the operator's local folder and are not in this repository. Section 9 cites each by sha256.
+images stay in the operator's local folder and are not in this repository. The Sources section cites each by sha256.
 
 **Provenance.**
 - **Who investigated:** the `claude-code` seat on the laptop, in several sessions from 2026-10-10 to 2026-10-14.
@@ -25,11 +25,11 @@ moving and clicking. Nothing found points to another person, device or agent con
 
 ## What was seen
 
-Jordan's account, given 2026-10-12 (`evt_af736fe0…`), is Jordan-reported and in his own words uncertain: the cursor
-"was moving around in the Orca app. I shut the PC off. When I turned it back on (after logging into Stranger), Orca was
-still open (non-responsive), and it seemed the cursor was still moving, and had potentially clicked on elements in the
-page (Orca layout/tabs appeared different than how I left them)." He removed the PC from the tailnet and kept it off
-until a guided repair session on 2026-10-13.
+Jordan's account, given 2026-10-12 (`evt_af736fe0…`), is Jordan-reported and in his own words uncertain. Paraphrased: the
+cursor was moving around in the Orca app, and he shut the PC off. When he turned it back on and logged in, Orca was
+still open and not responding, the cursor still seemed to be moving, and it seemed to have clicked on things: Orca's
+layout and tabs looked different from how he had left them. He removed the PC from the tailnet and kept it off until a
+guided repair session on 2026-10-13.
 
 ## Timeline, 2026-10-08
 
@@ -40,14 +40,14 @@ recordings and photo (2026-10-14).
 |---|---|---|---|
 | 8:30 PM | 02:30 (10-09) | `omarchy plugin add …Motion-Wallpaper-Omarchy.git --enable` typed at the keyboard | bash history, journal |
 | 8:48:00 PM | 02:48:00 | the shell opens `~/Videos/screenrecording-2026-10-05_03-53-28.mp4` (4.90 s, 3840x2160) as the looping wallpaper | journal |
-| 8:53:28 PM | — | a 78-second recording of a 408x268 region of the screen (Jordan's, Jordan-reported) | file list |
-| 8:56:34 PM | — | a 2 min 18 s recording of the screen (Jordan's, Jordan-reported) | file list; frames below |
-| 8:57 PM | — | phone photo: the real Orca's "Close Window?" dialog with Jordan's cursor on Close, and a second cursor at the top edge of the screen | image #19 |
+| 8:53:28 PM | 02:53:28 | a 78-second recording of a 408x268 region of the screen (Jordan's, Jordan-reported) | file list |
+| 8:56:34 PM | 02:56:34 | a 2 min 18 s recording of the screen (Jordan's, Jordan-reported) | file list; frames below |
+| 8:57 PM | 02:57 | phone photo: the real Orca's "Close Window?" dialog with Jordan's cursor on Close, and a second cursor at the top edge of the screen | image #19 |
 | 8:57:09–11 PM | 02:57:09–11 | Chromium, one other app and the Orca app exit within 2 s | journal |
-| about 8:57:27 PM | — | frame at 0:53 of the 8:56:34 recording: "Orca" with its "+" menu opening while Jordan's cursor is in Omarchy's menu | image #18 |
+| about 8:57:27 PM | about 02:57:27 | frame at 0:53 of the 8:56:34 recording: "Orca" with its "+" menu opening while Jordan's cursor is in Omarchy's menu | image #18 |
 | 8:59:21 PM | 02:59:21 | restart requested from the desktop session | journal |
 | 9:09:47 PM | 03:09:47 | in the next boot the wallpaper plays the 8:53 PM region clip; no Orca app runs in that boot | journal |
-| 9:18 PM | — | Jordan removes the PC from the tailnet | Jordan-reported |
+| 9:18 PM | 03:18 | Jordan removes the PC from the tailnet | Jordan-reported |
 
 ## Cause and evidence
 
@@ -71,9 +71,8 @@ recordings and photo (2026-10-14).
 
 ## Other explanations, checked
 
-- **A stranger on the tailnet: excluded.** In the whole boot there were two tailnet peers, the laptop and Jordan's phone.
-  All ssh contact came from the laptop, using the laptop's own key, which had been added at the PC's keyboard minutes
-  before. The firewall logged no accepted inbound connection from any other address.
+- **A stranger on the tailnet: excluded.** No unknown peer appeared on the tailnet in the whole boot, and all ssh
+  contact came from the laptop.
 - **Software that is not Omarchy's: excluded.** `pacman -Qkk` was clean for binaries and units. The package log is
   explained, and no unexplained unit, timer, autostart entry or hook was found.
 - **A hardware or input device: no evidence.** No new input device appeared on 2026-10-08.
@@ -96,10 +95,12 @@ recordings and photo (2026-10-14).
 
 ## Corrections to the working records
 
-These correct the local records, not this repository: none of the refuted statements appears in `docs/`.
-- **"The 2026-10-07 and 10-08 boots unlocked the disk by themselves" is refuted.** The inference rested on journal
-  timestamps, and the journal stamps early kernel lines after the unlock. The one boot screen is the LUKS passphrase
-  prompt. There is no keyfile, and the disk is encrypted at rest (`evt_aa941ca5…`, assessment `evt_fc8efc9d…`).
+These correct the local records, not this repository: none of the corrected statements appears in `docs/`.
+- **The earlier inference that the 2026-10-07 and 10-08 boots unlocked the disk by themselves is unsupported.** It
+  rested on journal timestamps, and the journal stamps early kernel lines after the unlock, so those timestamps cannot
+  show whether a passphrase was typed. What was typed at those boots is not established. As read on 2026-10-14, the one
+  boot screen is the LUKS passphrase prompt, there is no keyfile, and the disk is encrypted at rest (`evt_aa941ca5…`,
+  assessment `evt_fc8efc9d…`).
 - **"Something turned automatic login off" is wrong.** Automatic login (SDDM) is on, and the one password screen is the
   disk's.
 - **The investigating pane's own errors**, corrected on the ledger at the time: it called the boot screen settled too
@@ -107,14 +108,23 @@ These correct the local records, not this repository: none of the refuted statem
 
 ## Repair and hardening (2026-10-13 and 10-14)
 
-- The plugin and its leftovers were removed.
-- The file-sharing (LocalSend) firewall rule now admits only the tailnet and the home LAN.
-- The PC's `authorized_keys` holds one key, and sshd accepts keys only (checked 2026-10-14).
-- The PC rejoined the tailnet as a fresh node, and the only access rule that reaches it is ssh from the laptop.
-- Orca remote access is off on every device: the access grant revoked, the mobile pairings removed, and the laptop's
-  saved server deleted.
-- Claude's claude.ai connectors are disabled on the PC.
-- The accounts behind the PC's remote access were reviewed and tightened. The record stays in the operator's folder.
+"Jordan-reported" marks a change Jordan made and reported. "Observed" marks a result this investigation saw for itself,
+in a screenshot, a photo of command output, or a read.
+
+- **The plugin** and its leftovers were removed, and the moving cursor was gone afterwards (Jordan-reported).
+- **Firewall:** Jordan ran the commands that limit the file-sharing (LocalSend) rule to the tailnet and the home LAN
+  (Jordan-reported). The follow-up check, which should print nothing, was not reported, so the rule's final state is
+  not confirmed.
+- **ssh keys:** Jordan removed the laptop's own key from the PC's `authorized_keys`, and he reports one key remains
+  (Jordan-reported). sshd accepting keys only was read from a photo of its effective settings (observed, 2026-10-14).
+- **Tailnet:** the PC rejoined the tailnet as a fresh node, and a rule allows ssh to it from the laptop (observed,
+  screenshots). Jordan deleted the stale rules that named the PC's old address, which leaves that rule as the only one
+  reaching the PC (Jordan-reported).
+- **Orca remote access** was turned off on every device: the access grant revoked, the mobile pairings removed and the
+  laptop's saved server deleted (Jordan-reported).
+- **Connectors:** Claude's claude.ai connectors were disabled on the PC (Jordan-reported).
+- **Accounts:** the accounts behind the PC's remote access were reviewed and tightened (Jordan-reported). The record
+  stays in the operator's folder.
 
 ## Lessons
 
