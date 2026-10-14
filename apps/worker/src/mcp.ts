@@ -12,6 +12,7 @@ import {
   describeEvent,
   eventForModel,
   explainEvent,
+  isAttributionAmendment,
   markUntrustedText,
   parseCredentials,
   parseSigningKey,
@@ -26,6 +27,7 @@ import {
   verifyExportBundle,
   verifyProject,
   projectStatusForModel,
+  readProjectPages,
   lineageForModel,
   type Actor,
   type Credential,
@@ -112,6 +114,28 @@ function textResult(text: string, structuredContent?: Record<string, unknown>): 
   return { content: [{ type: "text", text }], ...(structuredContent ? { structuredContent } : {}) };
 }
 
+/** The attribution collection `history` and `why` render, as `collectAttributionAmendments(await store.all(project))`
+ *  gives it, without loading the ledger (#237 §4.3). Without attribution options that collection depends on one fact:
+ *  whether any body is an attribution amendment (empty if none, `untrusted_snapshot` if one). The first candidate the
+ *  partial index admits at the pinned head decides it when its body agrees. A candidate whose body refutes it (its
+ *  `action` column says `other`, its body does not) is an anomaly; then every body is scanned a page at a time, as
+ *  `all` would have read them. A body that is an amendment under an `action` column other than `other` is never a
+ *  candidate, so for that row the note reads as if it were absent. */
+export async function attributionNoteCollection(store: EventStore, project: string) {
+  if (!store.amendmentEventsUpTo) return collectAttributionAmendments(await store.all(project));
+  const head = await store.head(project);
+  if (!head) return collectAttributionAmendments([]);
+  const [candidate] = await store.amendmentEventsUpTo(project, head.seq, 1);
+  if (!candidate || isAttributionAmendment(candidate)) return collectAttributionAmendments(candidate ? [candidate] : []);
+  if (!store.eventRowsPage) return collectAttributionAmendments(await store.all(project));
+  // `events.some(isAttributionAmendment)` over every body: stop judging at the first match, keep parsing every page.
+  let found: Event | undefined;
+  for await (const page of readProjectPages(store, project)) {
+    if (!found) found = page.find((row) => isAttributionAmendment(row.event))?.event;
+  }
+  return collectAttributionAmendments(found ? [found] : []);
+}
+
 export function buildRemoteMcpServer(
   store: EventStore,
   credential: RemoteMcpCredential,
@@ -176,14 +200,14 @@ export function buildRemoteMcpServer(
       const p = requirePinnedProject(args.project, credential);
       const page = await store.history({ ...args, project: p });
       const note = page.truncated ? `\n\ntruncated — ${page.events.length} newest matching events; pass before_seq ${page.next_before_seq} for the previous page` : "";
-      return textResult(renderTimeline(page.events,{attribution:collectAttributionAmendments(await store.all(project))}) + note, { count: page.events.length, events: page.events.map(eventForModel), truncated: page.truncated, next_before_seq: page.next_before_seq });
+      return textResult(renderTimeline(page.events,{attribution:await attributionNoteCollection(store, project)}) + note, { count: page.events.length, events: page.events.map(eventForModel), truncated: page.truncated, next_before_seq: page.next_before_seq });
     },
 
     async why({ event_id }) {
       const first = await store.get(event_id);
       if (!first || first.project !== project) return { ...textResult(`no event ${event_id}`), isError: true };
       const chain = await explainEvent(store, event_id);
-      return textResult(renderWhyChain(chain,{attribution:collectAttributionAmendments(await store.all(project))}), { chain: chain.map(eventForModel) });
+      return textResult(renderWhyChain(chain,{attribution:await attributionNoteCollection(store, project)}), { chain: chain.map(eventForModel) });
     },
 
     async status(args) {

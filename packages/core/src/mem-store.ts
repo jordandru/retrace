@@ -4,7 +4,7 @@
  */
 import { Event } from "./schema.js";
 import {
-  CaptureIndexResult, captureIndexRowsFromEvents, InsertExtras, OwnerLoginConsumption, readOwnerLoginConsumption, ArtifactIndexQuery, ArtifactIndexResult, ChainHead, EventStore, HeadMovedError, HistoryQuery, HistoryPage,
+  CaptureIndexResult, captureIndexRowsFromEvents, EventRow, InsertExtras, OwnerLoginConsumption, readOwnerLoginConsumption, ArtifactIndexQuery, ArtifactIndexResult, ChainHead, EventStore, HeadMovedError, HistoryQuery, HistoryPage,
   PendingDelivery, Share, eventsReferencingArtifactKeys, pageHistoryNewest,
 } from "./store.js";
 import { PolicyDocument, PolicyRouteRow, PolicySnapshot, PolicySnapshotBudget, PolicyWrite, assertRouteWriteConsistent, policySnapshotFromIndex } from "./policy.js";
@@ -64,6 +64,18 @@ export class MemoryEventStore implements EventStore {
     for (const e of rows) {
       if (chars >= maxChars) break;
       page.push(e);
+      chars += JSON.stringify(e).length;
+    }
+    return page;
+  }
+  /** EventStore.eventRowsPage; this store keeps bodies only, so a row's seq is its body's. */
+  async eventRowsPage(p: string, afterSeq: number | null, throughSeq: number, limit: number, maxChars: number) {
+    const rows = this.events.filter((e) => e.project === p && (afterSeq === null || e.seq > afterSeq) && e.seq <= throughSeq).sort((a, b) => a.seq - b.seq).slice(0, limit);
+    const page: EventRow[] = [];
+    let chars = 0;
+    for (const e of rows) {
+      if (chars >= maxChars) break;
+      page.push({ seq: e.seq, event: e });
       chars += JSON.stringify(e).length;
     }
     return page;

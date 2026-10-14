@@ -3,7 +3,8 @@
  * SQL schema shared by both lives in SCHEMA_SQL.
  */
 import { Action, Event, EventInput, instantFromText } from "./schema.js";
-import { sealEvent, verifyChain, VerifyResult } from "./chain.js";
+import { ChainVerifier, sealEvent, verifyChain, VerifyResult } from "./chain.js";
+import { EXPORT_PAGE_CHARS, EXPORT_PAGE_ROWS } from "./export-stream.js";
 import { markUntrustedText } from "./explain.js";
 import { artifactKey, artifactLookup, sameArtifact } from "./capture.js";
 
@@ -222,6 +223,11 @@ export interface EventStore {
    *  page stay under `maxChars`, so a page holds at least one row when any remain and at most one row past the budget.
    *  Optional: only the streaming export needs it. */
   eventsPage?(project: string, afterSeq: number, throughSeq: number, limit: number, maxChars: number): Promise<Event[]>;
+  /** Paged read of one project for verify (#237 §4.0): rows with afterSeq < seq ≤ throughSeq by the `seq` COLUMN, ascending,
+   *  each with its column `seq` and its body parsed as `all` parses it, under `eventsPage`'s row and character bounds.
+   *  `afterSeq` null reads from the lowest row, whatever its seq. Bodies are never checked against their row: a body whose
+   *  `seq`, `project` or `hash` disagrees reaches the caller unchanged. Optional: `verifyProject` falls back to `all`. */
+  eventRowsPage?(project: string, afterSeq: number | null, throughSeq: number, limit: number, maxChars: number): Promise<EventRow[]>;
   /** Attribution-amendment candidates through inclusive sequence U, ascending, capped by the caller's LIMIT. */
   amendmentEventsUpTo?(project: string, throughSeq: number, limit: number, metrics?: StoreReadMetricsSink): Promise<Event[]>;
   projects(): Promise<string[]>;
@@ -1147,8 +1153,43 @@ export async function appendEvent(
   return { event, deduped: false };
 }
 
-export async function verifyProject(store: EventStore, project: string): Promise<VerifyResult> {
-  return verifyChain(await store.all(project));
+/** One stored row: its `seq` column and its parsed body, which may disagree. */
+export interface EventRow { seq: number; event: Event }
+
+export interface ProjectPageOptions { pageRows?: number; pageChars?: number }
+
+/** The rows of `project` up to the head pinned once at the start, one `eventRowsPage` at a time, windowed and advanced
+ *  by the `seq` column (#237 §4.0). Rows appended during the read stay out. It never judges a body. */
+export async function* readProjectPages(store: EventStore, project: string, opts: ProjectPageOptions = {}): AsyncGenerator<EventRow[]> {
+  if (!store.eventRowsPage) throw new Error("readProjectPages: the store has no eventRowsPage");
+  const head = await store.head(project);
+  if (!head) return;
+  const rows = opts.pageRows ?? EXPORT_PAGE_ROWS, chars = opts.pageChars ?? EXPORT_PAGE_CHARS;
+  let after: number | null = null;
+  while (after === null || after < head.seq) {
+    const page = await store.eventRowsPage(project, after, head.seq, rows, chars);
+    if (!page.length) return;
+    for (const row of page) {
+      // The store's own window, not the ledger's content: a row out of it would loop or read past the pin.
+      if ((after !== null && !(row.seq > after)) || row.seq > head.seq) throw new Error(`readProjectPages: row seq ${row.seq} is outside the window`);
+      after = row.seq;
+    }
+    yield page;
+  }
+}
+
+/** The chain verdict over every stored row of `project`, exactly `verifyChain(await store.all(project))` for the same
+ *  rows. With `eventRowsPage` it holds one page of bodies at a time; it keeps reading after a failure so that a body that
+ *  is not JSON throws wherever it sits, as `all` throws today. */
+export async function verifyProject(store: EventStore, project: string, opts: ProjectPageOptions = {}): Promise<VerifyResult> {
+  if (!store.eventRowsPage) return verifyChain(await store.all(project));
+  const verifier = new ChainVerifier();
+  let failed = false;
+  for await (const page of readProjectPages(store, project, opts)) {
+    if (failed) continue;
+    for (const row of page) if (!(await verifier.push(row.event))) { failed = true; break; }
+  }
+  return verifier.result();
 }
 
 /** Walk caused_by links up to the root — the "why" chain. */
