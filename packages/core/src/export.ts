@@ -11,8 +11,8 @@ import { GENESIS_HASH } from "./schema.js";
 import { keyId, publicFromPrivate, signCanonical, verifyCanonical } from "./signing.js";
 import {
   SUPPORTED_POLICY_PROFILES, PolicyDocument, PolicyError, PolicyVerifyFinding, canonicalPolicyV1, collectReferencedPolicies,
-  documentMapKey, eventPolicyRef, parseJsonRejectDuplicateKeys, policyHashObject, validatePolicyBody, validatePolicyEnvelope,
-  verifyPolicySelectionOffline,
+  documentMapKey, eventPolicyRef, offlinePolicySelectionVerifier, parseJsonRejectDuplicateKeys, policyHashObject, validatePolicyBody,
+  validatePolicyEnvelope, verifyPolicySelectionOffline,
 } from "./policy.js";
 
 export const EXPORT_FORMAT = "retrace-export/1";
@@ -196,6 +196,30 @@ function checkCoverage(bundle: ExportBundle, sorted: Event[], problems: string[]
   };
 }
 
+/**
+ * The policy findings of each policy-reference event, in order: what one verifyPolicySelectionOffline call per reference
+ * gives. That loop costs about m × n log n for m references over n events: a CPU profile of a remote `retrace_status` at
+ * 19,527 events put 17.6 s in it (2026-10-13). offlinePolicySelectionVerifier gives the same findings in linear time.
+ */
+function policyReferenceFindings(
+  refs: { e: Event; ref: { digest?: string; readHeadSeq?: number } }[],
+  sorted: Event[],
+  policies: PolicyDocument[],
+  coverageComplete: boolean,
+): PolicyVerifyFinding[][] {
+  if (!refs.length) return [];
+  try {
+    const check = offlinePolicySelectionVerifier({ events: sorted, policies, coverageComplete });
+    if (check) return refs.map(({ e, ref }) => check(e.project, ref.digest, ref.readHeadSeq));
+  } catch {
+    // A malformed event or document the linear pass trips over: the per-reference loop below gives today's findings
+    // or throws today's error.
+  }
+  return refs.map(({ e, ref }) => verifyPolicySelectionOffline({
+    project: e.project, claimedDigest: ref.digest, readHeadSeq: ref.readHeadSeq, events: sorted, policies, coverageComplete,
+  }).findings);
+}
+
 /** Offline verification: signature + per-event content hashes + adjacency links + omission (coverage). */
 export async function verifyExportBundle(bundle: ExportBundle, trustedPublicKey?: JsonWebKey, vopts?: { producers?: ProducerKey[]; trustedHookStamps?: readonly string[]; project?: string }): Promise<ExportVerdict> {
   const problems: string[] = [];
@@ -272,18 +296,12 @@ export async function verifyExportBundle(bundle: ExportBundle, trustedPublicKey?
     }
   }
   const refs = sorted.map((e) => ({ e, ref: eventPolicyRef(e) })).filter((x) => x.ref.digest);
-  for (const { e, ref } of refs) {
-    const result = verifyPolicySelectionOffline({
-      project: e.project,
-      claimedDigest: ref.digest,
-      readHeadSeq: ref.readHeadSeq,
-      events: sorted,
-      policies: bundle.policies ?? [],
-      coverageComplete: coverage.complete === true || (coverage.scope === "full" && coverage.complete !== false),
-    });
-    policy_findings.push(...result.findings);
-    for (const f of result.findings) problems.push(`event #${e.seq} ${f}`);
-  }
+  const coverageComplete = coverage.complete === true || (coverage.scope === "full" && coverage.complete !== false);
+  const refFindings = policyReferenceFindings(refs, sorted, bundle.policies ?? [], coverageComplete);
+  refs.forEach(({ e }, i) => {
+    policy_findings.push(...refFindings[i]!);
+    for (const f of refFindings[i]!) problems.push(`event #${e.seq} ${f}`);
+  });
   return {
     signature, events_intact, links_consistent, chain_ok_at_export: !!bundle.chain?.ok, coverage, legacy_hash_events,
     producer_signed: ps.producer_signed, producer_invalid: ps.producer_invalid,

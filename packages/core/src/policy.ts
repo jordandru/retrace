@@ -1127,6 +1127,156 @@ export function verifyPolicySelectionOffline(opts: {
   return { ok: findings.length === 0, findings, selected };
 }
 
+type DecisiveActivation = Extract<ReturnType<typeof evaluateActivation>, { status: "eligible" | "incomplete" }>;
+
+/**
+ * verifyPolicySelectionOffline for many references over one event set, in linear time. The returned function gives, for
+ * every input, the findings of verifyPolicySelectionOffline({ project, claimedDigest, readHeadSeq, events, policies,
+ * coverageComplete }). One call costs about n log n (a map over every event, filters and sorts of every event ≤ U), so a
+ * loop over m references costs m × n log n; this precomputes once what each call recomputes:
+ * - the documents map, which does not depend on the project, and its findings per project;
+ * - the longest contiguous seq prefix from 0, which answers chainCompleteThrough for any U;
+ * - one ascending pass that evaluates every event against the eligible versions of the events before it (what
+ *   olderEligibleVersions folds), from which selectPolicyForContext's newest-first answer as of any seq is read;
+ * - for "no selection, claimed digest", the first event carrying the claimed policy artifact and its evaluation.
+ * The pass runs lazily up to the largest U asked for, so it evaluates the events a per-reference call would.
+ * `events` must be sorted by seq. Returns undefined when a seq is not a finite number or the order does not hold; the
+ * caller then calls verifyPolicySelectionOffline per reference.
+ */
+export function offlinePolicySelectionVerifier(opts: {
+  events: Event[];
+  policies: PolicyDocument[];
+  coverageComplete: boolean;
+}): ((project: string, claimedDigest: string | undefined, readHeadSeq: number | undefined) => PolicyVerifyFinding[]) | undefined {
+  const { events, policies, coverageComplete } = opts;
+  for (let i = 0; i < events.length; i++) {
+    const s = events[i]!.seq;
+    if (typeof s !== "number" || !Number.isFinite(s) || (i > 0 && events[i - 1]!.seq > s)) return undefined;
+  }
+
+  // The same sets and gets as verifyPolicySelectionOffline's first loop, in the same order, so the map is the same.
+  const documents = new Map<string, PolicyDocument>();
+  const perDocument: { unsupported: boolean; project: string; corrupt: boolean }[] = [];
+  for (const d of policies) {
+    const unsupported = !SUPPORTED_POLICY_PROFILES.has(d.body.profile);
+    const key = documentMapKey(d.body.project, d.digest);
+    const prior = documents.get(key);
+    perDocument.push({ unsupported, project: d.body.project, corrupt: !!prior && JSON.stringify(prior) !== JSON.stringify(d) });
+    documents.set(key, d);
+    documents.set(d.digest, d);
+  }
+  const documentFindings = new Map<string, PolicyVerifyFinding[]>();
+  const documentFindingsFor = (project: string): PolicyVerifyFinding[] => {
+    let f = documentFindings.get(project);
+    if (!f) {
+      f = [];
+      for (const d of perDocument) {
+        if (d.unsupported) f.push("policy_unsupported_profile");
+        if (d.project !== project) f.push("policy_project_mismatch");
+        if (d.corrupt) f.push("policy_corrupt");
+      }
+      documentFindings.set(project, f);
+    }
+    return f;
+  };
+
+  let contiguousThrough: number | undefined;
+  // chainCompleteThrough(events, U) for U ≥ 0: every integer 0..U is a seq. `U < K + 1`, not `U <= K`, for a fractional U.
+  const chainComplete = (U: number): boolean => {
+    if (contiguousThrough === undefined) {
+      const seqs = new Set(events.map((e) => e.seq));
+      let k = 0;
+      while (seqs.has(k)) k++;
+      contiguousThrough = k - 1;
+    }
+    return U < contiguousThrough + 1;
+  };
+
+  // groupSeqs[g] is the g-th distinct seq; selectionAt[g] is selectPolicyForContext's answer for U = groupSeqs[g]: the
+  // newest seq ≤ U holding an eligible or incomplete activation, and within that seq the first in event order.
+  const groupSeqs: number[] = [];
+  const selectionAt: (DecisiveActivation | undefined)[] = [];
+  const versions: number[] = [];
+  let next = 0;
+  const extendThrough = (U: number) => {
+    while (next < events.length && events[next]!.seq <= U) {
+      const seq = events[next]!.seq;
+      let pick: DecisiveActivation | undefined;
+      for (; next < events.length && events[next]!.seq === seq; next++) {
+        // `versions` is olderEligibleVersions' fold so far. As a candidate an event sees only the versions of smaller
+        // seqs; that differs from the fold only after an earlier event of the same seq was eligible, which is the pick.
+        const ev = evaluateActivation(events[next]!, documents, versions);
+        if (!pick && (ev.status === "eligible" || ev.status === "incomplete")) pick = ev;
+        if (ev.status === "eligible") versions.push(ev.version);
+      }
+      groupSeqs.push(seq);
+      selectionAt.push(pick ?? selectionAt.at(-1));
+    }
+  };
+  const selectAsOf = (U: number): DecisiveActivation | undefined => {
+    extendThrough(U);
+    let lo = 0;
+    let hi = groupSeqs.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (groupSeqs[mid]! <= U) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo ? selectionAt[lo - 1] : undefined;
+  };
+
+  // events are sorted, so the first event carrying an artifact has the smallest seq among those that do: it is the
+  // `snapshot.activations.find` answer when its seq ≤ U, and there is none otherwise.
+  let firstWithPolicyArtifact: Map<string, Event> | undefined;
+  const claimedEvaluation = new Map<string, ReturnType<typeof evaluateActivation>>();
+  const claimedFinding = (art: string, U: number): PolicyVerifyFinding => {
+    if (!firstWithPolicyArtifact) {
+      firstWithPolicyArtifact = new Map();
+      for (const e of events) {
+        for (const a of e.artifacts) {
+          if (typeof a.id === "string" && a.id.startsWith("policy:") && !firstWithPolicyArtifact.has(a.id)) firstWithPolicyArtifact.set(a.id, e);
+        }
+      }
+    }
+    const claimedAct = firstWithPolicyArtifact.get(art);
+    if (!claimedAct || !(claimedAct.seq <= U)) return "policy_missing";
+    let ev = claimedEvaluation.get(art);
+    if (!ev) {
+      ev = evaluateActivation(claimedAct, documents, []);
+      claimedEvaluation.set(art, ev);
+    }
+    return ev.status === "ignored" && ev.reason === "policy_audit_mismatch" ? "policy_audit_mismatch" : "policy_missing";
+  };
+
+  return (project, claimedDigest, readHeadSeq) => {
+    const findings = [...documentFindingsFor(project)];
+    const U = readHeadSeq ?? -1;
+    if (U < 0 && !claimedDigest) return findings;
+    if (!coverageComplete) {
+      findings.push("policy_selection_unverifiable");
+      return findings;
+    }
+    if (U >= 0 && !chainComplete(U)) {
+      findings.push("policy_selection_unverifiable");
+      return findings;
+    }
+    // The snapshot holds events with seq ≤ U and selectPolicyForContext keeps those ≤ snapshot.U, which is −1 when U < 0.
+    const selected = selectAsOf(U < 0 ? Math.min(U, -1) : U);
+    if (selected?.status === "incomplete") {
+      findings.push(selected.reason === "policy_missing" ? "policy_missing" : "policy_corrupt");
+      return findings;
+    }
+    if (claimedDigest) {
+      if (!selected) {
+        findings.push(claimedFinding(`policy:${project}@${claimedDigest}`, U));
+        return findings;
+      }
+      if (selected.digest !== claimedDigest) findings.push("policy_misselected");
+    }
+    return findings;
+  };
+}
+
 export function eventPolicyRef(e: Event): { digest?: string; readHeadSeq?: number } {
   const p = asParams(e);
   const cd = p.claim_decision;
