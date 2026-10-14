@@ -12,6 +12,7 @@ import {
   describeEvent,
   eventForModel,
   explainEvent,
+  isAttributionAmendment,
   markUntrustedText,
   parseCredentials,
   parseSigningKey,
@@ -26,6 +27,8 @@ import {
   verifyExportBundle,
   verifyProject,
   projectStatusForModel,
+  readProjectPages,
+  UnpageableLedgerError,
   lineageForModel,
   type Actor,
   type Credential,
@@ -112,6 +115,32 @@ function textResult(text: string, structuredContent?: Record<string, unknown>): 
   return { content: [{ type: "text", text }], ...(structuredContent ? { structuredContent } : {}) };
 }
 
+/** The attribution collection `history` and `why` render, exactly `collectAttributionAmendments(await store.all(project))`,
+ *  holding one page of bodies at a time (#237 §4.3). Without attribution options that collection depends on one fact:
+ *  `events.some(isAttributionAmendment)` (empty if false, `untrusted_snapshot` if true). Every body is read, never a
+ *  column-filtered projection (PR 244 r1, Codex M): `isAttributionAmendment` is judged in seq order up to the first match
+ *  or throw, and a throw is held until every page is parsed, because `all` parses every body before `.some` judges any.
+ *  A ledger that cannot be paged is read with `all`. */
+export async function attributionNoteCollection(store: EventStore, project: string) {
+  if (!store.eventRowsPage) return collectAttributionAmendments(await store.all(project));
+  try {
+    let found: Event | undefined, judged = false, thrown = false, error: unknown;
+    for await (const page of readProjectPages(store, project)) {
+      for (const row of page) {
+        if (judged) break;
+        try {
+          if (isAttributionAmendment(row.event)) { found = row.event; judged = true; }
+        } catch (e) { error = e; thrown = judged = true; }
+      }
+    }
+    if (thrown) throw error;
+    return collectAttributionAmendments(found ? [found] : []);
+  } catch (e) {
+    if (e instanceof UnpageableLedgerError) return collectAttributionAmendments(await store.all(project));
+    throw e;
+  }
+}
+
 export function buildRemoteMcpServer(
   store: EventStore,
   credential: RemoteMcpCredential,
@@ -176,14 +205,14 @@ export function buildRemoteMcpServer(
       const p = requirePinnedProject(args.project, credential);
       const page = await store.history({ ...args, project: p });
       const note = page.truncated ? `\n\ntruncated — ${page.events.length} newest matching events; pass before_seq ${page.next_before_seq} for the previous page` : "";
-      return textResult(renderTimeline(page.events,{attribution:collectAttributionAmendments(await store.all(project))}) + note, { count: page.events.length, events: page.events.map(eventForModel), truncated: page.truncated, next_before_seq: page.next_before_seq });
+      return textResult(renderTimeline(page.events,{attribution:await attributionNoteCollection(store, project)}) + note, { count: page.events.length, events: page.events.map(eventForModel), truncated: page.truncated, next_before_seq: page.next_before_seq });
     },
 
     async why({ event_id }) {
       const first = await store.get(event_id);
       if (!first || first.project !== project) return { ...textResult(`no event ${event_id}`), isError: true };
       const chain = await explainEvent(store, event_id);
-      return textResult(renderWhyChain(chain,{attribution:collectAttributionAmendments(await store.all(project))}), { chain: chain.map(eventForModel) });
+      return textResult(renderWhyChain(chain,{attribution:await attributionNoteCollection(store, project)}), { chain: chain.map(eventForModel) });
     },
 
     async status(args) {

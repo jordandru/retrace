@@ -3,7 +3,8 @@
  * SQL schema shared by both lives in SCHEMA_SQL.
  */
 import { Action, Event, EventInput, instantFromText } from "./schema.js";
-import { sealEvent, verifyChain, VerifyResult } from "./chain.js";
+import { ChainVerifier, sealEvent, verifyChain, VerifyResult } from "./chain.js";
+import { EXPORT_PAGE_CHARS, EXPORT_PAGE_ROWS } from "./export-stream.js";
 import { markUntrustedText } from "./explain.js";
 import { artifactKey, artifactLookup, sameArtifact } from "./capture.js";
 
@@ -222,6 +223,11 @@ export interface EventStore {
    *  page stay under `maxChars`, so a page holds at least one row when any remain and at most one row past the budget.
    *  Optional: only the streaming export needs it. */
   eventsPage?(project: string, afterSeq: number, throughSeq: number, limit: number, maxChars: number): Promise<Event[]>;
+  /** Paged read of one project for verify (#237 §4.0): rows with afterSeq < seq ≤ throughSeq by the `seq` COLUMN, ascending,
+   *  each with its column `seq` and its body parsed as `all` parses it, under `eventsPage`'s row and character bounds.
+   *  `afterSeq` null reads from the lowest row, whatever its seq. Bodies are never checked against their row: a body whose
+   *  `seq`, `project` or `hash` disagrees reaches the caller unchanged. Optional: `verifyProject` falls back to `all`. */
+  eventRowsPage?(project: string, afterSeq: number | null, throughSeq: number, limit: number, maxChars: number): Promise<EventRow[]>;
   /** Attribution-amendment candidates through inclusive sequence U, ascending, capped by the caller's LIMIT. */
   amendmentEventsUpTo?(project: string, throughSeq: number, limit: number, metrics?: StoreReadMetricsSink): Promise<Event[]>;
   projects(): Promise<string[]>;
@@ -1147,8 +1153,70 @@ export async function appendEvent(
   return { event, deduped: false };
 }
 
-export async function verifyProject(store: EventStore, project: string): Promise<VerifyResult> {
-  return verifyChain(await store.all(project));
+/** One stored row: its `seq` column and its parsed body, which may disagree. */
+export interface EventRow { seq: number; event: Event }
+
+export interface ProjectPageOptions { pageRows?: number; pageChars?: number }
+
+/** `readProjectPages` cannot window this ledger by its `seq` column: the pinned head's or a row's column value is not a
+ *  safe integer (a TEXT, BLOB or REAL value in a damaged row), or a row falls outside the requested window. Callers fall
+ *  back to `store.all`, whose verdict is today's for every ledger (PR 244 r1, Codex H). */
+export class UnpageableLedgerError extends Error {
+  constructor(project: string, what: string) {
+    super(`project ${project} cannot be read in pages: ${what}`);
+    this.name = "UnpageableLedgerError";
+  }
+}
+
+/** Page bounds must read at least one row a page; a bound of 0 would end the read at once (PR 244 r1, Codex L). */
+export function projectPageBounds(opts: ProjectPageOptions = {}): { rows: number; chars: number } {
+  const rows = opts.pageRows ?? EXPORT_PAGE_ROWS, chars = opts.pageChars ?? EXPORT_PAGE_CHARS;
+  if (!Number.isSafeInteger(rows) || rows < 1) throw new RangeError(`pageRows must be a positive integer, got ${rows}`);
+  if (!Number.isFinite(chars) || !(chars > 0)) throw new RangeError(`pageChars must be positive and finite, got ${chars}`);
+  return { rows, chars };
+}
+
+/** The rows of `project` up to the head pinned once at the start, one `eventRowsPage` at a time, windowed and advanced
+ *  by the `seq` column (#237 §4.0). Rows appended during the read stay out. It never judges a body; a column value it
+ *  cannot window by throws `UnpageableLedgerError`. */
+export async function* readProjectPages(store: EventStore, project: string, opts: ProjectPageOptions = {}): AsyncGenerator<EventRow[]> {
+  if (!store.eventRowsPage) throw new Error("readProjectPages: the store has no eventRowsPage");
+  const { rows, chars } = projectPageBounds(opts);
+  const head = await store.head(project);
+  if (!head) return;
+  if (!Number.isSafeInteger(head.seq)) throw new UnpageableLedgerError(project, "the head's seq is not a safe integer");
+  let after: number | null = null;
+  while (after === null || after < head.seq) {
+    const page = await store.eventRowsPage(project, after, head.seq, rows, chars);
+    if (!page.length) return;
+    for (const row of page) {
+      if (!Number.isSafeInteger(row.seq) || (after !== null && !(row.seq > after)) || row.seq > head.seq) {
+        throw new UnpageableLedgerError(project, "a row's seq is not a safe integer inside the window");
+      }
+      after = row.seq;
+    }
+    yield page;
+  }
+}
+
+/** The chain verdict over every stored row of `project`, exactly `verifyChain(await store.all(project))` for the same
+ *  rows. With `eventRowsPage` it holds one page of bodies at a time; it keeps reading after a failure so that a body that
+ *  is not JSON throws wherever it sits, as `all` throws today. A ledger it cannot page is verified from `all`. */
+export async function verifyProject(store: EventStore, project: string, opts: ProjectPageOptions = {}): Promise<VerifyResult> {
+  projectPageBounds(opts);
+  if (!store.eventRowsPage) return verifyChain(await store.all(project));
+  try {
+    const verifier = new ChainVerifier();
+    let failed = false;
+    for await (const page of readProjectPages(store, project, opts)) {
+      if (failed) continue;
+      for (const row of page) if (!(await verifier.push(row.event))) { failed = true; break; }
+    }
+    return verifier.result();
+  } catch (e) {
+    if (e instanceof UnpageableLedgerError) return verifyChain(await store.all(project));
+    throw e;
+  }
 }
 
 /** Walk caused_by links up to the root — the "why" chain. */

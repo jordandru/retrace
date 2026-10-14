@@ -129,6 +129,19 @@ export class D1Store implements EventStore {
     return results.map((r) => JSON.parse(r.body) as Event);
   }
 
+  /** EventStore.eventRowsPage, one query, `eventsPage`'s window with the row's `seq` column beside its body. The first
+   *  page (afterSeq null) has no lower bound, so a row whose column seq is negative is still read, as `all` reads it. */
+  async eventRowsPage(project: string, afterSeq: number | null, throughSeq: number, limit: number, maxChars: number) {
+    const lower = afterSeq === null ? "" : " AND seq > ?";
+    const { results } = await this.db.prepare(
+      `SELECT seq, body FROM (
+         SELECT seq, body, SUM(length(body)) OVER (ORDER BY seq ROWS UNBOUNDED PRECEDING) AS upto
+         FROM (SELECT seq, body FROM events WHERE project = ?${lower} AND seq <= ? ORDER BY seq LIMIT ?)
+       ) WHERE upto - length(body) < ? ORDER BY seq`,
+    ).bind(...(afterSeq === null ? [project] : [project, afterSeq]), throughSeq, limit, maxChars).all<{ seq: number; body: string }>();
+    return results.map((r) => ({ seq: r.seq, event: JSON.parse(r.body) as Event }));
+  }
+
   async amendmentEventsUpTo(project: string, throughSeq: number, limit: number, metrics?: StoreReadMetricsSink) {
     const result = await this.db.prepare(
       `SELECT body FROM events
