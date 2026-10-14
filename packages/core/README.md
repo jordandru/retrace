@@ -40,6 +40,20 @@ Most users should install [`@retrace-dev/cli`](https://www.npmjs.com/package/@re
 - `ReconcileReport.attribution` (PR 198); `ProjectStatus` `capture.commit_shas` (PR 224) and the `sibling_corroborated` counts (PR 221);
   `RouterOptions.now` (PR 218).
 
+**Behaviour changes that need no change from a caller, but that a caller or an HTTP client can observe:**
+
+- A history text search whose escaped pattern is longer than 50 bytes runs as `instr(lower(body), ?)` instead of a `LIKE` pattern. It
+  matches the same events, and it no longer fails on the Worker's D1 (`store.ts`, PR 207).
+- A classification that misses its deadline is reported with the reason `deadline`, not `store_error` (`classify.ts`, PR 208).
+- A push webhook with push capture on that is not finished by the delivery deadline answers HTTP 202 with `pending` (the commit shas) and
+  `reason: "deadline"`, and the delivery stays queued (`router.ts`, PR 219).
+- `renderProjectStatus` reports "unlinked commit seals · N distinct commit shas" (PR 224) and a sibling-corroboration line, which reads
+  "disabled" when the project has no policy or routes only by environment fallback (PRs 221 and 229).
+- Attribution: a commit reference on a record that is not seal-shaped, and does not resolve, becomes an ignored diagnostic
+  (`non_seal_commit_record`) instead of failing the whole attribution context (`attribution-context.ts`, PR 198). Attribution and reconcile
+  diagnose every event that carries a restricted hook stamp, not only commit events (PR 214).
+- The cached export is served with its `Content-Length`, as a stream when the store gives one (`router.ts`, PR 235).
+
 **Same output, less work:** `verifyExportBundle` checks policy selection in one forward pass (PR 238), and `parseJsonRejectDuplicateKeys` builds
 each string in one step (PR 241). Both are tested for equivalence against the code they replace.
 
