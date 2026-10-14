@@ -1,6 +1,6 @@
 /**
- * NOOA audit durable fix, step 1: verifyExportBundle reads policy selection from one linear pass
- * (offlinePolicySelectionVerifier) instead of one verifyPolicySelectionOffline call per policy-reference event.
+ * NOOA audit durable fix, step 1: verifyExportBundle reads policy selection from one forward pass over the events and a binary
+ * search per reference (offlinePolicySelectionVerifier) instead of one verifyPolicySelectionOffline call per policy-reference event.
  * Equivalence is the spec: the whole ExportVerdict must equal the one the per-reference loop gave. The reference below is
  * verifyExportBundle and checkCoverage as they stood on main at f8d15aa7, copied verbatim except for their names.
  * Synthetic fixtures only.
@@ -441,7 +441,7 @@ test("durable fix step 1: verifyExportBundle equals the per-reference reference 
   console.log(`# ${refEvents} policy-reference events; outcomes ${JSON.stringify(Object.fromEntries(seen))}`);
 });
 
-test("durable fix step 1: the linear verifier equals verifyPolicySelectionOffline for any seqs, U and coverage", async () => {
+test("durable fix step 1: the one-pass verifier equals verifyPolicySelectionOffline for any seqs, U and coverage", async () => {
   const random = xorshift(0x5e1ec7);
   const r = (n: number) => random() % n;
   let queries = 0;
@@ -626,7 +626,34 @@ test("durable fix step 1: a read_head_seq in (−1, 0) selects nothing but finds
   assert.deepEqual(check(P, v1.digest, -0.5), ["policy_missing"]);
 });
 
-// ---- Fallback: bundles the linear pass does not take ----
+test("durable fix step 1: each special read head the seeded test draws, under both coverage values (#239)", async () => {
+  const { v1, v2 } = await twoVersions();
+  const events = await sealAll([
+    { seq: 0, ...ordinaryFields(0) }, { seq: 1, ...activationFields(v1) }, { seq: 2, ...ordinaryFields(2) },
+    { seq: 3, ...activationFields(v2) }, { seq: 4, ...ordinaryFields(4) },
+  ]);
+  const heads: [string, number | undefined][] = [
+    ["undefined", undefined], ["NaN", NaN], ["-0", -0], ["+Infinity", Infinity], ["-Infinity", -Infinity], ["-0.5", -0.5],
+  ];
+  // With complete coverage, +Infinity passes the end of the contiguous prefix (seq 4), so selection is unverifiable. The other
+  // heads select nothing, so the claimed digest is missing: undefined reads as −1, NaN, −Infinity and −0.5 admit no event, and −0
+  // admits only seq 0, which is not an activation. With incomplete coverage every head is unverifiable.
+  const pinned = (name: string, coverageComplete: boolean): PolicyVerifyFinding[] =>
+    !coverageComplete || name === "+Infinity" ? ["policy_selection_unverifiable"] : ["policy_missing"];
+  for (const coverageComplete of [true, false]) {
+    const check = offlinePolicySelectionVerifier({ events, policies: [v1, v2], coverageComplete })!;
+    for (const [name, U] of heads) {
+      for (const claimedDigest of [v1.digest, v2.digest]) {
+        const expected = verifyPolicySelectionOffline({ project: P, claimedDigest, readHeadSeq: U, events, policies: [v1, v2], coverageComplete }).findings;
+        const label = `U=${name} cov=${coverageComplete} ${claimedDigest === v1.digest ? "v1" : "v2"}`;
+        assert.deepEqual(check(P, claimedDigest, U), expected, label);
+        assert.deepEqual(expected, pinned(name, coverageComplete), `${label}: pinned`);
+      }
+    }
+  }
+});
+
+// ---- Fallback: bundles the forward pass does not take ----
 
 test("durable fix step 1: unsorted or non-finite seqs go to the per-reference loop", async () => {
   const { v1 } = await twoVersions();
@@ -650,7 +677,7 @@ test("durable fix step 1: a malformed event gives today's result or today's erro
     { seq: 2, ...withReference(ordinaryFields(2), "claim_decision", v1.digest, 2) },
     { seq: 3, ...withReference(ordinaryFields(3), "claim_decision", v1.digest, 0) },
   ];
-  // The first throws in today's selection. Today's loop never reaches the other two; the linear pass must not trip over
+  // The first throws in today's selection. Today's loop never reaches the other two; the forward pass must not trip over
   // the key beyond U (it stops at the largest U) and does trip over the null artifact (its index scans every event), so it
   // falls back.
   for (const [name, at, patch, expectError] of [

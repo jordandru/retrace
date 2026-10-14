@@ -1125,10 +1125,12 @@ export function verifyPolicySelectionOffline(opts: {
 type DecisiveActivation = Extract<ReturnType<typeof evaluateActivation>, { status: "eligible" | "incomplete" }>;
 
 /**
- * verifyPolicySelectionOffline for many references over one event set, in linear time. The returned function gives, for
- * every input, the findings of verifyPolicySelectionOffline({ project, claimedDigest, readHeadSeq, events, policies,
- * coverageComplete }). One call costs about n log n (a map over every event, filters and sorts of every event ≤ U), so a
- * loop over m references costs m × n log n; this precomputes once what each call recomputes:
+ * verifyPolicySelectionOffline for many references over one event set: one forward pass over the events and a binary search per
+ * reference. It is not linear for every event set: the eligible-version check is O(A²) in eligible activations, and the document
+ * findings are O(P × D) for P reference projects and D documents. The returned function gives, for every input, the findings of
+ * verifyPolicySelectionOffline({ project, claimedDigest, readHeadSeq, events, policies, coverageComplete }). One call costs
+ * about n log n (a map over every event, filters and sorts of every event ≤ U), so a loop over m references costs m × n log n;
+ * this precomputes once what each call recomputes:
  * - the documents map, which does not depend on the project, and its findings per project;
  * - the longest contiguous seq prefix from 0, which answers chainCompleteThrough for any U;
  * - one ascending pass that evaluates every event against the eligible versions of the events before it (what

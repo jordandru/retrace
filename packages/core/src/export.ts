@@ -199,7 +199,9 @@ function checkCoverage(bundle: ExportBundle, sorted: Event[], problems: string[]
 /**
  * The policy findings of each policy-reference event, in order: what one verifyPolicySelectionOffline call per reference
  * gives. That loop costs about m × n log n for m references over n events: a CPU profile of a remote `retrace_status` at
- * 19,527 events put 17.6 s in it (2026-10-13). offlinePolicySelectionVerifier gives the same findings in linear time.
+ * 19,527 events put 17.6 s in it (2026-10-13). offlinePolicySelectionVerifier gives the same findings from one forward pass over
+ * the events and a binary search per reference; its eligible-version check is O(A²) in eligible activations and its document
+ * findings O(P × D) for P reference projects and D documents.
  */
 function policyReferenceFindings(
   refs: { e: Event; ref: { digest?: string; readHeadSeq?: number } }[],
@@ -212,7 +214,7 @@ function policyReferenceFindings(
     const check = offlinePolicySelectionVerifier({ events: sorted, policies, coverageComplete });
     if (check) return refs.map(({ e, ref }) => check(e.project, ref.digest, ref.readHeadSeq));
   } catch {
-    // A malformed event or document the linear pass trips over: the per-reference loop below gives today's findings
+    // A malformed event or document the forward pass trips over: the per-reference loop below gives today's findings
     // or throws today's error.
   }
   return refs.map(({ e, ref }) => verifyPolicySelectionOffline({
