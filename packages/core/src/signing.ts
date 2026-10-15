@@ -45,9 +45,45 @@ export function encodeSignature(sig: Uint8Array): string {
   return b64u.enc(sig);
 }
 
+/** 32 bytes as 43 characters of unpadded base64url; the last character's 2 spare bits are zero (canonical only). */
+const B64U_32 = /^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/;
+
+/** The shape a private Ed25519 signing JWK must have before any runtime import (#232 round 2). workerd's JWK import
+ *  error quotes a malformed `kty` or `crv` value, and an error's stack reaches the router's log, so a key that is not
+ *  this shape is refused here with a fixed message that names only the failing field. */
+export function assertSigningJwk(jwk: unknown): asserts jwk is JsonWebKey {
+  if (!jwk || typeof jwk !== "object" || Array.isArray(jwk)) throw new Error("signing key: not a JWK object");
+  const k = jwk as Record<string, unknown>;
+  for (const [field, ok] of [
+    ["kty", k.kty === "OKP"],
+    ["crv", k.crv === "Ed25519"],
+    ["d", typeof k.d === "string" && B64U_32.test(k.d)],
+    ["x", typeof k.x === "string" && B64U_32.test(k.x)],
+  ] as const) {
+    if (!ok) throw new Error(`signing key: JWK ${field} is missing or invalid`);
+  }
+}
+
+/** Import a private signing JWK: its shape first, then the runtime import. The runtime's own error is dropped, never
+ *  kept as message, stack or cause, because it can quote the key. */
+export async function importSigningKey(priv: JsonWebKey): Promise<CryptoKey> {
+  assertSigningJwk(priv);
+  try {
+    return await subtle.importKey("jwk", importable(priv), ALG, false, ["sign"]);
+  } catch {
+    throw new Error("signing key: the runtime refused to import the JWK");
+  }
+}
+
 export async function signCanonical(priv: JsonWebKey, value: unknown): Promise<string> {
-  const key = await subtle.importKey("jwk", importable(priv), ALG, false, ["sign"]);
-  const sig = await subtle.sign(ALG, key, new TextEncoder().encode(canonicalize(value)));
+  const key = await importSigningKey(priv);
+  const bytes = new TextEncoder().encode(canonicalize(value));
+  let sig: ArrayBuffer;
+  try {
+    sig = await subtle.sign(ALG, key, bytes);
+  } catch {
+    throw new Error("signing key: the runtime refused to sign");
+  }
   return b64u.enc(sig);
 }
 

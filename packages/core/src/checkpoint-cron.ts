@@ -13,6 +13,7 @@
  */
 import { Checkpoint, checkpointFromStore } from "./checkpoint.js";
 import { canonicalize, sha256Hex } from "./chain.js";
+import { assertSigningJwk, importSigningKey } from "./signing.js";
 import { EventStore } from "./store.js";
 
 export const CRON_WITNESS_FORMAT = "retrace-witness/1";
@@ -57,9 +58,14 @@ function strip(jwk: JsonWebKey): JsonWebKey {
   return rest;
 }
 
+/** The import goes through importSigningKey: shape first, and a fixed error in place of the runtime's (#232 round 2). */
 async function signArtifact(privateJwk: JsonWebKey, artifact: Uint8Array): Promise<Uint8Array> {
-  const key = await subtle.importKey("jwk", strip(privateJwk), { name: "Ed25519" }, false, ["sign"]);
-  return new Uint8Array(await subtle.sign({ name: "Ed25519" }, key, artifact as unknown as ArrayBuffer));
+  const key = await importSigningKey(privateJwk);
+  try {
+    return new Uint8Array(await subtle.sign({ name: "Ed25519" }, key, artifact as unknown as ArrayBuffer));
+  } catch {
+    throw new Error("signing key: the runtime refused to sign");
+  }
 }
 
 /** Same record shape the CLI's witness writes to .retrace/witnesses.jsonl. */
@@ -90,6 +96,7 @@ export async function witnessCheckpointRekor(
   opts: { rekorUrl?: string; fetchImpl?: PortableFetch } = {},
 ): Promise<CronWitnessRecord> {
   if (!cp.signature || !cp.signer) throw new Error("refusing to witness an unsigned checkpoint");
+  assertSigningJwk(privateJwk); // before `x` is decoded below; the failure is saved as witness_error
   const rekorUrl = (opts.rekorUrl ?? CRON_DEFAULT_REKOR_URL).replace(/\/+$/, "");
   const f: PortableFetch = opts.fetchImpl ?? (fetch as unknown as PortableFetch);
   const { d: _d, ...pub } = strip(privateJwk) as JsonWebKey & { d?: string };
