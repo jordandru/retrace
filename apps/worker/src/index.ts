@@ -11,7 +11,7 @@
  *   GET /projects/:p/export|report|lineage · POST /projects/:p/share · GET /.well-known/retrace-pubkey
  *   POST /hooks/github  (GitHub webhook; HMAC-verified with RETRACE_GITHUB_SECRET; project from repo via RETRACE_GITHUB_PROJECTS)
  */
-import { createHandler, parseCheckpointProjectAllowlist, parseCredentials, parseGithubRepoProjects, parseOwnerPrincipal, parseSigningKey, parseTrailerPolicy, runCheckpointCron, refreshExportCacheStream, keyId, drainPendingGithubDeliveries } from "@retrace-dev/core";
+import { createHandler, CredentialsConfigError, parseCheckpointProjectAllowlist, parseCredentials, parseGithubRepoProjects, parseOwnerPrincipal, parseSigningKey, parseTrailerPolicy, runCheckpointCron, refreshExportCacheStream, keyId, drainPendingGithubDeliveries } from "@retrace-dev/core";
 import type { ExportSigner, RefreshResult } from "@retrace-dev/core";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { D1Store } from "./d1-store.js";
@@ -59,9 +59,10 @@ export function allCredentials(env: Env) {
   const main = parseCredentials(env.RETRACE_CREDENTIALS);
   if (!env.RETRACE_CREDENTIALS_EXTRA) return main;
   try {
-    return [...main, ...parseCredentials(env.RETRACE_CREDENTIALS_EXTRA)];
+    return [...main, ...parseCredentials(env.RETRACE_CREDENTIALS_EXTRA, "RETRACE_CREDENTIALS_EXTRA")];
   } catch (e) {
-    console.error("RETRACE_CREDENTIALS_EXTRA ignored (malformed):", String((e as Error)?.message ?? e));
+    // Only the sanitized detail: a parser's own message can quote the secret (#232).
+    console.error("RETRACE_CREDENTIALS_EXTRA ignored (malformed):", e instanceof CredentialsConfigError ? e.detail : "unclassified failure");
     return main;
   }
 }

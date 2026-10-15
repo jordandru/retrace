@@ -192,10 +192,39 @@ export const Credential = z.object({
   principal: z.object({ type: z.enum(["human", "team"]), id: z.string().min(1) }).optional(),
 });
 export type Credential = z.infer<typeof Credential>;
-/** Parse the RETRACE_CREDENTIALS secret (JSON array). Throws on malformed config so a bad deploy fails loudly. */
-export function parseCredentials(raw?: string | null): Credential[] {
+/** A malformed credentials secret, described without any part of its value (#232). V8's JSON.parse message quotes the
+ *  start of its input and zod's messages quote the received value for some issue types (an invalid enum value), so
+ *  neither message is kept, nor attached as `cause`. `detail` is "not JSON" or each schema issue's path and code; a path
+ *  is built from the schema's own keys and array indices only (Credential and Actor have no record or passthrough). */
+export class CredentialsConfigError extends Error {
+  readonly detail: string;
+  constructor(readonly secret: string, detail: string) {
+    super(`${secret} is malformed: ${detail}`);
+    this.detail = detail;
+  }
+}
+
+const MAX_LISTED_ISSUES = 10;
+function issuePath(path: (string | number)[]): string {
+  return path.map((p) => (typeof p === "number" ? `[${p}]` : `.${p}`)).join("").replace(/^\./, "") || "(root)";
+}
+
+/** Parse the RETRACE_CREDENTIALS secret (JSON array), or another secret of the same shape named by `secret`. Throws a
+ *  CredentialsConfigError on malformed config so a bad deploy fails loudly, without quoting the secret. */
+export function parseCredentials(raw?: string | null, secret = "RETRACE_CREDENTIALS"): Credential[] {
   if (!raw) return [];
-  return z.array(Credential).parse(JSON.parse(raw));
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    throw new CredentialsConfigError(secret, "not JSON");
+  }
+  const parsed = z.array(Credential).safeParse(value);
+  if (parsed.success) return parsed.data;
+  const issues = parsed.error.issues;
+  const listed = issues.slice(0, MAX_LISTED_ISSUES).map((i) => `${issuePath(i.path)} ${i.code}`).join(", ");
+  const more = issues.length > MAX_LISTED_ISSUES ? ` (+${issues.length - MAX_LISTED_ISSUES} more)` : "";
+  throw new CredentialsConfigError(secret, `schema issues ${listed}${more}`);
 }
 
 export interface RouterOptions {
