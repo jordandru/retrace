@@ -13,6 +13,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 import { Miniflare, convertV4MiniflareOptions } from "miniflare";
+import { generateSigningKey, keyId } from "@retrace-dev/core";
 
 const SRC = fileURLToPath(new URL("../src/", import.meta.url));
 const schemaSql = readFileSync(fileURLToPath(new URL("../schema.sql", import.meta.url)), "utf8");
@@ -54,16 +55,22 @@ function assertNoFragment(text: string, jwk: Record<string, string>, where: stri
   }
 }
 
-test("#232 workerd: a malformed RETRACE_SIGNING_KEY leaks no fragment through a fresh export, the public key route, or the scheduled run", { timeout: 300_000 }, async () => {
-  const bundled = await build({
+let bundling: Promise<string> | undefined;
+/** The real Worker behind the log-capturing entry, bundled once for both tests. */
+function bundleWorker(): Promise<string> {
+  return bundling ??= build({
     stdin: { contents: ENTRY, resolveDir: SRC, sourcefile: "signing-key-test-entry.js", loader: "js" },
     bundle: true, write: false, format: "esm", platform: "neutral", target: "es2022",
     conditions: ["workerd", "worker", "browser"], mainFields: ["module", "main"], external: ["node:*", "cloudflare:*"], logLevel: "silent",
-  });
+  }).then((bundled) => bundled.outputFiles[0]!.text);
+}
+
+test("#232 workerd: a malformed RETRACE_SIGNING_KEY leaks no fragment through a fresh export, the public key route, or the scheduled run", { timeout: 300_000 }, async () => {
+  const script = await bundleWorker();
   for (const { field, jwk } of CASES) {
     const mf = new Miniflare(convertV4MiniflareOptions({
       workers: [{
-        name: "retrace", modules: true, script: bundled.outputFiles[0]!.text,
+        name: "retrace", modules: true, script,
         compatibilityDate: "2025-06-01", compatibilityFlags: ["nodejs_compat"],
         d1Databases: { DB: `signing-key-${field}` }, r2Buckets: { EXPORT_CACHE: `signing-key-${field}` },
         bindings: { RETRACE_TOKEN: TOKEN, RETRACE_SIGNING_KEY: JSON.stringify(jwk), RETRACE_CHECKPOINT_PROJECTS: JSON.stringify(["p"]) },
@@ -103,6 +110,49 @@ test("#232 workerd: a malformed RETRACE_SIGNING_KEY leaks no fragment through a 
       assert.match(all, new RegExp(`retrace-api: request failed \\[[0-9a-f]{8}\\] GET /projects/p/export: Error: signing key: JWK ${field} is missing or invalid`), `${field}: the export failure is still logged`);
       assert.match(all, /checkpoint cron failed: signing key: /, `${field}: the cron failure is still logged`);
       assertNoFragment(all, jwk, `${field} logs`);
+    } finally {
+      await mf.dispose();
+    }
+  }
+});
+
+/** main's publicFromPrivate before round 3, kept here only to show that a valid key is served exactly as it was. */
+function publicFromPrivateBeforeR3(priv: JsonWebKey): JsonWebKey {
+  const { d: _d, key_ops: _k, ...pub } = priv as unknown as Record<string, unknown>;
+  return { ...pub, key_ops: ["verify"] } as JsonWebKey;
+}
+
+// Round 3 (Codex r2 Medium, evt_21e24853): in workerd too, the public key route derives x from d (d imported alone, as
+// PKCS #8) and refuses a mismatch, and it builds the public JWK from an allowlist of public members.
+test("#232 r3 workerd: the public key route refuses a d/x mismatch, publishes no extension member, and serves a valid key as before", { timeout: 300_000 }, async () => {
+  const script = await bundleWorker();
+  const { privateKey } = await generateSigningKey();
+  const NOTE = "tok_FAKEnoteRFVB4739";
+  const validBody = JSON.stringify({ kid: await keyId(publicFromPrivateBeforeR3(privateKey)), alg: "Ed25519", public_key: publicFromPrivateBeforeR3(privateKey) });
+  const cases: { name: string; key: object; status: number; body: string; secrets: Record<string, string> }[] = [
+    { name: "mismatch", key: { kty: "OKP", crv: "Ed25519", d: D, x: X }, status: 503, body: JSON.stringify({ error: "signing key is not a valid Ed25519 JWK" }), secrets: { d: D, x: X } },
+    { name: "extension member", key: { ...privateKey, private_note: NOTE }, status: 200, body: validBody, secrets: { note: NOTE } },
+    { name: "valid", key: privateKey, status: 200, body: validBody, secrets: {} },
+  ];
+  for (const { name, key, status, body, secrets } of cases) {
+    const mf = new Miniflare(convertV4MiniflareOptions({
+      workers: [{
+        name: "retrace", modules: true, script,
+        compatibilityDate: "2025-06-01", compatibilityFlags: ["nodejs_compat"],
+        d1Databases: { DB: `pubkey-r3-${name}` }, r2Buckets: { EXPORT_CACHE: `pubkey-r3-${name}` },
+        bindings: { RETRACE_TOKEN: TOKEN, RETRACE_SIGNING_KEY: JSON.stringify(key) },
+        outboundService: () => new Response("no network in tests", { status: 503 }),
+      }],
+    }));
+    try {
+      const res = await mf.dispatchFetch("http://retrace.test/.well-known/retrace-pubkey");
+      const text = await res.text();
+      assert.equal(res.status, status, `${name}: ${text}`);
+      assert.equal(text, body, `${name}: the exact response body`);
+      assertNoFragment(text, secrets, `${name} public key response`);
+      assert.ok(!text.includes(privateKey.d!), `${name}: d is not published`);
+      const logs = await (await mf.dispatchFetch("http://retrace.test/__test/logs")).json() as string[];
+      assertNoFragment(logs.join("\n"), { ...secrets, d: (key as { d?: string }).d ?? "" }, `${name} logs`);
     } finally {
       await mf.dispose();
     }

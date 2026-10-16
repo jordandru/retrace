@@ -59,7 +59,7 @@ import { appendOwnerLoginEvent, OWNER_LOGIN_DECISION_PARAM } from "./owner-login
 import { mapGithubWebhook, verifyGithubSignature } from "./github.js";
 import { mapDriveActivities, DrivePayload } from "./gdrive.js";
 import { buildProjectStatus } from "./status.js";
-import { assertSigningJwk, publicFromPrivate, keyId, signCanonical } from "./signing.js";
+import { assertSigningKeyPair, publicFromPrivate, keyId, signCanonical } from "./signing.js";
 import { UI_HTML } from "./ui-html.js";
 
 function writeClientError(e: unknown): string | undefined {
@@ -577,8 +577,9 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
     }
     if (parts[0] === ".well-known" && parts[1] === "retrace-pubkey") {
       if (!opts.signingKey) return json({ error: "no signing key configured" }, 404);
-      // A malformed key's other fields are part of the secret's value: never publish them (#232 round 2).
-      try { assertSigningJwk(opts.signingKey); } catch { return json({ error: "signing key is not a valid Ed25519 JWK" }, 503); }
+      // A malformed key's other fields are part of the secret's value: never publish them (#232 round 2). A key whose x
+      // is not d's public key is refused too, and the public JWK is built from an allowlist of public members (round 3).
+      try { await assertSigningKeyPair(opts.signingKey); } catch { return json({ error: "signing key is not a valid Ed25519 JWK" }, 503); }
       const pub = publicFromPrivate(opts.signingKey);
       return json({ kid: await keyId(pub), alg: "Ed25519", public_key: pub, name: opts.issuerName });
     }

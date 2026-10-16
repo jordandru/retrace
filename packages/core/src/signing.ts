@@ -22,9 +22,21 @@ export async function keyId(pub: JsonWebKey): Promise<string> {
   return (await sha256Hex(canonicalize({ crv: pub.crv, kty: pub.kty, x: pub.x }))).slice(0, 16);
 }
 
+/** The members a public JWK built from the signing key may carry, with the type each must have: the Ed25519 public key
+ *  (`kty`, `crv`, `x`, RFC 8037 §2) and the public metadata a configured key already carries (`kid` and `alg`, RFC 7517
+ *  §4; WebCrypto's `ext`). Nothing else is copied: not `d`, not `key_ops`, not any extension member (#232 round 3). */
+const PUBLIC_JWK_MEMBERS: Readonly<Record<string, "string" | "boolean">> = {
+  kty: "string", crv: "string", x: "string", kid: "string", alg: "string", ext: "boolean",
+};
+
+/** The public JWK for a private one, from the allowlist above, in the private key's own member order, so a valid key
+ *  serialises exactly as it did when every member but `d` and `key_ops` was copied. */
 export function publicFromPrivate(priv: JsonWebKey): JsonWebKey {
-  const { d: _d, key_ops: _k, ...pub } = priv as any;
-  return { ...pub, key_ops: ["verify"] };
+  const pub: Record<string, unknown> = {};
+  for (const [name, value] of Object.entries(priv)) {
+    if (Object.hasOwn(PUBLIC_JWK_MEMBERS, name) && typeof value === PUBLIC_JWK_MEMBERS[name]) pub[name] = value;
+  }
+  return { ...pub, key_ops: ["verify"] } as JsonWebKey;
 }
 
 const b64u = {
@@ -62,6 +74,28 @@ export function assertSigningJwk(jwk: unknown): asserts jwk is JsonWebKey {
   ] as const) {
     if (!ok) throw new Error(`signing key: JWK ${field} is missing or invalid`);
   }
+}
+
+/** PKCS #8 DER prefix of an Ed25519 private key (RFC 8410 §7); the 32 bytes of `d` follow it. */
+const PKCS8_ED25519_PREFIX = Uint8Array.from([0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20]);
+
+/** The shape check, then the public key derived from `d` compared with `x` (#232 round 3, Codex r2 Medium). A
+ *  shape-valid key whose `x` is not `d`'s public key would otherwise be published as a key that cannot verify `d`'s
+ *  signatures. `d` is imported alone, as PKCS #8, so no runtime compares it with `x` on our behalf; the runtime's own
+ *  error is dropped, as in importSigningKey. Every message is fixed and names no value. */
+export async function assertSigningKeyPair(jwk: unknown): Promise<void> {
+  assertSigningJwk(jwk);
+  let derived: unknown;
+  try {
+    const der = new Uint8Array(PKCS8_ED25519_PREFIX.length + 32);
+    der.set(PKCS8_ED25519_PREFIX);
+    der.set(b64u.dec(jwk.d!), PKCS8_ED25519_PREFIX.length);
+    const key = await subtle.importKey("pkcs8", der, ALG, true, ["sign"]);
+    derived = ((await subtle.exportKey("jwk", key)) as JsonWebKey).x;
+  } catch {
+    throw new Error("signing key: the runtime could not derive the public key");
+  }
+  if (derived !== jwk.x) throw new Error("signing key: JWK x is not the public key of d");
 }
 
 /** Import a private signing JWK: its shape first, then the runtime import. The runtime's own error is dropped, never
