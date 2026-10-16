@@ -81,9 +81,10 @@ const PKCS8_ED25519_PREFIX = Uint8Array.from([0x30, 0x2e, 0x02, 0x01, 0x00, 0x30
 
 /** The members a snapshot copies: what is read after it. The shape check reads `kty`, `crv`, `d` and `x`;
  *  publicFromPrivate copies PUBLIC_JWK_MEMBERS (`kty`, `crv`, `x`, `kid`, `alg`, `ext`); the signing import gets every
- *  copied member but `alg` (importable), which leaves `key_ops` as the one member that changes what the import allows.
- *  Every other member is dropped (#232 round 6). */
-const SNAPSHOT_MEMBERS: ReadonlySet<string> = new Set(["kty", "crv", "d", "x", "kid", "alg", "ext", "key_ops"]);
+ *  copied member but `alg` (importable). Two of the imported members change what the import allows, and both are kept:
+ *  `key_ops`, and `use`, which WebCrypto enforces (a `use` other than "sig" is refused for signing; round 7, Codex r6
+ *  Medium). Every other member is dropped (#232 round 6). */
+const SNAPSHOT_MEMBERS: ReadonlySet<string> = new Set(["kty", "crv", "d", "x", "kid", "alg", "ext", "use", "key_ops"]);
 
 /** A private copy of a signing JWK, taken synchronously (#232 round 5, Codex r4 Medium; CODING_STANDARDS CS-5). The
  *  key's owner may change the object while a check is pending, so every check, and every use after the first `await`,
@@ -93,12 +94,15 @@ const SNAPSHOT_MEMBERS: ReadonlySet<string> = new Set(["kty", "crv", "d", "x", "
  *  once, for their order, then each member in SNAPSHOT_MEMBERS, once. A getter or a Proxy trap that throws, whatever
  *  its error says, becomes a fixed error; the caught error is dropped, not kept as message, stack or cause. Members
  *  outside SNAPSHOT_MEMBERS are never read. A member whose value is an object is dropped, so nothing the caller can
- *  still change is shared, except `key_ops`, which must be an array of strings and is copied as a new array. The
+ *  still change is shared. The two members that restrict the import are never dropped, because dropping one would
+ *  admit a key the runtime refuses: `key_ops` must be an array of strings and is copied as a new array, and `use` must
+ *  be a string, which is passed to the runtime to accept or refuse as it does. The
  *  copied members keep the caller's order, so a valid key's public JWK serialises as it did. Anything that is not a
  *  JWK object is returned as it is, for the shape check to refuse. */
 export function snapshotSigningKey(jwk: unknown): JsonWebKey {
   const copy: Record<string, unknown> = {};
   let badKeyOps = false;
+  let badUse = false;
   try {
     if (!jwk || typeof jwk !== "object" || Array.isArray(jwk)) return jwk as JsonWebKey;
     for (const name of Object.keys(jwk)) {
@@ -108,6 +112,9 @@ export function snapshotSigningKey(jwk: unknown): JsonWebKey {
         const ops: unknown[] = Array.isArray(value) ? Array.from(value as unknown[]) : [];
         if (!Array.isArray(value) || ops.some((op) => typeof op !== "string")) badKeyOps = true;
         else copy.key_ops = ops;
+      } else if (name === "use") {
+        if (typeof value === "string") copy.use = value;
+        else badUse = true;
       } else if (value === null || (typeof value !== "object" && typeof value !== "function")) {
         copy[name] = value;
       }
@@ -116,6 +123,7 @@ export function snapshotSigningKey(jwk: unknown): JsonWebKey {
     throw new Error("signing key: the JWK could not be read");
   }
   if (badKeyOps) throw new Error("signing key: JWK key_ops is missing or invalid");
+  if (badUse) throw new Error("signing key: JWK use is missing or invalid");
   return copy as JsonWebKey;
 }
 

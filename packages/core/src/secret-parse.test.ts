@@ -555,13 +555,17 @@ test("#232 r6 the snapshot copies only the members used afterwards, in the calle
   const keyOps = ["sign"];
   const jwk = { private_note: "tok_FAKEnoteRFVB4739", ext: true, alg: "Ed25519", crv: "Ed25519", use: "sig", d: D, x: X, oth: { d: "tok_FAKEothhWSXC9517" }, kty: "OKP", kid: "kid-r6", key_ops: keyOps, kid_obj: { a: 1 } };
   const snap = snapshotSigningKey(jwk);
-  assert.equal(JSON.stringify(snap), JSON.stringify({ ext: true, alg: "Ed25519", crv: "Ed25519", d: D, x: X, kty: "OKP", kid: "kid-r6", key_ops: ["sign"] }));
+  // Round 7 (Codex r6 Medium): `use` is kept, in its place in the caller's order.
+  assert.equal(JSON.stringify(snap), JSON.stringify({ ext: true, alg: "Ed25519", crv: "Ed25519", use: "sig", d: D, x: X, kty: "OKP", kid: "kid-r6", key_ops: ["sign"] }));
   assert.notEqual(snap.key_ops, keyOps, "key_ops is a new array");
   keyOps.push("verify");
   assert.deepEqual(snap.key_ops, ["sign"], "a later change to the caller's key_ops does not reach the snapshot");
   assert.equal((snapshotSigningKey({ ...jwk, kid: { nested: "tok_FAKEkidnUJMK2846" } }) as Record<string, unknown>).kid, undefined, "an object-valued member is dropped");
   for (const bad of [{ ...jwk, key_ops: "sign" }, { ...jwk, key_ops: [{ toString: () => "sign" }] }]) {
     assert.throws(() => snapshotSigningKey(bad), { message: "signing key: JWK key_ops is missing or invalid" });
+  }
+  for (const bad of [{ ...jwk, use: 1 }, { ...jwk, use: { toString: () => "sig" } }]) {
+    assert.throws(() => snapshotSigningKey(bad), { message: "signing key: JWK use is missing or invalid" });
   }
   for (const notObject of [null, "tok_FAKEqzwxVBNM7531", ["tok_FAKEqzwxVBNM7531"]]) assert.equal(snapshotSigningKey(notObject), notObject);
 });
@@ -587,4 +591,27 @@ test("#232 r6 the Rekor signature is made with the key compared with the checkpo
   const verifyWith = async (x: string) => crypto.subtle.verify({ name: "Ed25519" }, await crypto.subtle.importKey("jwk", { kty: "OKP", crv: "Ed25519", x }, { name: "Ed25519" }, false, ["verify"]), sig, artifact);
   assert.equal(await verifyWith(a.publicKey.x!), true, "the Rekor signature verifies against the key compared with the signer");
   assert.equal(await verifyWith(b.publicKey.x!), false, "the swapped key did not sign");
+});
+
+// Round 7 (Codex r6 Medium, evt_26e80427): round 6's snapshot dropped the standard JWK member `use`, so a key marked
+// `use: "enc"` signed, where round 5 and main refuse it (WebCrypto enforces `use` on import). `use` is kept now.
+test("#232 r7 a key marked use sig signs; the same key marked use enc is refused with the fixed message and signs nothing", async () => {
+  const { privateKey, publicKey } = await generateSigningKey();
+  const value = { n: 7 };
+  const sig = await signCanonical({ ...privateKey, use: "sig" } as JsonWebKey, value);
+  assert.equal(await verifyCanonical(publicKey, value, sig), true, "use sig signs, and the signature verifies against x");
+  const enc = { ...privateKey, use: "enc" } as JsonWebKey;
+  const store = new MemoryEventStore();
+  await appendEvent(store, { project: "p", actor: { type: "human", id: "owner@example.test" }, action: "created", artifacts: [{ id: "file:a.txt" }] });
+  const input = { project: "p", actor: { type: "agent" as const, id: "seat_FAKE" }, action: "created" as const, artifacts: [{ id: "file:b.txt" }], timestamp: "2026-10-16T00:00:00.000Z", idempotency_key: "idem-r7" };
+  for (const [name, run] of [
+    ["signCanonical", () => signCanonical(enc, value)],
+    ["checkpointFromStore", () => checkpointFromStore(store, "p", { signingKey: enc })],
+    ["buildExportBundle", () => buildExportBundle(store, { project: "p" }, { signingKey: enc })],
+    ["signProducer", () => signProducer(input, enc)],
+  ] as [string, () => Promise<unknown>][]) {
+    const e = await run().then(() => assert.fail(`${name}: use enc must not sign`), (err: Error) => err);
+    assert.equal(e.message, "signing key: the runtime refused to import the JWK", name);
+    assert.equal((e as { cause?: unknown }).cause, undefined, name);
+  }
 });

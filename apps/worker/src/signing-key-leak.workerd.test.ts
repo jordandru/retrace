@@ -404,3 +404,19 @@ test("#232 r6 workerd: a throwing getter or Proxy trap on the signing key gives 
     await mf.dispose();
   }
 });
+
+// Round 7 (Codex r6 Medium, evt_26e80427): workerd's WebCrypto enforces the JWK member `use` too, so the snapshot keeps it.
+test("#232 r7 workerd: a key marked use sig signs; the same key marked use enc is refused with the fixed message", { timeout: 300_000 }, async () => {
+  const a = await generateSigningKey();
+  const { mf } = await workerWithKey("use", a.privateKey);
+  try {
+    const value = { n: 7 };
+    const sig = await mf.dispatchFetch("http://retrace.test/__test/sign", { method: "POST", body: JSON.stringify({ jwk: { ...a.privateKey, use: "sig" }, value }) });
+    const signed = await sig.json() as { sig?: string; error?: string };
+    assert.equal(await verifyCanonical(publicFromPrivate(a.privateKey), value, signed.sig!), true, `use sig signs in workerd: ${JSON.stringify(signed)}`);
+    const enc = await mf.dispatchFetch("http://retrace.test/__test/sign", { method: "POST", body: JSON.stringify({ jwk: { ...a.privateKey, use: "enc" }, value }) });
+    assert.deepEqual(await enc.json(), { error: "signing key: the runtime refused to import the JWK" }, "use enc is refused in workerd and signs nothing");
+  } finally {
+    await mf.dispose();
+  }
+});
