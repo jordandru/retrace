@@ -8,7 +8,7 @@ import { EventStore, collectHistory, verifyProject } from "./store.js";
 import { verifyChain, VerifyResult, computeHash, hashRule, sha256Hex } from "./chain.js";
 import { ProducerKey, countProducerSigs } from "./producer-sig.js";
 import { GENESIS_HASH } from "./schema.js";
-import { keyId, publicFromPrivate, signCanonical, verifyCanonical } from "./signing.js";
+import { keyId, publicFromPrivate, signCanonical, snapshotSigningKey, verifyCanonical } from "./signing.js";
 import {
   SUPPORTED_POLICY_PROFILES, PolicyDocument, PolicyError, PolicyVerifyFinding, canonicalPolicyV1, collectReferencedPolicies,
   documentMapKey, eventPolicyRef, offlinePolicySelectionVerifier, parseJsonRejectDuplicateKeys, policyHashObject, validatePolicyBody,
@@ -96,9 +96,10 @@ export async function buildExportBundle(store: EventStore, scope: ExportScope, o
     bundle.context_events = context_events;
   }
   if (opts.signingKey) {
-    const pub = publicFromPrivate(opts.signingKey);
+    const key = snapshotSigningKey(opts.signingKey); // one snapshot for the embedded key and the signature (#232 round 5)
+    const pub = publicFromPrivate(key);
     bundle.issuer = { kid: await keyId(pub), alg: "Ed25519", public_key: pub, name: opts.issuerName };
-    bundle.signature = await signCanonical(opts.signingKey, { ...bundle, signature: undefined });
+    bundle.signature = await signCanonical(key, { ...bundle, signature: undefined });
   }
   return bundle;
 }

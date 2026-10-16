@@ -59,7 +59,7 @@ import { appendOwnerLoginEvent, OWNER_LOGIN_DECISION_PARAM } from "./owner-login
 import { mapGithubWebhook, verifyGithubSignature } from "./github.js";
 import { mapDriveActivities, DrivePayload } from "./gdrive.js";
 import { buildProjectStatus } from "./status.js";
-import { assertSigningKeyPair, publicFromPrivate, keyId, signCanonical } from "./signing.js";
+import { assertSigningKeyPair, publicFromPrivate, keyId, signCanonical, snapshotSigningKey } from "./signing.js";
 import { UI_HTML } from "./ui-html.js";
 
 function writeClientError(e: unknown): string | undefined {
@@ -579,8 +579,10 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
       if (!opts.signingKey) return json({ error: "no signing key configured" }, 404);
       // A malformed key's other fields are part of the secret's value: never publish them (#232 round 2). A key whose x
       // is not d's public key is refused too, and the public JWK is built from an allowlist of public members (round 3).
-      try { await assertSigningKeyPair(opts.signingKey); } catch { return json({ error: "signing key is not a valid Ed25519 JWK" }, 503); }
-      const pub = publicFromPrivate(opts.signingKey);
+      // The key published is the snapshot that was checked, not the configured object read again (round 5).
+      const key = snapshotSigningKey(opts.signingKey);
+      try { await assertSigningKeyPair(key); } catch { return json({ error: "signing key is not a valid Ed25519 JWK" }, 503); }
+      const pub = publicFromPrivate(key);
       return json({ kid: await keyId(pub), alg: "Ed25519", public_key: pub, name: opts.issuerName });
     }
 
@@ -1051,11 +1053,13 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
             const payload = head === null
               ? { project, seq: -1, hash: GENESIS_HASH, signed_at }
               : { project, seq: head.seq, hash: head.hash, signed_at };
-            const pub = publicFromPrivate(opts.signingKey);
+            // One snapshot for the published key and the signature (#232 round 5).
+            const key = snapshotSigningKey(opts.signingKey);
+            const pub = publicFromPrivate(key);
             return json({
               ...payload,
               issuer: { kid: await keyId(pub), alg: "Ed25519", public_key: pub },
-              signature: await signCanonical(opts.signingKey, payload),
+              signature: await signCanonical(key, payload),
             });
           }
           if (sub === "verify") return json(await verifyProject(store, project));

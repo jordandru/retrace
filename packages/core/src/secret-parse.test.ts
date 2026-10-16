@@ -296,7 +296,9 @@ test("#232 r4 every signing path refuses a shape-valid d/x mismatch with the pai
   assertNoFragment(logged.join("\n"), material(mismatched as Record<string, unknown>));
 });
 
-test("#232 r4 the pair check runs once per key object, and again when its d or x changes", async () => {
+// Round 5 replaced the round-4 test "the pair check runs once per key object, and again when its d or x changes": that
+// test asserted the per-object cache, which round 5 removes (Codex r4 Medium, Jordan's go evt_63b2c171).
+test("#232 r5 every signing import derives the public key again; nothing is cached", async () => {
   const subtle = globalThis.crypto.subtle as SubtleCrypto & { importKey: SubtleCrypto["importKey"] };
   const original = subtle.importKey;
   let derivations = 0;
@@ -311,13 +313,11 @@ test("#232 r4 the pair check runs once per key object, and again when its d or x
     await signCanonical(key, { n: 1 });
     await signCanonical(key, { n: 2 });
     await importSigningKey(key);
-    assert.equal(derivations, 1, "one derivation for three signing imports of one key object");
+    assert.equal(derivations, 3, "one derivation for each of three signing imports of one key object");
     (key as { x?: string }).x = b.publicKey.x;
     const e = await signCanonical(key, { n: 3 }).then(() => assert.fail("expected a rejection"), (err: Error) => err);
     assert.equal(e.message, MISMATCH_MESSAGE);
-    assert.equal(derivations, 2, "a changed x is checked again");
-    await signCanonical({ ...a.privateKey } as JsonWebKey, { n: 4 });
-    assert.equal(derivations, 3, "a different key object is checked on its own");
+    assert.equal(derivations, 4);
   } finally {
     subtle.importKey = original;
   }
@@ -333,4 +333,148 @@ test("#232 r4 a valid key's signatures are byte for byte those of a direct WebCr
   assert.equal(await signCanonical(privateKey, value), expected);
   const input = { project: "p", actor: { type: "agent" as const, id: "seat_FAKE" }, action: "created" as const, artifacts: [{ id: "file:b.txt" }], timestamp: "2026-10-16T00:00:00.000Z", idempotency_key: "idem-r4" };
   assert.equal(await verifyProducerSig(await signProducer(input, privateKey), publicKey), true);
+});
+
+// Round 5 (Codex r4 Medium, evt_5c175362; Jordan's go evt_63b2c171, "drop the cache"): the key's members are read once,
+// synchronously, before any await, and the check, the import and every publisher's embedded key use that snapshot. Codex
+// changed `d` in a queued microtask while the pair check was pending; the round-4 code then cached and signed with it.
+
+/** Run `fn` with one method of the shared SubtleCrypto replaced, then put it back. */
+async function withSubtle<R>(name: "exportKey" | "importKey" | "digest", replace: (original: (...a: unknown[]) => Promise<unknown>) => (...a: unknown[]) => Promise<unknown>, fn: () => Promise<R>): Promise<R> {
+  const subtle = globalThis.crypto.subtle as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>;
+  const original = subtle[name]!;
+  subtle[name] = replace((...a: unknown[]) => original.apply(globalThis.crypto.subtle, a));
+  try {
+    return await fn();
+  } finally {
+    subtle[name] = original;
+  }
+}
+
+test("#232 r5 a d changed while the pair check is pending never signs, and the next call checks again", async () => {
+  const a = await generateSigningKey();
+  const b = await generateSigningKey();
+  const value = { n: 1 };
+  const key = { ...a.privateKey } as JsonWebKey;
+  let settled = false;
+  let pendingWhenChanged = false;
+  const pending = signCanonical(key, value);
+  pending.then(() => { settled = true; }, () => { settled = true; });
+  queueMicrotask(() => { pendingWhenChanged = !settled; (key as { d?: string }).d = b.privateKey.d; });
+  const result = await pending.then((sig) => sig, (err: Error) => err);
+  assert.equal(pendingWhenChanged, true, "the change landed while the first call was pending");
+  if (result instanceof Error) {
+    assert.equal(result.message, MISMATCH_MESSAGE);
+  } else {
+    assert.equal(await verifyCanonical(a.publicKey, value, result), true, "the signature verifies against the advertised x");
+    assert.equal(await verifyCanonical(b.publicKey, value, result), false, "the changed d did not sign");
+  }
+  const again = await signCanonical(key, value).then(() => assert.fail("expected a rejection"), (err: Error) => err);
+  assert.equal(again.message, MISMATCH_MESSAGE, "the second call checks the changed object again");
+  // The pair check alone: the pending call checked the snapshot it took; the next call refuses the changed object.
+  const key2 = { ...a.privateKey } as JsonWebKey;
+  const check = assertSigningKeyPair(key2);
+  queueMicrotask(() => { (key2 as { d?: string }).d = b.privateKey.d; });
+  await check;
+  const refused = await assertSigningKeyPair(key2).then(() => assert.fail("expected a rejection"), (err: Error) => err);
+  assert.equal(refused.message, MISMATCH_MESSAGE);
+  assert.ok(![a.privateKey.d, b.privateKey.d].some((d) => `${again.stack}\n${refused.stack}`.includes(d!)), "no d in either error");
+});
+
+test("#232 r5 a d changed between the pair check and the import is not the key imported", async () => {
+  const a = await generateSigningKey();
+  const b = await generateSigningKey();
+  const value = { n: 2 };
+  const key = { ...a.privateKey } as JsonWebKey;
+  const imported: unknown[] = [];
+  const sig = await withSubtle("exportKey", (original) => async (...args) => {
+    const out = await original(...args);
+    (key as { d?: string }).d = b.privateKey.d; // the derivation is done; the import has not started
+    return out;
+  }, () => withSubtle("importKey", (original) => async (...args) => {
+    if (args[0] === "jwk") imported.push((args[1] as JsonWebKey).d);
+    return original(...args);
+  }, () => signCanonical(key, value)));
+  assert.equal(key.d, b.privateKey.d, "the change landed");
+  assert.deepEqual(imported, [a.privateKey.d], "the import used the checked snapshot's d");
+  assert.equal(await verifyCanonical(a.publicKey, value, sig), true);
+  assert.equal(await verifyCanonical(b.publicKey, value, sig), false);
+});
+
+test("#232 r5 each publisher signs with the key it embeds, even when the configured key changes mid-call", async () => {
+  const a = await generateSigningKey();
+  const b = await generateSigningKey();
+  const keyIdInput = JSON.stringify({ crv: "Ed25519", kty: "OKP", x: a.publicKey.x }); // keyId's canonical {crv,kty,x}
+  /** Swap the whole key to b (a consistent pair) as soon as the publisher hashes a's public key for its kid. */
+  const swapAtKid = <R>(key: JsonWebKey, fn: () => Promise<R>) => withSubtle("digest", (original) => async (...args) => {
+    const out = await original(...args);
+    if (new TextDecoder().decode(args[1] as Uint8Array) === keyIdInput) Object.assign(key, { d: b.privateKey.d, x: b.publicKey.x });
+    return out;
+  }, fn);
+  const store = new MemoryEventStore();
+  await appendEvent(store, { project: "p", actor: { type: "human", id: "owner@example.test" }, action: "created", artifacts: [{ id: "file:a.txt" }] });
+
+  let key = { ...a.privateKey } as JsonWebKey;
+  const bundle = await swapAtKid(key, () => buildExportBundle(store, { project: "p" }, { signingKey: key }));
+  assert.equal(key.x, b.publicKey.x, "export: the swap landed");
+  assert.equal(bundle.issuer!.public_key.x, a.publicKey.x);
+  assert.equal(await verifyCanonical(bundle.issuer!.public_key, { ...bundle, signature: undefined }, bundle.signature!), true, "export: the signature verifies against the embedded key");
+
+  key = { ...a.privateKey } as JsonWebKey;
+  const cp = await swapAtKid(key, () => checkpointFromStore(store, "p", { signingKey: key }));
+  assert.equal(key.x, b.publicKey.x, "checkpoint: the swap landed");
+  assert.equal(cp.signer!.public_key.x, a.publicKey.x);
+  assert.equal(await verifyCanonical(cp.signer!.public_key, { ...cp, signature: undefined }, cp.signature!), true, "checkpoint: the signature verifies against the embedded key");
+
+  key = { ...a.privateKey } as JsonWebKey;
+  const h = createHandler(store, { token: PUBKEY_TOKEN, signingKey: key });
+  const head = await swapAtKid(key, () => h(new Request("http://retrace.test/projects/p/head?signed=1", { headers: { authorization: `Bearer ${PUBKEY_TOKEN}` } })));
+  assert.equal(key.x, b.publicKey.x, "signed head: the swap landed");
+  const { signature, issuer, ...payload } = await head.json() as { signature: string; issuer: { public_key: JsonWebKey } } & Record<string, unknown>;
+  assert.equal(issuer.public_key.x, a.publicKey.x);
+  assert.equal(await verifyCanonical(issuer.public_key, payload, signature), true, "signed head: the signature verifies against the embedded key");
+
+  key = { ...a.privateKey } as JsonWebKey;
+  const input = { project: "p", actor: { type: "agent" as const, id: "seat_FAKE" }, action: "created" as const, artifacts: [{ id: "file:b.txt" }], timestamp: "2026-10-16T00:00:00.000Z", idempotency_key: "idem-r5" };
+  const signed = await swapAtKid(key, () => signProducer(input, key));
+  assert.equal(key.x, b.publicKey.x, "producer: the swap landed");
+  assert.equal(signed.producer_sig.kid, await keyId(a.publicKey));
+  assert.equal(await verifyProducerSig(signed, a.publicKey), true, "producer: the signature verifies against the key its kid names");
+
+  // The public key route publishes the snapshot it checked, even if the key is swapped once the check has derived.
+  key = { ...a.privateKey } as JsonWebKey;
+  const route = await withSubtle("exportKey", (original) => async (...args) => {
+    const out = await original(...args);
+    Object.assign(key, { d: b.privateKey.d, x: b.publicKey.x });
+    return out;
+  }, () => getPubkey(key));
+  assert.equal(route.status, 200);
+  assert.equal((await route.json() as { public_key: JsonWebKey }).public_key.x, a.publicKey.x, "route: the published x is the checked one");
+});
+
+/** A known answer, computed with WebCrypto directly from the made-up seed D, independent of this module. */
+const KAT = {
+  jwk: { kty: "OKP", crv: "Ed25519", d: D, x: "yBHdHjNm5Hc0I5Oq3_KUZdY2WJ3h2bKPtJChR93BmKc" },
+  value: { hash: "h", project: "p", seq: 3 },
+  sig: "Yr70t_wi9PNqN1Arm62gq_aBvs_NsEJI53cbEm8EJ_ImSA_TQiSRZ_yYzQmfyWpd6QbMDB1PB_rL9-FDYtaxCw",
+};
+
+test("#232 r5 a valid key's signature over a fixed payload is the known answer", async () => {
+  assert.equal(await signCanonical(KAT.jwk as JsonWebKey, KAT.value), KAT.sig);
+  assert.equal(await verifyCanonical({ kty: "OKP", crv: "Ed25519", x: KAT.jwk.x }, KAT.value, KAT.sig), true);
+});
+
+test("#232 r5 witnessCheckpointRekor refuses a key whose x is the signer's but whose d is not, before anything is sent", async () => {
+  const a = await generateSigningKey();
+  const b = await generateSigningKey();
+  const store = new MemoryEventStore();
+  await appendEvent(store, { project: "p", actor: { type: "human", id: "owner@example.test" }, action: "created", artifacts: [{ id: "file:a.txt" }] });
+  const cp = await checkpointFromStore(store, "p", { signingKey: a.privateKey });
+  let fetched = 0;
+  // x matches the checkpoint's signer, so the signer comparison passes; only the pair check can refuse it.
+  const e = await witnessCheckpointRekor(cp, { ...a.privateKey, d: b.privateKey.d } as JsonWebKey, { fetchImpl: async () => { fetched++; throw new Error("no network in tests"); } })
+    .then(() => assert.fail("expected a rejection"), (err: Error) => err);
+  assert.equal(e.message, MISMATCH_MESSAGE);
+  assert.equal(fetched, 0, "nothing is sent to Rekor");
+  assert.ok(![a.privateKey.d, b.privateKey.d].some((d) => `${e.stack}`.includes(d!)), "no d in the error");
 });

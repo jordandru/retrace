@@ -28,7 +28,7 @@
  */
 import { resolveCommitActor } from "./commit-actor.js";
 import { Actor, Event, EventInput } from "./schema.js";
-import { keyId, publicFromPrivate, signCanonical, verifyCanonical } from "./signing.js";
+import { keyId, publicFromPrivate, signCanonical, snapshotSigningKey, verifyCanonical } from "./signing.js";
 import { SEALED_BY_GITHUB_WEBHOOK, SEALED_BY_PARAM } from "./store.js";
 
 export const PRODUCER_SIG_FORMAT = "retrace-producer-sig/1";
@@ -380,8 +380,9 @@ export async function signProducer<T extends EventInput>(
   if (input.tags?.some((t) => t.startsWith(RESERVED_TAG_PREFIX))) throw new Error(`tags starting "${RESERVED_TAG_PREFIX}" are the server's annotation surface; a producer must not set them`);
   const trespass = input.method?.params ? reservedMethodParams(format).filter((k) => input.method!.params![k] !== undefined) : [];
   if (trespass.length) throw new Error(`method.params ${trespass.join(", ")} are server stamps; a producer must not set them`);
-  const pub = publicFromPrivate(privateJwk);
-  const producer_sig: ProducerSig = { kid: await keyId(pub), sig: await signCanonical(privateJwk, producerSignedPayload(input, format)) };
+  const key = snapshotSigningKey(privateJwk); // one snapshot for the kid and the signature (#232 round 5)
+  const pub = publicFromPrivate(key);
+  const producer_sig: ProducerSig = { kid: await keyId(pub), sig: await signCanonical(key, producerSignedPayload(input, format)) };
   if (format !== PRODUCER_SIG_FORMAT) producer_sig.format = format;
   return { ...input, producer_sig };
 }

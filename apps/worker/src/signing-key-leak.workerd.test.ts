@@ -23,10 +23,13 @@ const schemaSql = readFileSync(fileURLToPath(new URL("../schema.sql", import.met
 const TOKEN = "owner-token-for-the-workerd-signing-key-test";
 
 // The test-only route /__test/produce (round 4) runs core's signProducer inside workerd with the configured key: the Worker has no
-// producer-signing route of its own, and producer signing is one of the paths Codex r3 probed in workerd.
+// producer-signing route of its own, and producer signing is one of the paths Codex r3 probed in workerd. /__test/race
+// (round 5) runs Codex r4's probe inside workerd: it starts signCanonical with key a, changes the object's d to b's d either
+// in a queued microtask while the pair check is pending or right after the check's derivation, then signs again with the
+// same object. /__test/sign signs a given payload with a given key.
 const ENTRY = `
 import worker from "./index.ts";
-import { parseSigningKey, signProducer } from "@retrace-dev/core";
+import { parseSigningKey, signCanonical, signProducer } from "@retrace-dev/core";
 const logs = [];
 for (const level of ["log", "info", "warn", "error", "debug"]) {
   console[level] = (...args) => { logs.push(args.map((a) => (a instanceof Error ? (a.stack ?? a.message) : String(a))).join(" ")); };
@@ -35,6 +38,35 @@ export default {
   async fetch(request, env, ctx) {
     const path = new URL(request.url).pathname;
     if (path === "/__test/logs") return Response.json(logs);
+    if (path === "/__test/race") {
+      const { a, bD, value, window } = await request.json();
+      const key = { ...a };
+      const subtle = crypto.subtle;
+      const originalExport = subtle.exportKey;
+      let first;
+      if (window === "pending") {
+        const pending = signCanonical(key, value);
+        queueMicrotask(() => { key.d = bD; });
+        first = await pending.then((sig) => ({ sig }), (e) => ({ error: String(e?.message ?? e) }));
+      } else {
+        subtle.exportKey = async (...args) => {
+          const out = await originalExport.apply(subtle, args);
+          key.d = bD;
+          return out;
+        };
+        try {
+          first = await signCanonical(key, value).then((sig) => ({ sig }), (e) => ({ error: String(e?.message ?? e) }));
+        } finally {
+          subtle.exportKey = originalExport;
+        }
+      }
+      const second = await signCanonical(key, value).then((sig) => ({ sig }), (e) => ({ error: String(e?.message ?? e) }));
+      return Response.json({ first, second, changed: key.d === bD });
+    }
+    if (path === "/__test/sign") {
+      const { jwk, value } = await request.json();
+      return Response.json(await signCanonical(jwk, value).then((sig) => ({ sig }), (e) => ({ error: String(e?.message ?? e) })));
+    }
     if (path === "/__test/produce") {
       try {
         return Response.json(await signProducer(await request.json(), parseSigningKey(env.RETRACE_SIGNING_KEY)));
@@ -279,6 +311,44 @@ test("#232 r4 workerd: a valid key still signs the head, a fresh export, a produ
     assert.equal(rows.length, 1, "the checkpoint is stored");
     const cp = JSON.parse(rows[0]!.checkpoint) as Checkpoint;
     assert.equal((await verifyCheckpoint(cp, publicKey)).signature, "valid", "the stored checkpoint verifies");
+  } finally {
+    await mf.dispose();
+  }
+});
+
+/** The round-5 known answer, computed with WebCrypto directly from the made-up seed D (see secret-parse.test.ts). */
+const KAT = {
+  jwk: { kty: "OKP", crv: "Ed25519", d: D, x: "yBHdHjNm5Hc0I5Oq3_KUZdY2WJ3h2bKPtJChR93BmKc" },
+  value: { hash: "h", project: "p", seq: 3 },
+  sig: "Yr70t_wi9PNqN1Arm62gq_aBvs_NsEJI53cbEm8EJ_ImSA_TQiSRZ_yYzQmfyWpd6QbMDB1PB_rL9-FDYtaxCw",
+};
+
+// Round 5 (Codex r4 Medium, evt_5c175362): Codex's probe changed d in a queued microtask while the pair check was pending;
+// in workerd the round-4 code cached the changed pair and signCanonical signed with the changed d. Now the check and the
+// import both use one snapshot taken before the first await, and nothing is cached.
+test("#232 r5 workerd: a d changed during the pair check or before the import never signs; the next call checks again; a valid key gives the known answer", { timeout: 300_000 }, async () => {
+  const a = await generateSigningKey();
+  const b = await generateSigningKey();
+  const { mf } = await workerWithKey("race", a.privateKey);
+  try {
+    const value = { n: 5 };
+    for (const window of ["pending", "before-import"]) {
+      const res = await mf.dispatchFetch("http://retrace.test/__test/race", { method: "POST", body: JSON.stringify({ a: a.privateKey, bD: b.privateKey.d, value, window }) });
+      assert.equal(res.status, 200);
+      const { first, second, changed } = await res.json() as { first: { sig?: string; error?: string }; second: { sig?: string; error?: string }; changed: boolean };
+      assert.equal(changed, true, `${window}: the change landed`);
+      if (first.error !== undefined) {
+        assert.equal(first.error, MISMATCH_MESSAGE, `${window}: a refusal carries the fixed message`);
+      } else {
+        assert.equal(await verifyCanonical(publicFromPrivate(a.privateKey), value, first.sig!), true, `${window}: the signature verifies against the advertised x`);
+        assert.equal(await verifyCanonical(publicFromPrivate(b.privateKey), value, first.sig!), false, `${window}: the changed d did not sign`);
+      }
+      assert.deepEqual(second, { error: MISMATCH_MESSAGE }, `${window}: the next call checks the changed object again; nothing was cached`);
+    }
+    const kat = await mf.dispatchFetch("http://retrace.test/__test/sign", { method: "POST", body: JSON.stringify({ jwk: KAT.jwk, value: KAT.value }) });
+    assert.deepEqual(await kat.json(), { sig: KAT.sig }, "a valid key's signature in workerd is the known answer");
+    const logs = (await (await mf.dispatchFetch("http://retrace.test/__test/logs")).json() as string[]).join("\n");
+    assert.ok(![a.privateKey.d, b.privateKey.d].some((d) => logs.includes(d!)), "no d is logged");
   } finally {
     await mf.dispose();
   }

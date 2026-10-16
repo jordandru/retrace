@@ -13,7 +13,7 @@
  */
 import { Checkpoint, checkpointFromStore } from "./checkpoint.js";
 import { canonicalize, sha256Hex } from "./chain.js";
-import { assertSigningJwk, importSigningKey } from "./signing.js";
+import { assertSigningJwk, importSigningKey, snapshotSigningKey } from "./signing.js";
 import { EventStore } from "./store.js";
 
 export const CRON_WITNESS_FORMAT = "retrace-witness/1";
@@ -96,15 +96,16 @@ export async function witnessCheckpointRekor(
   opts: { rekorUrl?: string; fetchImpl?: PortableFetch } = {},
 ): Promise<CronWitnessRecord> {
   if (!cp.signature || !cp.signer) throw new Error("refusing to witness an unsigned checkpoint");
-  assertSigningJwk(privateJwk); // before `x` is decoded below; the failure is saved as witness_error
+  const key = snapshotSigningKey(privateJwk); // the key compared with the signer below is the key that signs (#232 round 5)
+  assertSigningJwk(key); // before `x` is decoded below; the failure is saved as witness_error
   const rekorUrl = (opts.rekorUrl ?? CRON_DEFAULT_REKOR_URL).replace(/\/+$/, "");
   const f: PortableFetch = opts.fetchImpl ?? (fetch as unknown as PortableFetch);
-  const { d: _d, ...pub } = strip(privateJwk) as JsonWebKey & { d?: string };
+  const { d: _d, ...pub } = strip(key) as JsonWebKey & { d?: string };
   const pubPem = ed25519SpkiPem(pub);
   if (pubPem !== ed25519SpkiPem(cp.signer.public_key)) throw new Error("witness key does not match the checkpoint's signer");
   const artifactText = canonicalize(cp);
   const artifact = new TextEncoder().encode(artifactText);
-  const sig = await signArtifact(privateJwk, artifact);
+  const sig = await signArtifact(key, artifact);
   const entry = {
     apiVersion: "0.0.1",
     kind: "rekord",

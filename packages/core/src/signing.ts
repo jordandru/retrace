@@ -79,48 +79,63 @@ export function assertSigningJwk(jwk: unknown): asserts jwk is JsonWebKey {
 /** PKCS #8 DER prefix of an Ed25519 private key (RFC 8410 §7); the 32 bytes of `d` follow it. */
 const PKCS8_ED25519_PREFIX = Uint8Array.from([0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20]);
 
-/** The shape check, then the public key derived from `d` compared with `x` (#232 round 3, Codex r2 Medium). A
+/** A private copy of a signing JWK, taken synchronously (#232 round 5, Codex r4 Medium; CODING_STANDARDS CS-5): each
+ *  own member is read once, and `key_ops` is copied too. The key's owner may change the object while a check is
+ *  pending, so every check, and every use after the first `await`, reads this copy and never the caller's object.
+ *  Anything that is not a JWK object is returned as it is, for the shape check to refuse. */
+export function snapshotSigningKey<T>(jwk: T): T {
+  if (!jwk || typeof jwk !== "object" || Array.isArray(jwk)) return jwk;
+  const copy: Record<string, unknown> = { ...(jwk as Record<string, unknown>) };
+  if (Array.isArray(copy.key_ops)) copy.key_ops = [...copy.key_ops];
+  return copy as T;
+}
+
+/** The shape check, then the public key derived from `d` compared with `x`, both on one snapshot, which it returns. A
  *  shape-valid key whose `x` is not `d`'s public key would otherwise be published as a key that cannot verify `d`'s
- *  signatures. `d` is imported alone, as PKCS #8, so no runtime compares it with `x` on our behalf; the runtime's own
- *  error is dropped, as in importSigningKey. Every message is fixed and names no value. Since round 4 every signing
- *  import runs it (importSigningKey), because workerd signs with `d` alone and never compares it with `x` (Codex r3
- *  Medium). A key object that passed is remembered with the `d` and `x` it passed with, so signing again with the same
- *  object skips the derivation unless either member has changed since. */
-export async function assertSigningKeyPair(jwk: unknown): Promise<void> {
-  assertSigningJwk(jwk);
-  const passed = checkedPairs.get(jwk);
-  if (passed && passed.d === jwk.d && passed.x === jwk.x) return;
+ *  signatures (round 3, Codex r2 Medium), and workerd would sign with it, because it signs with `d` alone (round 4,
+ *  Codex r3 Medium). `d` is imported alone, as PKCS #8, so no runtime compares it with `x` on our behalf. Nothing is
+ *  cached: every call derives (round 5, Jordan's choice over a snapshot cache). The runtime's own error is dropped and
+ *  every message is fixed and names no value. */
+async function checkedSigningKey(jwk: unknown): Promise<JsonWebKey> {
+  const key = snapshotSigningKey(jwk);
+  assertSigningJwk(key);
   let derived: unknown;
   try {
     const der = new Uint8Array(PKCS8_ED25519_PREFIX.length + 32);
     der.set(PKCS8_ED25519_PREFIX);
-    der.set(b64u.dec(jwk.d!), PKCS8_ED25519_PREFIX.length);
-    const key = await subtle.importKey("pkcs8", der, ALG, true, ["sign"]);
-    derived = ((await subtle.exportKey("jwk", key)) as JsonWebKey).x;
+    der.set(b64u.dec(key.d!), PKCS8_ED25519_PREFIX.length);
+    const derivedKey = await subtle.importKey("pkcs8", der, ALG, true, ["sign"]);
+    derived = ((await subtle.exportKey("jwk", derivedKey)) as JsonWebKey).x;
   } catch {
     throw new Error("signing key: the runtime could not derive the public key");
   }
-  if (derived !== jwk.x) throw new Error("signing key: JWK x is not the public key of d");
-  checkedPairs.set(jwk, { d: jwk.d!, x: jwk.x! });
+  if (derived !== key.x) throw new Error("signing key: JWK x is not the public key of d");
+  return key;
 }
 
-/** Key objects whose pair check passed, with the members it checked; held weakly, so an entry ends with its key. */
-const checkedPairs = new WeakMap<object, { d: string; x: string }>();
+/** The pair check on a snapshot of `jwk`. A caller that goes on to publish or sign takes its own snapshot first
+ *  (snapshotSigningKey) and passes that, so what it uses afterwards is what was checked. */
+export async function assertSigningKeyPair(jwk: unknown): Promise<void> {
+  await checkedSigningKey(jwk);
+}
 
-/** Import a private signing JWK: its shape and its d↔x pair first, then the runtime import. The runtime's own error is
- *  dropped, never kept as message, stack or cause, because it can quote the key. */
+/** Import a private signing JWK from the snapshot its shape and pair were checked on; the caller's object is not read
+ *  again after the first `await`. The runtime's own error is dropped, never kept as message, stack or cause, because it
+ *  can quote the key. */
 export async function importSigningKey(priv: JsonWebKey): Promise<CryptoKey> {
-  await assertSigningKeyPair(priv);
+  const key = await checkedSigningKey(priv);
   try {
-    return await subtle.importKey("jwk", importable(priv), ALG, false, ["sign"]);
+    return await subtle.importKey("jwk", importable(key), ALG, false, ["sign"]);
   } catch {
     throw new Error("signing key: the runtime refused to import the JWK");
   }
 }
 
+/** Sign the canonical bytes of `value`, taken before the first `await`, with the key imported from the checked
+ *  snapshot. */
 export async function signCanonical(priv: JsonWebKey, value: unknown): Promise<string> {
-  const key = await importSigningKey(priv);
   const bytes = new TextEncoder().encode(canonicalize(value));
+  const key = await importSigningKey(priv);
   let sig: ArrayBuffer;
   try {
     sig = await subtle.sign(ALG, key, bytes);
