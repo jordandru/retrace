@@ -82,9 +82,14 @@ const PKCS8_ED25519_PREFIX = Uint8Array.from([0x30, 0x2e, 0x02, 0x01, 0x00, 0x30
 /** The shape check, then the public key derived from `d` compared with `x` (#232 round 3, Codex r2 Medium). A
  *  shape-valid key whose `x` is not `d`'s public key would otherwise be published as a key that cannot verify `d`'s
  *  signatures. `d` is imported alone, as PKCS #8, so no runtime compares it with `x` on our behalf; the runtime's own
- *  error is dropped, as in importSigningKey. Every message is fixed and names no value. */
+ *  error is dropped, as in importSigningKey. Every message is fixed and names no value. Since round 4 every signing
+ *  import runs it (importSigningKey), because workerd signs with `d` alone and never compares it with `x` (Codex r3
+ *  Medium). A key object that passed is remembered with the `d` and `x` it passed with, so signing again with the same
+ *  object skips the derivation unless either member has changed since. */
 export async function assertSigningKeyPair(jwk: unknown): Promise<void> {
   assertSigningJwk(jwk);
+  const passed = checkedPairs.get(jwk);
+  if (passed && passed.d === jwk.d && passed.x === jwk.x) return;
   let derived: unknown;
   try {
     const der = new Uint8Array(PKCS8_ED25519_PREFIX.length + 32);
@@ -96,12 +101,16 @@ export async function assertSigningKeyPair(jwk: unknown): Promise<void> {
     throw new Error("signing key: the runtime could not derive the public key");
   }
   if (derived !== jwk.x) throw new Error("signing key: JWK x is not the public key of d");
+  checkedPairs.set(jwk, { d: jwk.d!, x: jwk.x! });
 }
 
-/** Import a private signing JWK: its shape first, then the runtime import. The runtime's own error is dropped, never
- *  kept as message, stack or cause, because it can quote the key. */
+/** Key objects whose pair check passed, with the members it checked; held weakly, so an entry ends with its key. */
+const checkedPairs = new WeakMap<object, { d: string; x: string }>();
+
+/** Import a private signing JWK: its shape and its d↔x pair first, then the runtime import. The runtime's own error is
+ *  dropped, never kept as message, stack or cause, because it can quote the key. */
 export async function importSigningKey(priv: JsonWebKey): Promise<CryptoKey> {
-  assertSigningJwk(priv);
+  await assertSigningKeyPair(priv);
   try {
     return await subtle.importKey("jwk", importable(priv), ALG, false, ["sign"]);
   } catch {

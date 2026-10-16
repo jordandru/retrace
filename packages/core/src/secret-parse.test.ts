@@ -5,8 +5,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   appendEvent, assertSigningJwk, assertSigningKeyPair, buildExportBundle, checkpointFromStore, createHandler, generateSigningKey,
-  importSigningKey, keyId, MemoryEventStore, parseCredentials, parseSigningKey, publicFromPrivate, signCanonical, verifyCanonical,
-  witnessCheckpointRekor,
+  importSigningKey, keyId, MemoryEventStore, parseCredentials, parseSigningKey, publicFromPrivate, signCanonical, signProducer,
+  verifyCanonical, verifyProducerSig, witnessCheckpointRekor,
 } from "./index.js";
 
 const NOT_JSON = "tok_FAKEqzwxVBNM7531";
@@ -252,4 +252,85 @@ test("#232 r3 a valid key is served byte for byte as before round 3", async () =
     assert.equal(res.status, 200);
     assert.equal(await res.text(), JSON.stringify({ kid: await keyId(before), alg: "Ed25519", public_key: before }));
   }
+});
+
+// Round 4 (Codex r3 Medium, evt_b320ac71): every signing import runs the d↔x pair check, not only the public key route.
+// workerd signs with d alone, so there a mismatched key signed artifacts its published x cannot verify; Node refuses the
+// mismatched JWK at import, so here the change shows as the pair check's own message in place of the import refusal.
+// The workerd regressions are in apps/worker/src/signing-key-leak.workerd.test.ts.
+const MISMATCH_MESSAGE = "signing key: JWK x is not the public key of d";
+
+test("#232 r4 every signing path refuses a shape-valid d/x mismatch with the pair check's fixed message", async () => {
+  const mismatched = { kty: "OKP", crv: "Ed25519", d: D, x: X } as JsonWebKey; // made up, shape-valid
+  const store = new MemoryEventStore();
+  await appendEvent(store, { project: "p", actor: { type: "human", id: "owner@example.test" }, action: "created", artifacts: [{ id: "file:a.txt" }] });
+  const input = { project: "p", actor: { type: "agent" as const, id: "seat_FAKE" }, action: "created" as const, artifacts: [{ id: "file:b.txt" }], timestamp: "2026-10-16T00:00:00.000Z", idempotency_key: "idem-r4" };
+  const paths: [string, () => Promise<unknown>][] = [
+    ["importSigningKey", () => importSigningKey(mismatched)],
+    ["signCanonical", () => signCanonical(mismatched, { a: 1 })],
+    ["signProducer", () => signProducer(input, mismatched)],
+    ["checkpointFromStore", () => checkpointFromStore(store, "p", { signingKey: mismatched })],
+    ["buildExportBundle", () => buildExportBundle(store, { project: "p" }, { signingKey: mismatched })],
+  ];
+  for (const [name, run] of paths) {
+    const e = await run().then(() => assert.fail(`${name}: expected a rejection`), (err: Error) => err);
+    assert.equal(e.message, MISMATCH_MESSAGE, name);
+    assert.equal((e as { cause?: unknown }).cause, undefined, name);
+    assertNoFragment(`${e.message}\n${e.stack}`, material(mismatched as Record<string, unknown>));
+  }
+  // The signed head answers no signature; its failure goes to the router's log with the same fixed message.
+  const logged: string[] = [];
+  const original = console.error;
+  console.error = (...args: unknown[]) => { logged.push(args.map(String).join(" ")); };
+  try {
+    const h = createHandler(store, { token: PUBKEY_TOKEN, signingKey: mismatched });
+    const head = await h(new Request("http://retrace.test/projects/p/head?signed=1", { headers: { authorization: `Bearer ${PUBKEY_TOKEN}` } }));
+    const body = await head.text();
+    assert.equal(head.status, 500);
+    assert.ok(!body.includes("signature"), body);
+    assertNoFragment(body, material(mismatched as Record<string, unknown>));
+  } finally {
+    console.error = original;
+  }
+  assert.match(logged.join("\n"), new RegExp(MISMATCH_MESSAGE));
+  assertNoFragment(logged.join("\n"), material(mismatched as Record<string, unknown>));
+});
+
+test("#232 r4 the pair check runs once per key object, and again when its d or x changes", async () => {
+  const subtle = globalThis.crypto.subtle as SubtleCrypto & { importKey: SubtleCrypto["importKey"] };
+  const original = subtle.importKey;
+  let derivations = 0;
+  subtle.importKey = (async (...args: Parameters<SubtleCrypto["importKey"]>) => {
+    if (args[0] === "pkcs8") derivations++;
+    return (original as (...a: unknown[]) => Promise<CryptoKey>).apply(subtle, args);
+  }) as SubtleCrypto["importKey"];
+  try {
+    const a = await generateSigningKey();
+    const b = await generateSigningKey();
+    const key = { ...a.privateKey } as JsonWebKey;
+    await signCanonical(key, { n: 1 });
+    await signCanonical(key, { n: 2 });
+    await importSigningKey(key);
+    assert.equal(derivations, 1, "one derivation for three signing imports of one key object");
+    (key as { x?: string }).x = b.publicKey.x;
+    const e = await signCanonical(key, { n: 3 }).then(() => assert.fail("expected a rejection"), (err: Error) => err);
+    assert.equal(e.message, MISMATCH_MESSAGE);
+    assert.equal(derivations, 2, "a changed x is checked again");
+    await signCanonical({ ...a.privateKey } as JsonWebKey, { n: 4 });
+    assert.equal(derivations, 3, "a different key object is checked on its own");
+  } finally {
+    subtle.importKey = original;
+  }
+});
+
+test("#232 r4 a valid key's signatures are byte for byte those of a direct WebCrypto signature", async () => {
+  const { privateKey, publicKey } = await generateSigningKey();
+  const { alg: _alg, ...importable } = privateKey as Record<string, unknown>;
+  const direct = await crypto.subtle.importKey("jwk", importable as JsonWebKey, { name: "Ed25519" }, false, ["sign"]);
+  const value = { hash: "h", project: "p", seq: 3 }; // keys already in canonical (sorted) order
+  const expected = Buffer.from(await crypto.subtle.sign({ name: "Ed25519" }, direct, new TextEncoder().encode(JSON.stringify(value))))
+    .toString("base64url");
+  assert.equal(await signCanonical(privateKey, value), expected);
+  const input = { project: "p", actor: { type: "agent" as const, id: "seat_FAKE" }, action: "created" as const, artifacts: [{ id: "file:b.txt" }], timestamp: "2026-10-16T00:00:00.000Z", idempotency_key: "idem-r4" };
+  assert.equal(await verifyProducerSig(await signProducer(input, privateKey), publicKey), true);
 });

@@ -13,21 +13,35 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 import { Miniflare, convertV4MiniflareOptions } from "miniflare";
-import { generateSigningKey, keyId } from "@retrace-dev/core";
+import {
+  canonicalize, generateSigningKey, keyId, publicFromPrivate, signProducer, verifyCanonical, verifyCheckpoint, verifyExportBundle, verifyProducerSig,
+  type Checkpoint, type ExportBundle,
+} from "@retrace-dev/core";
 
 const SRC = fileURLToPath(new URL("../src/", import.meta.url));
 const schemaSql = readFileSync(fileURLToPath(new URL("../schema.sql", import.meta.url)), "utf8");
 const TOKEN = "owner-token-for-the-workerd-signing-key-test";
 
+// The test-only route /__test/produce (round 4) runs core's signProducer inside workerd with the configured key: the Worker has no
+// producer-signing route of its own, and producer signing is one of the paths Codex r3 probed in workerd.
 const ENTRY = `
 import worker from "./index.ts";
+import { parseSigningKey, signProducer } from "@retrace-dev/core";
 const logs = [];
 for (const level of ["log", "info", "warn", "error", "debug"]) {
   console[level] = (...args) => { logs.push(args.map((a) => (a instanceof Error ? (a.stack ?? a.message) : String(a))).join(" ")); };
 }
 export default {
   async fetch(request, env, ctx) {
-    if (new URL(request.url).pathname === "/__test/logs") return Response.json(logs);
+    const path = new URL(request.url).pathname;
+    if (path === "/__test/logs") return Response.json(logs);
+    if (path === "/__test/produce") {
+      try {
+        return Response.json(await signProducer(await request.json(), parseSigningKey(env.RETRACE_SIGNING_KEY)));
+      } catch (e) {
+        return Response.json({ error: String(e?.message ?? e) }, { status: 500 });
+      }
+    }
     return worker.fetch(request, env, ctx);
   },
   scheduled: (controller, env, ctx) => worker.scheduled(controller, env, ctx),
@@ -156,5 +170,116 @@ test("#232 r3 workerd: the public key route refuses a d/x mismatch, publishes no
     } finally {
       await mf.dispose();
     }
+  }
+});
+
+const MISMATCH_MESSAGE = "signing key: JWK x is not the public key of d";
+const PRODUCER_INPUT = {
+  project: "p", actor: { type: "agent", id: "seat_FAKE" }, action: "created", artifacts: [{ id: "file:b.txt" }],
+  timestamp: "2026-10-16T00:00:00.000Z", idempotency_key: "idem-r4-workerd",
+};
+
+/** A Worker in workerd with `key` as RETRACE_SIGNING_KEY, its schema applied and one event seeded in project p. */
+async function workerWithKey(name: string, key: object): Promise<{ mf: Miniflare; db: D1Database }> {
+  const script = await bundleWorker();
+  const mf = new Miniflare(convertV4MiniflareOptions({
+    workers: [{
+      name: "retrace", modules: true, script,
+      compatibilityDate: "2025-06-01", compatibilityFlags: ["nodejs_compat"],
+      d1Databases: { DB: `signing-r4-${name}` }, r2Buckets: { EXPORT_CACHE: `signing-r4-${name}` },
+      bindings: { RETRACE_TOKEN: TOKEN, RETRACE_SIGNING_KEY: JSON.stringify(key), RETRACE_CHECKPOINT_PROJECTS: JSON.stringify(["p"]) },
+      outboundService: () => new Response("no network in tests", { status: 503 }),
+    }],
+  }));
+  const db = await mf.getD1Database("DB") as unknown as D1Database;
+  for (const statement of schemaSql.replace(/--[^\n]*/g, "").split(";").map((s) => s.trim()).filter(Boolean)) {
+    if (/^INSERT OR IGNORE INTO event_artifact_index/.test(statement)) continue;
+    try { await db.prepare(statement).run(); } catch (e) { if (!/duplicate column name/i.test(String((e as Error).message))) throw e; }
+  }
+  const seeded = await mf.dispatchFetch("http://retrace.test/events", {
+    method: "POST", headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+    body: JSON.stringify({ project: "p", actor: { type: "human", id: "owner@example.test" }, action: "created", artifacts: [{ id: "file:a.txt", role: "generated" }] }),
+  });
+  assert.equal(seeded.status, 201, await seeded.text());
+  return { mf, db };
+}
+
+// Round 4 (Codex r3 Medium, evt_b320ac71): workerd signs with d alone, so before this round a shape-valid key whose x is
+// not d's public key signed the head, a fresh export, a producer signature and the scheduled checkpoint, and none of
+// those signatures verified against the published x. Every signing import now runs the pair check.
+test("#232 r4 workerd: a d/x-mismatched key signs nothing on the signed head, a fresh export, producer signing or the scheduled checkpoint", { timeout: 300_000 }, async () => {
+  const mismatched = { kty: "OKP", crv: "Ed25519", d: D, x: X }; // made up, shape-valid
+  const { mf, db } = await workerWithKey("mismatch", mismatched);
+  try {
+    const auth = { authorization: `Bearer ${TOKEN}` };
+    const head = await mf.dispatchFetch("http://retrace.test/projects/p/head?signed=1", { headers: auth });
+    const headText = await head.text();
+    assert.equal(head.status, 500, `signed head: ${headText}`);
+    assert.ok(!headText.includes("signature"), `signed head carries no signature: ${headText}`);
+    assertNoFragment(headText, mismatched, "signed head response");
+
+    const exported = await mf.dispatchFetch("http://retrace.test/projects/p/export?fresh=1", { headers: auth });
+    const exportText = await exported.text();
+    assert.equal(exported.status, 500, `fresh export: ${exportText.slice(0, 500)}`);
+    assert.ok(!exportText.includes("signature"), "fresh export carries no signature");
+    assertNoFragment(exportText, mismatched, "fresh export response");
+
+    const produced = await mf.dispatchFetch("http://retrace.test/__test/produce", { method: "POST", body: JSON.stringify(PRODUCER_INPUT) });
+    const producedText = await produced.text();
+    assert.equal(produced.status, 500, `producer signing: ${producedText}`);
+    assert.deepEqual(JSON.parse(producedText), { error: MISMATCH_MESSAGE });
+
+    const worker = await mf.getWorker();
+    assert.equal((await worker.scheduled({ cron: "7 * * * *" })).outcome, "ok");
+    const checkpoints = await db.prepare("SELECT * FROM checkpoints").all();
+    assert.equal(checkpoints.results.length, 0, "no checkpoint is stored");
+    const refresh = await db.prepare("SELECT * FROM export_cache_refresh").all();
+    assert.deepEqual(refresh.results.map((row) => (row as { result: string }).result), ["failed"], "the export cache refresh fails");
+    assertNoFragment(JSON.stringify(refresh.results), mismatched, "export_cache_refresh rows");
+    const cached = await (await mf.getR2Bucket("EXPORT_CACHE")).list();
+    assert.equal(cached.objects.length, 0, "no cached export is stored");
+
+    const logs = (await (await mf.dispatchFetch("http://retrace.test/__test/logs")).json() as string[]).join("\n");
+    assert.match(logs, new RegExp(`retrace-api: request failed \\[[0-9a-f]{8}\\] GET /projects/p/head: Error: ${MISMATCH_MESSAGE}`), "the signed head's failure is logged");
+    assert.match(logs, new RegExp(`retrace-api: request failed \\[[0-9a-f]{8}\\] GET /projects/p/export: Error: ${MISMATCH_MESSAGE}`), "the fresh export's failure is logged");
+    assert.match(logs, new RegExp(`checkpoint cron failed: ${MISMATCH_MESSAGE}`), "the checkpoint's failure is logged");
+    assertNoFragment(logs, mismatched, "logs");
+  } finally {
+    await mf.dispose();
+  }
+});
+
+test("#232 r4 workerd: a valid key still signs the head, a fresh export, a producer signature and the checkpoint, each verifying against its x", { timeout: 300_000 }, async () => {
+  const { privateKey } = await generateSigningKey();
+  const publicKey = publicFromPrivate(privateKey);
+  const { mf, db } = await workerWithKey("valid", privateKey);
+  try {
+    const auth = { authorization: `Bearer ${TOKEN}` };
+    const head = await mf.dispatchFetch("http://retrace.test/projects/p/head?signed=1", { headers: auth });
+    assert.equal(head.status, 200);
+    const { signature, issuer, ...payload } = await head.json() as { signature: string; issuer: { public_key: JsonWebKey } } & Record<string, unknown>;
+    assert.equal(canonicalize(issuer.public_key), canonicalize(publicKey));
+    assert.equal(await verifyCanonical(publicKey, payload, signature), true, "signed head verifies");
+
+    const exported = await mf.dispatchFetch("http://retrace.test/projects/p/export?fresh=1", { headers: auth });
+    assert.equal(exported.status, 200);
+    const bundle = await exported.json() as ExportBundle;
+    assert.equal((await verifyExportBundle(bundle, publicKey)).signature, "valid", "fresh export verifies");
+
+    const produced = await mf.dispatchFetch("http://retrace.test/__test/produce", { method: "POST", body: JSON.stringify(PRODUCER_INPUT) });
+    assert.equal(produced.status, 200);
+    const signed = await produced.json() as Awaited<ReturnType<typeof signProducer>>;
+    assert.equal(await verifyProducerSig(signed, publicKey), true, "producer signature verifies");
+    const inNode = await signProducer(PRODUCER_INPUT as Parameters<typeof signProducer>[0], privateKey);
+    assert.equal(signed.producer_sig.sig, inNode.producer_sig.sig, "workerd and Node sign the same bytes identically");
+
+    const worker = await mf.getWorker();
+    assert.equal((await worker.scheduled({ cron: "7 * * * *" })).outcome, "ok");
+    const rows = (await db.prepare("SELECT checkpoint FROM checkpoints").all()).results as { checkpoint: string }[];
+    assert.equal(rows.length, 1, "the checkpoint is stored");
+    const cp = JSON.parse(rows[0]!.checkpoint) as Checkpoint;
+    assert.equal((await verifyCheckpoint(cp, publicKey)).signature, "valid", "the stored checkpoint verifies");
+  } finally {
+    await mf.dispose();
   }
 });

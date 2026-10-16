@@ -58,7 +58,7 @@ function strip(jwk: JsonWebKey): JsonWebKey {
   return rest;
 }
 
-/** The import goes through importSigningKey: shape first, and a fixed error in place of the runtime's (#232 round 2). */
+/** The import goes through importSigningKey: shape and d↔x pair first, and a fixed error in place of the runtime's (#232 rounds 2 and 4). */
 async function signArtifact(privateJwk: JsonWebKey, artifact: Uint8Array): Promise<Uint8Array> {
   const key = await importSigningKey(privateJwk);
   try {
