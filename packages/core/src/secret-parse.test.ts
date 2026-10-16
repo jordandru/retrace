@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   appendEvent, assertSigningJwk, assertSigningKeyPair, buildExportBundle, checkpointFromStore, createHandler, generateSigningKey,
-  importSigningKey, keyId, MemoryEventStore, parseCredentials, parseSigningKey, publicFromPrivate, signCanonical, signProducer,
+  importSigningKey, keyId, MemoryEventStore, parseCredentials, parseSigningKey, publicFromPrivate, signCanonical, signProducer, snapshotSigningKey,
   verifyCanonical, verifyProducerSig, witnessCheckpointRekor,
 } from "./index.js";
 
@@ -477,4 +477,114 @@ test("#232 r5 witnessCheckpointRekor refuses a key whose x is the signer's but w
   assert.equal(e.message, MISMATCH_MESSAGE);
   assert.equal(fetched, 0, "nothing is sent to Rekor");
   assert.ok(![a.privateKey.d, b.privateKey.d].some((d) => `${e.stack}`.includes(d!)), "no d in the error");
+});
+
+// Round 6 (Codex r5 Medium, evt_8ebc5f95; Jordan's go evt_ac3679c8): the snapshot spread the caller's object outside
+// any error boundary, so a getter or a Proxy trap that threw an error carrying key text propagated it through signing
+// and the public key route. Every read is now inside one boundary that throws a fixed error, and only the members used
+// afterwards are read.
+const UNREADABLE_MESSAGE = "signing key: the JWK could not be read";
+const FRAGMENT = "tok_FAKEgetrWSXZ7391";
+
+/** A generated key made hostile one of four ways; `reads` counts calls of the throwing accessor or trap. */
+function hostileKeys(privateKey: JsonWebKey) {
+  const reads = { note: 0 };
+  const noteGetter = { ...privateKey } as Record<string, unknown>;
+  Object.defineProperty(noteGetter, "private_note", { enumerable: true, get() { reads.note++; throw new Error(`leak ${FRAGMENT}`); } });
+  const dGetter = { ...privateKey } as Record<string, unknown>;
+  Object.defineProperty(dGetter, "d", { enumerable: true, get() { throw new Error(`leak ${FRAGMENT}`); } });
+  const proxyGet = new Proxy({ ...privateKey }, { get() { throw new Error(`leak ${FRAGMENT}`); } });
+  const proxyOwnKeys = new Proxy({ ...privateKey }, { ownKeys() { throw new Error(`leak ${FRAGMENT}`); } });
+  return { reads, noteGetter: noteGetter as JsonWebKey, refused: { dGetter: dGetter as JsonWebKey, proxyGet: proxyGet as JsonWebKey, proxyOwnKeys: proxyOwnKeys as JsonWebKey } };
+}
+
+test("#232 r6 a throwing getter or Proxy trap on the signing key gives only fixed messages, on every snapshot path", async () => {
+  const { privateKey, publicKey } = await generateSigningKey();
+  const { reads, noteGetter, refused } = hostileKeys(privateKey);
+  const logged: string[] = [];
+  const original = console.error;
+  console.error = (...args: unknown[]) => { logged.push(args.map((a) => (a instanceof Error ? `${a.stack}` : String(a))).join(" ")); };
+  try {
+    // An accessor on a member the snapshot does not copy is never called: the key signs and is published as itself.
+    const sig = await signCanonical(noteGetter, { n: 1 });
+    assert.equal(await verifyCanonical(publicKey, { n: 1 }, sig), true);
+    const published = await getPubkey(noteGetter);
+    assert.equal(published.status, 200);
+    assert.equal((await published.json() as { public_key: JsonWebKey }).public_key.x, publicKey.x);
+    assert.equal(reads.note, 0, "private_note was never read");
+
+    const store = new MemoryEventStore();
+    await appendEvent(store, { project: "p", actor: { type: "human", id: "owner@example.test" }, action: "created", artifacts: [{ id: "file:a.txt" }] });
+    const cp = await checkpointFromStore(store, "p", { signingKey: privateKey });
+    const input = { project: "p", actor: { type: "agent" as const, id: "seat_FAKE" }, action: "created" as const, artifacts: [{ id: "file:b.txt" }], timestamp: "2026-10-16T00:00:00.000Z", idempotency_key: "idem-r6" };
+    for (const [name, key] of Object.entries(refused)) {
+      const paths: [string, () => Promise<unknown>][] = [
+        ["signCanonical", () => signCanonical(key, { n: 1 })],
+        ["importSigningKey", () => importSigningKey(key)],
+        ["assertSigningKeyPair", () => assertSigningKeyPair(key)],
+        ["checkpointFromStore", () => checkpointFromStore(store, "p", { signingKey: key })],
+        ["buildExportBundle", () => buildExportBundle(store, { project: "p" }, { signingKey: key })],
+        ["signProducer", () => signProducer(input, key)],
+        ["witnessCheckpointRekor", () => witnessCheckpointRekor(cp, key, { fetchImpl: async () => { throw new Error("no network in tests"); } })],
+      ];
+      for (const [path, run] of paths) {
+        const e = await run().then(() => assert.fail(`${name} ${path}: expected a rejection`), (err: Error) => err);
+        assert.equal(e.message, UNREADABLE_MESSAGE, `${name} ${path}`);
+        assert.equal((e as { cause?: unknown }).cause, undefined, `${name} ${path}: no cause`);
+        assert.ok(!`${e.message}\n${e.stack}`.includes(FRAGMENT.slice(4)), `${name} ${path}: no fragment`);
+      }
+      const route = await getPubkey(key);
+      const routeBody = await route.text();
+      assert.equal(route.status, 503, `${name} route`);
+      assert.deepEqual(JSON.parse(routeBody), { error: "signing key is not a valid Ed25519 JWK" });
+      const h = createHandler(store, { token: PUBKEY_TOKEN, signingKey: key });
+      const head = await h(new Request("http://retrace.test/projects/p/head?signed=1", { headers: { authorization: `Bearer ${PUBKEY_TOKEN}` } }));
+      assert.equal(head.status, 500, `${name} signed head`);
+      assert.ok(!(await head.text()).includes(FRAGMENT.slice(4)));
+    }
+  } finally {
+    console.error = original;
+  }
+  const logs = logged.join("\n");
+  assert.match(logs, new RegExp(`GET /projects/p/head: Error: ${UNREADABLE_MESSAGE}`), "the signed head's failure is logged with the fixed message");
+  const unique = FRAGMENT.slice(4); // the made-up part after "tok_"
+  for (let i = 0; i + 4 <= unique.length; i++) assert.ok(!logs.includes(unique.slice(i, i + 4)), `"${unique.slice(i, i + 4)}" of the made-up fragment in a log`);
+});
+
+test("#232 r6 the snapshot copies only the members used afterwards, in the caller's order, with key_ops as a new array", () => {
+  const keyOps = ["sign"];
+  const jwk = { private_note: "tok_FAKEnoteRFVB4739", ext: true, alg: "Ed25519", crv: "Ed25519", use: "sig", d: D, x: X, oth: { d: "tok_FAKEothhWSXC9517" }, kty: "OKP", kid: "kid-r6", key_ops: keyOps, kid_obj: { a: 1 } };
+  const snap = snapshotSigningKey(jwk);
+  assert.equal(JSON.stringify(snap), JSON.stringify({ ext: true, alg: "Ed25519", crv: "Ed25519", d: D, x: X, kty: "OKP", kid: "kid-r6", key_ops: ["sign"] }));
+  assert.notEqual(snap.key_ops, keyOps, "key_ops is a new array");
+  keyOps.push("verify");
+  assert.deepEqual(snap.key_ops, ["sign"], "a later change to the caller's key_ops does not reach the snapshot");
+  assert.equal((snapshotSigningKey({ ...jwk, kid: { nested: "tok_FAKEkidnUJMK2846" } }) as Record<string, unknown>).kid, undefined, "an object-valued member is dropped");
+  for (const bad of [{ ...jwk, key_ops: "sign" }, { ...jwk, key_ops: [{ toString: () => "sign" }] }]) {
+    assert.throws(() => snapshotSigningKey(bad), { message: "signing key: JWK key_ops is missing or invalid" });
+  }
+  for (const notObject of [null, "tok_FAKEqzwxVBNM7531", ["tok_FAKEqzwxVBNM7531"]]) assert.equal(snapshotSigningKey(notObject), notObject);
+});
+
+test("#232 r6 the Rekor signature is made with the key compared with the checkpoint signer, even if the configured key changes after the comparison", async () => {
+  const a = await generateSigningKey();
+  const b = await generateSigningKey();
+  const store = new MemoryEventStore();
+  await appendEvent(store, { project: "p", actor: { type: "human", id: "owner@example.test" }, action: "created", artifacts: [{ id: "file:a.txt" }] });
+  const cp = await checkpointFromStore(store, "p", { signingKey: a.privateKey });
+  const key = { ...a.privateKey } as JsonWebKey;
+  // canonicalize(cp) runs after the signer comparison and before the signature: an enumerable getter on the checkpoint
+  // swaps the configured key to b, a consistent pair, at exactly that point.
+  let swapped = false;
+  Object.defineProperty(cp, "zz_swap", { enumerable: true, get() { if (!swapped) { Object.assign(key, { d: b.privateKey.d, x: b.publicKey.x }); swapped = true; } return "swap"; } });
+  let body: string | undefined;
+  await witnessCheckpointRekor(cp, key, { fetchImpl: async (_url, init) => { body = init?.body; throw new Error("no network in tests"); } })
+    .then(() => assert.fail("expected the fake network to refuse"), (err: Error) => assert.equal(err.message, "no network in tests"));
+  assert.equal(swapped, true, "the swap landed after the comparison");
+  const entry = JSON.parse(body!) as { spec: { data: { content: string }; signature: { content: string } } };
+  const artifact = Buffer.from(entry.spec.data.content, "base64");
+  const sig = Buffer.from(entry.spec.signature.content, "base64");
+  const verifyWith = async (x: string) => crypto.subtle.verify({ name: "Ed25519" }, await crypto.subtle.importKey("jwk", { kty: "OKP", crv: "Ed25519", x }, { name: "Ed25519" }, false, ["verify"]), sig, artifact);
+  assert.equal(await verifyWith(a.publicKey.x!), true, "the Rekor signature verifies against the key compared with the signer");
+  assert.equal(await verifyWith(b.publicKey.x!), false, "the swapped key did not sign");
 });

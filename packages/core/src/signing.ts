@@ -79,15 +79,44 @@ export function assertSigningJwk(jwk: unknown): asserts jwk is JsonWebKey {
 /** PKCS #8 DER prefix of an Ed25519 private key (RFC 8410 §7); the 32 bytes of `d` follow it. */
 const PKCS8_ED25519_PREFIX = Uint8Array.from([0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20]);
 
-/** A private copy of a signing JWK, taken synchronously (#232 round 5, Codex r4 Medium; CODING_STANDARDS CS-5): each
- *  own member is read once, and `key_ops` is copied too. The key's owner may change the object while a check is
- *  pending, so every check, and every use after the first `await`, reads this copy and never the caller's object.
- *  Anything that is not a JWK object is returned as it is, for the shape check to refuse. */
-export function snapshotSigningKey<T>(jwk: T): T {
-  if (!jwk || typeof jwk !== "object" || Array.isArray(jwk)) return jwk;
-  const copy: Record<string, unknown> = { ...(jwk as Record<string, unknown>) };
-  if (Array.isArray(copy.key_ops)) copy.key_ops = [...copy.key_ops];
-  return copy as T;
+/** The members a snapshot copies: what is read after it. The shape check reads `kty`, `crv`, `d` and `x`;
+ *  publicFromPrivate copies PUBLIC_JWK_MEMBERS (`kty`, `crv`, `x`, `kid`, `alg`, `ext`); the signing import gets every
+ *  copied member but `alg` (importable), which leaves `key_ops` as the one member that changes what the import allows.
+ *  Every other member is dropped (#232 round 6). */
+const SNAPSHOT_MEMBERS: ReadonlySet<string> = new Set(["kty", "crv", "d", "x", "kid", "alg", "ext", "key_ops"]);
+
+/** A private copy of a signing JWK, taken synchronously (#232 round 5, Codex r4 Medium; CODING_STANDARDS CS-5). The
+ *  key's owner may change the object while a check is pending, so every check, and every use after the first `await`,
+ *  reads this copy and never the caller's object.
+ *
+ *  Every read of the caller's object happens inside one `try` (round 6, Codex r5 Medium): its own enumerable keys,
+ *  once, for their order, then each member in SNAPSHOT_MEMBERS, once. A getter or a Proxy trap that throws, whatever
+ *  its error says, becomes a fixed error; the caught error is dropped, not kept as message, stack or cause. Members
+ *  outside SNAPSHOT_MEMBERS are never read. A member whose value is an object is dropped, so nothing the caller can
+ *  still change is shared, except `key_ops`, which must be an array of strings and is copied as a new array. The
+ *  copied members keep the caller's order, so a valid key's public JWK serialises as it did. Anything that is not a
+ *  JWK object is returned as it is, for the shape check to refuse. */
+export function snapshotSigningKey(jwk: unknown): JsonWebKey {
+  const copy: Record<string, unknown> = {};
+  let badKeyOps = false;
+  try {
+    if (!jwk || typeof jwk !== "object" || Array.isArray(jwk)) return jwk as JsonWebKey;
+    for (const name of Object.keys(jwk)) {
+      if (!SNAPSHOT_MEMBERS.has(name)) continue;
+      const value: unknown = (jwk as Record<string, unknown>)[name];
+      if (name === "key_ops") {
+        const ops: unknown[] = Array.isArray(value) ? Array.from(value as unknown[]) : [];
+        if (!Array.isArray(value) || ops.some((op) => typeof op !== "string")) badKeyOps = true;
+        else copy.key_ops = ops;
+      } else if (value === null || (typeof value !== "object" && typeof value !== "function")) {
+        copy[name] = value;
+      }
+    }
+  } catch {
+    throw new Error("signing key: the JWK could not be read");
+  }
+  if (badKeyOps) throw new Error("signing key: JWK key_ops is missing or invalid");
+  return copy as JsonWebKey;
 }
 
 /** The shape check, then the public key derived from `d` compared with `x`, both on one snapshot, which it returns. A

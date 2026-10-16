@@ -579,9 +579,15 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
       if (!opts.signingKey) return json({ error: "no signing key configured" }, 404);
       // A malformed key's other fields are part of the secret's value: never publish them (#232 round 2). A key whose x
       // is not d's public key is refused too, and the public JWK is built from an allowlist of public members (round 3).
-      // The key published is the snapshot that was checked, not the configured object read again (round 5).
-      const key = snapshotSigningKey(opts.signingKey);
-      try { await assertSigningKeyPair(key); } catch { return json({ error: "signing key is not a valid Ed25519 JWK" }, 503); }
+      // The key published is the snapshot that was checked, not the configured object read again (round 5). Taking the
+      // snapshot is inside the same handling, so a key that cannot be read answers the same fixed 503 (round 6).
+      let key: JsonWebKey;
+      try {
+        key = snapshotSigningKey(opts.signingKey);
+        await assertSigningKeyPair(key);
+      } catch {
+        return json({ error: "signing key is not a valid Ed25519 JWK" }, 503);
+      }
       const pub = publicFromPrivate(key);
       return json({ kid: await keyId(pub), alg: "Ed25519", public_key: pub, name: opts.issuerName });
     }

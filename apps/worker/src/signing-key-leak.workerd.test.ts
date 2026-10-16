@@ -26,10 +26,11 @@ const TOKEN = "owner-token-for-the-workerd-signing-key-test";
 // producer-signing route of its own, and producer signing is one of the paths Codex r3 probed in workerd. /__test/race
 // (round 5) runs Codex r4's probe inside workerd: it starts signCanonical with key a, changes the object's d to b's d either
 // in a queued microtask while the pair check is pending or right after the check's derivation, then signs again with the
-// same object. /__test/sign signs a given payload with a given key.
+// same object. /__test/sign signs a given payload with a given key. /__test/hostile (round 6) builds a key whose reads
+// throw, by a getter or a Proxy trap, and runs signCanonical and the public key route on it inside workerd.
 const ENTRY = `
 import worker from "./index.ts";
-import { parseSigningKey, signCanonical, signProducer } from "@retrace-dev/core";
+import { createHandler, MemoryEventStore, parseSigningKey, signCanonical, signProducer } from "@retrace-dev/core";
 const logs = [];
 for (const level of ["log", "info", "warn", "error", "debug"]) {
   console[level] = (...args) => { logs.push(args.map((a) => (a instanceof Error ? (a.stack ?? a.message) : String(a))).join(" ")); };
@@ -62,6 +63,22 @@ export default {
       }
       const second = await signCanonical(key, value).then((sig) => ({ sig }), (e) => ({ error: String(e?.message ?? e) }));
       return Response.json({ first, second, changed: key.d === bD });
+    }
+    if (path === "/__test/hostile") {
+      const { jwk, mode, value, fragment } = await request.json();
+      const leak = () => { throw new Error("leak " + fragment); };
+      const reads = { note: 0 };
+      let key = { ...jwk };
+      if (mode === "note-getter") Object.defineProperty(key, "private_note", { enumerable: true, get() { reads.note++; leak(); } });
+      else if (mode === "d-getter") Object.defineProperty(key, "d", { enumerable: true, get: leak });
+      else if (mode === "proxy-get") key = new Proxy(key, { get: leak });
+      else key = new Proxy(key, { ownKeys: leak });
+      const signed = await signCanonical(key, value).then(
+        (sig) => ({ sig }),
+        (e) => ({ error: String(e?.message ?? e), stack: String(e?.stack ?? ""), hasCause: e?.cause !== undefined }),
+      );
+      const route = await createHandler(new MemoryEventStore(), { token: "t", signingKey: key })(new Request("http://retrace.test/.well-known/retrace-pubkey"));
+      return Response.json({ signed, route: { status: route.status, body: await route.text() }, noteReads: reads.note });
     }
     if (path === "/__test/sign") {
       const { jwk, value } = await request.json();
@@ -349,6 +366,40 @@ test("#232 r5 workerd: a d changed during the pair check or before the import ne
     assert.deepEqual(await kat.json(), { sig: KAT.sig }, "a valid key's signature in workerd is the known answer");
     const logs = (await (await mf.dispatchFetch("http://retrace.test/__test/logs")).json() as string[]).join("\n");
     assert.ok(![a.privateKey.d, b.privateKey.d].some((d) => logs.includes(d!)), "no d is logged");
+  } finally {
+    await mf.dispose();
+  }
+});
+
+// Round 6 (Codex r5 Medium, evt_8ebc5f95): a getter or a Proxy trap on the signing key that throws an error carrying key
+// text reached signCanonical's and the public key route's callers. The snapshot now reads only the members it copies,
+// inside one boundary that throws a fixed error.
+test("#232 r6 workerd: a throwing getter or Proxy trap on the signing key gives only fixed messages in signing and the public key route", { timeout: 300_000 }, async () => {
+  const a = await generateSigningKey();
+  const fragment = "tok_FAKEgetrWSXZ7391";
+  const { mf } = await workerWithKey("hostile", a.privateKey);
+  try {
+    const value = { n: 6 };
+    for (const mode of ["note-getter", "d-getter", "proxy-get", "proxy-ownkeys"]) {
+      const res = await mf.dispatchFetch("http://retrace.test/__test/hostile", { method: "POST", body: JSON.stringify({ jwk: a.privateKey, mode, value, fragment }) });
+      assert.equal(res.status, 200);
+      const text = await res.text();
+      assert.ok(!text.includes(fragment.slice(4)), `${mode}: no fragment in any result: ${text}`);
+      const { signed, route, noteReads } = JSON.parse(text) as { signed: { sig?: string; error?: string; stack?: string; hasCause?: boolean }; route: { status: number; body: string }; noteReads: number };
+      if (mode === "note-getter") {
+        assert.equal(noteReads, 0, "private_note is never read");
+        assert.equal(await verifyCanonical(publicFromPrivate(a.privateKey), value, signed.sig!), true, "the key signs as itself");
+        assert.equal(route.status, 200);
+        assert.equal((JSON.parse(route.body) as { public_key: JsonWebKey }).public_key.x, a.privateKey.x);
+      } else {
+        assert.equal(signed.error, "signing key: the JWK could not be read", `${mode}: the fixed message`);
+        assert.equal(signed.hasCause, false, `${mode}: no cause`);
+        assert.equal(route.status, 503, `${mode}: the route answers 503`);
+        assert.deepEqual(JSON.parse(route.body), { error: "signing key is not a valid Ed25519 JWK" });
+      }
+    }
+    const logs = (await (await mf.dispatchFetch("http://retrace.test/__test/logs")).json() as string[]).join("\n");
+    assert.ok(!logs.includes(fragment.slice(4)), "no fragment is logged");
   } finally {
     await mf.dispose();
   }
