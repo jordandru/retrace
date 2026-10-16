@@ -24,9 +24,17 @@ finds something, ask what would have caught it before review, and change that.
 
 ## 2. Sources, and what this note does not claim
 
-- aihero.dev/skills was read on 2026-10-16. The page names `/pr` ("writes reviewable PR bodies") and `/retro`
-  ("improves your agent's environment"). It does not describe "review the system", `/improve-codebase-architecture`,
-  `/code-review`, `CODING_STANDARDS.md` or `/show-me`. It links its source, github.com/mattpocock/skills (MIT).
+- aihero.dev/skills was read as raw HTML (`curl -sL`, HTTP 200, 484,769 bytes, sha256 `b6b41379…81c8`) at
+  2026-10-16T18:14Z. Its visible text lists:
+  - `/code-review`: "Review a diff against your standards and against the spec.";
+  - `/improve-codebase-architecture`: "Find the modules worth refactoring, as a visual report.";
+  - `/pr`: "The shape a pull request body should take.";
+  - `/retro`: "Look back on a session and suggest repo improvements.";
+  - `/codebase-design`: "The vocabulary for designing deep modules."
+
+  It links github.com/mattpocock/skills (MIT, per that repository). The strings `show-me` and `CODING_STANDARDS` do
+  not occur in that HTML. *(Round 2: the round-1 text of this item rested on a summarising fetch that missed the skill
+  list, and wrongly said the page did not describe `/code-review` or `/improve-codebase-architecture`. Codex r1 M3.)*
 - That repository's README describes the following. `code-review` "reviews the diff on two axes, Standards and Spec".
   `pr` covers a summary, before/after evidence and a merge-danger call. `retro` suggests "improvements to the coding
   agent's environment (navigation, automated checks, coding standards, steering files, tooling) … most severe first".
@@ -80,7 +88,9 @@ finds something, ask what would have caught it before review, and change that.
   It then hashes the body with agent-ops 19's normalisation, declares the write, runs it and reads it back.
 - **`.claude/skills/retrace-code-review/SKILL.md`** takes the diff `<base>..<head>`, applies each standard's stated
   check and the brief axis, and reports pass / fail / not applicable per rule with `file:line` evidence. It logs one
-  `executed` event tagged `self-check`. Fresh-context helpers, when used, read only and never call the retrace tools.
+  `executed` event tagged `self-check`. Every check runs in the builder's own session, where its commands are logged
+  (agent-rules 2). There is no helper path. *(Round 2: the round-1 skill allowed fresh-context helpers whose commands
+  no event recorded. Codex r1 M2.)*
 - **`.claude/skills/retrace-retro/SKILL.md`** takes a merged PR number. It reads every verdict event for the PR raw,
   and the verdict text where it survives. For each Medium or High, and for any Low that recurs, it names what would
   have caught the finding earlier:

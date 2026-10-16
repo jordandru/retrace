@@ -35,8 +35,8 @@ A caught runtime error is not attached as `cause`, and its message is not carrie
 **CS-2. Validate the shape before any runtime parser or importer sees secret material.** Between reading a secret
 and its first runtime import, a validator checks the fields, their types and their exact allowed values. It then fails
 with a CS-1 error.
-- *From:* the same finding: `parseSigningKey` accepted any valid JSON and handed it to WebCrypto, whose error text we
-  do not control.
+- *From:* PR 248 round 1, Codex, Medium, `evt_73cc3ae7563f45729002cd113cebc344`, the same finding as CS-1:
+  `parseSigningKey` accepted any valid JSON and handed it to WebCrypto, whose error text we do not control.
 - *Check:* reading test. The first use of the value after the env read is the validator call. Tests cover one
   malformed made-up value per validated field.
 
@@ -88,16 +88,18 @@ fixtures include malformed, tampered and non-canonical rows. A "stated divergenc
 
 **CS-7. Check a value's type and domain before it decides a count, a page bound or a verdict.** Never infer a fact
 from a column or string that can disagree with the sealed body.
-- *From:* PR 244 round 1 (above): a non-integer `seq` truncated verify; the `action` column was trusted; Codex Low,
-  page bounds of 0 gave `{ok:true, checked:0}`. And PR 224 round 1, Codex, Medium, `evt_26759ce0aa4b410d8dfef93ed6238343`:
+- *From:* PR 244 round 1, Codex, High, Medium and Low, `evt_96aed167513140beaaf5a41904ed6304`. A non-integer `seq`
+  truncated verify (High); the `action` column was trusted (Medium); page bounds of 0 gave `{ok:true, checked:0}`
+  (Low). And PR 224 round 1, Codex, Medium, `evt_26759ce0aa4b410d8dfef93ed6238343`:
   `commit_shas` counted `commit:repo@not-a-sha` and upper/lower-case copies of one SHA as distinct SHAs.
 - *Check:* tests feed a wrong type, a zero, negative or non-finite number, and a non-canonical spelling, and each
   input is refused or normalised. Reading test: no count or verdict reads a column without that column's check.
 
 **CS-8. A test of runtime-dependent behaviour runs in the runtime that ships.** Worker paths that touch WebCrypto,
 streams or the runtime's own error text are tested in the workerd pool (`*.workerd.test.ts`), not only in Node.
-- *From:* PR 248 round 1 (the leak reproduced only in Miniflare/workerd) and round 3 (Node refuses a mismatched key
-  at import, so the Node tests could not show that workerd signs with it).
+- *From:* PR 248 round 1, Codex, Medium, `evt_73cc3ae7563f45729002cd113cebc344`: the leak reproduced only in
+  Miniflare/workerd. And PR 248 round 3, Codex, Medium, `evt_b320ac71630b4da7baab3f1e09f2b7f8`: Node refuses a
+  mismatched key at import, so the Node tests could not show that workerd signs with it.
 - *Check:* a diff that changes such a path adds or updates a `*.workerd.test.ts` case for it, or the pull request
   says why none is feasible.
 
@@ -106,10 +108,10 @@ streams or the runtime's own error text are tested in the workerd pool (`*.worke
 **CS-9. Every count and every completeness claim is backed by a command run at the head, or removed.** This covers
 test counts, "all", "every", "covers", "none" and inventories, in a pull request body, a note or release text. Each
 names the command that enumerates it. A claim without its command is removed rather than defended.
-- *From:* PR 248 round 1, Codex Lows (`evt_73cc3ae7…` above): the body said 15 new tests where there were 14, and its
+- *From:* PR 248 round 1, Codex, two Lows, `evt_73cc3ae7563f45729002cd113cebc344`: the body said 15 new tests where there were 14, and its
   secret inventory missed `RETRACE_ISSUER` and `RETRACE_OPS_PROJECT` and misclassified `RETRACE_TRAILER_POLICY`.
   PR 242 round 1, Codex, Medium, `evt_c9e62e54320e4f5b8b7301cf6841bfdf`: the release notes claimed coverage of the
-  changes since 0.3.0 and omitted four shipped behaviour changes (PRs 207, 208, 219, 229). PR 242 round 2, NOOA,
+  changes since 0.3.0 and omitted four shipped behaviour changes (PRs 207, 208, 219, 229). PR 242 round 2, NOOA, Medium,
   `evt_e17e320462724a9286fa77a0982f45ac`: the coverage sentence overstated what the sections covered.
 - *Check:* the body's "How to verify" names a command for each number and each completeness claim. The reviewer can
   re-run it.
@@ -127,7 +129,7 @@ conclusion the argument needs instead of the inventory behind it.
 **CS-11. Each factual statement says who established it.** It is either observed or read back (and names the
 command or record), or reported (and names who reported it). An inference the evidence does not support is called
 unsupported, not refuted and not true.
-- *From:* PR 245 round 1, Codex, Mediums M2 and M3 (`evt_8c118c8c…` above). A boot inference was stated as refuted
+- *From:* PR 245 round 1, Codex, Mediums M2 and M3, `evt_8c118c8c5aa945eb9849fe5c01d64051`. A boot inference was stated as refuted
   rather than unsupported, and repair items Jordan reported were mixed in with items that were read back.
 - *Check:* reading test. In measurement notes, incident notes and pull request bodies, every past-tense factual
   sentence carries its source: a command, an event id, a file hash, or "reported by <who>".

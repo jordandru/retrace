@@ -37,12 +37,10 @@ For each rule in `CODING_STANDARDS.md`:
 3. List every changed path the brief does not ask for. Each one is either justified in one line or removed.
 4. Check every number and completeness claim in the PR body or notes against a command run at the head (CS-9).
 
-## Helpers
+## Where it runs
 
-If the harness offers a fresh-context subagent, each axis may run in one, so the check does not inherit the
-builder's assumptions. A helper reads files and runs read-only commands. It **never** calls a retrace tool, commits,
-pushes or writes outside the scratchpad. Its test runs carry the scratch environment inline, `HOME` included
-(agent-ops 10).
+Run every check in your own session, where each command is logged under agent-rules 2. Do not hand the checks to a
+subagent.
 
 ## Report and log
 
