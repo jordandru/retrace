@@ -55,10 +55,21 @@ Run these on the scratch file. Any hit stops the skill until the body is fixed:
    newlines removed.
    `python3 -c 'import sys,hashlib;t=open(sys.argv[1],encoding="utf-8").read().replace("\r\n","\n");t="\n".join(l.rstrip() for l in t.split("\n")).rstrip("\n");print(hashlib.sha256(t.encode()).hexdigest())' <body>`.
    Hash the title the same way.
-2. `retrace_log` under your own credential: the pull request (or, for a new one, the branch) as an artifact,
-   `caused_by` your receipt, `actor.model` and `model_source` set, and `method.params.github_action`
-   `{kind: "pr_create" | "pr_edit", repo, login, pr, content}`, with the body and title sha256 in `content`. Wait
-   for the event id.
+2. Declare with `retrace_log` under your own credential, with `caused_by` your receipt and `actor.model` and
+   `model_source` set. The shape is the one the owner-login matcher binds: `docs/design/github-owner-login-attribution.md`
+   §3.2, and `packages/core/src/owner-login.ts` (`declarationAction`, `declarationTarget`, `declarationContent`). The
+   kinds are exactly those of `owner-login-record.ts` (there is no `pr_create`). The content fields sit at the **top
+   level** of `github_action`, never nested.
+   - **New pull request:** action `created`. The artifact is the branch, `git:jordandru/retrace#<branch>`, because the
+     number does not exist yet. Then `method.params.github_action` =
+     `{"kind": "pr_open", "repo": "jordandru/retrace", "login": "jordandru", "body_sha256": "…", "title_sha256": "…", "head_sha": "<full sha>"}`.
+   - **Body or title edit:** action `edited`, with artifact `pr:jordandru/retrace#<n>`. Then
+     `github_action` = `{"kind": "pr_edit", "repo": "jordandru/retrace", "login": "jordandru", "pr": <n>, "body_sha256": "…", "title_sha256": "…"}`.
+     Give both hashes even when only one changes, so that a title-only edit never matches a body-only declaration (§3.2).
+   - A declaration never carries `result`: an object with `result` is an outcome record, and the matcher skips it.
+
+   Wait for the event id, then run the write at once. The declaration binds only if its seal is within the 30 minutes
+   before the webhook's arrival (§3.3, `OWNER_LOGIN_WINDOW_MS`).
 3. Run the write. Create: `gh pr create --base main --head <branch> --title <title> --body-file <body>`. Edit:
    `gh api -X PATCH repos/jordandru/retrace/pulls/<n> -F body=@<body> -f title=<title>`, because `gh pr edit` fails
    on this repository.
