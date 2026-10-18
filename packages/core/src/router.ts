@@ -59,7 +59,7 @@ import { appendOwnerLoginEvent, OWNER_LOGIN_DECISION_PARAM } from "./owner-login
 import { mapGithubWebhook, verifyGithubSignature } from "./github.js";
 import { mapDriveActivities, DrivePayload } from "./gdrive.js";
 import { buildProjectStatus } from "./status.js";
-import { publicFromPrivate, keyId, signCanonical } from "./signing.js";
+import { assertSigningKeyPair, publicFromPrivate, keyId, signCanonical, snapshotSigningKey } from "./signing.js";
 import { UI_HTML } from "./ui-html.js";
 
 function writeClientError(e: unknown): string | undefined {
@@ -192,10 +192,39 @@ export const Credential = z.object({
   principal: z.object({ type: z.enum(["human", "team"]), id: z.string().min(1) }).optional(),
 });
 export type Credential = z.infer<typeof Credential>;
-/** Parse the RETRACE_CREDENTIALS secret (JSON array). Throws on malformed config so a bad deploy fails loudly. */
-export function parseCredentials(raw?: string | null): Credential[] {
+/** A malformed credentials secret, described without any part of its value (#232). V8's JSON.parse message quotes the
+ *  start of its input and zod's messages quote the received value for some issue types (an invalid enum value), so
+ *  neither message is kept, nor attached as `cause`. `detail` is "not JSON" or each schema issue's path and code; a path
+ *  is built from the schema's own keys and array indices only (Credential and Actor have no record or passthrough). */
+export class CredentialsConfigError extends Error {
+  readonly detail: string;
+  constructor(readonly secret: string, detail: string) {
+    super(`${secret} is malformed: ${detail}`);
+    this.detail = detail;
+  }
+}
+
+const MAX_LISTED_ISSUES = 10;
+function issuePath(path: (string | number)[]): string {
+  return path.map((p) => (typeof p === "number" ? `[${p}]` : `.${p}`)).join("").replace(/^\./, "") || "(root)";
+}
+
+/** Parse the RETRACE_CREDENTIALS secret (JSON array), or another secret of the same shape named by `secret`. Throws a
+ *  CredentialsConfigError on malformed config so a bad deploy fails loudly, without quoting the secret. */
+export function parseCredentials(raw?: string | null, secret = "RETRACE_CREDENTIALS"): Credential[] {
   if (!raw) return [];
-  return z.array(Credential).parse(JSON.parse(raw));
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    throw new CredentialsConfigError(secret, "not JSON");
+  }
+  const parsed = z.array(Credential).safeParse(value);
+  if (parsed.success) return parsed.data;
+  const issues = parsed.error.issues;
+  const listed = issues.slice(0, MAX_LISTED_ISSUES).map((i) => `${issuePath(i.path)} ${i.code}`).join(", ");
+  const more = issues.length > MAX_LISTED_ISSUES ? ` (+${issues.length - MAX_LISTED_ISSUES} more)` : "";
+  throw new CredentialsConfigError(secret, `schema issues ${listed}${more}`);
 }
 
 export interface RouterOptions {
@@ -548,7 +577,18 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
     }
     if (parts[0] === ".well-known" && parts[1] === "retrace-pubkey") {
       if (!opts.signingKey) return json({ error: "no signing key configured" }, 404);
-      const pub = publicFromPrivate(opts.signingKey);
+      // A malformed key's other fields are part of the secret's value: never publish them (#232 round 2). A key whose x
+      // is not d's public key is refused too, and the public JWK is built from an allowlist of public members (round 3).
+      // The key published is the snapshot that was checked, not the configured object read again (round 5). Taking the
+      // snapshot is inside the same handling, so a key that cannot be read answers the same fixed 503 (round 6).
+      let key: JsonWebKey;
+      try {
+        key = snapshotSigningKey(opts.signingKey);
+        await assertSigningKeyPair(key);
+      } catch {
+        return json({ error: "signing key is not a valid Ed25519 JWK" }, 503);
+      }
+      const pub = publicFromPrivate(key);
       return json({ kid: await keyId(pub), alg: "Ed25519", public_key: pub, name: opts.issuerName });
     }
 
@@ -1019,11 +1059,13 @@ export function createHandler(store: EventStore, tokenOrOpts?: string | RouterOp
             const payload = head === null
               ? { project, seq: -1, hash: GENESIS_HASH, signed_at }
               : { project, seq: head.seq, hash: head.hash, signed_at };
-            const pub = publicFromPrivate(opts.signingKey);
+            // One snapshot for the published key and the signature (#232 round 5).
+            const key = snapshotSigningKey(opts.signingKey);
+            const pub = publicFromPrivate(key);
             return json({
               ...payload,
               issuer: { kid: await keyId(pub), alg: "Ed25519", public_key: pub },
-              signature: await signCanonical(opts.signingKey, payload),
+              signature: await signCanonical(key, payload),
             });
           }
           if (sub === "verify") return json(await verifyProject(store, project));

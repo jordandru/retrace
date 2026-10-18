@@ -16,7 +16,7 @@ import { Event } from "./schema.js";
 import { EventStore } from "./store.js";
 import { canonicalize, sha256Hex } from "./chain.js";
 import { ExportBundle, ExportScope } from "./export.js";
-import { keyId, publicFromPrivate, signCanonical, verifyCanonical } from "./signing.js";
+import { keyId, publicFromPrivate, signCanonical, snapshotSigningKey, verifyCanonical } from "./signing.js";
 
 export const CHECKPOINT_FORMAT = "retrace-checkpoint/1";
 
@@ -44,9 +44,10 @@ function isFullScope(scope: ExportScope | undefined): boolean {
 
 async function sign(cp: Checkpoint, opts: CheckpointOptions): Promise<Checkpoint> {
   if (!opts.signingKey) return cp;
-  const pub = publicFromPrivate(opts.signingKey);
+  const key = snapshotSigningKey(opts.signingKey); // one snapshot for the embedded key and the signature (#232 round 5)
+  const pub = publicFromPrivate(key);
   cp.signer = { kid: await keyId(pub), alg: "Ed25519", public_key: pub, name: opts.signerName };
-  cp.signature = await signCanonical(opts.signingKey, { ...cp, signature: undefined });
+  cp.signature = await signCanonical(key, { ...cp, signature: undefined });
   return cp;
 }
 
