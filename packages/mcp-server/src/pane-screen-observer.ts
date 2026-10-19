@@ -11,8 +11,20 @@ export const PREFIX_MIN_CHARS = 24;
 
 type Composer = { top: number; lines: string[] };
 
+type RowMetadata = {
+  wrapped: boolean;
+  trailingSpaces: number;
+};
+
+type RenderedRow = RowMetadata & {
+  text: string;
+  rawIndex: number;
+  metadataAvailable: boolean;
+};
+
 type ScreenRead = {
   rows: string[];
+  renderedRows: RenderedRow[];
   lastLine: string;
   composer?: Composer;
   draft?: string;
@@ -60,6 +72,7 @@ const PROMPT_ROW_RE = /^❯(?:[\s\u00a0]|$)/u;
 const CODEX_PROMPT_ROW_RE = /^[›»](?:[\s\u00a0]|$)/u;
 const BOX_TOP_RE = /^\s*╭─/u;
 const BOX_BOTTOM_RE = /^\s*╰─/u;
+const TRANSCRIPT_BLOCK_START_RE = /^(?:[•●◦○✻✳◆◇◈](?:[\t \u00a0]|$)|[›»❯](?:[\t \u00a0]|$))/u;
 
 function composerOf(rows: string[], layout: string | undefined): Composer | undefined {
   if (layout === "claude") {
@@ -112,7 +125,7 @@ function errorMessage(value: unknown): string {
 }
 
 function failedRead(error: string): ScreenRead {
-  return { rows: [], lastLine: "", composerEmpty: false, error };
+  return { rows: [], renderedRows: [], lastLine: "", composerEmpty: false, error };
 }
 
 type TerminalPayloadSelection =
@@ -185,8 +198,10 @@ function boundaryPositions(line: string, positions: Set<number>): Set<number> {
   const expanded = new Set(positions);
   for (const position of positions) {
     let afterWhitespace = position;
-    while (afterWhitespace < line.length && /^[\t \u00a0]$/u.test(line[afterWhitespace]!)) afterWhitespace++;
-    expanded.add(afterWhitespace);
+    while (afterWhitespace < line.length && /^[\t \u00a0]$/u.test(line[afterWhitespace]!)) {
+      afterWhitespace++;
+      expanded.add(afterWhitespace);
+    }
   }
   return expanded;
 }
@@ -200,29 +215,81 @@ function advancePositions(line: string, positions: Set<number>, fragment: string
   return advanced;
 }
 
+type WrappedLineMatch = "exact" | "not_exact" | "boundary_unknown";
+
+type CompletionEvidence = "exact" | "continues" | "unknown";
+
+function completionEvidence(
+  body: RenderedRow[],
+  completedAt: number,
+  indent: "" | "  ",
+): CompletionEvidence {
+  const current = body[completedAt]!;
+  const next = body[completedAt + 1];
+  if (!next) return "exact";
+  if (next.rawIndex !== current.rawIndex + 1) return "unknown";
+
+  // Orca defines `wrapped` on the following row: true means it continues this terminal-emulator line.
+  if (next.metadataAvailable && next.wrapped) return "continues";
+
+  // Agent TUIs paint their own continuation rows. The supported layouts indent those rows by two columns and begin a
+  // new transcript block with a stable prompt/status glyph. Text with neither shape has no provable message boundary.
+  if (indent && next.text.startsWith(indent)) return "continues";
+  if (TRANSCRIPT_BLOCK_START_RE.test(next.text)) return "exact";
+  return "unknown";
+}
+
 /**
  * Match a rendered transcript line against the exact line supplied to Orca. The first fragment is anchored at column
- * zero or immediately after this layout's prompt; continuation rows consistently have either no indent or two spaces.
- * Orca removes trailing row whitespace, so only horizontal whitespace already present in `line` may disappear at a row
- * boundary. Every visible fragment is compared whole: visible prefixes and suffixes are never truncated away.
+ * zero or immediately after this layout's prompt. Terminal-emulator continuations require Orca's `wrapped` metadata;
+ * TUI-painted continuations require the measured two-space indent. Orca removes trailing row whitespace, so only
+ * horizontal whitespace already present in `line` may disappear at a row boundary. Every visible fragment is compared
+ * whole, and completion requires a structural boundary: visible prefixes and suffixes are never truncated away.
  */
-function matchesWrappedLine(body: string[], index: number, line: string, layout: string | undefined): boolean {
-  const first = transcriptStartContent(body[index]!, line, layout);
-  if (first === undefined) return false;
+function matchesWrappedLine(
+  body: RenderedRow[],
+  index: number,
+  line: string,
+  layout: string | undefined,
+): WrappedLineMatch {
+  const first = transcriptStartContent(body[index]!.text, line, layout);
+  if (first === undefined) return "not_exact";
+
+  let boundaryUnknown = false;
 
   for (const indent of ["", "  "] as const) {
     let positions = advancePositions(line, new Set([0]), first);
-    if (positions.has(line.length)) return true;
+    if (positions.has(line.length)) {
+      const completion = completionEvidence(body, index, indent);
+      if (completion === "exact") return "exact";
+      if (completion === "unknown") {
+        boundaryUnknown = true;
+        continue;
+      }
+    }
 
     for (let next = index + 1; next < body.length && positions.size; next++) {
       const row = body[next]!;
-      if (indent && !row.startsWith(indent)) break;
-      const fragment = indent ? row.slice(indent.length) : row;
+      const previous = body[next - 1]!;
+      if (row.rawIndex !== previous.rawIndex + 1) break;
+      if (indent) {
+        if ((row.metadataAvailable && row.wrapped) || !row.text.startsWith(indent)) break;
+      } else {
+        if (!row.metadataAvailable || !row.wrapped) break;
+      }
+      const fragment = indent ? row.text.slice(indent.length) : row.text;
       positions = advancePositions(line, boundaryPositions(line, positions), fragment);
-      if (positions.has(line.length)) return true;
+      if (positions.has(line.length)) {
+        const completion = completionEvidence(body, next, indent);
+        if (completion === "exact") return "exact";
+        if (completion === "unknown") {
+          boundaryUnknown = true;
+          break;
+        }
+      }
     }
   }
-  return false;
+  return boundaryUnknown ? "boundary_unknown" : "not_exact";
 }
 
 function composerHolds(lines: string[], text: string, sentEventId: string): boolean {
@@ -269,7 +336,32 @@ export function createPaneScreenObserver(options: PaneScreenObserverOptions): Pa
       return failedRead("orca-ide terminal read returned an invalid draft");
     }
 
-    const rows = terminal.tail.map((line) => line.replace(/\s+$/u, "")).filter((line) => line.trim().length > 0);
+    let metadata: RowMetadata[] | undefined;
+    if (terminal.tailRows !== undefined) {
+      if (!Array.isArray(terminal.tailRows)
+        || terminal.tailRows.length !== terminal.tail.length
+        || !terminal.tailRows.every((value) => isRecord(value)
+          && typeof value.wrapped === "boolean"
+          && Number.isSafeInteger(value.trailingSpaces)
+          && Number(value.trailingSpaces) >= 0)) {
+        return failedRead("orca-ide terminal read returned invalid row metadata");
+      }
+      metadata = terminal.tailRows.map((value) => ({
+        wrapped: (value as Record<string, unknown>).wrapped as boolean,
+        trailingSpaces: Number((value as Record<string, unknown>).trailingSpaces),
+      }));
+    }
+
+    const renderedRows = terminal.tail
+      .map((line, rawIndex): RenderedRow => ({
+        text: line.replace(/\s+$/u, ""),
+        rawIndex,
+        metadataAvailable: metadata !== undefined,
+        wrapped: metadata?.[rawIndex]?.wrapped ?? false,
+        trailingSpaces: metadata?.[rawIndex]?.trailingSpaces ?? 0,
+      }))
+      .filter((row) => row.text.trim().length > 0);
+    const rows = renderedRows.map((row) => row.text);
     const lastLine = rows.at(-1) ?? "";
     const source = terminal.source as string | undefined;
     const draft = typeof terminal.draft === "string" && terminal.draft.length ? terminal.draft : undefined;
@@ -281,6 +373,7 @@ export function createPaneScreenObserver(options: PaneScreenObserverOptions): Pa
       && draft === undefined;
     return {
       rows,
+      renderedRows,
       lastLine,
       ...(composer ? { composer } : {}),
       ...(draft !== undefined ? { draft } : {}),
@@ -322,13 +415,15 @@ export function createPaneScreenObserver(options: PaneScreenObserverOptions): Pa
       return { delivered: false, reason: "line_sits_in_composer", reobserve: false, evidence };
     }
 
-    const body = read.rows.slice(0, read.composer.top);
+    const body = read.renderedRows.slice(0, read.composer.top);
     const prefixRows = body
-      .map((row, index) => (transcriptStartContent(row, line, options.layout) !== undefined ? index : -1))
+      .map((row, index) => (transcriptStartContent(row.text, line, options.layout) !== undefined ? index : -1))
       .filter((index) => index >= 0);
     if (!prefixRows.length) return unknown("line_not_on_screen");
-    const exactLine = prefixRows.some((index) => matchesWrappedLine(body, index, line, options.layout));
-    if (!exactLine) return unknown("stale_prefix_only");
+    const matches = prefixRows.map((index) => matchesWrappedLine(body, index, line, options.layout));
+    if (!matches.includes("exact")) {
+      return unknown(matches.includes("boundary_unknown") ? "delivery_boundary_unavailable" : "stale_prefix_only");
+    }
     return { delivered: true, reobserve: false, evidence };
   };
 

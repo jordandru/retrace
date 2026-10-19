@@ -39,7 +39,7 @@ type RunResult = Awaited<ReturnType<OrcaRunner>>;
 
 function screen(
   tail: unknown[],
-  options: { source?: string | null; draft?: string; ok?: boolean } = {},
+  options: { source?: string | null; draft?: string; ok?: boolean; tailRows?: unknown } = {},
 ): RunResult {
   const source = options.source === undefined ? "screen" : options.source;
   return {
@@ -49,6 +49,7 @@ function screen(
       result: {
         terminal: {
           tail,
+          ...(options.tailRows !== undefined ? { tailRows: options.tailRows } : {}),
           ...(source === null ? {} : { source }),
           ...(options.draft ? { draft: options.draft } : {}),
         },
@@ -56,6 +57,18 @@ function screen(
     }),
     stderr: "",
   };
+}
+
+function rowMetadata(
+  tail: unknown[],
+  wrappedRows: number[] = [],
+  trailingSpaces: Record<number, number> = {},
+): Array<{ wrapped: boolean; trailingSpaces: number }> {
+  const wrapped = new Set(wrappedRows);
+  return tail.map((_row, index) => ({
+    wrapped: wrapped.has(index),
+    trailingSpaces: trailingSpaces[index] ?? 0,
+  }));
 }
 
 function runner(...results: Array<RunResult | Error>): { run: OrcaRunner; calls: string[][] } {
@@ -124,6 +137,10 @@ test("PaneScreenObserver: configuration and raw-read failures are total and neve
     ["ok false", screen(codexFrame([`› ${LINE}`]), { ok: false })],
     ["missing terminal", { code: 0, stdout: JSON.stringify({ ok: true, result: {} }), stderr: "" }],
     ["non-string tail", screen(["older", { toString: null }])],
+    ["misaligned row metadata", screen(codexFrame([`› ${LINE}`, "• replying"]), { tailRows: [] })],
+    ["malformed row metadata", screen(codexFrame([`› ${LINE}`, "• replying"]), {
+      tailRows: codexFrame([`› ${LINE}`, "• replying"]).map(() => ({ wrapped: "no", trailingSpaces: -1 })),
+    })],
     ["malformed JSON", { code: 0, stdout: "{", stderr: "" }],
   ] as const) {
     const fake = runner(result);
@@ -237,6 +254,42 @@ test("PaneScreenObserver: delivery requires the exact suffixed line above a reco
       `${layout}: a wrapped line with a visible suffix is not the exact sent line`,
     );
 
+    const nextRowSuffixIndented = frame([
+      "older",
+      `${prompt}${LINE.slice(0, 30)}`,
+      `  ${LINE.slice(30)}`,
+      "   EXTRA",
+      "• replying",
+    ]);
+    assert.equal(
+      (await createPaneScreenObserver({
+        run: runner(screen(nextRowSuffixIndented)).run,
+        terminal: HANDLE,
+        layout,
+      }).assessPaneDelivery(LINE)).delivered,
+      "unknown",
+      `${layout}: a suffix on a separate TUI continuation row is not an exact line`,
+    );
+
+    const nextRowSuffixSoft = frame([
+      "older",
+      `${prompt}${LINE.slice(0, 30)}`,
+      LINE.slice(30),
+      " EXTRA",
+      "• replying",
+    ]);
+    assert.equal(
+      (await createPaneScreenObserver({
+        run: runner(screen(nextRowSuffixSoft, {
+          tailRows: rowMetadata(nextRowSuffixSoft, [2, 3]),
+        })).run,
+        terminal: HANDLE,
+        layout,
+      }).assessPaneDelivery(LINE)).delivered,
+      "unknown",
+      `${layout}: a suffix on a separate terminal-soft-wrapped row is not an exact line`,
+    );
+
     const earlier = runner(screen(frame(["older", `${prompt}${withSentSuffix(TEXT, `evt_${"0".repeat(32)}`)}`, "• done"])));
     const stale = await createPaneScreenObserver({ run: earlier.run, terminal: HANDLE, layout }).assessPaneDelivery(LINE);
     assert.equal(stale.delivered, "unknown", `${layout}: an earlier send is not this send`);
@@ -331,6 +384,23 @@ test("PaneScreenObserver: false needs recognized live composer evidence; insuffi
   assert.equal(invalid.reason, "sent_line_invalid");
   assert.equal(invalid.reobserve, false);
   assert.equal(invalidLine.calls.length, 1, "even an invalid classification input consumes exactly one observation");
+
+  const ambiguousTail = codexFrame([`› ${LINE}`, "ordinary unmarked output"]);
+  const ambiguous = await createPaneScreenObserver({
+    run: runner(screen(ambiguousTail, { tailRows: rowMetadata(ambiguousTail) })).run,
+    terminal: HANDLE,
+    layout: "codex",
+  }).assessPaneDelivery(LINE);
+  assert.equal(ambiguous.delivered, "unknown");
+  assert.equal(ambiguous.reason, "delivery_boundary_unavailable");
+  assert.equal(ambiguous.reobserve, false);
+
+  const composerAdjacent = runner(screen(codexFrame([`› ${LINE}`])));
+  assert.equal(
+    (await createPaneScreenObserver({ run: composerAdjacent.run, terminal: HANDLE, layout: "codex" }).assessPaneDelivery(LINE)).delivered,
+    true,
+    "the recognized composer is structural termination evidence even when row metadata is absent",
+  );
 });
 
 /** Render prompt + line at a terminal width. Orca drops trailing whitespace from each rendered row. */
@@ -359,11 +429,21 @@ test("PaneScreenObserver: the exact-line proof keeps the documented 240-byte and
   ] as const) {
     for (const width of [26, 40, 59, 80]) {
       for (const indent of ["", "  "]) {
-        const fake = runner(screen(frame(["older", ...wrapRows(prompt, boundedLine, width, indent), "• replying"])));
+        const exactRows = wrapRows(prompt, boundedLine, width, indent);
+        const exactFrame = frame(["older", ...exactRows, "• replying"]);
+        const exactMetadata = indent
+          ? undefined
+          : rowMetadata(exactFrame, exactRows.slice(1).map((_row, index) => index + 2));
+        const fake = runner(screen(exactFrame, { tailRows: exactMetadata }));
         const result = await createPaneScreenObserver({ run: fake.run, terminal: HANDLE, layout }).assessPaneDelivery(boundedLine);
         assert.equal(result.delivered, true, `${layout}, ${width} columns${indent ? ", indented" : ""}`);
 
-        const stale = runner(screen(frame(["older", ...wrapRows(prompt, staleLine, width, indent), "• replying"])));
+        const staleRows = wrapRows(prompt, staleLine, width, indent);
+        const staleFrame = frame(["older", ...staleRows, "• replying"]);
+        const staleMetadata = indent
+          ? undefined
+          : rowMetadata(staleFrame, staleRows.slice(1).map((_row, index) => index + 2));
+        const stale = runner(screen(staleFrame, { tailRows: staleMetadata }));
         const staleResult = await createPaneScreenObserver({ run: stale.run, terminal: HANDLE, layout }).assessPaneDelivery(boundedLine);
         assert.equal(staleResult.delivered, "unknown", `${layout}, ${width} columns${indent ? ", indented" : ""}: stale id`);
       }
@@ -384,5 +464,31 @@ test("PaneScreenObserver: the exact-line proof keeps the documented 240-byte and
       "unknown",
       `${layout}, 25 columns`,
     );
+  }
+});
+
+test("PaneScreenObserver: wrap-boundary whitespace may be partially elided without weakening exactness", async () => {
+  const spacedLine = withSentSuffix("CLAUDE-CODE xxxxxxxxxxxx  end CLAUDE-CODE", ID);
+
+  for (const [layout, frame, prompt] of [
+    ["claude", claudeFrame, "❯ "],
+    ["codex", codexFrame, "› "],
+    ["grok", grokFrame, "❯ "],
+  ] as const) {
+    for (const indent of ["", "  "]) {
+      const echo = wrapRows(prompt, spacedLine, 27, indent);
+      assert.ok(echo[0]?.endsWith("x"), `${layout}: one of two expected spaces is elided at the first boundary`);
+      assert.match(echo[1] ?? "", /^ {1,3}end/u, `${layout}: the other expected space remains visible`);
+      const tail = frame(["older", ...echo, "• replying"]);
+      const tailRows = indent
+        ? undefined
+        : rowMetadata(tail, echo.slice(1).map((_row, index) => index + 2), { 1: 1 });
+      const assessment = await createPaneScreenObserver({
+        run: runner(screen(tail, { tailRows })).run,
+        terminal: HANDLE,
+        layout,
+      }).assessPaneDelivery(spacedLine);
+      assert.equal(assessment.delivered, true, `${layout}${indent ? ", indented" : ", terminal soft-wrap"}`);
+    }
   }
 });
