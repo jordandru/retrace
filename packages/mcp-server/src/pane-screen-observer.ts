@@ -115,12 +115,24 @@ function failedRead(error: string): ScreenRead {
   return { rows: [], lastLine: "", composerEmpty: false, error };
 }
 
-function terminalPayload(envelope: Record<string, unknown>): Record<string, unknown> | undefined {
+type TerminalPayloadSelection =
+  | { found: false }
+  | { found: true; value: unknown };
+
+function hasOwn(record: Record<string, unknown>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(record, key);
+}
+
+function terminalPayload(envelope: Record<string, unknown>): TerminalPayloadSelection {
   const result = isRecord(envelope.result) ? envelope.result : undefined;
-  if (result && isRecord(result.terminal)) return result.terminal;
-  if (isRecord(envelope.terminal)) return envelope.terminal;
-  if (result && ("tail" in result || "source" in result || "draft" in result)) return result;
-  return undefined;
+  // Choose one legacy envelope shape by field presence before validating it. A malformed preferred shape must not
+  // fall through to a second, valid-looking payload and become positive screen evidence.
+  if (result && hasOwn(result, "terminal")) return { found: true, value: result.terminal };
+  if (hasOwn(envelope, "terminal")) return { found: true, value: envelope.terminal };
+  if (result && ["tail", "source", "draft"].some((key) => hasOwn(result, key))) {
+    return { found: true, value: result };
+  }
+  return { found: false };
 }
 
 function evidenceOf(read: ScreenRead): PaneScreenEvidence {
@@ -157,13 +169,60 @@ function rowShowsPrefix(row: string, text: string): boolean {
   return prefixOffset(row, text) >= 0;
 }
 
-/** Reconstruct only as many visible characters as the exact sent line contains. */
-function continuationRun(body: string[], index: number, text: string, lineLength: number): string {
-  let run = body[index]!.slice(Math.max(0, prefixOffset(body[index]!, text))).slice(0, lineLength);
-  for (let next = index + 1; next < body.length && run.length < lineLength; next++) {
-    run += body[next]!.trimStart().slice(0, lineLength - run.length);
+function transcriptStartContent(row: string, line: string, layout: string | undefined): string | undefined {
+  const prompt = layout === "codex"
+    ? row.match(/^[›»][\t \u00a0]+/u)
+    : layout === "claude" || layout === "grok"
+      ? row.match(/^❯[\t \u00a0]+/u)
+      : undefined;
+  const content = prompt ? row.slice(prompt[0].length) : row;
+  const required = Math.min(PREFIX_MIN_CHARS, line.length);
+  if (content.length < required || content.slice(0, required) !== line.slice(0, required)) return undefined;
+  return content;
+}
+
+function boundaryPositions(line: string, positions: Set<number>): Set<number> {
+  const expanded = new Set(positions);
+  for (const position of positions) {
+    let afterWhitespace = position;
+    while (afterWhitespace < line.length && /^[\t \u00a0]$/u.test(line[afterWhitespace]!)) afterWhitespace++;
+    expanded.add(afterWhitespace);
   }
-  return run;
+  return expanded;
+}
+
+function advancePositions(line: string, positions: Set<number>, fragment: string): Set<number> {
+  const advanced = new Set<number>();
+  if (!fragment.length) return advanced;
+  for (const position of positions) {
+    if (line.startsWith(fragment, position)) advanced.add(position + fragment.length);
+  }
+  return advanced;
+}
+
+/**
+ * Match a rendered transcript line against the exact line supplied to Orca. The first fragment is anchored at column
+ * zero or immediately after this layout's prompt; continuation rows consistently have either no indent or two spaces.
+ * Orca removes trailing row whitespace, so only horizontal whitespace already present in `line` may disappear at a row
+ * boundary. Every visible fragment is compared whole: visible prefixes and suffixes are never truncated away.
+ */
+function matchesWrappedLine(body: string[], index: number, line: string, layout: string | undefined): boolean {
+  const first = transcriptStartContent(body[index]!, line, layout);
+  if (first === undefined) return false;
+
+  for (const indent of ["", "  "] as const) {
+    let positions = advancePositions(line, new Set([0]), first);
+    if (positions.has(line.length)) return true;
+
+    for (let next = index + 1; next < body.length && positions.size; next++) {
+      const row = body[next]!;
+      if (indent && !row.startsWith(indent)) break;
+      const fragment = indent ? row.slice(indent.length) : row;
+      positions = advancePositions(line, boundaryPositions(line, positions), fragment);
+      if (positions.has(line.length)) return true;
+    }
+  }
+  return false;
 }
 
 function composerHolds(lines: string[], text: string, sentEventId: string): boolean {
@@ -196,8 +255,10 @@ export function createPaneScreenObserver(options: PaneScreenObserverOptions): Pa
     }
     if (!isRecord(parsed)) return failedRead("orca-ide terminal read returned invalid JSON");
     if (parsed.ok === false) return failedRead("orca-ide terminal read returned ok false");
-    const terminal = terminalPayload(parsed);
-    if (!terminal) return failedRead("orca-ide terminal read returned no terminal payload");
+    const selected = terminalPayload(parsed);
+    if (!selected.found) return failedRead("orca-ide terminal read returned no terminal payload");
+    if (!isRecord(selected.value)) return failedRead("orca-ide terminal read returned an invalid terminal payload");
+    const terminal = selected.value;
     if (!Array.isArray(terminal.tail) || !terminal.tail.every((line) => typeof line === "string")) {
       return failedRead("orca-ide terminal read returned a non-string tail");
     }
@@ -263,10 +324,10 @@ export function createPaneScreenObserver(options: PaneScreenObserverOptions): Pa
 
     const body = read.rows.slice(0, read.composer.top);
     const prefixRows = body
-      .map((row, index) => (rowShowsPrefix(row, sent.text) ? index : -1))
+      .map((row, index) => (transcriptStartContent(row, line, options.layout) !== undefined ? index : -1))
       .filter((index) => index >= 0);
     if (!prefixRows.length) return unknown("line_not_on_screen");
-    const exactLine = prefixRows.some((index) => continuationRun(body, index, sent.text, line.length) === line);
+    const exactLine = prefixRows.some((index) => matchesWrappedLine(body, index, line, options.layout));
     if (!exactLine) return unknown("stale_prefix_only");
     return { delivered: true, reobserve: false, evidence };
   };

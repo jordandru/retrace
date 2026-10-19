@@ -134,6 +134,61 @@ test("PaneScreenObserver: configuration and raw-read failures are total and neve
     assert.ok(assessment.evidence.error, label);
     assert.equal(fake.calls.length, 1, label);
   }
+
+  for (const malformedTerminal of [0, [], "malformed"] as const) {
+    const conflicting: RunResult = {
+      code: 0,
+      stdout: JSON.stringify({
+        ok: true,
+        result: { terminal: malformedTerminal },
+        terminal: { tail: codexFrame([`› ${LINE}`, "• replying"]), source: "screen" },
+      }),
+      stderr: "",
+    };
+    const label = `malformed preferred terminal ${JSON.stringify(malformedTerminal)}`;
+    const gate = await createPaneScreenObserver({
+      run: runner(conflicting).run,
+      terminal: HANDLE,
+      layout: "codex",
+    }).readComposerGate();
+    assert.equal(gate.empty, false, `${label}: alternate payload cannot make the composer gate positive`);
+    assert.ok(gate.evidence.error, label);
+
+    const assessment = await createPaneScreenObserver({
+      run: runner(conflicting).run,
+      terminal: HANDLE,
+      layout: "codex",
+    }).assessPaneDelivery(LINE);
+    assert.equal(assessment.delivered, "unknown", `${label}: alternate payload cannot prove delivery`);
+    assert.match(assessment.reason, /^post_send_read_failed:/, label);
+  }
+
+  const liveTerminal = { tail: codexFrame([`› ${LINE}`, "• replying"]), source: "screen" };
+  for (const [label, envelope] of [
+    ["top-level terminal", { ok: true, terminal: liveTerminal }],
+    ["direct result terminal", { ok: true, result: liveTerminal }],
+  ] as const) {
+    const read: RunResult = { code: 0, stdout: JSON.stringify(envelope), stderr: "" };
+    const assessment = await createPaneScreenObserver({
+      run: runner(read).run,
+      terminal: HANDLE,
+      layout: "codex",
+    }).assessPaneDelivery(LINE);
+    assert.equal(assessment.delivered, true, `${label}: legacy envelope shape remains supported`);
+  }
+
+  const malformedTopLevel: RunResult = {
+    code: 0,
+    stdout: JSON.stringify({ ok: true, terminal: null, result: liveTerminal }),
+    stderr: "",
+  };
+  const topLevelConflict = await createPaneScreenObserver({
+    run: runner(malformedTopLevel).run,
+    terminal: HANDLE,
+    layout: "codex",
+  }).assessPaneDelivery(LINE);
+  assert.equal(topLevelConflict.delivered, "unknown", "malformed selected top-level terminal cannot fall through to direct result");
+  assert.match(topLevelConflict.reason, /^post_send_read_failed:/);
 });
 
 test("PaneScreenObserver: delivery requires the exact suffixed line above a recognized live composer", async () => {
@@ -148,11 +203,38 @@ test("PaneScreenObserver: delivery requires the exact suffixed line above a reco
     assert.equal(delivered.reobserve, false, layout);
     assert.equal(delivered.evidence.source, "screen", layout);
 
+    for (const [label, altered] of [
+      ["text after an extra prompt-row prefix", `${prompt}PREFIX ${LINE}`],
+      ["text with a same-row suffix", `${prompt}${LINE} EXTRA`],
+      ["text embedded in an ordinary output row", `output ${LINE}`],
+    ] as const) {
+      const alteredRead = runner(screen(frame(["older", altered, "• replying"])));
+      const result = await createPaneScreenObserver({
+        run: alteredRead.run,
+        terminal: HANDLE,
+        layout,
+      }).assessPaneDelivery(LINE);
+      assert.equal(result.delivered, "unknown", `${layout}: ${label}`);
+      assert.equal(result.reobserve, true, `${layout}: ${label}`);
+    }
+
     const wrapped = runner(screen(frame(["older", `${prompt}${LINE.slice(0, 30)}`, `  ${LINE.slice(30)}`, "• replying"])));
     assert.equal(
       (await createPaneScreenObserver({ run: wrapped.run, terminal: HANDLE, layout }).assessPaneDelivery(LINE)).delivered,
       true,
       `${layout}: an exact line may wrap`,
+    );
+
+    const wrappedWithSuffix = runner(screen(frame([
+      "older",
+      `${prompt}${LINE.slice(0, 30)}`,
+      `  ${LINE.slice(30)} EXTRA`,
+      "• replying",
+    ])));
+    assert.equal(
+      (await createPaneScreenObserver({ run: wrappedWithSuffix.run, terminal: HANDLE, layout }).assessPaneDelivery(LINE)).delivered,
+      "unknown",
+      `${layout}: a wrapped line with a visible suffix is not the exact sent line`,
     );
 
     const earlier = runner(screen(frame(["older", `${prompt}${withSentSuffix(TEXT, `evt_${"0".repeat(32)}`)}`, "• done"])));
@@ -251,29 +333,56 @@ test("PaneScreenObserver: false needs recognized live composer evidence; insuffi
   assert.equal(invalidLine.calls.length, 1, "even an invalid classification input consumes exactly one observation");
 });
 
-test("PaneScreenObserver: the exact-line proof keeps the documented 26-column lower bound", async () => {
-  assert.equal(PREFIX_MIN_CHARS, 24);
-  // Use non-repeating, non-whitespace characters so Orca's trailing-whitespace normalization does not erase a
-  // character at a wrap boundary and no continuation row can masquerade as the line's prefix.
-  const boundedText = Array.from({ length: 100 }, (_unused, index) => String.fromCodePoint(0x400 + index)).join("");
-  const boundedLine = withSentSuffix(boundedText, ID);
-  const wrapped = (width: number): string[] => {
-    const rows: string[] = [];
-    for (let rest = boundedLine, prompt = "› "; rest.length; prompt = "") {
-      const room = width - prompt.length;
-      rows.push(`${prompt}${rest.slice(0, room)}`);
-      rest = rest.slice(room);
-    }
-    return rows;
-  };
-  for (const width of [26, 40, 59, 80]) {
-    const fake = runner(screen(codexFrame(["older", ...wrapped(width), "• replying"])));
-    const result = await createPaneScreenObserver({ run: fake.run, terminal: HANDLE, layout: "codex" }).assessPaneDelivery(boundedLine);
-    assert.equal(result.delivered, true, `${width} columns`);
+/** Render prompt + line at a terminal width. Orca drops trailing whitespace from each rendered row. */
+function wrapRows(prompt: string, line: string, width: number, indent = ""): string[] {
+  const rows: string[] = [];
+  for (let rest = line, head = prompt; rest.length; head = indent) {
+    const room = width - head.length;
+    rows.push(`${head}${rest.slice(0, room)}`.replace(/\s+$/u, ""));
+    rest = rest.slice(room);
   }
-  const narrow = runner(screen(codexFrame(["older", ...wrapped(25), "• replying"])));
-  assert.equal(
-    (await createPaneScreenObserver({ run: narrow.run, terminal: HANDLE, layout: "codex" }).assessPaneDelivery(boundedLine)).delivered,
-    "unknown",
-  );
+  return rows;
+}
+
+test("PaneScreenObserver: the exact-line proof keeps the documented 240-byte and 26-column wrap contract", async () => {
+  assert.equal(PREFIX_MIN_CHARS, 24);
+  const boundedText = `CLAUDE-CODE ${"review the PR at its exact head and seal the verdict ".repeat(4).slice(0, 166).trimEnd().padEnd(166, "x")} CLAUDE-CODE`;
+  const boundedLine = withSentSuffix(boundedText, ID);
+  const staleLine = withSentSuffix(boundedText, `evt_${"0".repeat(32)}`);
+  assert.equal(Buffer.byteLength(boundedText, "utf8"), 190);
+  assert.equal(Buffer.byteLength(boundedLine, "utf8"), 240);
+
+  for (const [layout, frame, prompt] of [
+    ["claude", claudeFrame, "❯ "],
+    ["codex", codexFrame, "› "],
+    ["grok", grokFrame, "❯ "],
+  ] as const) {
+    for (const width of [26, 40, 59, 80]) {
+      for (const indent of ["", "  "]) {
+        const fake = runner(screen(frame(["older", ...wrapRows(prompt, boundedLine, width, indent), "• replying"])));
+        const result = await createPaneScreenObserver({ run: fake.run, terminal: HANDLE, layout }).assessPaneDelivery(boundedLine);
+        assert.equal(result.delivered, true, `${layout}, ${width} columns${indent ? ", indented" : ""}`);
+
+        const stale = runner(screen(frame(["older", ...wrapRows(prompt, staleLine, width, indent), "• replying"])));
+        const staleResult = await createPaneScreenObserver({ run: stale.run, terminal: HANDLE, layout }).assessPaneDelivery(boundedLine);
+        assert.equal(staleResult.delivered, "unknown", `${layout}, ${width} columns${indent ? ", indented" : ""}: stale id`);
+      }
+    }
+
+    const corruptBoundary = wrapRows(prompt, boundedLine, 59, "  ");
+    assert.ok(corruptBoundary[1]?.startsWith("  verdict"), `${layout}: fixture loses expected whitespace at the first wrap boundary`);
+    corruptBoundary[1] = `  X${corruptBoundary[1]!.slice(3)}`;
+    const corrupt = runner(screen(frame(["older", ...corruptBoundary, "• replying"])));
+    assert.equal(
+      (await createPaneScreenObserver({ run: corrupt.run, terminal: HANDLE, layout }).assessPaneDelivery(boundedLine)).delivered,
+      "unknown",
+      `${layout}: boundary whitespace elision does not hide a changed continuation character`,
+    );
+    const narrow = runner(screen(frame(["older", ...wrapRows(prompt, boundedLine, 25), "• replying"])));
+    assert.equal(
+      (await createPaneScreenObserver({ run: narrow.run, terminal: HANDLE, layout }).assessPaneDelivery(boundedLine)).delivered,
+      "unknown",
+      `${layout}, 25 columns`,
+    );
+  }
 });

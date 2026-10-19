@@ -145,14 +145,15 @@ with `--enter` and seals `enter_pressed_by: "retrace_send (tool)"` (Codex r2 M4)
    characters, or a prefix of at least 24 ending a row) or its id; or the CLI itself failed (`orca_send_failed`). Only
    `line_sits_in_composer` comes with advice: read the pane, then a human presses Enter as a separately logged keystroke.
    **`true`** only on positive evidence: the read succeeded, Orca returned the rendered screen (`source: screen`), the
-   composer is found and does not hold the line, and a transcript row above it starts a reconstruction that equals the
-   **entire exact suffixed line**, including this send's `[sent-event <id>]`. `PaneScreenObserver.assessPaneDelivery`
-   parses the suffix from the same exact line passed to Orca; a matching prefix plus a nearby current id is not enough.
-   The reconstruction uses the rows after the prefix, leading indentation dropped, joined without a separator (a wrap
-   may split the id), until the run holds as many characters as the line or reaches the composer, and never more: the
-   first row is cut at the line's length and each continuation row at what remains, so an id further along an unrelated
-   row is never read as this line's (Codex r6 M2, strengthened in v1.7). That bound is the line's own
-   length in content characters, so it holds at every width with no row cap
+   composer is found and does not hold the line, and a transcript row above it starts at column zero or immediately
+   after the recognized harness prompt and matches the **entire exact suffixed line**, including this send's
+   `[sent-event <id>]`. `PaneScreenObserver.assessPaneDelivery` parses the suffix from the same exact line passed to
+   Orca; a matching prefix plus a nearby current id is not enough. Every visible fragment is compared whole, so a
+   visible prefix before the line or suffix after it is not discarded. Continuation rows use one measured shape for the
+   whole run (no indentation, or exactly two spaces). Orca omits trailing row whitespace; at a row boundary only
+   horizontal whitespace already present in the expected line may therefore be absent. This is equality of the
+   normalized rendered echo to the supplied line, not a claim that the screen preserves byte-for-byte boundary
+   whitespace. The matcher reaches the exact line's end with no row cap
    (Codex r5 L1: v1.4 capped the run at 12 rows, ceil(240 / 20), which assumed 20 content columns; a two-column prompt
    makes a 240-byte line 13 rows at 20 columns). At width W, with a P-column prompt and I-column indentation, an
    L-character line spans 1 + ⌈(L − (W − P)) / (W − I)⌉ rows when the harness breaks rows at the column limit. The first
@@ -374,14 +375,15 @@ implementation seam, and the protocol already owns the domain distinction.
 | finding | change |
 |---|---|
 | a post-send frame with no `source` could fall through to `delivered: true` | `assessPaneDelivery` requires `source === "screen"` before every layout or delivery decision; absent source is `"unknown"`, `post_send_screen_unavailable: source none` |
-| a matching text prefix plus the current id elsewhere inside the bounded run could prove a corrupted or unrelated line | the observer takes the exact suffixed line passed to Orca, parses its suffix internally, reconstructs only that line's length and requires byte-for-code-unit equality with the whole line; prefix-only evidence remains `stale_prefix_only` |
-| exit-zero `ok: false`, malformed payloads, coercion failures or a rejected read promise could become evidence or escape after the `sent` seal | raw read acquisition is total and validates the envelope, terminal payload and string tail before interpretation; failures become non-positive gate evidence or `post_send_read_failed`, and integration tests require the outcome event after post-seal failures. The configurable empty-composer regex is compiled before sealing. A rejected send promise is normalized to exit 127 and `orca_send_failed` |
+| a matching text prefix plus the current id elsewhere inside the bounded run could prove a corrupted or unrelated line; truncation could hide visible text before or after the expected line | the observer takes the exact suffixed line passed to Orca, parses its suffix internally, anchors it at column zero or directly after the layout prompt, and compares every visible fragment whole. Only expected horizontal whitespace may be elided at a rendered row boundary; arbitrary visible prefixes, suffixes and changed continuation characters remain non-positive evidence |
+| exit-zero `ok: false`, malformed payloads, coercion failures or a rejected read promise could become evidence or escape after the `sent` seal; a malformed preferred payload could fall through to a valid-looking alternate shape | raw read acquisition is total, selects one legacy envelope shape by field presence, then validates that selected terminal payload and its string tail before interpretation; it never falls through after selecting malformed data. Failures become non-positive gate evidence or `post_send_read_failed`, and integration tests require the outcome event after post-seal failures. The configurable empty-composer regex is compiled before sealing. A rejected send promise is normalized to exit 127 and `orca_send_failed` |
 | an unknown layout with a matching `draft` returned `false` and Enter advice | layout recognition now precedes draft/composer classification; unsupported layouts are `"unknown"`, `composer_not_on_screen` |
 | the caller owned both the retry loop and a copied list of retryable reason strings | private `shouldReobserveDelivery` maps the assessment to a typed `reobserve` hint; the caller still owns the single delay and retry count |
 | screen parsing, layout adapters, evidence classification and ledger orchestration lived in one module | `PaneScreenObserver` owns one-read observation and returns a discriminated decision with the evidence from that same frame; `dispatch-mcp.ts` owns orchestration and preserves the existing event, response, reason and CLI-acceptance projections |
 | cross-model review found that the step-4 incarnation check is not atomic with the handle-only send | explicitly documented as a pre-existing transport race. v1.7 does not claim the observer closes it; an atomic expected-incarnation send primitive is a separate decision |
 
-The module matrix exercises Claude, Codex and Grok frames, wrapping and narrow panes, exact/corrupt/stale lines,
+The module matrix exercises Claude, Codex and Grok frames, a valid 240-byte line across whitespace-eliding wraps and
+26/40/59/80-column panes, exact/corrupt/stale lines, visible prefix and suffix boundaries,
 composer and draft evidence, missing/non-screen sources, unknown layouts, failed envelopes, malformed payloads and
 runner rejection. Tool-level tests retain call-order and persisted-outcome coverage; the former private-helper tests are
 removed rather than duplicated.
