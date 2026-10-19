@@ -115,6 +115,11 @@ test("PaneScreenObserver: configuration and raw-read failures are total and neve
   assert.match(rejectedGate.detail, /orca-ide terminal read failed: runner rejected/);
   assert.match(rejectedGate.evidence.error ?? "", /runner rejected/);
 
+  const hostileRejection: OrcaRunner = async () => Promise.reject(Object.create(null));
+  const hostileGate = await createPaneScreenObserver({ run: hostileRejection, terminal: HANDLE, layout: "codex" }).readComposerGate();
+  assert.equal(hostileGate.empty, false);
+  assert.equal(hostileGate.detail, "orca-ide terminal read failed: unknown error");
+
   for (const [label, result] of [
     ["ok false", screen(codexFrame([`› ${LINE}`]), { ok: false })],
     ["missing terminal", { code: 0, stdout: JSON.stringify({ ok: true, result: {} }), stderr: "" }],
@@ -150,6 +155,25 @@ test("PaneScreenObserver: delivery requires the exact suffixed line above a reco
       `${layout}: an exact line may wrap`,
     );
 
+    const earlier = runner(screen(frame(["older", `${prompt}${withSentSuffix(TEXT, `evt_${"0".repeat(32)}`)}`, "• done"])));
+    const stale = await createPaneScreenObserver({ run: earlier.run, terminal: HANDLE, layout }).assessPaneDelivery(LINE);
+    assert.equal(stale.delivered, "unknown", `${layout}: an earlier send is not this send`);
+    assert.equal(stale.reason, "stale_prefix_only", layout);
+
+    for (const composerLine of [`${prompt}${LINE}`, `${prompt}${TEXT.slice(0, 30)}`]) {
+      const sitting = runner(screen(frame(["older"], [composerLine])));
+      const result = await createPaneScreenObserver({ run: sitting.run, terminal: HANDLE, layout }).assessPaneDelivery(LINE);
+      assert.equal(result.delivered, false, `${layout}: positive composer evidence`);
+      assert.equal(result.reason, "line_sits_in_composer", layout);
+    }
+
+    for (const rows of [["older", `${prompt}${LINE}`], ["older", `${prompt}${LINE}`, "]"]]) {
+      const noComposer = runner(screen(rows));
+      const result = await createPaneScreenObserver({ run: noComposer.run, terminal: HANDLE, layout }).assessPaneDelivery(LINE);
+      assert.equal(result.delivered, "unknown", `${layout}: transcript-shaped tail is not a composer`);
+      assert.equal(result.reason, "composer_not_on_screen", layout);
+    }
+
     const corruptedLine = `${TEXT.slice(0, 40)}${"x".repeat(TEXT.length - 40)} [sent-event ${ID}]`;
     const corrupted = runner(screen(frame(["older", `${prompt}${corruptedLine}`, "• replying"])));
     assert.deepEqual(
@@ -169,6 +193,18 @@ test("PaneScreenObserver: delivery requires the exact suffixed line above a reco
       `${layout}: a nearby id in unrelated output is not delivery evidence`,
     );
   }
+
+  const multiRowComposer = runner(screen(claudeFrame(["older"], [
+    "❯ CLAUDE-CODE stand",
+    `  by … [sent-event ${ID.slice(0, 18)}`,
+    `  ${ID.slice(18)}]`,
+  ])));
+  const heldById = await createPaneScreenObserver({ run: multiRowComposer.run, terminal: HANDLE, layout: "claude" }).assessPaneDelivery(LINE);
+  assert.equal(heldById.delivered, false, "Claude's later composer rows can hold the exact send id");
+
+  const draft = runner(screen(codexFrame(["older"]), { draft: TEXT.slice(0, 50) }));
+  const heldByDraft = await createPaneScreenObserver({ run: draft.run, terminal: HANDLE, layout: "codex" }).assessPaneDelivery(LINE);
+  assert.equal(heldByDraft.delivered, false, "Orca draft is positive composer evidence for a known layout");
 });
 
 test("PaneScreenObserver: false needs recognized live composer evidence; insufficient evidence is typed unknown", async () => {
@@ -184,6 +220,16 @@ test("PaneScreenObserver: false needs recognized live composer evidence; insuffi
   assert.equal(absent.delivered, "unknown");
   assert.equal(absent.reason, "post_send_screen_unavailable: source none");
   assert.equal(absent.reobserve, false);
+
+  const unavailableSource = runner(screen(codexFrame([`› ${LINE}`]), { source: "screen-unavailable" }));
+  const unavailable = await createPaneScreenObserver({ run: unavailableSource.run, terminal: HANDLE, layout: "codex" }).assessPaneDelivery(LINE);
+  assert.equal(unavailable.delivered, "unknown");
+  assert.equal(unavailable.reason, "post_send_screen_unavailable: source screen-unavailable");
+
+  const emptyScreen = runner(screen([]));
+  const empty = await createPaneScreenObserver({ run: emptyScreen.run, terminal: HANDLE, layout: "codex" }).assessPaneDelivery(LINE);
+  assert.equal(empty.delivered, "unknown");
+  assert.equal(empty.reason, "post_send_screen_empty");
 
   const unknownLayout = runner(screen(codexFrame([]), { draft: LINE }));
   const unknown = await createPaneScreenObserver({ run: unknownLayout.run, terminal: HANDLE, layout: "cursor" }).assessPaneDelivery(LINE);

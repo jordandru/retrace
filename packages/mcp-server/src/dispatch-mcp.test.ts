@@ -8,7 +8,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildServer } from "./index.js";
 import { SqliteStore } from "./sqlite-store.js";
-import { composerOf, deliveryFromScreen, ENTER_PRESSED_BY, PREFIX_MIN_CHARS, type OrcaRunner, type ScreenRead } from "./dispatch-mcp.js";
+import { ENTER_PRESSED_BY } from "./dispatch-mcp.js";
+import type { OrcaRunner } from "./pane-screen-observer.js";
 
 const HANDLE = "term_11111111-2222-3333-4444-555555555555";
 const HUMAN = "term_99999999-2222-3333-4444-555555555555";
@@ -17,21 +18,22 @@ const INC = "977b50fe-87d7-435e-8e21-1b57da749867";
 const ENV_KEYS = ["RETRACE_ACTOR", "RETRACE_ACTOR_MODEL", "RETRACE_ACTOR_MODEL_SOURCE", "RETRACE_ON_BEHALF_OF", "RETRACE_ACTOR_LOCK", "RETRACE_PROJECT", "RETRACE_PRODUCER_KEY", "RETRACE_PRODUCER_KEY_FILE", "RETRACE_PANES_FILE", "RETRACE_URL", "RETRACE_TOKEN", "RETRACE_DB", "RETRACE_TERMINAL", "ORCA_TERMINAL_HANDLE"];
 
 /** `source`: Orca's field for this read; null leaves it out. A screen without one takes the fake's, else `screen`. */
-type Screen = { lines?: string[]; draft?: string; source?: string | null; fail?: boolean };
-type Fake = { calls: string[][]; screenLines: string[]; draft?: string; source?: string | null; sendOk: boolean; listed: boolean; identity?: string; incarnation?: string; afterSend?: Screen[]; pending?: Screen[]; sentLine?: string };
+type Screen = { lines?: string[]; draft?: string; source?: string | null; fail?: boolean; reject?: boolean; ok?: boolean };
+type Fake = { calls: string[][]; screenLines: string[]; draft?: string; source?: string | null; sendOk: boolean; sendReject?: boolean; listed: boolean; identity?: string; incarnation?: string; afterSend?: Screen[]; pending?: Screen[]; sentLine?: string };
 function fakeOrca(f: Fake): OrcaRunner {
   return async (args) => {
     f.calls.push(args);
     if (args[0] === "terminal" && args[1] === "list") return { code: 0, stdout: JSON.stringify({ ok: true, result: { terminals: f.listed ? [{ handle: HANDLE, title: "Reviewer", agentIdentity: f.identity ?? "codex", incarnationId: f.incarnation ?? INC, writable: true }] : [] } }), stderr: "crash-reporter: noise\n" };
     if (args[0] === "terminal" && args[1] === "read") {
       const s = f.pending?.shift();
+      if (s?.reject) throw new Error("read runner rejected");
       if (s?.fail) return { code: 1, stdout: "", stderr: "read failed" };
       const lines = (s?.lines ?? f.screenLines).map((l) => l.replace("__LINE__", f.sentLine ?? "__LINE__"));
       const draft = s ? s.draft : f.draft;
       const source = s && s.source !== undefined ? s.source : f.source !== undefined ? f.source : "screen";
-      return { code: 0, stdout: JSON.stringify({ ok: true, result: { terminal: { tail: lines, ...(source === null ? {} : { source }), truncated: true, ...(draft ? { draft } : {}) } } }), stderr: "" };
+      return { code: 0, stdout: JSON.stringify({ ok: s?.ok ?? true, result: { terminal: { tail: lines, ...(source === null ? {} : { source }), truncated: true, ...(draft ? { draft } : {}) } } }), stderr: "" };
     }
-    if (args[0] === "terminal" && args[1] === "send") { f.sentLine = args[5]; if (f.afterSend) f.pending = [...f.afterSend]; return f.sendOk ? { code: 0, stdout: JSON.stringify({ ok: true, result: { accepted: true, submission: "observed" } }), stderr: "" } : { code: 1, stdout: "", stderr: "transport failed" }; }
+    if (args[0] === "terminal" && args[1] === "send") { f.sentLine = args[5]; if (f.afterSend) f.pending = [...f.afterSend]; if (f.sendReject) throw new Error("send runner rejected"); return f.sendOk ? { code: 0, stdout: JSON.stringify({ ok: true, result: { accepted: true, submission: "observed" } }), stderr: "" } : { code: 1, stdout: "", stderr: "transport failed" }; }
     return { code: 2, stdout: "", stderr: `unknown ${args.join(" ")}` };
   };
 }
@@ -336,115 +338,6 @@ test("retrace_verify_send: a server that does not know its own terminal cannot b
   } finally { await close(); }
 });
 
-test("composerOf: each harness's composer is found by its own layout, never as the last row (M2 r5)", () => {
-  assert.deepEqual(composerOf(claudeFrame(["older"]), "claude"), { top: 1, lines: ["❯"] });
-  assert.deepEqual(composerOf(codexFrame(["older"]), "codex"), { top: 1, lines: ["› Ask Codex to do anything"] });
-  assert.deepEqual(composerOf(grokFrame(["older"]), "grok"), { top: 1, lines: ["❯"] });
-  assert.deepEqual(composerOf(claudeFrame(["older"], ["❯ CLAUDE-CODE wrapped", "  rest of it"]), "claude")?.lines, ["❯ CLAUDE-CODE wrapped", "  rest of it"]);
-  // The layout must match the harness: a Claude Code frame is not a Codex composer, and an unknown harness has none.
-  assert.equal(composerOf(claudeFrame(["older"]), "codex"), undefined);
-  assert.equal(composerOf(codexFrame(["older"]), "claude"), undefined);
-  assert.equal(composerOf(codexFrame(["older"]), "cursor"), undefined);
-  // A row that ends the screen, or a transcript row with output below it, is not Codex's composer.
-  assert.equal(composerOf(["older", "› CODEX echo"], "codex"), undefined);
-  assert.equal(composerOf(["older", "› CODEX echo", "• Working (3s • esc to interrupt)"], "codex"), undefined);
-  // No rules, no Claude Code composer; one rule is not two.
-  assert.equal(composerOf(["older", "❯ CLAUDE-CODE echo"], "claude"), undefined);
-  assert.equal(composerOf(["older", RULE, "❯"], "claude"), undefined);
-});
-
-test("deliveryFromScreen: false only when the composer itself holds the line; true only above a found composer; everything else unknown (M2 r3, r5)", () => {
-  const id = "evt_" + "b".repeat(32);
-  const LINE = `${PLAIN} [sent-event ${id}]`;
-  const read = (rows: string[], over: Partial<ScreenRead> = {}): ScreenRead => ({ empty: false, last_line: rows.at(-1) ?? "", rows, source: "screen", ...over });
-  for (const [layout, frame, prompt] of [["claude", claudeFrame, "❯ "], ["codex", codexFrame, "› "], ["grok", grokFrame, "❯ "]] as const) {
-    const at = (what: string) => `${layout}: ${what}`;
-    assert.deepEqual(deliveryFromScreen(read(frame(["older", `${prompt}${LINE}`, "• replying"])), PLAIN, id, layout), { delivered: true }, at("echoed above the composer, composer empty"));
-    assert.deepEqual(deliveryFromScreen(read(frame(["older", `${prompt}${PLAIN.slice(0, 30)}`, `  ${PLAIN.slice(30)} [sent-event ${id}]`, "• replying"])), PLAIN, id, layout), { delivered: true }, at("echo wrapped, the id on the continuation row"));
-    assert.deepEqual(deliveryFromScreen(read(frame(["older", `${prompt}${PLAIN} [sent-event ${id.slice(0, 20)}`, `${id.slice(20)}]`, "• replying"])), PLAIN, id, layout), { delivered: true }, at("the id split across a wrap"));
-    // r3 M2: a transcript row with the same words and no id, or another id, is some earlier send.
-    assert.deepEqual(deliveryFromScreen(read(frame(["older", `${prompt}${PLAIN} [sent-event evt_${"0".repeat(32)}]`, "• done"])), PLAIN, id, layout), { delivered: "unknown", reason: "stale_prefix_only" }, at("another id"));
-    assert.deepEqual(deliveryFromScreen(read(frame(["older", `${prompt}${PLAIN}`, "• done"])), PLAIN, id, layout), { delivered: "unknown", reason: "stale_prefix_only" }, at("no id"));
-    assert.deepEqual(deliveryFromScreen(read(frame(["older"])), PLAIN, id, layout), { delivered: "unknown", reason: "line_not_on_screen" }, at("the line nowhere: lag or loss"));
-    // r6 M2 (Codex's case): a stale prefix of this line, then an unrelated overlong row carrying this send's id past the
-    // line's length. The run stops at the bound, so that id is not this line's: unknown, never true.
-    assert.deepEqual(deliveryFromScreen(read(frame(["older", `${prompt}${PLAIN.slice(0, 30)}`, `• ${"x".repeat(LINE.length)} ${id}`])), PLAIN, id, layout), { delivered: "unknown", reason: "stale_prefix_only" }, at("a stale prefix, then this id past the bound in an unrelated row"));
-    // The first row is cut at the bound too: one wide row holds an earlier send of the same words, then this id past the line's length.
-    assert.deepEqual(deliveryFromScreen(read(frame(["older", `${prompt}${PLAIN} [sent-event evt_${"0".repeat(32)}] ${"y".repeat(8)} ${id}`])), PLAIN, id, layout), { delivered: "unknown", reason: "stale_prefix_only" }, at("one wide row: an earlier send, then this id past the bound"));
-    // Positive composer evidence: the composer row itself holds the line, whole, cut off, or wrapped.
-    assert.deepEqual(deliveryFromScreen(read(frame(["older"], [`${prompt}${LINE}`])), PLAIN, id, layout), { delivered: false, reason: "line_sits_in_composer" }, at("sits"));
-    assert.deepEqual(deliveryFromScreen(read(frame(["older"], [`${prompt}${PLAIN.slice(0, 30)}`])), PLAIN, id, layout), { delivered: false, reason: "line_sits_in_composer" }, at("sits, cut off by the width"));
-    assert.deepEqual(deliveryFromScreen(read(frame([`${prompt}${PLAIN} [sent-event evt_${"0".repeat(32)}]`, "• done"], [`${prompt}${LINE}`])), PLAIN, id, layout), { delivered: false, reason: "line_sits_in_composer" }, at("an earlier send above, this one in the composer"));
-  }
-  // Claude Code's multi-row composer: only the id is visible on a later row (the first row too narrow for the prefix).
-  assert.deepEqual(deliveryFromScreen(read(claudeFrame(["older"], ["❯ CLAUDE-CODE stand", `  by … [sent-event ${id.slice(0, 18)}`, `  ${id.slice(18)}]`])), PLAIN, id, "claude"), { delivered: false, reason: "line_sits_in_composer" });
-  // Orca's draft is composer text by definition.
-  assert.deepEqual(deliveryFromScreen(read(codexFrame(["older"]), { draft: PLAIN.slice(0, 50) }), PLAIN, id, "codex"), { delivered: false, reason: "line_sits_in_composer" });
-  // Codex's round-5 probes: an echo that ends the screen, and an unrelated last row of only `]`, are not composer evidence.
-  for (const layout of ["claude", "codex", "grok"]) {
-    assert.deepEqual(deliveryFromScreen(read(["older", `> ${LINE}`]), PLAIN, id, layout), { delivered: "unknown", reason: "composer_not_on_screen" }, `${layout}: echo ends the screen`);
-    assert.deepEqual(deliveryFromScreen(read(["older", `› ${LINE}`]), PLAIN, id, layout), { delivered: "unknown", reason: "composer_not_on_screen" }, `${layout}: an echo drawn like Codex's prompt ends the screen`);
-    assert.deepEqual(deliveryFromScreen(read(["older", `> ${LINE}`, "]"]), PLAIN, id, layout), { delivered: "unknown", reason: "composer_not_on_screen" }, `${layout}: unrelated last row ]`);
-  }
-  assert.deepEqual(deliveryFromScreen(read(["older", `› ${LINE}`, "• Running git status"]), PLAIN, id, "codex"), { delivered: "unknown", reason: "composer_not_on_screen" }, "Codex's composer replaced by output or a dialog: unknown, not sitting");
-  assert.deepEqual(deliveryFromScreen(read(codexFrame(["older", `› ${LINE}`])), PLAIN, id, "cursor"), { delivered: "unknown", reason: "composer_not_on_screen" }, "a harness whose layout is not known");
-  assert.deepEqual(deliveryFromScreen(read(["x"], { error: "orca-ide terminal read exited 1" }), PLAIN, id, "codex"), { delivered: "unknown", reason: "post_send_read_failed: orca-ide terminal read exited 1" });
-  assert.deepEqual(deliveryFromScreen(read(codexFrame([]), { source: "screen-unavailable" }), PLAIN, id, "codex"), { delivered: "unknown", reason: "post_send_screen_unavailable: source screen-unavailable" });
-  assert.deepEqual(deliveryFromScreen(read([]), PLAIN, id, "codex"), { delivered: "unknown", reason: "post_send_screen_empty" });
-});
-
-/** The rows a terminal `width` columns wide shows for `prompt + line`, continuation rows led by `indent`, breaking at the
- *  column limit, trailing whitespace dropped as `readComposer` drops it. */
-function wrapRows(prompt: string, line: string, width: number, indent = ""): string[] {
-  const rows: string[] = [];
-  for (let rest = line, head = prompt; rest.length; head = indent) {
-    const room = width - head.length;
-    rows.push(`${head}${rest.slice(0, room)}`.replace(/\s+$/u, ""));
-    rest = rest.slice(room);
-  }
-  return rows;
-}
-
-test("deliveryFromScreen: a 240-byte line is proved delivered from 26 columns (a two-column prompt plus 24 characters), whatever the row count; narrower is unknown (L1 r4, r5)", () => {
-  const id = "evt_3f9c2a7b1d8e4f60a5b7c9d1e3f5a7b9";
-  const MAX = `CLAUDE-CODE ${"review the PR at its exact head and seal the verdict ".repeat(4).slice(0, 166).trimEnd().padEnd(166, "x")} CLAUDE-CODE`;
-  const line = `${MAX} [sent-event ${id}]`;
-  assert.equal(Buffer.byteLength(MAX, "utf8"), 190); assert.equal(Buffer.byteLength(line, "utf8"), 240);
-  const read = (rows: string[]): ScreenRead => ({ empty: false, last_line: rows.at(-1)!, rows, source: "screen" });
-  const MIN = 2 + PREFIX_MIN_CHARS;
-  assert.equal(MIN, 26, "Codex measured 26");
-  // The row count the scan must follow is the line's own: 1 + ceil((240 - (W - 2)) / (W - I)); at 20 columns it is 13, past v1.4's 12-row cap.
-  assert.equal(wrapRows("› ", line, 20).length, 13);
-  assert.equal(wrapRows("› ", line, MIN).length, 1 + Math.ceil((240 - (MIN - 2)) / MIN));
-  for (const [layout, frame, echoPrompt, composerPrompt] of [["claude", claudeFrame, "❯ ", "❯ "], ["codex", codexFrame, "› ", "› "]] as const) {
-    for (const width of [MIN, 40, 59, 80] as number[]) for (const indent of ["", "  "]) {
-      const at: string = `${layout}, ${width} columns${indent ? ", indented continuation rows" : ""}`;
-      const echo = wrapRows(echoPrompt, line, width, indent);
-      assert.deepEqual(deliveryFromScreen(read(frame(["older output", ...echo, "• working"])), MAX, id, layout), { delivered: true }, `${at}: echoed`);
-      const stale = wrapRows(echoPrompt, `${MAX} [sent-event evt_${"0".repeat(32)}]`, width, indent);
-      assert.deepEqual(deliveryFromScreen(read(frame(["older output", ...stale, "• done"])), MAX, id, layout), { delivered: "unknown", reason: "stale_prefix_only" }, `${at}: an earlier send of the same words`);
-      // A line still in the composer wraps there, its rows after the first indented under the prompt.
-      if (!indent) continue;
-      const sitting = wrapRows(composerPrompt, line, width, "  ");
-      assert.deepEqual(deliveryFromScreen(read(frame(["older output"], sitting)), MAX, id, layout), { delivered: false, reason: "line_sits_in_composer" }, `${at}: still in the composer`);
-      assert.deepEqual(deliveryFromScreen(read(frame(["older output", ...stale, "• done"], sitting)), MAX, id, layout), { delivered: false, reason: "line_sits_in_composer" }, `${at}: an earlier send above, this one in the composer`);
-    }
-    // Below 26 columns the first row cannot show 24 characters after a two-column prompt: never true.
-    for (const width of [MIN - 1, 20]) {
-      assert.deepEqual(deliveryFromScreen(read(frame(["older output", ...wrapRows(echoPrompt, line, width), "• working"])), MAX, id, layout), { delivered: "unknown", reason: "line_not_on_screen" }, `${layout}, ${width} columns: echoed, unproven`);
-    }
-  }
-  // Claude Code at 25 columns, the line in the composer: the id on its later rows is still composer evidence.
-  assert.deepEqual(deliveryFromScreen(read(claudeFrame(["older output"], wrapRows("❯ ", line, MIN - 1, "  "))), MAX, id, "claude"), { delivered: false, reason: "line_sits_in_composer" });
-  // Codex at 25 columns, the line in the composer: only the first composer row is Codex's, and it is too narrow: unknown, never true.
-  assert.equal(deliveryFromScreen(read(codexFrame(["older output"], wrapRows("› ", line, MIN - 1, "  "))), MAX, id, "codex").delivered, "unknown");
-  // A Codex composer whose wrapped rows start at column 0 is not found: unknown, never false.
-  assert.deepEqual(deliveryFromScreen(read(codexFrame(["older output"], wrapRows("› ", line, 40))), MAX, id, "codex"), { delivered: "unknown", reason: "composer_not_on_screen" });
-  // r4's bracket case (only `]` on the composer's last row) is still the composer's: false. The same `]` outside a composer is not (above).
-  const bracket = [`❯ ${line.slice(0, 120)}`, `  ${line.slice(120, 239)}`, "  ]"];
-  assert.deepEqual(deliveryFromScreen(read(claudeFrame(["older output"], bracket)), MAX, id, "claude"), { delivered: false, reason: "line_sits_in_composer" });
-});
-
 test("retrace_send: a failed orca send is not delivered; a stuck line is not delivered; an unreadable or lagging screen is unknown (M2)", async () => {
   const f: Fake = { calls: [], screenLines: codexFrame([]), sendOk: false, listed: true };
   const { store, client, rootId, close } = await setup(f, registry);
@@ -493,6 +386,47 @@ test("retrace_send: a failed orca send is not delivered; a stuck line is not del
     f.afterSend = [{ lines: [] }];
     const empty = await client.callTool({ name: "retrace_send", arguments: { to: HANDLE, receiver: "codex", text: PLAIN, caused_by: rootId } });
     assert.equal((empty.structuredContent as any).delivered, "unknown"); assert.equal((empty.structuredContent as any).outcome.reason, "post_send_screen_empty");
+  } finally { await close(); }
+});
+
+test("retrace_send: post-seal source/envelope/runner failures are unknown and every read or send rejection gets an outcome", async () => {
+  const f: Fake = { calls: [], screenLines: codexFrame([]), sendOk: true, listed: true };
+  const { store, client, rootId, close } = await setup(f, registry);
+  const send = () => client.callTool({ name: "retrace_send", arguments: { to: HANDLE, receiver: "codex", text: PLAIN, caused_by: rootId } });
+  try {
+    f.afterSend = [{ lines: codexFrame(["› __LINE__", "• replying"]), source: null }];
+    const noSource = await send();
+    const missing = noSource.structuredContent as any;
+    assert.notEqual(noSource.isError, true, errText(noSource));
+    assert.equal(missing.delivered, "unknown");
+    assert.equal(missing.outcome.reason, "post_send_screen_unavailable: source none");
+    assert.ok(await store.get(missing.outcome_event_id), "missing source still records the outcome");
+
+    f.afterSend = [{ lines: codexFrame(["› __LINE__", "• replying"]), ok: false }];
+    const failedEnvelope = await send();
+    const envelope = failedEnvelope.structuredContent as any;
+    assert.notEqual(failedEnvelope.isError, true, errText(failedEnvelope));
+    assert.equal(envelope.delivered, "unknown");
+    assert.match(envelope.outcome.reason, /^post_send_read_failed:.*ok false/);
+    assert.ok(await store.get(envelope.outcome_event_id), "ok:false still records the outcome");
+
+    f.afterSend = [{ reject: true }];
+    const rejectedRead = await send();
+    const read = rejectedRead.structuredContent as any;
+    assert.notEqual(rejectedRead.isError, true, errText(rejectedRead));
+    assert.equal(read.delivered, "unknown");
+    assert.match(read.outcome.reason, /^post_send_read_failed:.*read runner rejected/);
+    assert.ok(await store.get(read.outcome_event_id), "a rejected post-send read still records the outcome");
+
+    f.afterSend = [{ lines: codexFrame([]) }];
+    f.sendReject = true;
+    const rejectedSend = await send();
+    const sent = rejectedSend.structuredContent as any;
+    assert.notEqual(rejectedSend.isError, true, errText(rejectedSend));
+    assert.equal(sent.delivered, false);
+    assert.equal(sent.outcome.accepted, false);
+    assert.equal(sent.outcome.reason, "orca_send_failed: exit 127");
+    assert.ok(await store.get(sent.outcome_event_id), "a rejected send call still records the outcome");
   } finally { await close(); }
 });
 

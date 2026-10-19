@@ -8,9 +8,10 @@
  * "kind": "agent", "agent_identity": "codex", "incarnation_id": "<Orca incarnationId>" } }`. A handle that is not
  * listed, or is listed as kind "human", is refused: the registry is how the operator says which panes are
  * agent-dispatch targets, and "never send into a human's pane" (agent-ops 18) is enforced by that list, not by guessing
- * from a title. An agent entry is bound to Orca's live `agentIdentity` AND `incarnationId` for the handle (Codex, PR 222
- * r1 M4, r2 M3): a pane relaunched or reused under the same handle has a new incarnation and is refused until the
- * operator re-registers it.
+ * from a title. Preflight binds an agent entry to Orca's then-live `agentIdentity` AND `incarnationId` for the handle
+ * (Codex, PR 222 r1 M4, r2 M3): a pane relaunched or reused before that check has a new incarnation and is refused until
+ * the operator re-registers it. Orca's handle-only send is not an atomic incarnation-conditional operation; the
+ * residual check-to-send race is documented in dispatch-protocol.md v1.7 and is not an observer-layer guarantee.
  */
 import { z } from "zod";
 import { spawn } from "node:child_process";
@@ -25,8 +26,9 @@ import {
   resolveBriefName, expandHome, PANE_MESSAGE_MAX_BYTES, type SentVerification,
 } from "@retrace-dev/core";
 import { AuditActor } from "./audit-mcp.js";
+import { createPaneScreenObserver, type OrcaRunner, type PaneDeliveryAssessment } from "./pane-screen-observer.js";
 
-export type OrcaRunner = (args: string[]) => Promise<{ code: number; stdout: string; stderr: string }>;
+export type { OrcaRunner } from "./pane-screen-observer.js";
 
 export type PaneRegistryEntry = { seat: string; kind: "agent" | "human"; agent_identity?: string; incarnation_id?: string; empty_composer?: string; note?: string };
 export type PaneRegistry = Record<string, PaneRegistryEntry>;
@@ -58,7 +60,7 @@ export class DispatchRefusal extends Error {
 
 /** The tool always sends with `--enter`; nobody else presses it on this path (Codex, PR 222 r2, M4). */
 export const ENTER_PRESSED_BY = "retrace_send (tool)";
-/** What the sent event's `pane_binding` says when the registry's incarnation id matched Orca's live one. */
+/** Historical wire value: records the successful identity/incarnation preflight, not an atomic conditional send. */
 export const PANE_BINDING = "handle+identity+incarnation";
 
 export function defaultRegistryPath(env: NodeJS.ProcessEnv = process.env): string {
@@ -108,172 +110,9 @@ function parseJson(stdout: string): unknown {
   try { return JSON.parse(stdout); } catch { return undefined; }
 }
 
-/** The empty composer row of each harness this environment runs, as `composerOf` returns it: Claude Code and Grok `❯`
- *  (Claude Code adds a NBSP), Codex `›` (`»` in older builds) alone or with its placeholder. */
-const DEFAULT_EMPTY_COMPOSER = "^(?:❯|[›»](?: Ask Codex to do anything)?)[\\s\\u00a0]*$";
-
-/** A composer found on a rendered screen: `top` is the first row of it or its frame (everything above is the transcript);
- *  `lines` are its rows with the frame removed, the first one starting with the harness's prompt. */
-export type Composer = { top: number; lines: string[] };
-
-const RULE_ROW_RE = /^─{8,}$/u;
-const PROMPT_ROW_RE = /^❯(?:[\s\u00a0]|$)/u;
-const CODEX_PROMPT_ROW_RE = /^[›»](?:[\s\u00a0]|$)/u;
-const BOX_TOP_RE = /^\s*╭─/u;
-const BOX_BOTTOM_RE = /^\s*╰─/u;
-
-/**
- * Where the harness's composer is on a rendered screen, or undefined when the screen does not show it the way that harness
- * draws it. A row is in the composer only on the layout's own evidence, never because it is the last row (Codex, PR 222
- * r5 M2). `layout` is Orca's `agentIdentity` for the pane, which the registry entry must match. Measured on this host's
- * panes, 2026-10-12, with `orca-ide terminal read --screen`; on all three the last rendered row is a status row:
- *  - `claude` (Claude Code): `❯` between two rules of `─`, status rows below the second rule. The composer is every row
- *    between the last two rules, and its first row starts with `❯`.
- *  - `codex`: `› Ask Codex to do anything` at column 0, then indented status rows (`  <model> · <dir> · …`, `  ? for
- *    shortcuts`). The composer row is the last row that starts at column 0; it must start with `›` (or `»`) and have at
- *    least one row below it. Codex's own output rows start at column 0 (`• …`), so a transcript row followed by output is
- *    not taken for the composer, and neither is a row that ends the screen.
- *  - `grok`: `│ ❯` inside a box drawn with `╭─` and `╰─`, a footer below. The composer is the last box's inner rows.
- * Any other layout has no composer this code can find: the gate refuses and delivery stays `"unknown"`.
- */
-export function composerOf(rows: string[], layout: string | undefined): Composer | undefined {
-  if (layout === "claude") {
-    const rules = rows.flatMap((r, i) => (RULE_ROW_RE.test(r.trim()) ? [i] : []));
-    const [top, bottom] = rules.slice(-2);
-    if (top === undefined || bottom === undefined || bottom - top < 2 || !PROMPT_ROW_RE.test(rows[top + 1]!)) return undefined;
-    return { top, lines: rows.slice(top + 1, bottom) };
-  }
-  if (layout === "codex") {
-    let k = rows.length - 1;
-    while (k >= 0 && /^[\s\u00a0]/u.test(rows[k]!)) k--;
-    if (k < 0 || k === rows.length - 1 || !CODEX_PROMPT_ROW_RE.test(rows[k]!)) return undefined;
-    return { top: k, lines: [rows[k]!] };
-  }
-  if (layout === "grok") {
-    let top = -1;
-    for (let i = rows.length - 1; i >= 0 && top < 0; i--) if (BOX_TOP_RE.test(rows[i]!)) top = i;
-    const bottom = top < 0 ? -1 : rows.findIndex((r, i) => i > top && BOX_BOTTOM_RE.test(r));
-    if (top < 0 || bottom < 0 || bottom - top < 2) return undefined;
-    const lines = rows.slice(top + 1, bottom).map((r) => r.replace(/^\s*│[\s\u00a0]?/u, "").replace(/[\s\u00a0]*│$/u, ""));
-    if (!PROMPT_ROW_RE.test(lines[0]!)) return undefined;
-    return { top, lines };
-  }
-  return undefined;
-}
-
-export type ScreenRead = {
-  /** The read is a live rendered screen (`source` is `screen`), the harness's composer is on it (`composerOf`), is one
-   *  row matching its empty form, and there is no draft. False for any other source or none (Codex, PR 222 r6 M1: a
-   *  `screen-unavailable` read can carry an old idle frame), when nothing rendered, or when no composer was found. */
-  empty: boolean;
-  last_line: string;
-  /** Every rendered non-blank row, in order. */
-  rows: string[];
-  /** The composer's first row as found (`composerOf`), absent when no composer was found. */
-  composer_line?: string;
-  draft?: string;
-  /** Orca's `source`: `screen` is the rendered frame; `stream` or `screen-unavailable` is accumulated output, not what the pane shows. */
-  source?: string;
-  error?: string;
-};
-
-export async function readComposer(run: OrcaRunner, handle: string, layout: string | undefined, emptyPattern = DEFAULT_EMPTY_COMPOSER): Promise<ScreenRead> {
-  const r = await run(["terminal", "read", "--terminal", handle, "--screen", "--json"]);
-  const j = parseJson(r.stdout) as any;
-  if (r.code !== 0 || !j) return { empty: false, last_line: "", rows: [], error: `orca-ide terminal read exited ${r.code}: ${(r.stderr || r.stdout).trim().slice(0, 200)}` };
-  const term = j.result?.terminal ?? j.terminal ?? j.result ?? {};
-  const tail: string[] = Array.isArray(term.tail) ? term.tail.map((l: unknown) => String(l)) : [];
-  const rows = tail.map((l) => l.replace(/\s+$/u, "")).filter((l) => l.trim().length > 0);
-  const last = rows.length ? rows[rows.length - 1]! : "";
-  const draft = typeof term.draft === "string" && term.draft.length ? term.draft : undefined;
-  const source = typeof term.source === "string" ? term.source : undefined;
-  // The gate reads the composer itself (Codex, PR 222 r5 M2): the last rendered row is a status row on every harness here.
-  const composer = composerOf(rows, layout);
-  // Only the rendered frame shows what the pane shows now (Codex, PR 222 r6 M1): `screen-unavailable` or `stream` is
-  // accumulated output that can hold an old idle frame, and a read with no source proves nothing.
-  const empty = source === "screen" && composer !== undefined && composer.lines.length === 1 && new RegExp(emptyPattern, "u").test(composer.lines[0]!) && !draft;
-  return { empty, last_line: last, rows, ...(composer ? { composer_line: composer.lines[0]! } : {}), ...(draft ? { draft } : {}), ...(source !== undefined ? { source } : {}) };
-}
-
-/** What a gate read saw, for a refusal: a source that is not the live screen, then the composer row, or that none was
- *  found and the last row. */
-function composerDetail(read: ScreenRead, layout: string | undefined): string {
-  if (read.error) return read.error;
-  const live = read.source === "screen" ? "" : `not a live screen (source ${read.source ?? "none"}); `;
-  const seen = read.composer_line !== undefined ? `composer ${JSON.stringify(read.composer_line)}` : `no ${layout ?? "known"} composer on screen (last line ${JSON.stringify(read.last_line)})`;
-  return `${live}${seen}${read.draft ? ` draft ${JSON.stringify(read.draft)}` : ""}`;
-}
-
-/** How much of the text a row must show to count as showing it: its first 40 characters anywhere in the row, or a prefix
- *  of at least this many characters ending the row (the screen cut the line off, or wrapped it). */
-export const PREFIX_MIN_CHARS = 24;
-/** Does a rendered row show (the start of) our text? A prefix alone never proves THIS send: see `deliveryFromScreen`. */
-function rowShowsPrefix(row: string, text: string): boolean {
-  return prefixOffset(row, text) >= 0;
-}
-/** Where our text starts in a row that shows its prefix (the two tests above), or -1. */
-function prefixOffset(row: string, text: string): number {
-  const i = row.indexOf(text.slice(0, 40));
-  if (i >= 0) return i;
-  for (let n = Math.min(text.length, 120); n >= PREFIX_MIN_CHARS; n--) if (row.endsWith(text.slice(0, n))) return row.length - n;
-  return -1;
-}
-
-/**
- * The wrapped run that starts at `body[i]`: that row from where our text starts, then each continuation row with its
- * leading indentation dropped (harnesses indent wrapped rows), joined without a separator (a wrap may split the id), until
- * the run holds as many characters as the whole line or the body ends at the composer, and never more: the first row is
- * cut at the line's length and each continuation row is cut to what remains, so the id search never reads past the line
- * (Codex, PR 222 r6 M2: a whole last row appended past the bound let an id in an unrelated overlong row count as this
- * send's). The bound is the line's own length in content characters, so it holds at every width and needs no row count
- * (Codex, PR 222 r5 L1: v1.4's 12-row cap assumed 20 content columns, and a two-column prompt makes a 240-byte line 13
- * rows at width 20). At width W, with a P-column prompt and I-column indentation, an L-character line spans
- * 1 + ⌈(L − (W − P)) / (W − I)⌉ rows when the harness breaks rows at the column limit.
- */
-function continuationRun(body: string[], i: number, text: string, lineLength: number): string {
-  let run = body[i]!.slice(Math.max(0, prefixOffset(body[i]!, text))).slice(0, lineLength);
-  for (let j = i + 1; j < body.length && run.length < lineLength; j++) run += body[j]!.trimStart().slice(0, lineLength - run.length);
-  return run;
-}
-
-/** Do these composer rows hold this send's line: a row shows the start of its text, or the rows joined show its id. */
-function composerHolds(lines: string[], text: string, sentEventId: string): boolean {
-  return lines.some((l) => rowShowsPrefix(l, text)) || lines.map((l) => l.trimStart()).join("").includes(sentEventId);
-}
-
-export type Delivery = { delivered: true | false | "unknown"; reason?: string };
-
-/**
- * What the post-send screen proves (Codex, PR 222 r1 M2, r2 M2, r3 M2, r5 M2). Every answer rests on the harness's
- * composer as its layout draws it (`composerOf`), never on which row happens to be last:
- *  - `false`, `line_sits_in_composer`, only on positive evidence that the line is still in the composer: Orca's `draft`
- *    or the composer's own rows show the start of this send's text or its id;
- *  - `true` only when the composer is found and does not hold the line, and a transcript row above it shows the start of
- *    the text **with this send's id** on that row or in its continuation run, which never reads past the line's own
- *    length (`continuationRun`). A row with the text and
- *    no id, or another id, is some earlier send of the same words: `"unknown"`, `stale_prefix_only`;
- *  - `"unknown"`, with the reason, for everything else: a read error, a frame that is not the rendered screen or is empty,
- *    no composer on screen (`composer_not_on_screen`: an echo that ends the screen, a dialog in the composer's place, a
- *    harness whose layout this code does not know), or no row above the composer showing the text (`line_not_on_screen`;
- *    also a pane too narrow for a row to show `PREFIX_MIN_CHARS` of the text after the prompt).
- * Only `false` comes with advice to press Enter; `"unknown"` says to read the pane.
- */
-export function deliveryFromScreen(after: ScreenRead, text: string, sentEventId: string, layout: string | undefined): Delivery {
-  if (after.error) return { delivered: "unknown", reason: `post_send_read_failed: ${after.error}` };
-  if (after.source !== undefined && after.source !== "screen") return { delivered: "unknown", reason: `post_send_screen_unavailable: source ${after.source}` };
-  if (!after.rows.length) return { delivered: "unknown", reason: "post_send_screen_empty" };
-  if (after.draft !== undefined && composerHolds([after.draft], text, sentEventId)) return { delivered: false, reason: "line_sits_in_composer" };
-  const composer = composerOf(after.rows, layout);
-  if (!composer) return { delivered: "unknown", reason: "composer_not_on_screen" };
-  if (composerHolds(composer.lines, text, sentEventId)) return { delivered: false, reason: "line_sits_in_composer" };
-  const line = withSentSuffix(text, sentEventId);
-  const body = after.rows.slice(0, composer.top);
-  const prefixRows = body.map((row, i) => (rowShowsPrefix(row, text) ? i : -1)).filter((i) => i >= 0);
-  if (!prefixRows.length) return { delivered: "unknown", reason: "line_not_on_screen" };
-  // The id may sit on the same row or anywhere in the continuation run after a wrap (possibly split across a wrap).
-  const withId = prefixRows.some((i) => continuationRun(body, i, text, line.length).includes(sentEventId));
-  if (!withId) return { delivered: "unknown", reason: "stale_prefix_only" };
-  return { delivered: true };
+function errorMessage(value: unknown): string {
+  if (value instanceof Error) return value.message;
+  try { return String(value); } catch { return "unknown error"; }
 }
 
 async function listedTerminal(run: OrcaRunner, handle: string): Promise<{ found: boolean; title?: string; agentIdentity?: string; incarnationId?: string; writable?: boolean; error?: string }> {
@@ -355,11 +194,12 @@ export function registerDispatchTools(server: McpServer, deps: DispatchDeps): vo
         throw new DispatchRefusal("incarnation_mismatch", `${args.to} is registered as incarnation ${entry.incarnation_id} but Orca lists ${listed.incarnationId ?? "(no incarnationId)"}; the pane was relaunched or reused since it was registered; re-register it after reading the pane`);
       // The composer is found by the harness's own layout (the registry's agent_identity, equal to Orca's live label above).
       const layout = entry.agent_identity;
-      const first = await readComposer(run, args.to, layout, entry.empty_composer);
-      if (!first.empty) throw new DispatchRefusal("composer_not_empty", `first read: ${composerDetail(first, layout)}`);
+      const observer = createPaneScreenObserver({ run, terminal: args.to, layout, emptyComposer: entry.empty_composer });
+      const first = await observer.readComposerGate();
+      if (!first.empty) throw new DispatchRefusal("composer_not_empty", `first read: ${first.detail}`);
       await sleep(gateMs);
-      const second = await readComposer(run, args.to, layout, entry.empty_composer);
-      if (!second.empty) throw new DispatchRefusal("composer_not_empty", `second read: ${composerDetail(second, layout)}`);
+      const second = await observer.readComposerGate();
+      if (!second.empty) throw new DispatchRefusal("composer_not_empty", `second read: ${second.detail}`);
       const textSha = await paneTextSha256(args.text);
       const sentInput = EventInputSchema.parse({
         project: deps.writeProject(args.project),
@@ -391,32 +231,39 @@ export function registerDispatchTools(server: McpServer, deps: DispatchDeps): vo
       const line = withSentSuffix(args.text, sent.id);
       if (Buffer.byteLength(line, "utf8") > PANE_MESSAGE_MAX_BYTES) throw new Error(`internal: ${Buffer.byteLength(line, "utf8")} bytes exceeds ${PANE_MESSAGE_MAX_BYTES} after the suffix`);
       // One more look right before Enter: the ledger write took time and a human may have started typing.
-      const final = await readComposer(run, args.to, layout, entry.empty_composer);
+      const final = await observer.readComposerGate();
       let outcome: Record<string, unknown>;
-      let delivery: Delivery;
+      let delivery: { delivered: true | false | "unknown"; reason?: string };
       if (!final.empty) {
+        const evidence = final.evidence;
         delivery = { delivered: false, reason: "composer_not_empty" };
-        outcome = { sent: false, reason: "composer_not_empty", last_line: final.last_line, ...(final.source !== "screen" ? { source: final.source ?? "none" } : {}), ...(final.composer_line !== undefined ? { composer_line: final.composer_line } : {}), ...(final.draft ? { draft: final.draft } : {}) };
+        outcome = { sent: false, reason: "composer_not_empty", last_line: evidence.last_line, ...(evidence.source !== "screen" ? { source: evidence.source ?? "none" } : {}), ...(evidence.composer_line !== undefined ? { composer_line: evidence.composer_line } : {}), ...(evidence.draft ? { draft: evidence.draft } : {}) };
       } else {
-        const r = await run(["terminal", "send", "--terminal", args.to, "--text", line, "--enter", "--json"]);
+        let r: Awaited<ReturnType<OrcaRunner>>;
+        try {
+          r = await run(["terminal", "send", "--terminal", args.to, "--text", line, "--enter", "--json"]);
+        } catch (error) {
+          r = { code: 127, stdout: "", stderr: `orca-ide terminal send failed: ${errorMessage(error)}` };
+        }
         const j = parseJson(r.stdout) as any;
         const accepted = r.code === 0 && !!j && j.ok !== false;
         // Accepted by the CLI is not delivered (Codex, PR 222 r1 M2): the measured failure is a line that sits unsubmitted
         // in the composer. The screen decides, on positive evidence only (r2 M2, r5 M2); a frame that has not caught up yet
         // (`line_not_on_screen`, `stale_prefix_only`, `composer_not_on_screen`) is read once more after the gate interval
         // before it is called unknown.
-        let after = await readComposer(run, args.to, layout, entry.empty_composer);
-        delivery = accepted ? deliveryFromScreen(after, args.text, sent.id, layout) : { delivered: false, reason: `orca_send_failed: exit ${r.code}` };
-        if (accepted && delivery.delivered === "unknown" && ["line_not_on_screen", "stale_prefix_only", "composer_not_on_screen"].includes(delivery.reason ?? "")) {
+        let after: PaneDeliveryAssessment = await observer.assessPaneDelivery(line);
+        delivery = accepted ? after : { delivered: false, reason: `orca_send_failed: exit ${r.code}` };
+        if (accepted && after.delivered === "unknown" && after.reobserve) {
           await sleep(gateMs);
-          after = await readComposer(run, args.to, layout, entry.empty_composer);
-          delivery = deliveryFromScreen(after, args.text, sent.id, layout);
+          after = await observer.assessPaneDelivery(line);
+          delivery = after;
         }
+        const evidence = after.evidence;
         outcome = {
           sent: delivery.delivered, accepted, exit: r.code,
           ...(delivery.reason ? { reason: delivery.reason } : {}),
           receipt: j?.result ?? j ?? (r.stderr || r.stdout).trim().slice(0, 300),
-          post_send: { last_line: after.last_line, ...(after.composer_line !== undefined ? { composer_line: after.composer_line } : {}), composer_empty: after.empty, rows: after.rows.length, ...(after.source ? { source: after.source } : {}), ...(after.draft ? { draft: after.draft } : {}), ...(after.error ? { error: after.error } : {}) },
+          post_send: { last_line: evidence.last_line, ...(evidence.composer_line !== undefined ? { composer_line: evidence.composer_line } : {}), composer_empty: evidence.composer_empty, rows: evidence.row_count, ...(evidence.source ? { source: evidence.source } : {}), ...(evidence.draft ? { draft: evidence.draft } : {}), ...(evidence.error ? { error: evidence.error } : {}) },
         };
       }
       const delivered = delivery.delivered;

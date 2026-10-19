@@ -23,6 +23,11 @@ items starting with 1", received `evt_85ad930c…`), item 1 of `~/.retrace/ops-2
 exactly the six fields a receiver checks". It changes no rule text; the follow-up that strikes the by-hand steps from
 agent-ops 18 is a separate class (a) PR after the measurement in §6.
 
+**v1.7 update, 2026-10-19.** Codex extracted live pane acquisition and classification into the internal
+`PaneScreenObserver` boundary after the domain-modeling decision `evt_e52b8bcef8d348178eca343a87cab252` and the
+fresh-context / Astra reconciliation `evt_092f92e2596b4eafacb2a7aa43e98a49` / `evt_ce650c41829d4720ab6571bf667bfa30`.
+Section 4g records the corrections. Historical function names in §§4b–4f remain as the names those versions shipped.
+
 ## 0. The question and the answer
 
 **Question.** Every pane dispatch in this environment is composed by hand: a 240-byte pointer, a `sent` event with two
@@ -109,7 +114,8 @@ with `--enter` and seals `enter_pressed_by: "retrace_send (tool)"` (Codex r2 M4)
    counts: Orca's `source` must be `screen`. A read whose source is `screen-unavailable`, `stream`, any other value or none
    is not empty whatever its frame shows, because accumulated output can hold an old idle frame (Codex r6 M1); the refusal
    names the source. The composer is found
-   by the harness's own layout (`composerOf`, chosen by the registry's `agent_identity`, which step 4 matched to Orca's
+   by the harness's own layout (`PaneScreenObserver.readComposerGate`, chosen by the registry's `agent_identity`, which
+   step 4 matched to Orca's
    live label), never as the last rendered row: on every harness here the last row is a status row (Codex r5 M2; v1.4's
    gate read the last row and so refused every send, §4e). Layouts, measured on this host's panes 2026-10-12: **Claude
    Code** draws `❯` between two rules of `─`, status rows below; the composer is every row between the last two rules,
@@ -127,6 +133,11 @@ with `--enter` and seals `enter_pressed_by: "retrace_send (tool)"` (Codex r2 M4)
    `gate`; `caused_by` as given.
 7. **Last look, then send.** One more screen read, counted as step 5 counts it; if the composer filled during the write,
    or the read is not a live screen, nothing is sent and the outcome says so (with the source when it is not `screen`). Otherwise `terminal send --terminal <h> --text "<text> [sent-event <id>]" --enter --json`.
+   **Incarnation boundary:** step 4 is a preflight check, not an atomic condition on this handle-addressed send. Orca's
+   send command accepts no expected `incarnationId`; a relaunch between the list check and the send can therefore reuse
+   the handle. The persisted `pane_binding` wire value records the successful preflight. Closing the residual race needs
+   an atomic incarnation-conditional transport primitive and is a separate transport decision, not a screen-observer
+   claim. Repeating the list check would narrow but not close the race.
 8. **Outcome.** `executed` event, `caused_by` the sent event, with Orca's receipt and what the post-send screen proved.
    `delivered` has three values, and each rests on the composer as step 5 finds it, never on which row happens to be
    last (Codex r1 M2, r2 M2, r3 M2, r5 M2). **`false`** (`line_sits_in_composer`) only on positive evidence that the line
@@ -134,11 +145,13 @@ with `--enter` and seals `enter_pressed_by: "retrace_send (tool)"` (Codex r2 M4)
    characters, or a prefix of at least 24 ending a row) or its id; or the CLI itself failed (`orca_send_failed`). Only
    `line_sits_in_composer` comes with advice: read the pane, then a human presses Enter as a separately logged keystroke.
    **`true`** only on positive evidence: the read succeeded, Orca returned the rendered screen (`source: screen`), the
-   composer is found and does not hold the line, and a transcript row above it shows the start of the text **with this
-   send's `[sent-event <id>]` on that row or in its continuation run**: the rows after it, leading indentation dropped,
-   joined without a separator (a wrap may split the id), until the run holds as many characters as the line or reaches
-   the composer, and never more: the first row is cut at the line's length and each continuation row at what remains,
-   so an id further along an unrelated row is never read as this line's (Codex r6 M2). That bound is the line's own
+   composer is found and does not hold the line, and a transcript row above it starts a reconstruction that equals the
+   **entire exact suffixed line**, including this send's `[sent-event <id>]`. `PaneScreenObserver.assessPaneDelivery`
+   parses the suffix from the same exact line passed to Orca; a matching prefix plus a nearby current id is not enough.
+   The reconstruction uses the rows after the prefix, leading indentation dropped, joined without a separator (a wrap
+   may split the id), until the run holds as many characters as the line or reaches the composer, and never more: the
+   first row is cut at the line's length and each continuation row at what remains, so an id further along an unrelated
+   row is never read as this line's (Codex r6 M2, strengthened in v1.7). That bound is the line's own
    length in content characters, so it holds at every width with no row cap
    (Codex r5 L1: v1.4 capped the run at 12 rows, ceil(240 / 20), which assumed 20 content columns; a two-column prompt
    makes a 240-byte line 13 rows at 20 columns). At width W, with a P-column prompt and I-column indentation, an
@@ -148,7 +161,8 @@ with `--enter` and seals `enter_pressed_by: "retrace_send (tool)"` (Codex r2 M4)
    harness breaks rows at word boundaries; narrower, delivery is `"unknown"`. A row that shows the text with no id, or
    with another id, is a transcript of some earlier send of the same words and proves nothing about this one:
    `"unknown"`, `stale_prefix_only`. **`"unknown"`**, with the reason, for everything else the screen cannot settle:
-   `post_send_read_failed`, `post_send_screen_unavailable`, `post_send_screen_empty`, `composer_not_on_screen` (an echo
+   `post_send_read_failed`, `post_send_screen_unavailable` (including an absent source as `source none`),
+   `post_send_screen_empty`, `composer_not_on_screen` (an echo
    that ends the screen, an unrelated last row such as `]`, output or a dialog where the composer was, a harness whose
    layout is not known), `line_not_on_screen` (lag, a frame that scrolled, or a pane narrower than the minimum), or
    `stale_prefix_only`; the last three after a second read one gate interval later. `"unknown"` carries no advice to
@@ -156,6 +170,17 @@ with `--enter` and seals `enter_pressed_by: "retrace_send (tool)"` (Codex r2 M4)
    its params carry `delivered`, `accepted`, the reason, the frame's last line and the composer row. The caller sees
    `delivered`, `accepted`, both ids and the exact line; on `false` or `"unknown"` it reads the pane before relying on
    the send. A human pressing Enter on a sitting line is that human's keystroke, logged by the human, not this tool's act.
+
+**Current implementation boundary (v1.7).** `packages/mcp-server/src/pane-screen-observer.ts` owns exactly one Orca
+screen read per `readComposerGate` or `assessPaneDelivery` call: raw read-envelope validation, source normalization,
+Claude/Codex/Grok layout adapters, composer evidence, exact-line delivery classification, and the typed recommendation
+to reobserve a potentially settling frame. `dispatch-mcp.ts` owns registry and preflight identity checks, both gate
+delays, the one bounded delivery retry, ledger sealing, the handle-addressed send, and event/response projection. Read
+runner rejection, `ok: false`, malformed envelopes and malformed terminal payloads are non-positive evidence, never
+exceptions after the `sent` seal; send-runner rejection is recorded as `orca_send_failed`. The observer returns the
+classification and its ledger-facing evidence from the same read, so the caller never obtains a second frame to explain
+the first decision. CLI acceptance remains exit zero plus parseable JSON whose top-level `ok` is not false; v1.7 does
+not reinterpret `result.accepted`.
 
 **Receiver (`retrace_verify_send`).** Inputs: the received line as it arrived, optional `brief_path` (when given it
 must be the brief the text names), optional own `caused_by`, optional `intent`. Order: split the suffix (no suffix →
@@ -338,6 +363,28 @@ enumerating forms.
 
 Both regressions fail on the round-5 code (`delivered: true` in Codex's M2 case; the `screen-unavailable` read sent) and
 pass on this round's. Nothing else changed in behaviour.
+
+## 4g. Observer boundary and fix round 7 (Codex Candidate 1, applied in v1.7)
+
+This round follows the narrow domain-modeling decision and the independent fresh-context / Astra reviews cited in the
+v1.7 update. It extracts an internal boundary; `sent` sealing, Orca CLI acceptance, pane delivery assessment and
+receiver `received` verification remain four distinct concepts. No glossary or ADR was added: the observer is an
+implementation seam, and the protocol already owns the domain distinction.
+
+| finding | change |
+|---|---|
+| a post-send frame with no `source` could fall through to `delivered: true` | `assessPaneDelivery` requires `source === "screen"` before every layout or delivery decision; absent source is `"unknown"`, `post_send_screen_unavailable: source none` |
+| a matching text prefix plus the current id elsewhere inside the bounded run could prove a corrupted or unrelated line | the observer takes the exact suffixed line passed to Orca, parses its suffix internally, reconstructs only that line's length and requires byte-for-code-unit equality with the whole line; prefix-only evidence remains `stale_prefix_only` |
+| exit-zero `ok: false`, malformed payloads, coercion failures or a rejected read promise could become evidence or escape after the `sent` seal | raw read acquisition is total and validates the envelope, terminal payload and string tail before interpretation; failures become non-positive gate evidence or `post_send_read_failed`, and integration tests require the outcome event after post-seal failures. The configurable empty-composer regex is compiled before sealing. A rejected send promise is normalized to exit 127 and `orca_send_failed` |
+| an unknown layout with a matching `draft` returned `false` and Enter advice | layout recognition now precedes draft/composer classification; unsupported layouts are `"unknown"`, `composer_not_on_screen` |
+| the caller owned both the retry loop and a copied list of retryable reason strings | private `shouldReobserveDelivery` maps the assessment to a typed `reobserve` hint; the caller still owns the single delay and retry count |
+| screen parsing, layout adapters, evidence classification and ledger orchestration lived in one module | `PaneScreenObserver` owns one-read observation and returns a discriminated decision with the evidence from that same frame; `dispatch-mcp.ts` owns orchestration and preserves the existing event, response, reason and CLI-acceptance projections |
+| cross-model review found that the step-4 incarnation check is not atomic with the handle-only send | explicitly documented as a pre-existing transport race. v1.7 does not claim the observer closes it; an atomic expected-incarnation send primitive is a separate decision |
+
+The module matrix exercises Claude, Codex and Grok frames, wrapping and narrow panes, exact/corrupt/stale lines,
+composer and draft evidence, missing/non-screen sources, unknown layouts, failed envelopes, malformed payloads and
+runner rejection. Tool-level tests retain call-order and persisted-outcome coverage; the former private-helper tests are
+removed rather than duplicated.
 
 ## 5. Rollout
 

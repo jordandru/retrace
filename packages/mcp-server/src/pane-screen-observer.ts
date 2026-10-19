@@ -103,7 +103,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function errorMessage(value: unknown): string {
-  return value instanceof Error ? value.message : String(value);
+  if (value instanceof Error) return value.message;
+  try {
+    return String(value);
+  } catch {
+    return "unknown error";
+  }
 }
 
 function failedRead(error: string): ScreenRead {
