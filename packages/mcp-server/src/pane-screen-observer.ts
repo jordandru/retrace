@@ -6,25 +6,13 @@ export type OrcaRunner = (args: string[]) => Promise<OrcaRunResult>;
 /** The empty composer row of each harness this environment runs. */
 const DEFAULT_EMPTY_COMPOSER = "^(?:❯|[›»](?: Ask Codex to do anything)?)[\\s\\u00a0]*$";
 
-/** How much of a sent line one rendered row must show before it can start a delivery proof. */
+/** How much of a sent line one rendered row must show before it is positive stuck-composer evidence. */
 export const PREFIX_MIN_CHARS = 24;
 
-type Composer = { top: number; lines: string[] };
-
-type RowMetadata = {
-  wrapped: boolean;
-  trailingSpaces: number;
-};
-
-type RenderedRow = RowMetadata & {
-  text: string;
-  rawIndex: number;
-  metadataAvailable: boolean;
-};
+type Composer = { lines: string[]; anchors: number[] };
 
 type ScreenRead = {
   rows: string[];
-  renderedRows: RenderedRow[];
   lastLine: string;
   composer?: Composer;
   draft?: string;
@@ -47,16 +35,16 @@ export type ComposerGateRead =
   | { empty: true; evidence: PaneScreenEvidence }
   | { empty: false; detail: string; evidence: PaneScreenEvidence };
 
-export type PaneDeliveryAssessment =
-  | { delivered: true; reobserve: false; evidence: PaneScreenEvidence }
-  | { delivered: false; reason: string; reobserve: false; evidence: PaneScreenEvidence }
-  | { delivered: "unknown"; reason: string; reobserve: boolean; evidence: PaneScreenEvidence };
+/** Screen evidence is deliberately one-sided: it can prove a stuck composer, never successful submission. */
+export type PanePostSendAssessment =
+  | { delivered: false; reason: "line_sits_in_composer"; evidence: PaneScreenEvidence }
+  | { delivered: "unknown"; reason: string; evidence: PaneScreenEvidence };
 
 export type PaneScreenObserver = {
   /** Read the pane once and decide whether the live harness composer is empty. */
   readComposerGate(): Promise<ComposerGateRead>;
-  /** Read the pane once and assess evidence for the exact suffixed line supplied to Orca. */
-  assessPaneDelivery(line: string): Promise<PaneDeliveryAssessment>;
+  /** Read once for positive stuck-composer evidence. A screen echo is never delivery proof. */
+  inspectPostSend(line: string): Promise<PanePostSendAssessment>;
 };
 
 export type PaneScreenObserverOptions = {
@@ -72,20 +60,19 @@ const PROMPT_ROW_RE = /^❯(?:[\s\u00a0]|$)/u;
 const CODEX_PROMPT_ROW_RE = /^[›»](?:[\s\u00a0]|$)/u;
 const BOX_TOP_RE = /^\s*╭─/u;
 const BOX_BOTTOM_RE = /^\s*╰─/u;
-const TRANSCRIPT_BLOCK_START_RE = /^(?:[•●◦○✻✳◆◇◈](?:[\t \u00a0]|$)|[›»❯](?:[\t \u00a0]|$))/u;
 
 function composerOf(rows: string[], layout: string | undefined): Composer | undefined {
   if (layout === "claude") {
     const rules = rows.flatMap((row, index) => (RULE_ROW_RE.test(row.trim()) ? [index] : []));
     const [top, bottom] = rules.slice(-2);
     if (top === undefined || bottom === undefined || bottom - top < 2 || !PROMPT_ROW_RE.test(rows[top + 1]!)) return undefined;
-    return { top, lines: rows.slice(top + 1, bottom) };
+    return { lines: rows.slice(top + 1, bottom), anchors: [top, top + 1, bottom] };
   }
   if (layout === "codex") {
     let index = rows.length - 1;
     while (index >= 0 && /^[\s\u00a0]/u.test(rows[index]!)) index--;
     if (index < 0 || index === rows.length - 1 || !CODEX_PROMPT_ROW_RE.test(rows[index]!)) return undefined;
-    return { top: index, lines: [rows[index]!] };
+    return { lines: [rows[index]!], anchors: [index, index + 1] };
   }
   if (layout === "grok") {
     let top = -1;
@@ -98,7 +85,7 @@ function composerOf(rows: string[], layout: string | undefined): Composer | unde
       .slice(top + 1, bottom)
       .map((row) => row.replace(/^\s*│[\s\u00a0]?/u, "").replace(/[\s\u00a0]*│$/u, ""));
     if (!PROMPT_ROW_RE.test(lines[0]!)) return undefined;
-    return { top, lines };
+    return { lines, anchors: [top, top + 1, bottom] };
   }
   return undefined;
 }
@@ -125,7 +112,7 @@ function errorMessage(value: unknown): string {
 }
 
 function failedRead(error: string): ScreenRead {
-  return { rows: [], renderedRows: [], lastLine: "", composerEmpty: false, error };
+  return { rows: [], lastLine: "", composerEmpty: false, error };
 }
 
 type TerminalPayloadSelection =
@@ -178,126 +165,9 @@ function prefixOffset(row: string, text: string): number {
   return -1;
 }
 
-function rowShowsPrefix(row: string, text: string): boolean {
-  return prefixOffset(row, text) >= 0;
-}
-
-function transcriptStartContent(row: string, line: string, layout: string | undefined): string | undefined {
-  const prompt = layout === "codex"
-    ? row.match(/^[›»][\t \u00a0]+/u)
-    : layout === "claude" || layout === "grok"
-      ? row.match(/^❯[\t \u00a0]+/u)
-      : undefined;
-  const content = prompt ? row.slice(prompt[0].length) : row;
-  const required = Math.min(PREFIX_MIN_CHARS, line.length);
-  if (content.length < required || content.slice(0, required) !== line.slice(0, required)) return undefined;
-  return content;
-}
-
-function boundaryPositions(line: string, positions: Set<number>): Set<number> {
-  const expanded = new Set(positions);
-  for (const position of positions) {
-    let afterWhitespace = position;
-    while (afterWhitespace < line.length && /^[\t \u00a0]$/u.test(line[afterWhitespace]!)) {
-      afterWhitespace++;
-      expanded.add(afterWhitespace);
-    }
-  }
-  return expanded;
-}
-
-function advancePositions(line: string, positions: Set<number>, fragment: string): Set<number> {
-  const advanced = new Set<number>();
-  if (!fragment.length) return advanced;
-  for (const position of positions) {
-    if (line.startsWith(fragment, position)) advanced.add(position + fragment.length);
-  }
-  return advanced;
-}
-
-type WrappedLineMatch = "exact" | "not_exact" | "boundary_unknown";
-
-type CompletionEvidence = "exact" | "continues" | "unknown";
-
-function completionEvidence(
-  body: RenderedRow[],
-  completedAt: number,
-  indent: "" | "  ",
-): CompletionEvidence {
-  const current = body[completedAt]!;
-  const next = body[completedAt + 1];
-  if (!next) return "exact";
-  if (next.rawIndex !== current.rawIndex + 1) return "unknown";
-
-  // Orca defines `wrapped` on the following row: true means it continues this terminal-emulator line.
-  if (next.metadataAvailable && next.wrapped) return "continues";
-
-  // Agent TUIs paint their own continuation rows. The supported layouts indent those rows by two columns and begin a
-  // new transcript block with a stable prompt/status glyph. Text with neither shape has no provable message boundary.
-  if (indent && next.text.startsWith(indent)) return "continues";
-  if (TRANSCRIPT_BLOCK_START_RE.test(next.text)) return "exact";
-  return "unknown";
-}
-
-/**
- * Match a rendered transcript line against the exact line supplied to Orca. The first fragment is anchored at column
- * zero or immediately after this layout's prompt. Terminal-emulator continuations require Orca's `wrapped` metadata;
- * TUI-painted continuations require the measured two-space indent. Orca removes trailing row whitespace, so only
- * horizontal whitespace already present in `line` may disappear at a row boundary. Every visible fragment is compared
- * whole, and completion requires a structural boundary: visible prefixes and suffixes are never truncated away.
- */
-function matchesWrappedLine(
-  body: RenderedRow[],
-  index: number,
-  line: string,
-  layout: string | undefined,
-): WrappedLineMatch {
-  const first = transcriptStartContent(body[index]!.text, line, layout);
-  if (first === undefined) return "not_exact";
-
-  let boundaryUnknown = false;
-
-  for (const indent of ["", "  "] as const) {
-    let positions = advancePositions(line, new Set([0]), first);
-    if (positions.has(line.length)) {
-      const completion = completionEvidence(body, index, indent);
-      if (completion === "exact") return "exact";
-      if (completion === "unknown") {
-        boundaryUnknown = true;
-        continue;
-      }
-    }
-
-    for (let next = index + 1; next < body.length && positions.size; next++) {
-      const row = body[next]!;
-      const previous = body[next - 1]!;
-      if (row.rawIndex !== previous.rawIndex + 1) break;
-      if (indent) {
-        if ((row.metadataAvailable && row.wrapped) || !row.text.startsWith(indent)) break;
-      } else {
-        if (!row.metadataAvailable || !row.wrapped) break;
-      }
-      const fragment = indent ? row.text.slice(indent.length) : row.text;
-      positions = advancePositions(line, boundaryPositions(line, positions), fragment);
-      if (positions.has(line.length)) {
-        const completion = completionEvidence(body, next, indent);
-        if (completion === "exact") return "exact";
-        if (completion === "unknown") {
-          boundaryUnknown = true;
-          break;
-        }
-      }
-    }
-  }
-  return boundaryUnknown ? "boundary_unknown" : "not_exact";
-}
-
 function composerHolds(lines: string[], text: string, sentEventId: string): boolean {
-  return lines.some((line) => rowShowsPrefix(line, text)) || lines.map((line) => line.trimStart()).join("").includes(sentEventId);
-}
-
-function shouldReobserveDelivery(reason: string): boolean {
-  return reason === "line_not_on_screen" || reason === "stale_prefix_only" || reason === "composer_not_on_screen";
+  return lines.some((line) => prefixOffset(line, text) >= 0)
+    || lines.map((line) => line.trimStart()).join("").includes(sentEventId);
 }
 
 export function createPaneScreenObserver(options: PaneScreenObserverOptions): PaneScreenObserver {
@@ -336,7 +206,7 @@ export function createPaneScreenObserver(options: PaneScreenObserverOptions): Pa
       return failedRead("orca-ide terminal read returned an invalid draft");
     }
 
-    let metadata: RowMetadata[] | undefined;
+    let wrapped: boolean[] | undefined;
     if (terminal.tailRows !== undefined) {
       if (!Array.isArray(terminal.tailRows)
         || terminal.tailRows.length !== terminal.tail.length
@@ -346,26 +216,27 @@ export function createPaneScreenObserver(options: PaneScreenObserverOptions): Pa
           && Number(value.trailingSpaces) >= 0)) {
         return failedRead("orca-ide terminal read returned invalid row metadata");
       }
-      metadata = terminal.tailRows.map((value) => ({
-        wrapped: (value as Record<string, unknown>).wrapped as boolean,
-        trailingSpaces: Number((value as Record<string, unknown>).trailingSpaces),
-      }));
+      wrapped = terminal.tailRows.map((value) => (value as Record<string, unknown>).wrapped as boolean);
     }
 
     const renderedRows = terminal.tail
-      .map((line, rawIndex): RenderedRow => ({
+      .map((line, rawIndex) => ({
         text: line.replace(/\s+$/u, ""),
-        rawIndex,
-        metadataAvailable: metadata !== undefined,
-        wrapped: metadata?.[rawIndex]?.wrapped ?? false,
-        trailingSpaces: metadata?.[rawIndex]?.trailingSpaces ?? 0,
+        metadataAvailable: wrapped !== undefined,
+        wrapped: wrapped?.[rawIndex] ?? false,
       }))
       .filter((row) => row.text.trim().length > 0);
     const rows = renderedRows.map((row) => row.text);
     const lastLine = rows.at(-1) ?? "";
     const source = terminal.source as string | undefined;
     const draft = typeof terminal.draft === "string" && terminal.draft.length ? terminal.draft : undefined;
-    const composer = composerOf(rows, options.layout);
+    const detectedComposer = composerOf(rows, options.layout);
+    // Known wrapped anchors cannot establish a live composer. Missing metadata remains a documented limitation of
+    // the screen gate; it never affects positive delivery, which comes only from Orca's prompt receipt.
+    const composer = detectedComposer
+      && detectedComposer.anchors.every((index) => !renderedRows[index]!.metadataAvailable || !renderedRows[index]!.wrapped)
+      ? detectedComposer
+      : undefined;
     const composerEmpty = source === "screen"
       && composer !== undefined
       && composer.lines.length === 1
@@ -373,7 +244,6 @@ export function createPaneScreenObserver(options: PaneScreenObserverOptions): Pa
       && draft === undefined;
     return {
       rows,
-      renderedRows,
       lastLine,
       ...(composer ? { composer } : {}),
       ...(draft !== undefined ? { draft } : {}),
@@ -390,15 +260,10 @@ export function createPaneScreenObserver(options: PaneScreenObserverOptions): Pa
       : { empty: false, detail: composerDetail(read, options.layout), evidence };
   };
 
-  const assessPaneDelivery = async (line: string): Promise<PaneDeliveryAssessment> => {
+  const inspectPostSend = async (line: string): Promise<PanePostSendAssessment> => {
     const read = await readScreen();
     const evidence = evidenceOf(read);
-    const unknown = (reason: string): PaneDeliveryAssessment => ({
-      delivered: "unknown",
-      reason,
-      reobserve: shouldReobserveDelivery(reason),
-      evidence,
-    });
+    const unknown = (reason: string): PanePostSendAssessment => ({ delivered: "unknown", reason, evidence });
 
     if (read.error) return unknown(`post_send_read_failed: ${read.error}`);
     if (read.source !== "screen") return unknown(`post_send_screen_unavailable: source ${read.source ?? "none"}`);
@@ -409,23 +274,13 @@ export function createPaneScreenObserver(options: PaneScreenObserverOptions): Pa
     // Resolve a known layout before draft inspection. A draft from an unknown harness has no trusted composer meaning.
     if (!read.composer) return unknown("composer_not_on_screen");
     if (read.draft !== undefined && composerHolds([read.draft], sent.text, sent.sentEventId)) {
-      return { delivered: false, reason: "line_sits_in_composer", reobserve: false, evidence };
+      return { delivered: false, reason: "line_sits_in_composer", evidence };
     }
     if (composerHolds(read.composer.lines, sent.text, sent.sentEventId)) {
-      return { delivered: false, reason: "line_sits_in_composer", reobserve: false, evidence };
+      return { delivered: false, reason: "line_sits_in_composer", evidence };
     }
-
-    const body = read.renderedRows.slice(0, read.composer.top);
-    const prefixRows = body
-      .map((row, index) => (transcriptStartContent(row.text, line, options.layout) !== undefined ? index : -1))
-      .filter((index) => index >= 0);
-    if (!prefixRows.length) return unknown("line_not_on_screen");
-    const matches = prefixRows.map((index) => matchesWrappedLine(body, index, line, options.layout));
-    if (!matches.includes("exact")) {
-      return unknown(matches.includes("boundary_unknown") ? "delivery_boundary_unavailable" : "stale_prefix_only");
-    }
-    return { delivered: true, reobserve: false, evidence };
+    return unknown("line_not_in_composer");
   };
 
-  return { readComposerGate, assessPaneDelivery };
+  return { readComposerGate, inspectPostSend };
 }

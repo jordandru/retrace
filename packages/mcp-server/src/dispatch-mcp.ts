@@ -26,7 +26,8 @@ import {
   resolveBriefName, expandHome, PANE_MESSAGE_MAX_BYTES, type SentVerification,
 } from "@retrace-dev/core";
 import { AuditActor } from "./audit-mcp.js";
-import { createPaneScreenObserver, type OrcaRunner, type PaneDeliveryAssessment } from "./pane-screen-observer.js";
+import { createPaneScreenObserver, type OrcaRunner } from "./pane-screen-observer.js";
+import { assessOrcaSendReceipt } from "./orca-send-receipt.js";
 
 export type { OrcaRunner } from "./pane-screen-observer.js";
 
@@ -140,6 +141,7 @@ export function registerDispatchTools(server: McpServer, deps: DispatchDeps): vo
   const run = deps.run ?? runOrcaIde;
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const gateMs = deps.gateMs ?? 3000;
+  const waitSubmitSeconds = Math.min(3600, Math.max(1, Math.ceil(gateMs / 1000)));
   const registryPath = deps.registryPath ?? defaultRegistryPath();
   const homeDir = deps.homeDir ?? homedir();
   const write = async (input: EventInput) => {
@@ -151,7 +153,7 @@ export function registerDispatchTools(server: McpServer, deps: DispatchDeps): vo
     "retrace_send",
     {
       title: "Send a signed message into another agent's pane",
-      description: "Agent-rules 15 / agent-ops 18 in one step: checks the SEAT envelope and the byte rules, refuses the owner's JD envelope, refuses any pane not registered as an agent pane or whose live Orca identity or incarnation differs from the registry, requires the brief when the text names one as `brief <path>` and refuses any other path-like token (a path, URL or slash token outside `brief <path>`) and a brief_path that is not the brief the text names, waits for the harness's composer (found by its layout: claude, codex, grok) to be empty on a live screen read (Orca's source `screen`), logs the `sent` event (text and brief hashes, target seat and terminal) under this seat's credential, then sends the line with ` [sent-event <id>]` appended, pressing Enter itself, and records what the post-send screen proved: delivered true (the line and its sent-event id are in the transcript above the composer), false (the composer itself holds the line) or unknown (the screen could not settle it). A refusal writes nothing.",
+      description: "Agent-rules 15 / agent-ops 18 in one step: checks the SEAT envelope and the byte rules, refuses the owner's JD envelope, refuses any pane not registered as an agent pane or whose live Orca identity or incarnation differs from the registry, requires the brief when the text names one as `brief <path>` and refuses any other path-like token (a path, URL or slash token outside `brief <path>`) and a brief_path that is not the brief the text names, waits for the harness's composer (found by its layout: claude, codex, grok) to be empty on a live screen read (Orca's source `screen`), logs the `sent` event (text and brief hashes, target seat and terminal) under this seat's credential, then sends the line with ` [sent-event <id>]` appended, pressing Enter itself and asking Orca to wait for submission. It records delivered true only from the request-bound `turn_started` receipt, false from an explicit zero-byte refusal or positive stuck-composer evidence, and unknown otherwise. A refusal writes nothing.",
       inputSchema: z.object({
         to: z.string().min(1).describe("Orca terminal handle of the receiving agent pane (must be in the pane registry as kind agent)"),
         receiver: z.string().min(1).describe("The receiving seat's actor id, e.g. codex; must match the registry entry"),
@@ -241,29 +243,28 @@ export function registerDispatchTools(server: McpServer, deps: DispatchDeps): vo
       } else {
         let r: Awaited<ReturnType<OrcaRunner>>;
         try {
-          r = await run(["terminal", "send", "--terminal", args.to, "--text", line, "--enter", "--json"]);
+          r = await run(["terminal", "send", "--terminal", args.to, "--text", line, "--enter", "--wait-submit", String(waitSubmitSeconds), "--json"]);
         } catch (error) {
           r = { code: 127, stdout: "", stderr: `orca-ide terminal send failed: ${errorMessage(error)}` };
         }
-        const j = parseJson(r.stdout) as any;
-        const accepted = r.code === 0 && !!j && j.ok !== false;
-        // Accepted by the CLI is not delivered (Codex, PR 222 r1 M2): the measured failure is a line that sits unsubmitted
-        // in the composer. The screen decides, on positive evidence only (r2 M2, r5 M2); a frame that has not caught up yet
-        // (`line_not_on_screen`, `stale_prefix_only`, `composer_not_on_screen`) is read once more after the gate interval
-        // before it is called unknown.
-        let after: PaneDeliveryAssessment = await observer.assessPaneDelivery(line);
-        delivery = accepted ? after : { delivered: false, reason: `orca_send_failed: exit ${r.code}` };
-        if (accepted && after.delivered === "unknown" && after.reobserve) {
-          await sleep(gateMs);
-          after = await observer.assessPaneDelivery(line);
-          delivery = after;
-        }
+        const receiptAssessment = assessOrcaSendReceipt(r, args.to, layout, listed.incarnationId);
+        const after = await observer.inspectPostSend(line);
+        // The request-bound Orca receipt is the only positive delivery signal. Screen rows are lossy (Orca filters
+        // blanks and clears wrap continuity across those gaps), so they can prove only that this unique line remains in
+        // the live composer. A durable turn_started receipt outranks contradictory or stale visual state.
+        delivery = receiptAssessment.delivered === true
+          ? { delivered: true }
+          : receiptAssessment.delivered === false
+            ? { delivered: false, reason: receiptAssessment.reason }
+            : after.delivered === false
+              ? { delivered: false, reason: after.reason }
+              : { delivered: "unknown", reason: receiptAssessment.reason ?? after.reason };
+        const { delivered: _receiptDelivered, reason: _receiptReason, ...receiptEvidence } = receiptAssessment;
         const evidence = after.evidence;
         outcome = {
-          sent: delivery.delivered, accepted, exit: r.code,
+          sent: delivery.delivered, exit: r.code, wait_submit_seconds: waitSubmitSeconds, ...receiptEvidence,
           ...(delivery.reason ? { reason: delivery.reason } : {}),
-          receipt: j?.result ?? j ?? (r.stderr || r.stdout).trim().slice(0, 300),
-          post_send: { last_line: evidence.last_line, ...(evidence.composer_line !== undefined ? { composer_line: evidence.composer_line } : {}), composer_empty: evidence.composer_empty, rows: evidence.row_count, ...(evidence.source ? { source: evidence.source } : {}), ...(evidence.draft ? { draft: evidence.draft } : {}), ...(evidence.error ? { error: evidence.error } : {}) },
+          post_send: { reason: after.reason, last_line: evidence.last_line, ...(evidence.composer_line !== undefined ? { composer_line: evidence.composer_line } : {}), composer_empty: evidence.composer_empty, rows: evidence.row_count, ...(evidence.source ? { source: evidence.source } : {}), ...(evidence.draft ? { draft: evidence.draft } : {}), ...(evidence.error ? { error: evidence.error } : {}) },
         };
       }
       const delivered = delivery.delivered;
@@ -275,12 +276,12 @@ export function registerDispatchTools(server: McpServer, deps: DispatchDeps): vo
         action_detail: detail,
         artifacts: [{ id: `pane:${args.to}`, kind: "terminal", label: `${args.receiver} pane`, role: "generated" }],
         intent: delivered === true
-          ? `Sent [sent-event ${sent.id}] to ${args.receiver}; ${ENTER_PRESSED_BY} pressed Enter; the screen shows the line in the transcript`
+          ? `Sent [sent-event ${sent.id}] to ${args.receiver}; ${ENTER_PRESSED_BY} pressed Enter; Orca's request-bound receipt includes turn_started`
           : delivered === false
             ? `Send of ${sent.id} not delivered: ${delivery.reason}`
             : `Send of ${sent.id}: delivery unknown (${delivery.reason}); read the pane before relying on it`,
         caused_by: sent.id,
-        method: { tool: "orca-ide terminal send", automated: true, params: { sent_event_id: sent.id, line_bytes: Buffer.byteLength(line, "utf8"), delivered, enter_pressed_by: ENTER_PRESSED_BY, ...outcome } },
+        method: { tool: "orca-ide terminal send --wait-submit", automated: true, params: { sent_event_id: sent.id, line_bytes: Buffer.byteLength(line, "utf8"), delivered, enter_pressed_by: ENTER_PRESSED_BY, ...outcome } },
         location: deps.locationDefaults(),
         tags: ["sent-outcome", args.receiver],
       }));
@@ -288,7 +289,7 @@ export function registerDispatchTools(server: McpServer, deps: DispatchDeps): vo
         ? `sent ${sent.id} to ${args.receiver} (${args.to}); outcome ${executed.id}; line ${Buffer.byteLength(line, "utf8")} B\n${line}`
         : delivered === false
           ? `NOT delivered (${delivery.reason}); sent event ${sent.id} stands, outcome ${executed.id} records it${delivery.reason === "line_sits_in_composer" ? "; the line sits unsubmitted in the composer: read the pane, then a human presses Enter as a separately logged keystroke" : ""}`
-          : `delivery UNKNOWN (${delivery.reason}); sent event ${sent.id} stands, outcome ${executed.id} records what the screen showed; read the pane before relying on the send`;
+          : `delivery UNKNOWN (${delivery.reason}); sent event ${sent.id} stands, outcome ${executed.id} records the Orca receipt and screen diagnostics; read the pane before relying on the send`;
       return { content: [{ type: "text", text }], structuredContent: { sent_event_id: sent.id, outcome_event_id: executed.id, delivered, line, outcome } };
     },
   );
