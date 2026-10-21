@@ -201,7 +201,9 @@ The provenance rules themselves are `docs/agent-rules.md`.
     routing skill launches reviewers itself with the routed model id.
 
 18. **Signed pane messages — the mechanics of agent-rules 15.** (Added 2026-09-24, same sources as agent-rules 15; Codex round-2 F4 `evt_8ad99634…` applied here too.)
-    The channel is `orca-ide terminal send --terminal <handle> --text <text> --enter`. Order of operations, because the
+    The automated channel is `orca-ide terminal send --terminal <handle> --text <text> --enter --wait-submit <seconds>`;
+    only a validated request- and incarnation-bound `turn_started` receipt proves delivery. Screen state gates an empty
+    composer and can prove that a line remains stuck, but a transcript echo is not delivery proof. Order of operations, because the
     event must exist before its id can be appended: write the enveloped text (`SEAT … SEAT`) to disk, hash it, log the
     `sent` event with that hash, the target handle and `enter_pressed_by`, then send the text with ` [sent-event <id>]`
     appended. **Serialization** (NOOA round 1, `evt_69673ea1…`): the hashed text is the exact UTF-8 bytes of the file
