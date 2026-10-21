@@ -57,6 +57,12 @@ export function parseTrailerPolicy(raw?: string | null): TrailerPolicy {
 
 export interface ProducerSig { kid: string; sig: string; format?: string }
 export type ProducerSigVerdict = "verified" | "invalid" | "unknown_kid" | "none";
+
+// Every server-sealed write also carries the producer-signature verdict ("none" wherever no credential key could be
+// checked: owner, webhooks, the delete audit) — the sealed_by precedent: server wins, hash-covered.
+export const stampSealedBy = <T extends { method?: EventInput["method"] }>(input: T, by: string, producerVerdict: ProducerSigVerdict = "none"): T =>
+  ({ ...input, method: { ...input.method, params: { ...input.method?.params, [SEALED_BY_PARAM]: by, [PRODUCER_SIG_VERDICT_PARAM]: producerVerdict } } });
+
 /** A registered producer public key — lives on the credential (server) and in export bundles (offline verify). */
 export interface ProducerKey { kid: string; public_key: JsonWebKey; actor_id?: string; name?: string }
 /** Actor {type, id, on_behalf_of} derived from verified bytes — never read from a stored annotation. */

@@ -944,6 +944,13 @@ export class CausedByError extends Error {
   }
 }
 
+/** Recognized append errors callers may report as invalid input; other failures stay exceptional. */
+export function writeClientError(e: unknown): string | undefined {
+  const name = (e as any)?.name;
+  if (e instanceof AdapterIdempotencyError || name === "AdapterIdempotencyError") return (e as Error).message;
+  if (e instanceof CausedByError || name === "CausedByError") return (e as Error).message;
+}
+
 /** Hash-covered tag stamped when a caused_by is kept but does not pass exists/older/same-project. */
 export const CAUSED_BY_UNVERIFIED_TAG = "caused_by:unverified";
 
