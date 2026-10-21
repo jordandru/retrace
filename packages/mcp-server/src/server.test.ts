@@ -56,6 +56,13 @@ test("MCP round trip: instruct → log → why → history → verify", async ()
     },
   })) as any;
   assert.equal(log.structuredContent.seq, 1);
+  assert.equal(ins.structuredContent.receipt.action, "instructed");
+  assert.equal(ins.structuredContent.receipt.actor.id, "jordan");
+  assert.equal(log.structuredContent.receipt.id, log.structuredContent.id);
+  assert.equal(log.structuredContent.receipt.hash, log.structuredContent.hash);
+  assert.equal(log.structuredContent.receipt.caused_by, insId);
+  assert.equal(log.structuredContent.receipt.storage, "local");
+  assert.deepEqual(log.structuredContent.receipt.artifacts, [{ id: "repo:rpg#src/fight.ts", role: "both" }]);
 
   const why = (await client.callTool({ name: "retrace_why", arguments: { event_id: log.structuredContent.id } })) as any;
   assert.equal(why.structuredContent.chain.length, 2);

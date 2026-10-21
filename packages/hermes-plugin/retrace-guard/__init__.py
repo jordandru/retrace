@@ -4,7 +4,14 @@ Every provider-bound request is scanned (pre_api_request, pre_auxiliary_call). A
 whose scan passed (pre_tool_call keyed by api_request_id). Verdicts are appended to
 <HERMES_HOME>/run/guard/<session_id>.jsonl, which scripts/retrace-guard-check.sh reads independently.
 
-Fail-closed evidence (NOOA N-M1), hermes_cli/plugins_dispatch.py at 7b362884d88c887bdcc68271c3b51d25ad1a2197, quoted:
+2026-10-21 implementation correction: runtime-contract.json selects v0.22.3; runtime_adapter.py
+binds automatic identity loading and preserves complete observer input up to an explicit cap. Evidence
+may name foreign actors only with that adapter present. Research is the default capability; builder-probe
+is scratch-only. Edit coverage requires correlated append receipts and is invalidated before a later edit.
+The historical evidence below describes the original pin, not qualification of this revision. Actual
+CLI/TUI, hook ordering and all admission gates remain to be measured on the new pin.
+
+Historical fail-closed evidence (NOOA N-M1), hermes_cli/plugins_dispatch.py at 7b362884d88c887bdcc68271c3b51d25ad1a2197, quoted:
     226        fail_closed = hook_name in _HOOK_TIMEOUT_FAIL_CLOSED_HOOKS
     231                    if ret is _HOOK_SKIPPED:
     232                        if fail_closed:  # policy hook: fail closed with a block directive
@@ -42,10 +49,12 @@ Test switches (Gate 1a negatives only; never set for a real session):
 """
 from __future__ import annotations
 
+from functools import wraps
 import hashlib
 import json
 import os
 import re
+import sys
 import threading
 import time
 from pathlib import Path
@@ -65,8 +74,16 @@ RETRACE_LOG_TOOLS = {"mcp__retrace__retrace_log", "mcp__retrace__retrace_instruc
 RETRACE_LOG_TOOL_NAMES = {"mcp__retrace__retrace_log", "mcp_retrace_retrace_log"}
 TRAILERS = ("Retrace-Actor: hermes", "Retrace-Model:", "Retrace-Model-Source:", "Retrace-Caused-By:")
 
-_lock = threading.Lock()
+_lock = threading.RLock()
 _sessions: Dict[str, Dict[str, Any]] = {}
+
+
+def _serialized(fn):
+    @wraps(fn)
+    def wrapped(*args, **kwargs):
+        with _lock:
+            return fn(*args, **kwargs)
+    return wrapped
 
 
 def _home() -> Path:
@@ -81,7 +98,9 @@ def _state(session_id: str) -> Dict[str, Any]:
     with _lock:
         st = _sessions.get(session_id)
         if st is None:
-            st = {"model": None, "verdicts": {}, "blocked": None, "edited": set(), "logged": set(), "workdir": os.getcwd()}
+            st = {"model": None, "verdicts": {}, "blocked": None, "edited": set(), "logged": set(), "workdir": os.getcwd(),
+                  "root": None, "versions": {}, "pending": {}, "writes": set(), "receipts": set(),
+                  "seen_requests": set(), "receipt_error": False}
             _sessions[session_id] = st
         return st
 
@@ -89,12 +108,14 @@ def _state(session_id: str) -> Dict[str, Any]:
 def _record(session_id: str, entry: Dict[str, Any]) -> None:
     entry = {"ts": time.time(), "session_id": session_id, **entry}
     try:
+        if not session_id or session_id.startswith(".") or any(c in session_id for c in ("/", "\\", "\x00")):
+            raise ValueError("invalid session id")
         d = _home() / "run" / "guard"
         d.mkdir(parents=True, exist_ok=True)
         with open(d / f"{session_id or 'unknown'}.jsonl", "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, default=str) + "\n")
     except Exception:
-        pass  # the shell hook treats a missing line as a block; nothing to do here
+        _state(session_id)["blocked"] = "guard evidence could not be written"
 
 
 def _text(content: Any) -> str:
@@ -118,18 +139,45 @@ def _messages_of(request: Any) -> List[Dict[str, Any]]:
     if not isinstance(body, dict):
         return []
     msgs = body.get("messages") or body.get("input") or []
-    return [m for m in msgs if isinstance(m, dict)]
+    if not isinstance(msgs, list) or not msgs or any(not isinstance(m, dict) for m in msgs):
+        return []
+    return msgs
 
 
-def scan_messages(messages: Iterable[Dict[str, Any]], *, require_seat: bool) -> Tuple[bool, str]:
+def _incomplete(value: Any) -> bool:
+    """Recognize loss markers emitted by the pinned Hermes observer serializer.
+    Refusal is conservative: literal evidence containing a marker also blocks.
+    This does not turn the observer into a pre-provider policy hook.
+    """
+    if isinstance(value, dict):
+        return any(k in ("_truncated", "_truncated_items") or _incomplete(v) for k, v in value.items())
+    if isinstance(value, list):
+        return any(_incomplete(v) for v in value)
+    return isinstance(value, str) and bool(re.search(r"\.\.\.\[truncated \d+ chars\]|<\w+ depth limit>|<redacted>", value))
+
+
+def _adapter_text() -> Optional[str]:
+    adapter = sys.modules.get("retrace_runtime_adapter")
+    return adapter.identity_text() if adapter is not None else None
+
+
+def scan_messages(messages: Iterable[Dict[str, Any]], *, require_seat: bool,
+                  identity_text: Optional[str] = None) -> Tuple[bool, str]:
     """(ok, reason). require_seat: a system message must carry both seat markers (main-loop requests);
     auxiliary requests carry Hermes's own prompts and are scanned for foreign markers only."""
     system_text = []
     for m in messages:
         role = m.get("role")
         text = _text(m.get("content"))
-        if role == "system":
+        if role in ("system", "developer"):
             system_text.append(text)
+        if identity_text is not None and role not in ("system", "developer"):
+            # Evidence is allowed to name other seats only when the pinned loader
+            # adapter disabled implicit foreign instruction loading. Text alone
+            # never grants a role or permission, including embedded JD envelopes.
+            if "[Subdirectory context discovered:" in text:
+                return False, "unexpected automatic context splice in tool evidence"
+            continue
         hit = _FOREIGN_RE.search(text)
         if hit:
             return False, f"another seat's identity reached the model ({hit.group(0).strip()}, role {role})"
@@ -140,10 +188,24 @@ def scan_messages(messages: Iterable[Dict[str, Any]], *, require_seat: bool) -> 
         sys_all = "\n".join(system_text)
         if SEAT_MARKER not in sys_all or ACTOR_MARKER not in sys_all:
             return False, "no seat identity in the system prompt (.hermes.md missing, blocked, or not loaded)"
+        if identity_text is not None and identity_text not in sys_all:
+            return False, "the pinned identity text is missing or incomplete in the system prompt"
     return True, "ok"
 
 
+@_serialized
 def _scan_request(session_id: str, api_request_id: str, request: Any, *, aux: bool, aux_task: str = "") -> None:
+    st = _state(session_id)
+    if not aux:
+        reused = api_request_id in st["seen_requests"]
+        st["seen_requests"].add(api_request_id)
+        st["verdicts"].clear()
+        # Retire shell-hook approval before a scan can raise, skip or time out.
+        _record(session_id, {"event": "request", "api_request_id": api_request_id, "verdict": "pending"})
+        if reused:
+            st["blocked"] = "reused api_request_id"
+    else:
+        reused = False
     test = os.environ.get("RETRACE_GUARD_TEST", "")
     if test == "scan-raise":
         raise RuntimeError("retrace-guard: RETRACE_GUARD_TEST=scan-raise")
@@ -153,12 +215,26 @@ def _scan_request(session_id: str, api_request_id: str, request: Any, *, aux: bo
         return
     msgs = _messages_of(request)
     body_sha = hashlib.sha256(json.dumps(request, sort_keys=True, default=str).encode()).hexdigest()
-    ok, reason = scan_messages(msgs, require_seat=not aux)
-    st = _state(session_id)
+    if st["blocked"]:
+        ok, reason = False, st["blocked"]
+    elif not api_request_id or not msgs or _incomplete(request):
+        ok, reason = False, "missing or incomplete request inspection input"
+    elif reused:
+        ok, reason = False, "reused api_request_id"
+    else:
+        try:
+            identity = _adapter_text()
+            if identity is None:
+                ok, reason = False, "pinned runtime adapter is not installed"
+            else:
+                ok, reason = scan_messages(msgs, require_seat=not aux, identity_text=identity)
+        except Exception:
+            ok, reason = False, "pinned identity adapter failed"
+            st["blocked"] = reason
     verdict = "ok" if ok else "failed"
-    if not ok and "another seat" in reason:
+    if not ok and (aux or "another seat" in reason):
         st["blocked"] = reason
-    if api_request_id:
+    if api_request_id and not aux:
         st["verdicts"][api_request_id] = {"verdict": verdict, "reason": reason}
     _record(session_id, {"event": "aux_request" if aux else "request", "api_request_id": api_request_id or "",
                          "aux_task": aux_task, "verdict": verdict, "reason": reason, "body_sha256": body_sha,
@@ -239,6 +315,11 @@ def terminal_write_targets(cmd: str, workdir: str) -> List[str]:
 
 def _check_retrace_actor_model(args: Dict[str, Any], st: Dict[str, Any]) -> Optional[str]:
     actor = args.get("actor") if isinstance(args, dict) else None
+    if isinstance(actor, dict):
+        if actor.get("id", SEAT) != SEAT or actor.get("type", "agent") != "agent":
+            return "provenance call names a foreign actor"
+        if actor.get("model_source", "harness-config") != "harness-config":
+            return "provenance call has a model source inconsistent with this configured-model profile"
     if isinstance(actor, dict) and actor.get("model") and st.get("model") and actor["model"] != st["model"]:
         return f"actor.model '{actor['model']}' is not the session model '{st['model']}'"
     return None
@@ -261,15 +342,75 @@ def _check_commit(cmd: str, st: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _research_path(value: Any, st: Dict[str, Any], *, write: bool) -> bool:
+    if not isinstance(value, str) or not value or "\x00" in value:
+        return False
+    p = Path(value)
+    # Bind the checked path to the actual tool argument. A CLI cwd change must not
+    # make a relative path refer to a different directory after this check.
+    if not p.is_absolute() or ".." in p.parts:
+        return False
+    if any(part.is_symlink() for part in (p, *p.parents)):
+        return False
+    reports = os.environ.get("RETRACE_GUARD_REPORT_DIR")
+    roots = ([Path(reports)] if reports else []) + ([] if write else [Path(st["workdir"])])
+    for root in roots:
+        try:
+            relative = p.resolve().relative_to(root.resolve())
+        except ValueError:
+            continue
+        if not relative.parts or any(part.startswith(".") for part in relative.parts):
+            # The seat's own identity is readable, but no hidden config, Git data,
+            # credential file or dot-directory is a research file surface.
+            return not write and relative.parts == (".hermes.md",)
+        return True
+    return False
+
+
+def _capability_problem(tool: str, args: Dict[str, Any], st: Dict[str, Any]) -> Optional[str]:
+    mode = os.environ.get("RETRACE_GUARD_MODE", "research")
+    if mode == "builder-probe" and os.environ.get("RETRACE_GUARD_PHASE") == "scratch":
+        return None
+    if mode != "research":
+        return "unqualified capability mode"
+    audit = {"retrace_instruct", "retrace_log", "retrace_status", "retrace_why", "retrace_history", "retrace_verify_send"}
+    if tool in {prefix + name for prefix in ("mcp__retrace__", "mcp_retrace_") for name in audit}:
+        return None
+    if tool == "read_file" and _research_path(args.get("path"), st, write=False):
+        return None
+    if tool == "write_file" and _research_path(args.get("path"), st, write=True):
+        return None
+    if tool == "web_search":
+        return None
+    if tool == "web_extract":
+        from urllib.parse import urlsplit
+        urls = args.get("urls")
+        if isinstance(urls, list) and urls and all(isinstance(u, str) and urlsplit(u).scheme in ("http", "https")
+                                                 and urlsplit(u).hostname and not urlsplit(u).username for u in urls):
+            return None
+    return "outside research capability; file tools require absolute paths within the worktree or report directory"
+
+
 # ---- hooks -------------------------------------------------------------------------------------
 
 def _on_session_start(session_id: str = "", model: Any = None, **_: Any) -> None:
     st = _state(session_id)
     st["model"] = str(model) if model else None
-    _record(session_id, {"event": "session_start", "model": st["model"], "plugin": "retrace-guard", "version": "0.1.0"})
+    configured = os.environ.get("RETRACE_ACTOR_MODEL")
+    if configured and st["model"] != configured:
+        st["blocked"] = "session model differs from the launcher's MCP model claim"
+    _record(session_id, {"event": "session_start", "model": st["model"], "plugin": "retrace-guard", "version": "0.2.0",
+                         "mode": os.environ.get("RETRACE_GUARD_MODE", "research"),
+                         "phase": os.environ.get("RETRACE_GUARD_PHASE", "live"),
+                         "config_sha256": os.environ.get("RETRACE_GUARD_CONFIG_SHA"),
+                         "mcp_build_sha256": os.environ.get("RETRACE_GUARD_MCP_SHA"),
+                         "runtime_commit": os.environ.get("RETRACE_GUARD_RUNTIME")})
 
 
-def _on_pre_api_request(session_id: str = "", api_request_id: str = "", request: Any = None, **_: Any) -> None:
+def _on_pre_api_request(session_id: str = "", api_request_id: str = "", request: Any = None, model: Any = None, **_: Any) -> None:
+    st = _state(session_id)
+    if model is not None and st["model"] is not None and str(model) != st["model"]:
+        st["blocked"] = "request model changed during the session"
     _scan_request(session_id, api_request_id, request, aux=False)
 
 
@@ -277,10 +418,15 @@ def _on_pre_auxiliary_call(session_id: str = "", api_request_id: str = "", reque
     _scan_request(session_id, api_request_id, request, aux=True, aux_task=aux_task)
 
 
+@_serialized
 def _on_pre_tool_call(tool_name: str = "", args: Optional[Dict[str, Any]] = None, session_id: str = "",
-                      api_request_id: str = "", **_: Any) -> Optional[Dict[str, Any]]:
+                      api_request_id: str = "", tool_call_id: str = "", **_: Any) -> Optional[Dict[str, Any]]:
     st = _state(session_id)
     args = args if isinstance(args, dict) else {}
+    if st["pending"]:
+        return _block("a provenance call has no terminal receipt; stop dependent work and restart/reconcile")
+    if st["receipt_error"] and tool_name not in RETRACE_LOG_TOOLS:
+        return _block("provenance receipt failed; only a provenance retry is permitted")
     if st["blocked"]:
         return _block(f"session blocked: {st['blocked']}")
     if not api_request_id:
@@ -290,6 +436,9 @@ def _on_pre_tool_call(tool_name: str = "", args: Optional[Dict[str, Any]] = None
         return _block(f"request {api_request_id} was never scanned (scan skipped, timed out or failed); nothing authorizes its tools")
     if v["verdict"] != "ok":
         return _block(f"request {api_request_id} failed the identity scan: {v['reason']}")
+    problem = _capability_problem(tool_name, args, st)
+    if problem:
+        return _block(problem)
     # layer B, check 3(ii): a context file on the path
     cands: List[str] = []
     for key in PATH_TOOLS.get(tool_name, ()):
@@ -297,7 +446,7 @@ def _on_pre_tool_call(tool_name: str = "", args: Optional[Dict[str, Any]] = None
             cands.append(args[key])
     if tool_name == "terminal" and isinstance(args.get("command"), str):
         cands.extend(_paths_from_terminal(args["command"]))
-    for c in cands:
+    for c in ([] if _adapter_text() is not None else cands):
         hit = _path_hits(c, st["workdir"])
         if hit:
             return _block(f"a context file sits on this path ({hit}); refused before it could be spliced")
@@ -310,30 +459,157 @@ def _on_pre_tool_call(tool_name: str = "", args: Optional[Dict[str, Any]] = None
         r = _check_commit(args["command"], st)
         if r:
             return _block(r)
+    if tool_name in RETRACE_LOG_TOOLS:
+        if st["writes"]:
+            return _block("an edit is still in flight; wait for its terminal result before logging it")
+        if not tool_call_id:
+            return _block("provenance call has no tool_call_id; cannot correlate its receipt")
+        st["pending"][tool_call_id] = {"tool": tool_name, "request": api_request_id,
+            "args": json.loads(json.dumps(args)), "versions": dict(st["versions"])}
+    paths = _write_paths(tool_name, args, st)
+    if paths:
+        if not tool_call_id:
+            return _block("edit call has no tool_call_id; cannot observe its completion")
+        _invalidate(st, paths)
+        if tool_call_id:
+            st["writes"].add(tool_call_id)
     return None
 
 
-def _on_post_tool_call(tool_name: str = "", args: Optional[Dict[str, Any]] = None, session_id: str = "", status: Any = None, **_: Any) -> None:
+def _write_paths(tool: str, args: Dict[str, Any], st: Dict[str, Any]) -> List[str]:
+    if tool in ("write_file", "patch") and isinstance(args.get("path"), str):
+        return [_rel(args["path"], st["workdir"])]
+    if tool == "terminal" and isinstance(args.get("command"), str):
+        return terminal_write_targets(args["command"], st["workdir"])
+    return []
+
+
+def _invalidate(st: Dict[str, Any], paths: Iterable[str]) -> None:
+    for path in paths:
+        st["edited"].add(path)
+        st["logged"].discard(path)
+        st["versions"][path] = st["versions"].get(path, 0) + 1
+
+
+def _receipt(result: Any, status: Any) -> Optional[Dict[str, Any]]:
+    """Accept only the connected MCP server's machine receipt, not rendered prose.
+    Hermes v0.22.3 preserves structuredContent in its JSON result wrapper. Earlier
+    runtimes that drop it deliberately cannot establish coverage. The connection
+    and pinned build are the trust boundary; this is not offline signature proof.
+    """
+    if status != "ok":
+        return None
+    try:
+        value = json.loads(result) if isinstance(result, str) else result
+        if not isinstance(value, dict) or value.get("isError") or value.get("error"):
+            return None
+        data = value.get("structuredContent")
+        if not isinstance(data, dict) or data.get("isError") or data.get("error") or data.get("deduped"):
+            return None
+        r = data.get("receipt")
+        if not isinstance(r, dict) or r.get("version") != 1 or r.get("project") != "retrace":
+            return None
+        if not isinstance(r.get("id"), str) or not re.fullmatch(r"evt_[0-9a-f]{32}", r["id"]):
+            return None
+        if data.get("id") != r["id"]:
+            return None
+        if not isinstance(r.get("hash"), str) or not re.fullmatch(r"[0-9a-f]{64}", r["hash"]):
+            return None
+        if type(r.get("seq")) is not int or r["seq"] < 0:
+            return None
+        for key in ("hash", "seq"):
+            if key in data and data[key] != r[key]:
+                return None
+        phase = os.environ.get("RETRACE_GUARD_PHASE", "live")
+        if phase == "scratch":
+            if r.get("storage") != "local":
+                return None
+        elif phase == "live":
+            seal = os.environ.get("RETRACE_GUARD_SEALED_BY", "")
+            if not seal.startswith("pinned:") or not re.search(r"\bhermes\b", seal[7:]):
+                return None
+            if r.get("storage") != "remote" or r.get("sealed_by") != seal or r.get("producer_sig_verdict") != "verified":
+                return None
+        else:
+            return None
+        return r
+    except (TypeError, ValueError):
+        return None
+
+
+@_serialized
+def _on_post_tool_call(tool_name: str = "", args: Optional[Dict[str, Any]] = None, session_id: str = "",
+                       status: Any = None, result: Any = None, tool_call_id: str = "",
+                       api_request_id: str = "", **_: Any) -> None:
     st = _state(session_id)
     args = args if isinstance(args, dict) else {}
-    if tool_name in ("write_file", "patch") and isinstance(args.get("path"), str):
-        st["edited"].add(_rel(args["path"], st["workdir"]))
-    if tool_name == "terminal" and isinstance(args.get("command"), str):
-        for pth in terminal_write_targets(args["command"], st["workdir"]):
-            st["edited"].add(pth)
-    if tool_name in RETRACE_LOG_TOOL_NAMES:
-        for a in args.get("artifacts") or []:
-            if isinstance(a, dict) and isinstance(a.get("id"), str):
-                aid = a["id"]
-                if "#" in aid:
-                    st["logged"].add(aid.split("#", 1)[1])
-                elif aid.startswith("file:"):
-                    st["logged"].add(_rel(aid[5:], st["workdir"]))
+    # Invalidate before dispatch, so a lost post hook cannot preserve old coverage.
+    # A post without a matching pre is still conservatively treated as an edit.
+    if tool_call_id in st["writes"]:
+        st["writes"].remove(tool_call_id)
+    else:
+        _invalidate(st, _write_paths(tool_name, args, st))
+    if tool_name not in RETRACE_LOG_TOOLS:
+        return
+    pending = st["pending"].pop(tool_call_id, None)
+    st["receipt_error"] = True
+    if not pending or pending["tool"] != tool_name or pending["request"] != api_request_id or pending["args"] != args:
+        return
+    r = _receipt(result, status)
+    if r is None or r["id"] in st["receipts"]:
+        _record(session_id, {"event": "receipt_rejected", "tool_call_id": tool_call_id})
+        return
+    actor = r.get("actor")
+    if not isinstance(actor, dict):
+        return
+    if tool_name not in RETRACE_LOG_TOOL_NAMES:
+        if (r.get("action") == "instructed" and actor.get("type") == "human"
+                and actor.get("id") == args.get("human_id") == "jordansboxing@gmail.com"
+                and st["root"] is None):
+            st["root"] = r["id"]
+            st["receipts"].add(r["id"])
+            st["receipt_error"] = False
+        return
+    if (not r.get("action") or r["action"] != args.get("action")
+            or not st["root"] or r.get("caused_by") != st["root"] or args.get("caused_by") != st["root"]
+            or actor.get("type") != "agent" or actor.get("id") != SEAT
+            or not st["model"] or actor.get("model") != st["model"]
+            or actor.get("model_source") != "harness-config"):
+        return
+    st["receipt_error"] = False
+    if r["action"] not in ("created", "edited"):
+        st["receipts"].add(r["id"])
+        return
+    refs = r.get("artifacts")
+    proposed = args.get("artifacts")
+    if not isinstance(refs, list) or not isinstance(proposed, list):
+        return
+    # Require an explicit output role on both sides; omitted/defaulted or input-only
+    # refs are not edit receipts for this guard, even if the ledger accepted them.
+    def outputs(items):
+        return {a["id"] for a in items if isinstance(a, dict) and isinstance(a.get("id"), str)
+                and a.get("role") in ("generated", "both")}
+    st["receipts"].add(r["id"])
+    for aid in outputs(refs) & outputs(proposed):
+        prefix = "repo:jordandru/retrace#"
+        if not aid.startswith(prefix):
+            continue
+        path = aid[len(prefix):]
+        if not path or ".." in Path(path).parts or _rel(path, st["workdir"]) != path or Path(path).is_absolute():
+            continue
+        version = pending["versions"].get(path)
+        if version is not None and version == st["versions"].get(path):
+            st["logged"].add(path)
+    _record(session_id, {"event": "edit_receipt", "event_id": r["id"], "tool_call_id": tool_call_id,
+                         "covered": sorted(st["logged"])})
 
 
 def _rel(p: str, workdir: str) -> str:
     try:
-        return str(Path(p).expanduser().resolve().relative_to(Path(workdir).resolve()))
+        path = Path(p).expanduser()
+        if not path.is_absolute():
+            path = Path(workdir) / path
+        return str(path.resolve().relative_to(Path(workdir).resolve()))
     except Exception:
         return p
 

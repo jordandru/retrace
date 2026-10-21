@@ -48,6 +48,7 @@ import {
 } from "@retrace-dev/core";
 import { ensureSigningKey } from "./keys.js";
 import { loadProducerPrivateKey, sealForAppend } from "./producer-key.js";
+import { logReceipt } from "./log-receipt.js";
 import { SqliteStore } from "./sqlite-store.js";
 import { RemoteStore, RemoteApiError } from "./remote-store.js";
 import { isMainModule } from "./is-main.js";
@@ -346,7 +347,7 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
       const { event, deduped } = remote ? await remote.append(signed) : await appendEvent(store, signed);
       return {
         content: [{ type: "text", text: `${deduped ? "(deduped) " : ""}logged ${event.id} seq=${event.seq}\n${describeEvent(event)}` }],
-        structuredContent: { id: event.id, seq: event.seq, hash: event.hash, deduped },
+        structuredContent: { id: event.id, seq: event.seq, hash: event.hash, deduped, receipt: logReceipt(event, !!remote) },
       };
     };
 
@@ -429,7 +430,7 @@ export function buildServer(store = makeStore(), opts: { pinnedProject?: string;
       });
       const signed = await prepareWrite(input);
       const { event } = remote ? await remote.append(signed) : await appendEvent(store, signed);
-      return { content: [{ type: "text", text: `instruction logged ${event.id}` }], structuredContent: { id: event.id } };
+      return { content: [{ type: "text", text: `instruction logged ${event.id}` }], structuredContent: { id: event.id, receipt: logReceipt(event, !!remote) } };
     };
 
   auditHandlers.history = async (args) => {

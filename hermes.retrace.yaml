@@ -3,7 +3,7 @@
 # hook directory (where it copies and hash-pins scripts/retrace-guard-check.sh), the model id, and mcp_env_common plus one
 # of mcp_env_scratch / mcp_env_live from hermes.retrace.phases.yaml. Anything else that differs
 # fails the launch. (The placeholders are written only where they are substituted, never in these comments.)
-_config_version: 49
+_config_version: 51
 mcp_discovery_timeout: 30          # the first turn waits for the retrace MCP server (default 1.5 s is shorter than node startup)
 mcp_single_query_discovery_timeout: 30
 model:
@@ -11,7 +11,7 @@ model:
   model: "{{MODEL}}"
 agent:
   max_turns: 60
-  disabled_toolsets: [memory, skills, web, browser, cronjob, delegation, image_gen]
+  disabled_toolsets: [memory, skills, browser, cronjob, delegation, image_gen, code_execution, kanban]
 approvals:
   mode: manual
   unattended_mode: deny
@@ -21,9 +21,19 @@ compression:
   enabled: false
 memory:
   memory_enabled: false
+  user_profile_enabled: false
+  write_approval: true
+  nudge_interval: 0
+  provider: ""
 skills:
   write_approval: true
   guard_agent_created: true
+  ledger_max_bytes: 0
+curator:
+  enabled: false
+auxiliary:
+  background_review:
+    enabled: false
 security:
   protected_instruction_files: true
   protected_instruction_extra_patterns: [".hermes.md"]
@@ -50,4 +60,4 @@ mcp_servers:
     env:
 {{PHASE_ENV}}
     tools:
-      include: [retrace_instruct, retrace_log, retrace_status, retrace_why, retrace_history]
+      include: [retrace_instruct, retrace_log, retrace_status, retrace_why, retrace_history, retrace_verify_send]
