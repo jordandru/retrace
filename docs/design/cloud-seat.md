@@ -11,6 +11,14 @@ restricted capture policy and a change to how commit actors are resolved.
   `evt_f470a3a07c34453095e82e6b040da14e`, fixed in place (Jordan, `evt_9dc98206`: rule 10 binds the merged record, not a
   draft). §10 gives each finding its disposition.
 
+**Dated status correction and role addition, 2026-10-21**, by codex on Jordan's instruction
+`evt_517d7d29e24c4511b6ecf964a73edf29` (class a). The original "Not built" status and §9's closing claim
+are retained as the 2026-10-03 record. B2 subsequently merged in PR 169 (`1760697`), and the B3 package pin
+merged in PR 173 (`23f9eea`). `docs/design/sandbox-credential-proxy.md` §1 records B4 credential placement
+on 2026-10-04 (`evt_255a43b7`, abbreviated there); that dated report is not a current credential or deployment
+verification. No P3 pass or activation is established by this correction. §11 specifies the adjusted role
+and separates implementation, verified configuration and execution authority. The seat remains inactive.
+
 The pilot that produced the evidence below is in `~/.retrace/cloud-credit-2026-10-02/`.
 
 ## 0. What this note decides, and what it leaves to the gate
@@ -388,3 +396,107 @@ back to Jordan.
 | NOOA Low, exception before the seat exists | **Applied** by dropping the exception (§2.4) |
 | Codex review note, detection wording | **Applied.** §6 says a reader can notice; no automated alert exists |
 | Codex review note, B4 script sinks | **Applied.** §2.2 lists stdin, tracing, clipboard checks, browser save, and clean-up on failure and cancel |
+
+## 11. Asynchronous builder and reproduction worker (2026-10-21)
+
+Source: Jordan's instruction `evt_517d7d29e24c4511b6ecf964a73edf29`, approving the five role adjustments
+and preparation of governing documents while keeping activation a separate decision. This section qualifies
+§2.3's "builds only" to include bounded reproduction work and diagnostic evidence, without formal review
+authority. It supplements §8's sequence as stated in §11.5. Historical text above remains visible.
+
+### 11.1 Role and work categories
+
+**Claude Code Cloud — asynchronous builder and reproduction worker.** Executes bounded assignments from
+approved briefs and returns changes with reproducible evidence. Works under its own identity on a named task
+branch. Formal review, coordination and outward operational authority remain with their assigned seats.
+
+Initial categories are bounded bug fixes, regression tests, reproducible investigations, and documentation
+updates implementing approved specifications. Start with work whose result another seat can cheaply verify.
+A reproduction may finish with a report and no commit. Cloud does not author new governing policy on its own
+initiative; a documentation task implements an already approved specification and still takes its normal gate.
+An unexpected security or provenance defect is reported with evidence; it does not expand the assignment.
+
+### 11.2 Assignment contract
+
+The coordinator supplies one hash-bound brief per task, delivered through owner-protocol §10. Before dispatch
+it records all of the following; an omitted required field stops execution rather than inviting inference:
+
+| Field | Required content |
+|---|---|
+| Authority and destination | Owner instruction, routing and separate probe/task go event ids; applicable merged authorization commits; project, repository, actor, cloud session id and unique task id |
+| Starting point | Full 40-hex base commit SHA; verify the clone against it before edits |
+| Scope | One named non-main task branch, exact destination repository/remote, allowed tracked paths, approved scratch/output directories, and permitted ledger and GitHub actions |
+| Acceptance | Concrete expected behavior, commands/checks, required evidence and completion condition; reviewer rework ceiling and measurement unit for the trial; a governing-document change retains the class-(a) gate |
+| Resources | Numeric usage ceiling, unit and observable usage source; wall-clock deadline in UTC; finite command timeouts and attempt limits; no metered overflow |
+| Stops | Stop on scope expansion, unavailable provenance logging, identity/base mismatch, credential exposure, unexpected outward action, exhausted limits or an unobservable usage ceiling; report the evidence |
+
+Runtime bookkeeping by the harness, git and approved test commands must be accounted for by the brief's
+scratch/output scope; it does not permit editing harness, credential or git configuration. A task does not
+gain permission to mint, copy or inspect credentials. Commands needing production changes are outside this role.
+If the required usage source is unavailable, the coordinator must obtain an approved measurable contract
+before dispatch; Cloud does not guess consumption or silently substitute a different limit.
+
+One task owns one branch. Scope expansion, branch changes and limit extensions return to the coordinator
+for a new authorized brief. Being asynchronous does not grant permission to select new tasks, spawn workers,
+or start recurring jobs. Begin with one task at a time.
+
+### 11.3 Result contract
+
+Return the task, dispatch and owner instruction ids; base and resulting full commit SHA (or explicitly
+"no commit"); branch and changed paths; commands, exit codes and reproducible results; unresolved questions,
+failed or skipped checks; observed usage with its source; and the relevant receipt, edit, hook and webhook
+event ids. Distinguish the cloud credential's assertions from independently observed webhook evidence.
+Never include secret values. Record unavailable evidence as unavailable, not as a passing check.
+
+Log edits before committing, obtain doctor READY before each commit, and declare each permitted push before
+executing it (agent-rules 8–9 and agent-ops 19). Preserve agent-ops 20's `doctor --gate --local` before
+push and strict CI gate after push; failures stop progression. The keyless declaration's owner-login attribution remains
+unresolved as described in §6; this role does not weaken `declarationPinned` or general hook trust.
+Return results through the Cloud session and permitted ledger records, not outbound signed pane messages.
+The signed laptop seat verifies the exact resulting head and evidence, opens the PR, and routes non-author
+review under the existing gate. Cloud neither approves its own work nor supplies a formal approval of another
+seat's work. Diagnostic findings may inform reviewers but do not satisfy a gate or establish vendor independence.
+
+### 11.4 Authority boundaries
+
+Keep the distinct actor `claude-code-cloud`, model/source reporting under agent-rules 4, keyless events and
+the restricted capture policy in §3.5. Never add its stamp to the general hook-trust lists. The seat does not
+coordinate or dispatch, merge, deploy, publish, administer credentials, open PRs, write GitHub comments/reviews,
+or send rule-15 messages. After separate activation, its only GitHub writes are the brief's explicit pushes
+to its named non-main task branch. No automatic PR fix loop or scheduled work is authorized.
+
+The push guard is a bypassable policy control (§6), not evidence of repository-side enforcement. These role
+limits remain binding even if the platform technically permits a broader action. A changed platform capability
+requires new evidence and the appropriate gate before it changes this seat's authority.
+
+### 11.5 Evidence and activation sequence
+
+Track three facts separately: **implemented infrastructure**, **verified configuration**, and **authorized
+operation**. As of this addition, B2 is merged; B4 has the dated report cited above; live configuration and P3
+are unverified by this work; the role is **inactive**. The following are future gates, not completed steps:
+
+1. **Document preparation and review.** This role addition and owner-protocol §10 take class-(a) review.
+   The author cannot supply its own gate verdict. Jordan personally merges the protocol change under §8.
+   Merging these documents neither starts P3 nor activates the role.
+2. **Verify configuration.** Check B3/B3b versions and B4's existing credential configuration with the required
+   owner-operated procedures; do not mint another credential because an earlier report is abbreviated or stale.
+   Record evidence without secret values. The channel in owner-protocol §10 must be merged (B4b).
+3. **Authorize P3 separately.** Add a class-(a), probe-only rule-7 exception and matching `CLAUDE.md` clause
+   before B5. Call this additional prerequisite **B4c**: it must enumerate verification scratch files,
+   receipt/probe ledger writes, and the one probe commit/push on a named non-main branch, with expiration
+   and stop conditions. Jordan then gives a separate go naming that probe. This resolves the old sequence's
+   conflict between P3's writes and the read-only clause; the present addition enacts no such exception.
+4. **Measure P3.** Run Q1–Q7 only under that go and exception; retain the exact observations and failed checks.
+   The signed laptop seat verifies them. A passing probe is configuration evidence, not activation.
+5. **Authorize one real task.** After P3 passes, B6 takes its own class-(a) gate: enact the bounded task
+   exception, identity and operational entries and restricted stamp configuration. Jordan separately approves
+   activation for one task with a complete §11.2 contract. Probe authority cannot be reused for that task.
+6. **Assess before expanding.** The assigned non-author reviewer records provenance completeness, acceptance
+   results, review/rework effort and observed usage against the brief's budget. Expansion requires complete
+   provenance, satisfied acceptance checks, no unresolved blocking findings, and usage/rework within limits
+   set before the trial. Missing measurements or failed conditions hold expansion. Jordan decides whether to
+   continue, revise or stop; a separate go records any larger workload. Suspension stops new dispatches;
+   an in-flight task stops on a verified stop instruction or its existing deadline/limit, whichever comes first.
+
+No automatic activation, revocation polling, budget enforcement or dispatch deduplication service is claimed.
+The signed coordinator remains responsible for ownership and duplicate checks under owner-protocol §10.

@@ -119,6 +119,18 @@ each one names the product change that would make it unnecessary.
    W7, the seat reads, and writes only the `received` records rule 15 asks of a receiver and that verification's
    scratch files.
 
+   **Cloud role preparation, 2026-10-21** (Jordan's instruction `evt_517d7d29e24c4511b6ecf964a73edf29`).
+   The planned `claude-code-cloud` role is the asynchronous builder and reproduction worker in
+   `docs/team-roles.md` and `docs/design/cloud-seat.md` §11. It has no producer key; a proxy-authenticated
+   event with `producer_sig_verdict: none` is not a verified producer signature. **This paragraph grants no
+   exception to rule 7 and no execution authority.** A later class-(a) change must enact the bounded probe
+   exception before P3; another must enact the task exception before the first real task. Each must name
+   permitted local writes, ledger writes and branch pushes, its prerequisites and termination, and the
+   corresponding identity clause. Neither may grant formal review, coordination, merge, deployment,
+   publishing, credential administration, PR/comment/review writes or outbound rule-15 messages. The relay
+   in owner-protocol §10 establishes a sender, not activation. Until the later changes and Jordan's separate
+   go exist, Cloud remains read and report only. A document merge or a successful probe is not that go.
+
 8. **Doctor before every commit.** `node packages/mcp-server/dist/doctor.js doctor` (or the packed
    `retrace doctor`) must print `READY`; resolve every FAIL. One run, retried up to three times to READY
    on a transient fetch failure — never two independent runs treated as one result.
