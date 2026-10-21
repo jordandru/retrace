@@ -1,0 +1,569 @@
+{
+  "push-off": {
+    "project": "delivery-characterization",
+    "actor": {
+      "type": "agent",
+      "id": "codex",
+      "model": "fixture-model",
+      "on_behalf_of": "owner@example.com",
+      "model_source": "harness-runtime"
+    },
+    "action": "committed",
+    "artifacts": [
+      {
+        "id": "commit:acme/delivery@aaaaaaaaaaaa",
+        "kind": "commit",
+        "label": "acme/delivery@aaaaaaa",
+        "role": "generated"
+      },
+      {
+        "id": "repo:acme/delivery#src/new.ts",
+        "kind": "file",
+        "label": "src/new.ts",
+        "role": "generated"
+      }
+    ],
+    "change": {
+      "after_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "summary": "1 file (pushed to main)"
+    },
+    "timestamp": "2026-10-01T12:00:00.000Z",
+    "location": {
+      "url": "https://github.com/acme/delivery/commit/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "system": "github"
+    },
+    "intent": "Preserve records",
+    "method": {
+      "tool": "git",
+      "params": {
+        "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "producer": "github-push",
+        "ref": "refs/heads/main",
+        "pusher": "owner",
+        "raw_message": "Preserve records\n\nRetrace-Actor: codex\nRetrace-Model: fixture-model\nRetrace-Model-Source: harness-runtime\n",
+        "author": {
+          "name": "Fixture Owner",
+          "email": "owner@example.com"
+        },
+        "parents": [
+          "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        ],
+        "parents_complete": true,
+        "model_claim": "complete",
+        "principal_rule": "agent-address/1",
+        "sealed_by": "webhook:github",
+        "producer_sig_verdict": "none"
+      },
+      "automated": true
+    },
+    "idempotency_key": "gh:push:acme/delivery:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "tags": [
+      "github",
+      "push"
+    ],
+    "id": "<event-id>",
+    "seq": 1,
+    "prev_hash": "<read-head-hash>",
+    "hash": "<event-hash>",
+    "received_at": "<seal-received-at>",
+    "hash_v": 2
+  },
+  "push-shadow": {
+    "project": "delivery-characterization",
+    "actor": {
+      "type": "agent",
+      "id": "codex",
+      "model": "fixture-model",
+      "on_behalf_of": "owner@example.com",
+      "model_source": "harness-runtime"
+    },
+    "action": "committed",
+    "artifacts": [
+      {
+        "id": "commit:acme/delivery@aaaaaaaaaaaa",
+        "kind": "commit",
+        "label": "acme/delivery@aaaaaaa",
+        "role": "generated"
+      },
+      {
+        "id": "repo:acme/delivery#src/new.ts",
+        "kind": "file",
+        "label": "src/new.ts",
+        "role": "generated"
+      }
+    ],
+    "change": {
+      "after_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "summary": "1 file (pushed to main)"
+    },
+    "timestamp": "2026-10-01T12:00:00.000Z",
+    "location": {
+      "url": "https://github.com/acme/delivery/commit/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "system": "github"
+    },
+    "intent": "Preserve records",
+    "method": {
+      "tool": "git",
+      "params": {
+        "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "producer": "github-push",
+        "ref": "refs/heads/main",
+        "pusher": "owner",
+        "raw_message": "Preserve records\n\nRetrace-Actor: codex\nRetrace-Model: fixture-model\nRetrace-Model-Source: harness-runtime\n",
+        "author": {
+          "name": "Fixture Owner",
+          "email": "owner@example.com"
+        },
+        "parents": [
+          "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        ],
+        "parents_complete": true,
+        "model_claim": "complete",
+        "principal_rule": "agent-address/1",
+        "claim_decision": {
+          "policy": "trailer-consistency/1",
+          "observer": {
+            "producer": "github-push",
+            "sealed_by": "webhook:github"
+          },
+          "claim": {
+            "type": "agent",
+            "id": "codex",
+            "source": "retrace-actor",
+            "model": "fixture-model",
+            "model_claim": "complete",
+            "raw_trailers": {
+              "retrace-actor": "codex"
+            }
+          },
+          "caused_by": {
+            "source": "none"
+          },
+          "signed_actor": {
+            "type": "agent",
+            "id": "codex",
+            "on_behalf_of": "owner@example.com"
+          },
+          "decision": {
+            "status": "unresolved",
+            "reason": "unrooted",
+            "actor_written": "claim",
+            "unresolved_policy": "record",
+            "shadow": true,
+            "would_write": {
+              "actor_written": "claim"
+            },
+            "context": {
+              "read_head_seq": 0,
+              "read_head_hash": "<read-head-hash>",
+              "policy_digest": "<policy-digest>",
+              "first_producer": "github-push",
+              "first_F_digest": "2d86a144a4514ddfc8a7c052c0963896cf4dc6ed73ad4844227b4c53e6112428",
+              "first_claim_digest": "957b98a9b7824629ff62330df271321f62cdc8ac5c95ae52e042b0cb7f90975b"
+            },
+            "submitted": {
+              "F_digest": "2d86a144a4514ddfc8a7c052c0963896cf4dc6ed73ad4844227b4c53e6112428",
+              "parents": [
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+              ],
+              "raw_message_param": "method.params.raw_message"
+            },
+            "window": {
+              "upper_seq": 0,
+              "per_path_lower": {
+                "src/new.ts": 0
+              }
+            },
+            "witnesses": [],
+            "witness_actors": [],
+            "loose_hints": 0,
+            "harness": {
+              "marker_actor": "codex",
+              "witness_clients": [],
+              "mismatch": false
+            },
+            "classification_ms": "<elapsed-ms>"
+          }
+        },
+        "sealed_by": "webhook:github",
+        "producer_sig_verdict": "none"
+      },
+      "automated": true
+    },
+    "idempotency_key": "gh:push:acme/delivery:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "tags": [
+      "github",
+      "push"
+    ],
+    "id": "<event-id>",
+    "seq": 1,
+    "prev_hash": "<read-head-hash>",
+    "hash": "<event-hash>",
+    "received_at": "<seal-received-at>",
+    "hash_v": 2
+  },
+  "pull-request": {
+    "project": "delivery-characterization",
+    "actor": {
+      "type": "agent",
+      "id": "codex"
+    },
+    "action": "created",
+    "artifacts": [
+      {
+        "id": "pr:acme/delivery#7",
+        "kind": "pr",
+        "label": "PR #7 Preserve delivery records",
+        "derived_from": [
+          "commit:acme/delivery@aaaaaaaaaaaa"
+        ],
+        "role": "generated"
+      }
+    ],
+    "change": {
+      "after_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "summary": "Preserve delivery records (feature/delivery → main)"
+    },
+    "timestamp": "2026-10-01T12:00:00.000Z",
+    "location": {
+      "url": "https://github.com/acme/delivery/pull/7",
+      "system": "github"
+    },
+    "intent": "A fixed pull request body.",
+    "method": {
+      "tool": "github",
+      "params": {
+        "action": "opened",
+        "head": "feature/delivery",
+        "base": "main",
+        "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "additions": 4,
+        "deletions": 1,
+        "changed_files": 1,
+        "github_payload": {
+          "login": "owner",
+          "login_source": "sender",
+          "branch": "feature/delivery",
+          "head_repo": "acme/delivery",
+          "body_sha256": "6cec70c0ded85b96ac633554bbd9b912e8bcce4e2a43873858461efc4d173215",
+          "body_null": false,
+          "title_sha256": "c813617cf0c86d8f757b467129a7270192549df2f5d235a1d6f626719f881d6a",
+          "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "delivery": "fixture-pull-request",
+          "ingress_at": "<original-ingress>",
+          "payload_time": "2026-10-01T12:00:00.000Z"
+        },
+        "sealed_by": "webhook:github",
+        "producer_sig_verdict": "none",
+        "owner_login_decision": {
+          "policy": "owner-login/1",
+          "observer": {
+            "producer": "github-webhook",
+            "sealed_by": "webhook:github"
+          },
+          "login": "owner",
+          "shared": false,
+          "payload": {
+            "login": "owner",
+            "login_source": "sender",
+            "branch": "feature/delivery",
+            "head_repo": "acme/delivery",
+            "body_sha256": "6cec70c0ded85b96ac633554bbd9b912e8bcce4e2a43873858461efc4d173215",
+            "body_null": false,
+            "title_sha256": "c813617cf0c86d8f757b467129a7270192549df2f5d235a1d6f626719f881d6a",
+            "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "delivery": "fixture-pull-request",
+            "ingress_at": "<original-ingress>",
+            "payload_time": "2026-10-01T12:00:00.000Z"
+          },
+          "decision": {
+            "status": "identity_mapped",
+            "reason": null,
+            "kind": "pr_open",
+            "actor_written": {
+              "type": "agent",
+              "id": "codex"
+            },
+            "evidence_level": "identity_mapped",
+            "declarations": [],
+            "proximity_hints": 0,
+            "context": {
+              "read_head_seq": 0,
+              "read_head_hash": "<read-head-hash>",
+              "policy_digest": "<policy-digest>"
+            },
+            "window": {
+              "from": "<original-ingress-minus-30m>",
+              "to": "<original-ingress>",
+              "basis": "ingress_at"
+            },
+            "received": {
+              "webhook": null,
+              "declaration": null
+            },
+            "consumed": [],
+            "ingress_at": "<original-ingress>",
+            "classification_ms": "<elapsed-ms>",
+            "timing": {
+              "pre_ms": 0,
+              "candidates_ms": null,
+              "consumption_ms": null,
+              "amendments_ms": null,
+              "filter_ms": null,
+              "stage_failed": null,
+              "candidates_rows": null,
+              "budget_rows_remaining": null,
+              "deadline_ms": 1000
+            }
+          }
+        }
+      },
+      "automated": false
+    },
+    "idempotency_key": "gh:fixture-pull-request",
+    "tags": [
+      "github",
+      "pr"
+    ],
+    "id": "<event-id>",
+    "seq": 1,
+    "prev_hash": "<read-head-hash>",
+    "hash": "<event-hash>",
+    "received_at": "<seal-received-at>",
+    "hash_v": 2
+  },
+  "review": {
+    "project": "delivery-characterization",
+    "actor": {
+      "type": "agent",
+      "id": "codex"
+    },
+    "action": "other",
+    "action_detail": "reviewed",
+    "artifacts": [
+      {
+        "id": "pr:acme/delivery#7",
+        "kind": "pr",
+        "label": "PR #7 Preserve delivery records",
+        "derived_from": [
+          "commit:acme/delivery@aaaaaaaaaaaa"
+        ],
+        "role": "used"
+      }
+    ],
+    "timestamp": "2026-10-01T12:00:00.000Z",
+    "location": {
+      "url": "https://github.com/acme/delivery/pull/7#pullrequestreview-17",
+      "system": "github"
+    },
+    "intent": "A fixed review body.",
+    "method": {
+      "tool": "github-review",
+      "params": {
+        "state": "commented",
+        "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "github_payload": {
+          "login": "owner",
+          "login_source": "review.user",
+          "branch": "feature/delivery",
+          "head_repo": "acme/delivery",
+          "body_sha256": "d580d3349b52711ec600f306d6b5ca4de206c5d3c32865eab3d38456585e3f32",
+          "body_null": false,
+          "review_state": "commented",
+          "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "review_id": 17,
+          "delivery": "fixture-review",
+          "ingress_at": "<original-ingress>",
+          "payload_time": "2026-10-01T12:00:00.000Z"
+        },
+        "sealed_by": "webhook:github",
+        "producer_sig_verdict": "none",
+        "owner_login_decision": {
+          "policy": "owner-login/1",
+          "observer": {
+            "producer": "github-webhook",
+            "sealed_by": "webhook:github"
+          },
+          "login": "owner",
+          "shared": false,
+          "payload": {
+            "login": "owner",
+            "login_source": "review.user",
+            "branch": "feature/delivery",
+            "head_repo": "acme/delivery",
+            "body_sha256": "d580d3349b52711ec600f306d6b5ca4de206c5d3c32865eab3d38456585e3f32",
+            "body_null": false,
+            "review_state": "commented",
+            "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "review_id": 17,
+            "delivery": "fixture-review",
+            "ingress_at": "<original-ingress>",
+            "payload_time": "2026-10-01T12:00:00.000Z"
+          },
+          "decision": {
+            "status": "identity_mapped",
+            "reason": null,
+            "kind": "review",
+            "actor_written": {
+              "type": "agent",
+              "id": "codex"
+            },
+            "evidence_level": "identity_mapped",
+            "declarations": [],
+            "proximity_hints": 0,
+            "context": {
+              "read_head_seq": 0,
+              "read_head_hash": "<read-head-hash>",
+              "policy_digest": "<policy-digest>"
+            },
+            "window": {
+              "from": "<original-ingress-minus-30m>",
+              "to": "<original-ingress>",
+              "basis": "ingress_at"
+            },
+            "received": {
+              "webhook": null,
+              "declaration": null
+            },
+            "consumed": [],
+            "ingress_at": "<original-ingress>",
+            "classification_ms": "<elapsed-ms>",
+            "timing": {
+              "pre_ms": 0,
+              "candidates_ms": null,
+              "consumption_ms": null,
+              "amendments_ms": null,
+              "filter_ms": null,
+              "stage_failed": null,
+              "candidates_rows": null,
+              "budget_rows_remaining": null,
+              "deadline_ms": 1000
+            }
+          }
+        }
+      },
+      "automated": false
+    },
+    "idempotency_key": "gh:fixture-review",
+    "tags": [
+      "github",
+      "review"
+    ],
+    "id": "<event-id>",
+    "seq": 1,
+    "prev_hash": "<read-head-hash>",
+    "hash": "<event-hash>",
+    "received_at": "<seal-received-at>",
+    "hash_v": 2
+  },
+  "comment": {
+    "project": "delivery-characterization",
+    "actor": {
+      "type": "agent",
+      "id": "codex"
+    },
+    "action": "sent",
+    "artifacts": [
+      {
+        "id": "pr:acme/delivery#7",
+        "kind": "pr",
+        "label": "PR #7 Preserve delivery records",
+        "role": "used"
+      }
+    ],
+    "timestamp": "2026-10-01T12:00:00.000Z",
+    "location": {
+      "url": "https://github.com/acme/delivery/pull/7#issuecomment-23",
+      "system": "github"
+    },
+    "intent": "A fixed comment body.",
+    "method": {
+      "tool": "github-comment",
+      "params": {
+        "github_payload": {
+          "login": "owner",
+          "login_source": "comment.user",
+          "body_sha256": "5c0c6dd45fbd38cad811acc1ede1930928cbb046e5954a118d454953e1bc9b19",
+          "body_null": false,
+          "comment_id": 23,
+          "delivery": "fixture-comment",
+          "ingress_at": "<original-ingress>",
+          "payload_time": "2026-10-01T12:00:00.000Z"
+        },
+        "sealed_by": "webhook:github",
+        "producer_sig_verdict": "none",
+        "owner_login_decision": {
+          "policy": "owner-login/1",
+          "observer": {
+            "producer": "github-webhook",
+            "sealed_by": "webhook:github"
+          },
+          "login": "owner",
+          "shared": false,
+          "payload": {
+            "login": "owner",
+            "login_source": "comment.user",
+            "body_sha256": "5c0c6dd45fbd38cad811acc1ede1930928cbb046e5954a118d454953e1bc9b19",
+            "body_null": false,
+            "comment_id": 23,
+            "delivery": "fixture-comment",
+            "ingress_at": "<original-ingress>",
+            "payload_time": "2026-10-01T12:00:00.000Z"
+          },
+          "decision": {
+            "status": "identity_mapped",
+            "reason": null,
+            "kind": "comment",
+            "actor_written": {
+              "type": "agent",
+              "id": "codex"
+            },
+            "evidence_level": "identity_mapped",
+            "declarations": [],
+            "proximity_hints": 0,
+            "context": {
+              "read_head_seq": 0,
+              "read_head_hash": "<read-head-hash>",
+              "policy_digest": "<policy-digest>"
+            },
+            "window": {
+              "from": "<original-ingress-minus-30m>",
+              "to": "<original-ingress>",
+              "basis": "ingress_at"
+            },
+            "received": {
+              "webhook": null,
+              "declaration": null
+            },
+            "consumed": [],
+            "ingress_at": "<original-ingress>",
+            "classification_ms": "<elapsed-ms>",
+            "timing": {
+              "pre_ms": 0,
+              "candidates_ms": null,
+              "consumption_ms": null,
+              "amendments_ms": null,
+              "filter_ms": null,
+              "stage_failed": null,
+              "candidates_rows": null,
+              "budget_rows_remaining": null,
+              "deadline_ms": 1000
+            }
+          }
+        }
+      },
+      "automated": false
+    },
+    "idempotency_key": "gh:fixture-comment",
+    "tags": [
+      "github",
+      "comment"
+    ],
+    "id": "<event-id>",
+    "seq": 1,
+    "prev_hash": "<read-head-hash>",
+    "hash": "<event-hash>",
+    "received_at": "<seal-received-at>",
+    "hash_v": 2
+  }
+}
