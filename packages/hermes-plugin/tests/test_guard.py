@@ -1,6 +1,8 @@
 """Unit tests for retrace-guard against message arrays extracted from recorded Gate 0 request bodies (docs/design/hermes-seat.md §7 1a;
 fixtures/*.json name the run and jsonl line each array came from).
 Run: python3 -m unittest discover -s packages/hermes-plugin/tests  (no Hermes install needed)."""
+from unittest.mock import patch
+import types
 import importlib.util, json, os, sys, tempfile, unittest
 from pathlib import Path
 
@@ -39,11 +41,16 @@ class ScanTests(unittest.TestCase):
 
 class HookTests(unittest.TestCase):
     def setUp(self):
+        self.adapter = patch.dict(sys.modules, {"retrace_runtime_adapter": types.SimpleNamespace(identity_text=lambda: "RETRACE-SEAT: hermes\nRetrace-Actor: hermes")})
+        self.adapter.start()
         self.tmp = tempfile.TemporaryDirectory(); os.environ["HERMES_HOME"] = self.tmp.name
         os.environ.pop("RETRACE_GUARD_TEST", None); os.environ.pop("RETRACE_GUARD_TEST_LOAD", None)
+        os.environ["RETRACE_GUARD_MODE"] = "builder-probe"; os.environ["RETRACE_GUARD_PHASE"] = "scratch"
         guard._sessions.clear(); self.ctx = Ctx(); guard.register(self.ctx); self.h = self.ctx.hooks
         self.h["on_session_start"](session_id="s1", model="stub-model-1")
-    def tearDown(self): self.tmp.cleanup()
+    def tearDown(self):
+        self.adapter.stop()
+        self.tmp.cleanup(); os.environ.pop("RETRACE_GUARD_MODE", None); os.environ.pop("RETRACE_GUARD_PHASE", None)
     def verdict_file(self): return Path(self.tmp.name) / "run" / "guard" / "s1.jsonl"
 
     def test_tool_allowed_only_after_passing_scan(self):
@@ -97,14 +104,14 @@ class HookTests(unittest.TestCase):
         (wd / "sub" / "dir" / "n.txt").write_text("x"); guard._sessions["s1"]["workdir"] = str(wd)
         self.h["pre_api_request"](session_id="s1", api_request_id="r1", request=req("ok"))
         r = self.h["pre_tool_call"](tool_name="read_file", args={"path": "sub/dir/n.txt"}, session_id="s1", api_request_id="r1")
-        self.assertEqual(r["action"], "block"); self.assertIn("context file sits on this path", r["message"])
+        self.assertIsNone(r)  # the bound loader disables automatic subdirectory context
         self.assertIsNone(self.h["pre_tool_call"](tool_name="read_file", args={"path": "README.md"}, session_id="s1", api_request_id="r1"))
 
     def test_model_equality(self):  # layer C check 6
         self.h["pre_api_request"](session_id="s1", api_request_id="r1", request=req("ok"))
         r = self.h["pre_tool_call"](tool_name="mcp__retrace__retrace_log", args={"actor": {"model": "narrated-model"}}, session_id="s1", api_request_id="r1")
         self.assertEqual(r["action"], "block")
-        self.assertIsNone(self.h["pre_tool_call"](tool_name="mcp__retrace__retrace_log", args={"actor": {"model": "stub-model-1"}}, session_id="s1", api_request_id="r1"))
+        self.assertIsNone(self.h["pre_tool_call"](tool_name="mcp__retrace__retrace_log", args={"actor": {"model": "stub-model-1"}}, session_id="s1", api_request_id="r1", tool_call_id="log1"))
 
     def test_commit_trailers_and_coverage(self):  # layer C checks 7-8
         self.h["pre_api_request"](session_id="s1", api_request_id="r1", request=req("ok"))
@@ -115,7 +122,8 @@ class HookTests(unittest.TestCase):
         r = self.h["pre_tool_call"](tool_name="terminal", args={"command": good_msg}, session_id="s1", api_request_id="r1")
         self.assertEqual(r["action"], "block"); self.assertIn("never named", r["message"])
         self.h["post_tool_call"](tool_name="mcp__retrace__retrace_log", args={"artifacts": [{"id": "repo:jordandru/retrace#a.md"}]}, session_id="s1")
-        self.assertIsNone(self.h["pre_tool_call"](tool_name="terminal", args={"command": good_msg}, session_id="s1", api_request_id="r1"))
+        # An attempted log without a matched successful receipt must remain uncovered.
+        self.assertIsNotNone(self.h["pre_tool_call"](tool_name="terminal", args={"command": good_msg}, session_id="s1", api_request_id="r1"))
         self.assertEqual(self.h["pre_tool_call"](tool_name="terminal", args={"command": good_msg + " --amend"}, session_id="s1", api_request_id="r1")["action"], "block")
 
 

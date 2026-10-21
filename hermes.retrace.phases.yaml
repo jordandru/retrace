@@ -8,6 +8,7 @@ mcp_env_common:
   RETRACE_ON_BEHALF_OF: jordansboxing@gmail.com
   RETRACE_ACTOR_MODEL: "${RETRACE_ACTOR_MODEL}"
   RETRACE_ACTOR_MODEL_SOURCE: harness-config
+  RETRACE_TERMINAL: "${RETRACE_TERMINAL}"
 mcp_env_scratch:
   RETRACE_DB: "{{PROFILE}}/run/scratch-{{DATE}}.sqlite"
 mcp_env_live:

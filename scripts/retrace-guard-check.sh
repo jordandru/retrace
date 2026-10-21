@@ -65,8 +65,14 @@ try:
             block("verdict file holds a line that is not JSON")
         if not isinstance(entry, dict):
             block("verdict file holds a line that is not a JSON object")
-        if entry.get("event") == "request" and entry.get("api_request_id") == rid:
-            ok = entry.get("verdict") == "ok"
+        if entry.get("event") == "session_start":
+            ok = False
+        if entry.get("event") == "aux_request" and entry.get("verdict") != "ok":
+            block("an auxiliary request failed inspection")
+        if entry.get("event") == "request":
+            # Only the newest main request can authorize tools. A later pending,
+            # failed or different request retires every previous approval.
+            ok = entry.get("api_request_id") == rid and entry.get("verdict") == "ok"
     if not ok:
         block("request " + rid + " has no passing verdict in the session's verdict file")
 except BaseException as exc:

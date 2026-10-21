@@ -437,7 +437,7 @@ test("T2on new-team refuses claude-code-openshell before any mint or write; add-
 test("new-team still plans every other harness; the refusal list is exactly the two provider-held seats", () => {
   assert.deepEqual(PROVIDER_HELD_HARNESSES, ["claude-code-cloud", "claude-code-openshell"]);
   const others = HARNESSES.filter((h) => !PROVIDER_HELD_HARNESSES.includes(h));
-  assert.deepEqual(others, ["claude-code", "codex", "gemini", "grok", "github-copilot", "openclaw", "nooa"]);
+  assert.deepEqual(others, ["claude-code", "codex", "gemini", "grok", "github-copilot", "openclaw", "nooa", "hermes"]);
   const plan = planTeam({ ...spec, harnesses: others }, fakeRand());
   assert.equal(plan.credentials.length, spec.members.length * others.length + 2, "one per member × harness, plus the hook and the CI reader");
   assert.match(plan.onboarding, /"env": \{/, "their team onboarding keeps its MCP env entries");
@@ -674,4 +674,35 @@ test("P6: set-policy refuses declared-project mismatch; --cross-project-copy pri
     url: "https://worker.example", token: "tok", fetchImpl: badFetch,
   });
   assert.equal(unavail.refused, "worker mapping unavailable");
+});
+
+
+test("Hermes is opt-in, keyed, and gets profile-specific onboarding without generic MCP JSON", async () => {
+  assert.ok(HARNESSES.includes("hermes"));
+  assert.equal((DEFAULT_HARNESSES as readonly string[]).includes("hermes"), false);
+  const dir = mkdtempSync(join(tmpdir(), "retrace-admin-hermes-"));
+  const file = join(dir, "creds.json");
+  const onboarding = join(dir, "hermes.md");
+  const keysDir = join(dir, "producer-keys");
+  appendCredentials(file, [], planCredentials(spec, fakeRand()));
+  const argv = ["add-agent", "acme-app", "--member", "alice@acme.dev", "--harness", "hermes", "--url", "https://retrace.example", "--credentials-file", file, "--producer-keys-dir", keysDir, "--out", onboarding];
+  assert.equal(await main(argv, {}, () => {}), 0);
+  const added = readCredentialsFile(file).at(-1)!;
+  assert.deepEqual(added.actor, { type: "agent", id: "hermes", on_behalf_of: "alice@acme.dev" });
+  assert.equal(added.trust, "pinned");
+  assert.equal(added.require_signature, true);
+  assert.ok(added.public_key?.x && added.producer_key_file);
+  assert.equal(statSync(added.producer_key_file!).mode & 0o777, 0o600);
+  assert.equal("d" in (added.public_key ?? {}), false);
+  const doc = readFileSync(onboarding, "utf8");
+  assert.match(doc, /RETRACE_TOKEN_HERMES=/);
+  assert.match(doc, /RETRACE_PRODUCER_KEY_FILE_HERMES=/);
+  assert.ok(doc.includes(`pinned:${added.name}`));
+  assert.match(doc, /retrace_verify_send/);
+  assert.match(doc, /Provisioning does not admit/);
+  assert.doesNotMatch(doc, /"command": "npx"/);
+  await assert.rejects(() => main(argv, {}, () => {}), /refusing to mint a second live pinned agent\/hermes/);
+  const team = planTeam({ ...spec, harnesses: ["hermes"] }, fakeRand());
+  assert.match(team.onboarding, /RETRACE_TOKEN_HERMES=/);
+  assert.match(team.onboarding, /research and knowledge maintenance/);
 });
