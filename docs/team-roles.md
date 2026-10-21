@@ -27,6 +27,39 @@ we can least afford to spend on building, and reviews are cheaper than builds. K
 self-report `gpt-5` when the pane shows a newer model; current sessions omit `actor.model` rather than guess,
 which is the honest fallback until the runtime exposes the identifier.
 
+**Codex with Daybreak Blue — defensive security and provenance review.** Added 2026-10-21 on
+Jordan's instruction `evt_f492800e179c4c4fb17207ee9a9cec66`, following the capability assessment rooted
+in `evt_ad2b10f8cd8b4945a9a7afec37d9a077`. This is a specialization of the Codex seat. Daybreak access
+and the model running a task are separate facts: record the actual model and its source under
+agent-rules 4 v2 and `AGENTS.md`; the historical model-reporting paragraph above is superseded by those rules.
+
+*General fit.* OpenAI documents Daybreak Blue for vulnerability discovery and triage, secure code review
+and threat modeling, detection engineering and incident response, controlled malware analysis, and
+remediation and patch validation. Daybreak Red covers separately approved specialist workflows such as
+exploit validation and penetration testing; Blue access does not imply Red access.
+Source: [OpenAI, Models and Trusted Access](https://learn.chatgpt.com/docs/cyber-safety), consulted
+2026-10-21. These are documented use cases; neither that source nor the earlier Codex seat history
+establishes a Daybreak-specific performance advantage on Retrace.
+
+*Retrace allocation.* Prioritize adversarial design and code review where a failure could make the
+ledger claim more than its evidence proves:
+
+| Assignment | Question to resolve |
+|---|---|
+| Provenance and identity integrity | Can an event appear authenticated, correctly attributed, or causally covered without sufficient evidence? |
+| Signature and authorization checks | Can replay, mismatched hashes, credential confusion, or an unsigned path bypass verification? |
+| Race conditions and failure handling | Can keys, routing values, files, or process identity change between validation and use, or an unreadable check allow progress? |
+| Agent and sandbox boundaries | Can tool output, a handoff, or an acceptance receipt acquire authority or imply execution without evidence? |
+| Reproductions and patch validation | Does a minimal failing case demonstrate the defect, and does the fix reject it while preserving valid behavior? |
+| Bounded implementation | Can a specified security control be delivered with focused tests and reviewable evidence? |
+
+A useful initial audit traces instruction → authenticated event → edit evidence → commit attribution →
+review → merge, identifying each place a claim exceeds its supporting evidence. Findings should name the
+reviewed revision, affected boundary, evidence, consequence, and severity, and distinguish static analysis
+from executed checks. Implementation remains bounded by the assigned brief and takes independent review.
+This allocation preserves the existing review order, coordinator ownership, exact-head gates, and owner
+approval requirements; it grants no standing dispatch, merge, deployment, or operational authority.
+
 **Grok (xAI; Grok 4.6) — the measurer.** Reproductions, dry runs, gates, and operations: the fast-forward
 hole in the first post-merge guard (fixed in 69de979 within the hour), the OpenCode Gate 0/Gate 1 evidence
 with doc quotes and scratch-ledger events (#2411, #2428), the bfe87c3 dry run that returned the honest
