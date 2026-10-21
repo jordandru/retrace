@@ -320,6 +320,21 @@ it; the rule binds until that change is measured, not before): every seat runs `
     [direction]: the owner channel designed in `docs/owner-protocol.md` §5 ("proper defense later") lets the gate treat an
     owner-enveloped direct input, verified under that channel, as a root.
 
+21. **Cloud task operation is staged, not enabled by documentation.** (Added 2026-10-21 on Jordan's
+instruction `evt_517d7d29e24c4511b6ecf964a73edf29`.) `claude-code-cloud` is the planned asynchronous builder
+and reproduction worker in `team-roles.md`; its contract and activation sequence are `docs/design/cloud-seat.md`
+§11. It is not a laptop coordinator and remains inactive until those gates and the separate owner go pass.
+For a future authorized run, the current coordinator owns one task/branch assignment, supplies the complete
+brief, signs it before Jordan relays it through owner-protocol §10, and checks earlier receipts/results before
+any retry. The cloud seat checks the full base SHA and its limits, logs before commit/push, and stops when
+the contract requires. Jordan relays its evidence report back; the signed laptop seat verifies the exact head,
+opens the PR and routes review. No cloud result is an instruction to another seat or a formal gate verdict.
+Track implemented infrastructure, verified configuration and authorized operation separately. Begin with one
+task; record provenance completeness, acceptance, reviewer rework and measured usage before requesting expansion.
+→ unnecessary when [direction]: a gated dispatch runner enforces session/task ownership, scope, usage ceilings,
+expiry and replay prevention, verifies result provenance and exposes the three states without a manual relay.
+Until such a runner is built and measured, this is a manual procedure, not a claim of technical enforcement.
+
 ## Build order (Grok's read, PR 40, evt_1626b03aea8d4911ae1c7523c94903d9)
 
 For priority 3 and the stranger-install bar: **13** (credentials out of the Worker secret, with the store

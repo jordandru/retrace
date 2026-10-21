@@ -59,6 +59,21 @@ detached coordination worktree so the primary checkout alone owns `main`. Review
 instead of it: the PR 12 approval that missed the unsigned authorization path (#2131) is the reason the
 order is Codex first, Claude last. The most expensive seat per token; it should not do bulk implementation.
 
+**Claude Code Cloud — asynchronous builder and reproduction worker.** Executes bounded assignments from
+approved briefs and returns changes with reproducible evidence. Works under its own identity on a named task
+branch. Formal review, coordination and outward operational authority remain with their assigned seats.
+
+*Added 2026-10-21 on Jordan's instruction `evt_517d7d29e24c4511b6ecf964a73edf29`; planned role, not activation.*
+This is the distinct actor `claude-code-cloud`, with its model reported per session under agent-rules 4.
+Its initial work categories are bounded bug fixes, regression tests, reproducible investigations, and
+documentation updates implementing approved specifications. Diagnostic findings are evidence for assigned
+reviewers, never a gate verdict or an independent cross-vendor approval. It does not coordinate, dispatch,
+merge, deploy, publish, administer credentials, or create PRs, GitHub comments or reviews. After separate
+activation, its only GitHub writes are approved pushes to its named non-main task branch; the signed laptop
+seat opens the PR. Each assignment and evidence report follows `docs/design/cloud-seat.md` §11.2–§11.3.
+Start with one task that another seat can cheaply verify; workload expansion follows the measured decision
+in §11.5. Until the corresponding activation gates pass, the existing read-and-report-only restriction stands.
+
 **Builders — github-copilot (GPT-5.6 Sol), cursor-agent (the model Cursor is set to — Grok 4.6 until 2026-09-11, GPT-5.6 Sol since; identity is the credential, the model is self-reported per session).** Bounded, specified work
 from a brief, in their own worktrees, one PR each, commit only their own paths. Evidence: Copilot's export
 tail (PR 12), object-store doctor (PR 14, 17), stranger fixes (PR 20, 22), release prep (PR 25); cursor-agent's
