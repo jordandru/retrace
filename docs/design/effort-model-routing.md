@@ -11,6 +11,10 @@ Reviewer for v1: Nemotron 3 Ultra via NOOA (cross-vendor; Codex's weekly budget 
 here changes what the ledger records about *who did what*; it adds a recorded answer to *how much thinking
 was bought for it*, and a way to check later whether that was the right amount.
 
+**Addendum 2026-09-18** (claude-code, on Jordan's ask): §11 adds `DanMcInerney/orchflows` as named prior
+art — where it agrees, where it diverges, and the one thing this note should take from it. Nothing in
+§1–§10 changes; the earlier text stands as written (agent-rules 10).
+
 ## 1. The problem
 
 Coordinators already choose, per task, which agent runs it, at which model, at which reasoning effort — and
@@ -117,7 +121,8 @@ the P1s on PR 29, PR 31 and PR 32; medium correctly approved PR 30 r2 and PR 31 
 
 As a Claude Code skill (`.claude/skills/review-effort/`): the rubric table, the launch commands, and a
 logging hook. Only the sink is Retrace-specific; elsewhere the decision record can go to a file or a PR
-comment. The evaluation loop in §6 is the part that needs a ledger.
+comment. The evaluation loop in §6 is the part that needs a ledger. §11 assesses a named alternative that
+keeps the composition portable and deliberately records nothing.
 
 ## 8. Out of scope for v1
 
@@ -153,3 +158,83 @@ R7 A PR that receives a push after routing is re-classified against the new head
 | F4 Medium — moving head | §3 head-sha classification, re-classify per push; §5 `head_sha`; R7 |
 | F5 Low — which models support effort | §5 `models.json` + digest; R2 |
 | F6 Low — self-reported tokens | §6 advisory only |
+
+## 11. Prior art: orchflows (added 2026-09-18)
+
+`DanMcInerney/orchflows` (MIT; created 2026-07-18; read at `main` = `36c9d46`, pushed 2026-09-18 20:15Z,
+97 stars / 9 forks) composes two primitives — `orch-work` and `orch-review` — into Markdown workflows
+that a host's native subagents execute. It is the closest live prior art to this note, and it is useful
+here precisely because it states as **instructions** several of the rules this note states as **events**.
+Read for this section: `README.md` and `docs/architecture.md` at that sha. Not read: `scripts/`,
+`guidance/`, the example workflows, the E2E suite. Every quotation below is verbatim from those two
+files at that sha; the repository moves fast enough that a read two days earlier (2026-09-16) quoted
+README sentences that no longer exist, so cite it by sha and never by `main`.
+
+### 11.1 Where it agrees with this note
+
+| Rule | orchflows states it as an instruction | Here it is an event |
+|---|---|---|
+| Reviewer ≠ builder | "a fresh native child who did not make it reviews without fixing" (architecture, *Two primitives*); "never replace required independent review with self-review" (*Execution*) | agent-rules 11; the verdict event names the reviewing seat |
+| Effort and model are per-assignment, with precedence | "Model and effort are optional for work, review, stages and named assignments. Resolve each separately: current caller instructions override saved preferences; within either source, named assignment overrides stage, then operation default." (*Model and effort*) | §3 rubric + §5 `target` |
+| Never substitute a setting you cannot honour | "report unsupported settings as gaps without substituting values" (*Model and effort*) | §5 `models.json` + R2; a reviewer recording `reasoning_effort: not_exposed` rather than guessing |
+| A verdict binds to what was inspected | "Verdicts apply only to the inspected state and scope; changes do not inherit them." (*Review*) | R7 and agent-rules 11: the routing event records the head sha, the verdict cites the routing event |
+| No claims ahead of evidence | "Gather required outcomes before dependent work; report missing work as a gap." (*Execution*) | agent-rules 0 |
+
+Two projects reaching the same five rules independently is the strongest external support these rules
+have. It also shows the split cleanly: orchflows is prescriptive, this note is evidentiary, and they do
+not do each other's job.
+
+### 11.2 Where it diverges, and why that matters for §9
+
+Orchflows produces no record on purpose: "Orchflows supplies no agent runtime, scheduler or workflow
+language" (README) and "No shared event format or runtime is required" (*Iteration bounds*). Three
+consequences follow for the acceptance criteria in §9 — none of them defects in orchflows, all of them
+reasons its composition cannot stand in for this note's mechanism:
+
+1. **Independence is asserted, not recorded.** "Work directly or reuse a worker only when those
+   settings can be honored; otherwise use a fresh worker" (*Model and effort*) leaves three legitimate
+   staffing paths, and nothing afterwards says which one ran. A later reader cannot distinguish a fresh
+   reviewer from the coordinator's own pass. R1 and R3 exist to make exactly that difference checkable.
+2. **An effort mismatch is undetectable.** R3 compares self-reported effort against routing intent, and
+   that needs both records. Orchflows keeps neither, so a review that ran below its assignment reads the
+   same as one that ran at it.
+3. **It is host-bound.** Children are subagents of one host session on one credential. The seats here
+   are cross-vendor with separate credentials and producer keys (agent-rules 7, 13), and that separation
+   is most of what a verdict is worth. Routing gate seats through one host's subagents would collapse it.
+
+Its testing posture is worth naming for contrast: the E2E framework "asks a fresh evaluator whether the
+process and result were acceptable", where "Unsupported review, unauthorized effects and material wrong
+results fail" (README). That is a suite asserting the process at test time — valuable, and orthogonal to
+a per-run record a later reader can verify. The same README says of its own timing, "That is one
+observation, not a reliability estimate," which is agent-rules 0 applied to its own claims.
+
+### 11.3 Guidance documents versus §3's rubric
+
+Orchflows puts the specificity outside the workflows: "Workflows express dependencies, independence,
+review gates and stopping conditions. Guidance expresses what good work looks like" (README), under the
+thesis "A better model should need fewer instructions, not a new workflow architecture" and the
+maintenance rule "When a model stops needing a corrective instruction, test removing that instruction
+from guidance."
+
+§3 takes the same move for the same reason — the rubric and `routing-rules/models.json` are data files,
+not prose inside the skill, so a model's supported levels change by editing data (R6). The divergence is
+what happens to the old text. Orchflows deletes instructions a better model no longer needs, which is
+right for a library whose only job is the next run. Here the digest of the rules in force is recorded in
+every routing event (§5), so deleting a stale rule never makes a past decision unreadable: the event
+still names the `rule_version` and `rules_digest` it was decided under. **Editable guidance explains the
+next run; a digest-pinned rubric also explains the last one.** That is the sentence to reach for when
+someone asks why the rubric is versioned data rather than advice.
+
+### 11.4 What this note takes from it
+
+- **Adopt the precedence form.** Its one-sentence resolution order — caller instruction over saved
+  preference, and within either, named assignment over stage over operation default — is clearer than
+  anything §3 or §5 currently says about how a pin, the rubric default and a coordinator's explicit
+  choice combine. v2 should state precedence explicitly in that form (pin still raises and never lowers,
+  per R4).
+- **Do not adopt it in the gate path**, now or soon: §9 is a set of claims about records, and records
+  are the one thing orchflows deliberately does not produce.
+- **The integration seam, if it ever wants records**, is one step: after a verdict, emit an event
+  carrying `routing_event_id`, the self-reported effort and the reviewed head sha (§5). A generic tool
+  cannot mint per-seat producer keys (agent-rules 13), so a v1 would be unsigned client logging and
+  would have to be labelled as such — weaker than a seat here, stronger than nothing.
