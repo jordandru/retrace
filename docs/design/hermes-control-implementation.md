@@ -34,9 +34,15 @@ a stable public interface. A different source contract requires inspection and r
 Untracked/ignored code, installed dependencies and same-user filesystem interference are not proved
 safe by a Git HEAD check; the installation/isolation trial must address those surfaces.
 
+The literal `"[Subdirectory context discovered:"` evidence check is a best-effort secondary heuristic.
+The primary guarantee is the pinned adapter's suppression of `SubdirectoryHints.check_tool_call`; an
+upstream change to that surface requires a new source contract and renewed qualification.
+
 The stock serializer clips strings at 8,000 characters and sequences at 200 entries. Its top-level
-size setting does not remove those inner caps. The adapter preserves upstream secret-key redaction
-and JSON conversion with a maximum 8 MiB inspection budget; oversize/depth/redaction loss is explicit
+size setting does not remove those inner caps (`agent/api_request_hooks.py:67-70` at the pinned commit).
+The adapter relaxes those per-value caps so the guard can inspect complete requests while preserving
+upstream secret-key redaction and JSON conversion, then applies a maximum 8 MiB inspection budget;
+oversize/depth/redaction loss is explicit
 and the guard refuses dependent tools. It writes request hashes and verdicts, not raw requests.
 The callbacks are observers: an invalid request may already have reached a provider before tools
 are denied. This implementation does not claim a pre-provider privacy or authorization firewall.
@@ -63,8 +69,9 @@ own successful `retrace_instruct` receipt; binding a pre-existing routed root is
 before delegated/routed builder use.
 
 The research tool policy is narrower than filesystem isolation. It rejects symlink paths, traversal,
-hidden config paths and arbitrary executable tools, but a same-user process can race filesystem checks.
-No such process is authorized by this mode. Host isolation and credential custody remain admission work.
+hidden config paths and arbitrary executable tools, with one read-only hidden-path exception for the
+seat's root `.hermes.md` identity file. A same-user process can race filesystem checks. No such process
+is authorized by this mode. Host isolation and credential custody remain admission work.
 
 ## Remaining knowledge work
 

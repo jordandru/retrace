@@ -175,6 +175,8 @@ def scan_messages(messages: Iterable[Dict[str, Any]], *, require_seat: bool,
             # Evidence is allowed to name other seats only when the pinned loader
             # adapter disabled implicit foreign instruction loading. Text alone
             # never grants a role or permission, including embedded JD envelopes.
+            # This literal splice marker is a best-effort secondary heuristic;
+            # the pinned adapter's suppression of the hint loader is primary.
             if "[Subdirectory context discovered:" in text:
                 return False, "unexpected automatic context splice in tool evidence"
             continue
@@ -360,8 +362,9 @@ def _research_path(value: Any, st: Dict[str, Any], *, write: bool) -> bool:
         except ValueError:
             continue
         if not relative.parts or any(part.startswith(".") for part in relative.parts):
-            # The seat's own identity is readable, but no hidden config, Git data,
-            # credential file or dot-directory is a research file surface.
+            # The seat's own .hermes.md identity is the sole read-only exception;
+            # no other hidden config, Git data, credential file or dot-directory
+            # is a research file surface.
             return not write and relative.parts == (".hermes.md",)
         return True
     return False

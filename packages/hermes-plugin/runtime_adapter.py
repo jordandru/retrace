@@ -67,8 +67,9 @@ def bind(prompt_builder, subdirectory_hints, request_hooks, root: Path, identity
     subdirectory_hints.SubdirectoryHints.check_tool_call = lambda self, *args, **kwargs: None
 
     def complete_payload(cls, value):
-        # Preserve upstream secret-key redaction/SDK coercion but remove the small
-        # silent string/sequence caps. Above this explicit bound, tools fail closed.
+        # Preserve upstream secret-key redaction/SDK coercion while relaxing its
+        # max_string=8,000 and max_sequence=200 defaults (pinned v0.22.3
+        # agent/api_request_hooks.py:67-70). Above 8 MiB, tools fail closed.
         payload = cls._hook_jsonable(value, max_depth=64, max_string=MAX_PAYLOAD, max_sequence=MAX_PAYLOAD)
         encoded = json.dumps(payload, ensure_ascii=False)
         if len(encoded.encode("utf-8")) > MAX_PAYLOAD:

@@ -680,6 +680,13 @@ test("P6: set-policy refuses declared-project mismatch; --cross-project-copy pri
 test("Hermes is opt-in, keyed, and gets profile-specific onboarding without generic MCP JSON", async () => {
   assert.ok(HARNESSES.includes("hermes"));
   assert.equal((DEFAULT_HARNESSES as readonly string[]).includes("hermes"), false);
+  const help: string[] = [];
+  assert.equal(await main([], {}, (line) => help.push(line)), 0);
+  assert.match(help.join("\n"), /add-agent .*--harness [^|\n]*(?:\|[^|\n]*)*\|hermes/);
+  await assert.rejects(
+    () => main(["add-agent"], {}, () => {}),
+    /--harness openclaw\|claude-code-cloud\|claude-code-openshell\|hermes/,
+  );
   const dir = mkdtempSync(join(tmpdir(), "retrace-admin-hermes-"));
   const file = join(dir, "creds.json");
   const onboarding = join(dir, "hermes.md");

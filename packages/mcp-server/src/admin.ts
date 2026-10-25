@@ -5,7 +5,7 @@
  *   retrace-admin new-team <project> --member a@x.com[,b@y.com] [--harness claude-code,codex,gemini,grok,github-copilot]
  *                          [--url https://retrace-api.<you>.workers.dev] [--credentials-file ~/.retrace/worker-credentials.json]
  *                          [--out ~/.retrace/onboarding-<project>.md] [--producer-keys-dir ~/.retrace/producer-keys] [--dry-run]
- *   retrace-admin add-agent <project> --member a@x.com --harness openclaw|claude-code-cloud|claude-code-openshell [--url https://…] [--out ~/.retrace/onboarding-…md]
+ *   retrace-admin add-agent <project> --member a@x.com --harness openclaw|claude-code-cloud|claude-code-openshell|hermes [--url https://…] [--out ~/.retrace/onboarding-…md]
  *   retrace-admin retire-agent <project> --harness codex
  *   retrace-admin set-principal <project> --actor agent/codex --principal human/a@x.com [--on-behalf-of a@x.com]
  *   retrace-admin list-teams [--credentials-file …]
@@ -585,7 +585,7 @@ export async function main(argv = process.argv.slice(2), env = process.env, out:
     const members = list(flags.member);
     const harnesses = list(flags.harness);
     if (!project || members.length !== 1 || harnesses.length !== 1)
-      throw new Error("usage: retrace-admin add-agent <project> --member a@x.com --harness openclaw|claude-code-cloud|claude-code-openshell [--url https://…] [--out onboarding.md]");
+      throw new Error("usage: retrace-admin add-agent <project> --member a@x.com --harness openclaw|claude-code-cloud|claude-code-openshell|hermes [--url https://…] [--out onboarding.md]");
     const spec: AgentSpec = {
       project,
       member: members[0],
@@ -702,7 +702,7 @@ export async function main(argv = process.argv.slice(2), env = process.env, out:
     }
     return 0;
   }
-  out("retrace-admin <new-team <project> --member a@x.com[,…] [--harness …] | add-agent <project> --member a@x.com --harness openclaw|claude-code-cloud|claude-code-openshell | retire-agent <project> --harness codex | set-principal <project> --actor agent/codex --principal human/a@x.com | set-policy <project> --from <repo>/.retrace.json --if-match <digest>|none | list-teams> [--url https://…] [--credentials-file …] [--out file.md (default: ~/.retrace/onboarding-*.md)] [--producer-keys-dir ~/.retrace/producer-keys] [--dry-run]");
+  out("retrace-admin <new-team <project> --member a@x.com[,…] [--harness …] | add-agent <project> --member a@x.com --harness openclaw|claude-code-cloud|claude-code-openshell|hermes | retire-agent <project> --harness codex | set-principal <project> --actor agent/codex --principal human/a@x.com | set-policy <project> --from <repo>/.retrace.json --if-match <digest>|none | list-teams> [--url https://…] [--credentials-file …] [--out file.md (default: ~/.retrace/onboarding-*.md)] [--producer-keys-dir ~/.retrace/producer-keys] [--dry-run]");
   return cmd ? 1 : 0;
 }
 

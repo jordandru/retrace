@@ -467,8 +467,9 @@ through the normal design gate, it supersedes this note's builder-only ceiling (
 foreign-marker-anywhere refusal (sections 4/5), the blanket long-term feature shutdown (sections 5/6), and
 the implementation/admission sequence in sections 7/8 to the extent explicitly described there.
 
-The current `.hermes.md`, profile and guard still implement the older restrictions. Their reviewed updates
-and measured gates are required before the expanded capabilities run. Retain the useful mechanisms above:
+As of this 2026-10-21 planning amendment, before the implementation candidate recorded in section 13,
+the then-current `.hermes.md`, profile and guard still implemented the older restrictions. Their reviewed
+updates and measured gates are required before the expanded capabilities run. Retain the useful mechanisms above:
 one seat identity/credential/key, signed dispatch verification, separate scratch/live stores, request-bound
 checks with an independent fail-closed path, and evidence before support claims. The new plan requires a
 researcher to read other actors' evidence without adopting their identities; it does not simply remove the
