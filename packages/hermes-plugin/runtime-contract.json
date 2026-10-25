@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "commit": "5b147ab036d6d19131bff8d20701b5001eab844a",
+  "release": "v0.22.3",
+  "files": {
+    "agent/prompt_builder.py": "f4500660b1ba9cbce98236dfe92dab3dd30f2152daac1f5750c8de26f21f7b3c",
+    "agent/subdirectory_hints.py": "31a79816194f58fafa2438aa1a035db9246527ad03befbd4edfda0d1f557357f",
+    "agent/api_request_hooks.py": "6d320559f3df689cb24a93c9b110124abc7c32f4dcce88ea5aead5f59bdee2a7",
+    "agent/auxiliary_hooks.py": "480068b6bcb358fe1eaede974958a86c469aa411ff815af5ee3fcbfd142180d7",
+    "model_tools.py": "da5b7db1b05de615658e56c4172426ed82099a093c5b586e48e65ef930b778c8",
+    "tools/mcp_tool_handlers.py": "749d4c7ec5739a18a063b6499f42db18bf7261e72ecfc4ff69cc36ae20737509",
+    "hermes_cli/config_defaults.py": "93c989bcd0a4c3aff116ad2534375ece02bce4b79b9e9166dfacf834f09bc63b",
+    "tools/threat_patterns.py": "9e93a48960d55b7403c04bb30ca24ea178ba60dfc79e1a3938ce4e19a792fa02",
+    "uv.lock": "97367c6bf21aa3711bae5aa0d0662d9a68585a03a2a9d11cd9b17393435c4f91"
+  }
+}

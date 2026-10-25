@@ -42,6 +42,18 @@ def big_payload(n=140_000):
 
 
 class GuardCheckTests(unittest.TestCase):
+    def test_newer_request_retires_old_pass(self):
+        for verdict in ("ok", "failed", "pending"):
+            later = json.dumps({"event": "request", "api_request_id": "R2", "verdict": verdict}).encode() + b"\n"
+            self.assertBlocks(self.run_check(PAYLOAD, OK_R1 + later))
+
+    def test_pending_rescan_retires_same_request_pass(self):
+        self.assertBlocks(self.run_check(PAYLOAD, OK_R1 + b'{"event":"request","api_request_id":"R1","verdict":"pending"}\n'))
+
+    def test_restart_or_failed_auxiliary_scan_retires_old_pass(self):
+        self.assertBlocks(self.run_check(PAYLOAD, OK_R1 + b'{"event":"session_start"}\n'))
+        self.assertBlocks(self.run_check(PAYLOAD, OK_R1 + b'{"event":"aux_request","verdict":"failed"}\n'))
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.base = Path(self.tmp.name)

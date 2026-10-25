@@ -1,5 +1,11 @@
 # Hermes seat: Hermes Agent as an opt-in builder (design note v2)
 
+**2026-10-21 role decision and onboarding amendment:** Jordan selected research and knowledge maintenance
+as Hermes's primary role, with reasonable flexibility to other qualified roles, in
+`evt_4723bcc37e39419da2261142b6ef5f19`. The complete proposed implementation/admission process is
+[Hermes onboarding](hermes-onboarding.md). See section 12 for its relationship to this historical design.
+No new capability is activated by these documents alone.
+
 **Status:** v1, 2026-10-05, by `claude-code` (the "Hermes seat investigation" pane, author; `claude-fable-5-1`, model source harness-runtime). Drafted at 01:30 MDT; the four decisions were signed at 01:45 MDT (`evt_648a046e4778483b81db7bcbf2babc1e`, "0a, a2, b1, c1") and folded in.
 **Not built.** Class (a) under agent-rules 12: it defines a new seat, its identity file, a guard that governs what the seat may do,
 the custody of its credential, and a launcher. Written on Jordan's signed `evt_af0778b61f08410884d91c94aafd9db6` ("Draft design
@@ -445,3 +451,35 @@ Round 1 reviewed head `75942525`; every finding fixed in place in v2 on `evt_5cb
 | G-L2 a re-run is not byte-identical to the cited hashes | Grok, Low | **Applied.** §2 says which script form produced which run and that a re-run reproduces (a) and (b) but not the bytes | §2 |
 | G-L3 `local.py:334` is the scrub function | Grok, Low | **Applied.** Citation corrected (334 scrub; 328 and 365 the copy; 363 the comment) | §2 |
 | NOOA, no findings | NOOA, approved (`evt_2ad4a2d4…`) | nothing to dispose | — |
+
+## 12. Research and knowledge-maintenance role — 2026-10-21 amendment
+
+On `evt_4723bcc37e39419da2261142b6ef5f19`, Jordan chose the primary role **research and knowledge maintenance**,
+with reasonable flexibility to building, measurement, review, monitoring and delegated work. This changes
+the role decision in section 1, H-c; the earlier builder-only decision and its supporting text above remain
+as history under agent-rules 10. It does not change the local host or Portal choices, grant coordinator
+ownership, provision credentials, or claim that the seat has passed admission.
+
+[hermes-onboarding.md](hermes-onboarding.md) is the finalized planning draft for carrying that decision into
+operation. It proposes class (a): role boundaries, F1-F8 fixes, implementation order, refreshed Gates 0-3,
+research/knowledge trials, capability-specific expansions, and suspension/update behavior. When adopted
+through the normal design gate, it supersedes this note's builder-only ceiling (sections 0/1/5), the
+foreign-marker-anywhere refusal (sections 4/5), the blanket long-term feature shutdown (sections 5/6), and
+the implementation/admission sequence in sections 7/8 to the extent explicitly described there.
+
+As of this 2026-10-21 planning amendment, before the implementation candidate recorded in section 13,
+the then-current `.hermes.md`, profile and guard still implemented the older restrictions. Their reviewed
+updates and measured gates are required before the expanded capabilities run. Retain the useful mechanisms above:
+one seat identity/credential/key, signed dispatch verification, separate scratch/live stores, request-bound
+checks with an independent fail-closed path, and evidence before support claims. The new plan requires a
+researcher to read other actors' evidence without adopting their identities; it does not simply remove the
+identity guard. Its first operational scope is research plus controlled knowledge persistence, while each
+higher-authority capability qualifies separately. Existing agent rules and owner-reserved actions continue
+to bind every mode.
+
+## 13. Implementation candidate — 2026-10-21
+
+On Jordan's `evt_9ca54a682e8c4dcb8503a9d6c0494e19`, the first control implementation follows
+the role amendment in section 12. See [hermes-control-implementation.md](hermes-control-implementation.md)
+for the pinned v0.22.3 adapter, receipt contract, research capability, tests and outstanding knowledge
+work. The original runtime measurements above remain historical; they do not qualify this candidate.
