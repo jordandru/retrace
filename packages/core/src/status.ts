@@ -2,7 +2,7 @@ import { ownerLoginStats, OwnerLoginStats } from "./owner-login-status.js";
 import { collectAttributionAmendments, effectiveActor, isAttributionAmendment, type AttributionOptions } from "./attribution.js";
 import { Event, ModelSource } from "./schema.js";
 import { VerifyResult } from "./chain.js";
-import { EventStore, instantOrder, verifyProject } from "./store.js";
+import { EventStore, UnpageableLedgerError, instantOrder, readProjectPages, verifyProject } from "./store.js";
 import { collectProvenanceAmendments, collectRejectedAmendments } from "./amendment.js";
 import { isLegacyClientCommitSeal } from "./producer-sig.js";
 import { CAUSED_BY_UNVERIFIED_TAG, SEALED_BY_PARAM, sealedByKind } from "./store.js";
@@ -143,6 +143,25 @@ export type ProjectStatus = {
   export_cache?: ExportCacheStatus;
 };
 
+/** Every event of `project`, exactly `store.all(project)` for the same rows, read one `eventRowsPage` at a time when the
+ *  store can page (#237). On 2026-11-27 the Worker's single whole-ledger query (51.8 MB of bodies at 22,285 events) failed
+ *  on most requests while paged reads of the same rows answered; one query per page keeps each D1 result small. This still
+ *  holds every parsed event at once: it removes the one large read, not the growth with the ledger. A status computed in
+ *  one pass over compact per-event state is the follow-up (#237).
+ *  The head is pinned once, so rows appended during the read stay out, as in `verifyProject`. A store that cannot page, or
+ *  a ledger `readProjectPages` cannot window, is read through `all`, as before. */
+async function statusEvents(store: EventStore, project: string): Promise<Event[]> {
+  if (!store.eventRowsPage) return store.all(project);
+  try {
+    const events: Event[] = [];
+    for await (const page of readProjectPages(store, project)) for (const row of page) events.push(row.event);
+    return events;
+  } catch (e) {
+    if (e instanceof UnpageableLedgerError) return store.all(project);
+    throw e;
+  }
+}
+
 export async function buildProjectStatus(
   store: EventStore,
   project: string,
@@ -151,7 +170,7 @@ export async function buildProjectStatus(
   credentials?: IssuanceCredential[],
   extras?: { githubRepoProjects?: Record<string, string> },
 ): Promise<ProjectStatus> {
-  const events = await store.all(project);
+  const events = await statusEvents(store, project);
   const integrity = await verifyProject(store, project);
   const byId = new Map(events.map((e) => [e.id, e]));
   const caused = new Set(events.map((e) => e.caused_by).filter((x): x is string => !!x));
