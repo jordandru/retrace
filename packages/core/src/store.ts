@@ -87,8 +87,14 @@ export interface HistoryPage {
   next_before_seq?: number;
 }
 
-/** Max rows a history() query may return. Bound as a parameter, never interpolated (audit 2026-08-30). */
-export const HISTORY_LIMIT_MAX = 100_000;
+/** Max rows a history() query may return. Bound as a parameter, never interpolated (audit 2026-08-30).
+ *  It was 100,000, which let one request ask for the whole ledger. Measured on the Worker, 2026-11-27 (#237): a single
+ *  events read answered up to about 46 MB of bodies (18,750 events) and failed on every try above that, and the ledger
+ *  was 51.8 MB (22,285 events), so `collectHistory`, which asks for this many rows a page and is `RemoteStore.all`, got
+ *  an HTTP 500 from its first request. At 2,000 rows the largest page that ledger can produce is 10.8 MB (its 2,000
+ *  largest events together). The cap counts rows, not bytes: a ledger of much larger events needs a byte budget, as
+ *  `eventsPage` has. A request for more rows gets this many, `truncated: true` and `next_before_seq`, as any page does. */
+export const HISTORY_LIMIT_MAX = 2_000;
 export function clampHistoryLimit(limit?: number): number {
   if (typeof limit !== "number" || !Number.isFinite(limit) || limit < 1) return 100;
   return Math.min(Math.floor(limit), HISTORY_LIMIT_MAX);

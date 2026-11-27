@@ -87,3 +87,41 @@ test("#163 an idempotent GET whose socket the server closed is sent once more on
     server.close();
   }
 });
+
+test("#237 RemoteStore.all reads a ledger larger than the history cap in capped pages; a request for 100,000 rows is clamped", async () => {
+  const { HISTORY_LIMIT_MAX, MemoryEventStore, createHandler } = await import("@retrace-dev/core");
+  const TOKEN = "owner-token-for-history-cap-test-0000";
+  const ledger = new MemoryEventStore();
+  const total = HISTORY_LIMIT_MAX * 2 + 3;
+  for (let seq = 0; seq < total; seq++) {
+    await ledger.insert({
+      id: `evt_${seq}`, project: "p", seq, timestamp: "2026-09-01T00:00:00.000Z", received_at: "2026-09-01T00:00:00.000Z",
+      actor: { type: "agent", id: "x" }, action: "edited", artifacts: [{ id: "a" }], prev_hash: "0", hash: `h${seq}`,
+    });
+  }
+  const handler = createHandler(ledger, { token: TOKEN });
+  const searches: string[] = [];
+  const saved = globalThis.fetch;
+  globalThis.fetch = async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+    const req = new Request(input as string, init);
+    searches.push(new URL(req.url).search);
+    return handler(req);
+  };
+  try {
+    const all = await new RemoteStore("https://mock.test", TOKEN).all("p");
+    assert.equal(all.length, total);
+    assert.deepEqual(all.map((e) => e.seq), Array.from({ length: total }, (_, seq) => seq), "every event, ascending, none twice");
+    assert.equal(searches.length, 3, "two full pages and the remainder");
+    for (const search of searches) assert.match(search, new RegExp(`[?&]limit=${HISTORY_LIMIT_MAX}(&|$)`));
+    const res = await handler(new Request("https://mock.test/projects/p/events?limit=100000", { headers: { authorization: `Bearer ${TOKEN}` } }));
+    assert.equal(res.status, 200);
+    const page = await res.json() as { events: Array<{ seq: number }>; truncated: boolean; next_before_seq?: number };
+    assert.equal(page.events.length, HISTORY_LIMIT_MAX);
+    assert.equal(page.truncated, true);
+    assert.equal(page.next_before_seq, total - HISTORY_LIMIT_MAX);
+    assert.equal(page.events.at(-1)?.seq, total - 1);
+  } finally {
+    globalThis.fetch = saved;
+  }
+});
+
