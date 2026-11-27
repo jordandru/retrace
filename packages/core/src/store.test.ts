@@ -36,6 +36,9 @@ test("likeContains treats % and _ as literals; clampHistoryLimit binds a finite 
   assert.equal(clampHistoryLimit(-4), 100);
   assert.equal(clampHistoryLimit(3.9), 3);
   assert.equal(clampHistoryLimit(HISTORY_LIMIT_MAX + 1), HISTORY_LIMIT_MAX);
+  // #237: no single request can ask for the whole ledger; the old cap of 100,000 is clamped like any other large limit.
+  assert.equal(HISTORY_LIMIT_MAX, 2_000);
+  assert.equal(clampHistoryLimit(100_000), 2_000);
 });
 
 test("pageHistoryNewest: default limit is the newest 100, not genesis; cursor walks older pages", () => {
@@ -78,6 +81,36 @@ test("collectHistory: pages until the window is complete and returns ascending s
   assert.equal(all.length, 250);
   assert.equal(all[0].seq, 0);
   assert.equal(all.at(-1)?.seq, 249);
+});
+
+test("collectHistory: a ledger larger than the cap is read whole, one capped page at a time, also for a client that still asks for 100,000", async () => {
+  const total = HISTORY_LIMIT_MAX * 2 + 3;
+  const events = Array.from({ length: total }, (_, seq) => ({
+    id: `evt_${seq}`, project: "p", seq, timestamp: "2026-09-01T00:00:00.000Z", received_at: "2026-09-01T00:00:00.000Z",
+    actor: { type: "agent" as const, id: "claude-code" }, action: "edited" as const, artifacts: [{ id: "a" }],
+    prev_hash: "0", hash: `h${seq}`,
+  }));
+  const asked: Array<number | undefined> = [];
+  const pages: number[] = [];
+  const store = { history: async (q: { project: string; limit?: number; before_seq?: number }) => {
+    asked.push(q.limit);
+    const page = pageHistoryNewest(events, q);
+    pages.push(page.events.length);
+    return page;
+  } };
+  const all = await collectHistory(store, { project: "p" });
+  assert.deepEqual(all.map((e) => e.seq), events.map((e) => e.seq), "every event, ascending, none twice");
+  assert.deepEqual(asked, [HISTORY_LIMIT_MAX, HISTORY_LIMIT_MAX, HISTORY_LIMIT_MAX]);
+  assert.deepEqual(pages, [HISTORY_LIMIT_MAX, HISTORY_LIMIT_MAX, 3]);
+  // A client built before the cap moved asks for 100,000 rows a page; the server clamps it and the same loop completes.
+  const legacy = { history: async (q: { project: string; limit?: number; before_seq?: number }) => pageHistoryNewest(events, { ...q, limit: 100_000 }) };
+  const viaLegacy = await collectHistory(legacy, { project: "p" });
+  assert.equal(viaLegacy.length, total);
+  assert.equal(viaLegacy.at(-1)?.seq, total - 1);
+  const first = pageHistoryNewest(events, { project: "p", limit: 100_000 });
+  assert.equal(first.events.length, HISTORY_LIMIT_MAX);
+  assert.equal(first.truncated, true);
+  assert.equal(first.next_before_seq, total - HISTORY_LIMIT_MAX);
 });
 
 test("adapter idempotency: git:/gd:/gh: are reserved unless the event is adapter-shaped", () => {
