@@ -6,9 +6,9 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
-import { appendEvent, verifyProject } from "@retrace-dev/core";
+import { appendEvent, buildProjectStatus, verifyProject } from "@retrace-dev/core";
 import type { EventStore } from "@retrace-dev/core";
-import { P, assertSameResponses, responses, seedLedger, sqliteD1, tinyPages, todayStore } from "./whole-ledger-fixture.js";
+import { NOW, P, assertSameResponses, responses, seedLedger, sqliteD1, tinyPages, todayStore } from "./whole-ledger-fixture.js";
 
 const json = (o: { body: string }) => JSON.parse(o.body);
 
@@ -252,3 +252,77 @@ test("page bounds that read no row are refused", async () => {
   }
   assert.deepEqual(await verifyProject(store, P, { pageRows: 1, pageChars: 0.5 }), { ok: true, checked: 3, legacy_events: 0 });
 });
+
+// #237, status: `buildProjectStatus` reads its events through `readProjectPages` when the store can page. The differential
+// tests above already compare `status_json` on both paths for every ledger they build (sizes, tiny pages, tampering, a
+// body that is not JSON, amendments, a seq column that cannot be windowed); before this change both paths called `all`.
+
+/** `store` with every `all` call counted. */
+function countingAll(store: EventStore): { store: EventStore; calls: { all: number } } {
+  const calls = { all: 0 };
+  const counted: EventStore = new Proxy(store, {
+    get(target, key) {
+      if (key === "all") return async (project: string) => { calls.all++; return target.all(project); };
+      const value = Reflect.get(target, key, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  return { store: counted, calls };
+}
+
+test("status: a pageable ledger is never read through all, and the JSON equals today's path", { timeout: 600_000 }, async () => {
+  for (const n of [0, 1, 999, 1000, 1001, 2500]) {
+    const { store } = sqliteD1();
+    await seedLedger(store, n, n > 7 ? { amendments: [7] } : {});
+    const { store: counted, calls } = countingAll(store);
+    const paged = JSON.stringify(await buildProjectStatus(counted, P, NOW));
+    assert.equal(calls.all, 0, `n=${n}: no whole-ledger read on the paged path`);
+    const today = JSON.stringify(await buildProjectStatus(todayStore(counted), P, NOW));
+    assert.equal(calls.all, 2, `n=${n}: today's path reads the whole ledger twice, for the events and for the verdict`);
+    assert.equal(paged, today, `n=${n}: status JSON, key order included`);
+    assert.equal(JSON.parse(paged).events.total, n);
+  }
+});
+
+test("status D1 queries: the paged read adds the head and one query per page, as verify does", { timeout: 600_000 }, async (t) => {
+  const counts: Record<string, number> = {};
+  for (const n of [0, 1001, 2500]) {
+    const { d1, store } = sqliteD1();
+    await seedLedger(store, n);
+    const before = d1.queries;
+    const status = await buildProjectStatus(store, P, NOW);
+    counts[`n=${n}`] = d1.queries - before;
+    assert.equal(status.events.total, n);
+    assert.equal(status.integrity.ok, true);
+  }
+  for (const n of [1001, 2500]) {
+    assert.equal(counts[`n=${n}`]! - counts["n=0"]!, 2 * Math.ceil(n / 1000), `n=${n}: one query per 1,000-row page for the events and one for the verdict`);
+  }
+  t.diagnostic(`D1 queries per status: ${JSON.stringify(counts)}`);
+});
+
+test("status snapshot: events appended during the paged read are not counted", async () => {
+  const { store } = sqliteD1();
+  await seedLedger(store, 23);
+  let appended = 0;
+  let racingOn = true;
+  const racing: EventStore = new Proxy(tinyPages(store, 5), {
+    get(target, key) {
+      if (key === "eventRowsPage") return async (...args: Parameters<NonNullable<EventStore["eventRowsPage"]>>) => {
+        const page = await target.eventRowsPage!(...args);
+        if (racingOn) await appendEvent(store, { project: P, actor: { type: "agent", id: "late" }, action: "edited", artifacts: [{ id: `task:late-${appended++}` }] });
+        return page;
+      };
+      if (key === "head") return async (project: string) => { const head = await target.head(project); if (appended >= 5) racingOn = false; return head; };
+      const value = Reflect.get(target, key, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  const status = await buildProjectStatus(racing, P, NOW);
+  assert.equal(status.events.total, 23, "the head was pinned before the first page");
+  assert.equal(appended, 5, "one append after each of the five pages of the status read");
+  assert.equal(status.integrity.ok, true);
+  assert.equal(status.integrity.checked, 28, "the verdict is its own read, pinned after the appends, as on today's path");
+  assert.equal((await buildProjectStatus(store, P, NOW)).events.total, 28);
+});
+
