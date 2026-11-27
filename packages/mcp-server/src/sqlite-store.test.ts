@@ -176,9 +176,10 @@ test("SqliteStore suffix lookup drops the U+FFFE/U+FFFF false positive old GLOB 
   const stored = "repo:o/retrace#\uFFFE";
   const query = "repo:retrace#\uFFFF";
   await appendEvent(store, ev({ artifacts: [{ id: stored, role: "generated" }] }));
-  const db = (store as unknown as { db: { prepare: (sql: string) => { get: (...args: unknown[]) => { n: number } } } }).db;
-  const glob = db.prepare("SELECT COUNT(*) AS n FROM event_artifact_index WHERE artifact_key GLOB ?").get("repo:*/retrace#\uFFFF");
-  assert.equal(glob.n, 1, "old GLOB overmatched U+FFFE against U+FFFF; keep that as the documented false positive");
+  // This test used to assert first that SQLite's own GLOB overmatches here (`repo:*/retrace#\uFFFF` matching the stored
+  // U+FFFE key, count 1). That is a property of the SQLite build inside Node, not of this store: Node 22.23.2 (SQLite 3.51.3)
+  // returns 1, Node 22.23.5 on the CI runner returns 0 (retrace-gate runs 46055145073 and 46056875046, 2026-11-27). The
+  // assertions below are the ones about this store.
   const hit = await store.eventsReferencingArtifacts({
     project: "junk", artifact_keys: [query], after_seq: -1, through_seq: 10, row_cap: 10, deadline: Date.now() + 5_000,
   });
